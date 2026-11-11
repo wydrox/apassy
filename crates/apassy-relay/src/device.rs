@@ -37,8 +37,12 @@ pub const ACCOUNT_DOMAIN: &str = "apassy-connect account v1";
 pub const ACCOUNT_SIGN_IN_DOMAIN: &str = "apassy-connect sign-in v1";
 pub const ACCOUNT_JOIN_DOMAIN: &str = "apassy-connect join v1";
 pub const ACCOUNT_JOIN_CANCEL_DOMAIN: &str = "apassy-connect join-cancel v1";
-/// The device statement: a device of the account vouches for the key it adds.
-pub const ACCOUNT_DEVICE_DOMAIN: &str = "apassy-connect device v1";
+/// The signed device list of an account: each change (an added or a removed device) is
+/// an entry signed by a device of the list, naming the entry before it.
+pub const ACCOUNT_LIST_DOMAIN: &str = "apassy-connect device-list v1";
+/// The `previous` of the first entry of a device list, and the `link_hash` of an entry
+/// without a link.
+pub const LIST_NONE: &str = "-";
 pub const ACCOUNT_RECOVER_DOMAIN: &str = "apassy-connect recover v1";
 /// The bouncer brain's sign-in (plan 0035 A). Connect never accepts it.
 pub const BRAIN_SIGN_IN_DOMAIN: &str = "apassy-bouncer sign-in v1";
@@ -96,13 +100,16 @@ pub fn account_sign_in_message(
     ])
 }
 
-/// `"apassy-connect join v1" 0x00 origin 0x00 account 0x00 link_hash 0x00 public_key_b64`:
-/// the request of a new device (`POST /v1/account/devices/join`).
+/// `"apassy-connect join v1" 0x00 origin 0x00 account 0x00 link_hash 0x00 public_key_b64
+/// 0x00 device_name`: the request of a new device (`POST /v1/account/devices/join`). It
+/// names the device name in its canonical form ([`canonical_name`]): the confirming
+/// device signs that name into the device list only when this signature verifies.
 pub fn account_join_message(
     origin: &str,
     account: &str,
     link_hash: &str,
     public_key_b64: &str,
+    device_name: &str,
 ) -> Vec<u8> {
     joined(&[
         ACCOUNT_JOIN_DOMAIN,
@@ -110,7 +117,22 @@ pub fn account_join_message(
         account,
         link_hash,
         public_key_b64,
+        device_name,
     ])
+}
+
+/// The canonical form of a person's name or a device name (connect-account-v1 section 2):
+/// trimmed of white space, 1 to [`crate::api::MAX_NAME_BYTES`] bytes of UTF-8, no control character
+/// (so no NUL, the separator of the signed messages), and never `-` (the placeholder of
+/// the device-list message). `None` for any other text. Both sides sign and compare only
+/// this form.
+pub fn canonical_name(text: &str) -> Option<&str> {
+    let name = text.trim();
+    (!name.is_empty()
+        && name.len() <= crate::api::MAX_NAME_BYTES
+        && name != LIST_NONE
+        && !name.chars().any(char::is_control))
+    .then_some(name)
 }
 
 /// `"apassy-connect join-cancel v1" 0x00 origin 0x00 account 0x00 link_hash 0x00
@@ -131,23 +153,43 @@ pub fn account_join_cancel_message(
     ])
 }
 
-/// `"apassy-connect device v1" 0x00 origin 0x00 account 0x00 link_hash 0x00
-/// joining_key_b64`: the device statement that the confirming device signs
-/// (`POST /v1/account/devices/pending/{join_id}/confirm`). The statements of an account
-/// lead each of its devices back to its root key.
-pub fn account_device_message(
+/// One entry of the signed device list of an account (connect-account-v1 section 7.5):
+/// `"apassy-connect device-list v1" 0x00 origin 0x00 account 0x00 version 0x00 previous
+/// 0x00 op 0x00 key_b64 0x00 link_hash 0x00 name 0x00 by_b64`. `version` is decimal;
+/// `previous` is the list hash of the entry before ([`account_list_hash`]), or `-` for
+/// version 1; `op` is `root`, `add`, or `remove`; `link_hash` is the link of an `add`,
+/// else `-`; `name` is the device name of a `root` or an `add`, else `-`; `by` is the key
+/// of the device that signs the entry (for the `root`, the root key itself).
+#[allow(clippy::too_many_arguments)]
+pub fn account_list_message(
     origin: &str,
     account: &str,
+    version: u64,
+    previous: &str,
+    op: &str,
+    key_b64: &str,
     link_hash: &str,
-    joining_key_b64: &str,
+    name: &str,
+    by_b64: &str,
 ) -> Vec<u8> {
     joined(&[
-        ACCOUNT_DEVICE_DOMAIN,
+        ACCOUNT_LIST_DOMAIN,
         origin.trim_end_matches('/'),
         account,
+        &version.to_string(),
+        previous,
+        op,
+        key_b64,
         link_hash,
-        joining_key_b64,
+        name,
+        by_b64,
     ])
+}
+
+/// The list hash of an entry: b64u of SHA-256 of its message, 43 characters. The next
+/// entry names it as `previous`.
+pub fn account_list_hash(message: &[u8]) -> String {
+    encode_b64(&Sha256::digest(message))
 }
 
 /// `"apassy-connect recover v1" 0x00 origin 0x00 account 0x00 public_key_b64 0x00
@@ -543,6 +585,33 @@ mod tests {
     }
 
     #[test]
+    fn names_have_one_canonical_form() {
+        // The same table as the app's `connect::trust::canonical_name`.
+        let zoe = "Zoë’s iPhone";
+        assert_eq!(canonical_name(&format!("\t {zoe} \n")), Some(zoe));
+        let at_limit = format!("{}é", "a".repeat(62));
+        assert_eq!(at_limit.len(), 64);
+        assert_eq!(
+            canonical_name(&format!(" {at_limit} ")),
+            Some(at_limit.as_str())
+        );
+        let over = format!("{}é", "a".repeat(63));
+        assert_eq!(over.len(), 65);
+        for bad in [
+            "",
+            "   ",
+            "-",
+            " - ",
+            "Mac\u{0}mini",
+            "Mac\u{7}",
+            over.as_str(),
+        ] {
+            assert_eq!(canonical_name(bad), None, "{bad:?}");
+        }
+        assert_eq!(canonical_name("-Mac-"), Some("-Mac-"));
+    }
+
+    #[test]
     fn a_key_signs_and_its_public_key_verifies() {
         let key = DeviceKey::generate().unwrap();
         let again = DeviceKey::from_pkcs8(key.pkcs8()).unwrap();
@@ -639,9 +708,36 @@ mod tests {
             b"apassy-connect join-cancel v1\0https://c.test\0acc_a\0LH\0PK".to_vec()
         );
         assert_eq!(
-            account_device_message("https://c.test/", "acc_a", "LH", "PK"),
-            b"apassy-connect device v1\0https://c.test\0acc_a\0LH\0PK".to_vec()
+            account_list_message(
+                "https://c.test/",
+                "acc_a",
+                2,
+                "PH",
+                "add",
+                "PK",
+                "LH",
+                "iPhone",
+                "BY"
+            ),
+            b"apassy-connect device-list v1\0https://c.test\0acc_a\x002\0PH\0add\0PK\0LH\0iPhone\0BY"
+                .to_vec()
         );
+        assert_eq!(
+            account_list_message(
+                "https://c.test",
+                "acc_a",
+                3,
+                "PH",
+                "remove",
+                "PK",
+                "-",
+                "-",
+                "BY"
+            ),
+            b"apassy-connect device-list v1\0https://c.test\0acc_a\x003\0PH\0remove\0PK\0-\0-\0BY"
+                .to_vec()
+        );
+        assert_eq!(account_list_hash(b"").len(), 43);
         assert_eq!(
             account_recover_message("https://c.test", "acc_a", "PK", "RK"),
             b"apassy-connect recover v1\0https://c.test\0acc_a\0PK\0RK".to_vec()

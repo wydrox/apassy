@@ -3,8 +3,10 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, PoisonError};
 
+use ring::hmac;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 use crate::api::{
     AccessGrantedRef, Challenge, ChallengeRequest, DeviceEnroll, DeviceView, Role, TeamKind,
@@ -12,14 +14,182 @@ use crate::api::{
 };
 use crate::device;
 use crate::error::{RelayError, RelayResult, codes};
-use crate::hostkeys::decode_b64;
-use crate::ids::{AgentId, DeviceId, MemberId};
+use crate::hostkeys::{decode_b64, encode_b64};
+use crate::ids::{AgentId, DeviceId, MemberId, TeamId};
 use crate::secret::{TokenHash, TokenKind, new_token, token_hash};
 use crate::server::Core;
 use crate::server::approvals::invalidate_pending;
 use crate::server::audit::{Audit, RELAY_ACTOR, member_actor};
 use crate::server::auth::{MemberAuth, device_member};
 use crate::server::store::{db, to_i, to_u};
+
+/// The life of a sign-in nonce: 60 seconds.
+const NONCE_SECS: u64 = 60;
+/// The domain of the MAC of a vault store's sign-in nonce (relay-internal).
+const STORE_NONCE_DOMAIN: &str = "apassy-relay store nonce v1";
+/// Used sign-in nonces of one vault store, kept until they expire, at most; over it a
+/// sign-in is 503 `busy` and its nonce stays unused.
+pub const STORE_USED_NONCES: usize = 1000;
+/// Used sign-in nonces of one key in one vault store at most (a sign-in each 2 s for the
+/// 60 s of a nonce); over it a sign-in of that key is 429 `rate_limited` and its nonce
+/// stays unused.
+pub const STORE_USED_NONCES_PER_KEY: usize = 30;
+
+/// The bounds of `StoreNonces::grant`; a unit test lowers them.
+#[derive(Debug, Clone, Copy)]
+struct StoreCaps {
+    used: usize,
+    used_per_key: usize,
+}
+
+const STORE_CAPS: StoreCaps = StoreCaps {
+    used: STORE_USED_NONCES,
+    used_per_key: STORE_USED_NONCES_PER_KEY,
+};
+
+/// The sign-in nonces of a vault store (a team of kind `account`, connect-account-v1
+/// section 8), which keep no state until they are used: 12 random bytes, the expiry as a
+/// big-endian u32 on the nonce clock, and the first 16 bytes of HMAC-SHA256 under a key of
+/// this process over the team and the SHA-256 of the key. So a challenge never ends
+/// another challenge of the same key, and any number of them costs nothing. A used nonce
+/// is kept until it expires on the clock, which never goes back
+/// (`account::NonceClock`), within `StoreCaps`. The key is made at the first challenge and
+/// goes with `DeviceAuthState::clear` (a suspension, a stop): every open nonce ends.
+/// A nonce of a vault store that checked: its bytes, its expiry on the nonce clock, and
+/// the SHA-256 of its key.
+type StoreNonce = ([u8; device::NONCE_BYTES], u64, [u8; 32]);
+
+#[derive(Default)]
+struct StoreNonces {
+    key: Option<hmac::Key>,
+    clock: crate::server::account::NonceClock,
+    /// The used nonces, until their expiry on the clock, with the SHA-256 of their key.
+    used: HashMap<[u8; device::NONCE_BYTES], (u64, [u8; 32])>,
+    /// How many of `used` each key holds.
+    used_by_key: HashMap<[u8; 32], usize>,
+}
+
+impl StoreNonces {
+    /// The MAC key of this process, made at the first use.
+    fn key(&mut self) -> RelayResult<hmac::Key> {
+        if let Some(key) = &self.key {
+            return Ok(key.clone());
+        }
+        let mut bytes = zeroize::Zeroizing::new([0u8; 32]);
+        getrandom::fill(bytes.as_mut_slice())
+            .map_err(|_| RelayError::internal("The system has no random source."))?;
+        let key = hmac::Key::new(hmac::HMAC_SHA256, bytes.as_slice());
+        self.key = Some(key.clone());
+        Ok(key)
+    }
+
+    /// `HMAC-SHA256(key, "apassy-relay store nonce v1" 0x00 team 0x00 SHA-256(public key)
+    /// 0x00 random ‖ expiry)`, its first 16 bytes.
+    fn mac(key: &hmac::Key, team: &TeamId, key_hash: &[u8; 32], head: &[u8]) -> [u8; 16] {
+        let mut context = hmac::Context::with_key(key);
+        for (index, part) in [
+            STORE_NONCE_DOMAIN.as_bytes(),
+            team.as_str().as_bytes(),
+            key_hash.as_slice(),
+            head,
+        ]
+        .iter()
+        .enumerate()
+        {
+            if index > 0 {
+                context.update(&[0]);
+            }
+            context.update(part);
+        }
+        let mut mac = [0u8; 16];
+        mac.copy_from_slice(&context.sign().as_ref()[..16]);
+        mac
+    }
+
+    /// A new nonce of `team` for the key `key_hash`, valid for `NONCE_SECS` from the wall
+    /// time `now`. Nothing is kept.
+    fn issue(&mut self, team: &TeamId, key_hash: &[u8; 32], now: u64) -> RelayResult<String> {
+        let expiry = self.clock.tick(now).saturating_add(NONCE_SECS);
+        let expiry = u32::try_from(expiry)
+            .map_err(|_| RelayError::internal("The clock is past the nonce format."))?;
+        let key = self.key()?;
+        let mut nonce = [0u8; device::NONCE_BYTES];
+        getrandom::fill(&mut nonce[..12])
+            .map_err(|_| RelayError::internal("The system has no random source."))?;
+        nonce[12..16].copy_from_slice(&expiry.to_be_bytes());
+        let mac = Self::mac(&key, team, key_hash, &nonce[..16]);
+        nonce[16..].copy_from_slice(&mac);
+        Ok(encode_b64(&nonce))
+    }
+
+    /// The bytes and the expiry of a nonce of this process for `team` and `key_hash`, not
+    /// expired at the wall time `now`; `None` for anything else.
+    fn check(
+        &mut self,
+        text: &str,
+        team: &TeamId,
+        key_hash: &[u8; 32],
+        now: u64,
+    ) -> Option<([u8; device::NONCE_BYTES], u64)> {
+        let clock = self.clock.tick(now);
+        let key = self.key.as_ref()?;
+        let bytes: [u8; device::NONCE_BYTES] = decode_b64(text, device::NONCE_BYTES)
+            .ok()?
+            .try_into()
+            .ok()?;
+        let mac = Self::mac(key, team, key_hash, &bytes[..16]);
+        if !crate::secret::same_bytes(&mac, &bytes[16..]) {
+            return None;
+        }
+        let expires_at = u64::from(u32::from_be_bytes(bytes[12..16].try_into().ok()?));
+        (expires_at > clock && expires_at <= clock.saturating_add(NONCE_SECS))
+            .then_some((bytes, expires_at))
+    }
+
+    /// Drops the used nonces that expired on the clock `clock`.
+    fn purge(&mut self, clock: u64) {
+        let by_key = &mut self.used_by_key;
+        self.used.retain(|_, (expires_at, key)| {
+            let keep = *expires_at > clock;
+            if !keep && let Some(count) = by_key.get_mut(key) {
+                *count = count.saturating_sub(1);
+            }
+            keep
+        });
+        self.used_by_key.retain(|_, count| *count > 0);
+    }
+
+    /// Uses the nonce `nonce` (its bytes, its expiry, and the SHA-256 of its key) at the
+    /// wall time `now`: 401 when it was used; 429 `rate_limited` when its key holds
+    /// `used_per_key` used nonces; 503 `busy` when the table is full; both leave it unused.
+    fn grant(
+        &mut self,
+        (bytes, expires_at, key): StoreNonce,
+        now: u64,
+        caps: StoreCaps,
+    ) -> RelayResult<()> {
+        let clock = self.clock.tick(now);
+        self.purge(clock);
+        if self.used.contains_key(&bytes) {
+            return Err(RelayError::unauthenticated());
+        }
+        if self.used_by_key.get(&key).copied().unwrap_or(0) >= caps.used_per_key {
+            return Err(RelayError::new(
+                codes::RATE_LIMITED,
+                "This device signed in too often. Try again in a minute.",
+            ));
+        }
+        if self.used.len() >= caps.used {
+            return Err(RelayError::new(
+                codes::BUSY,
+                "The sign-in table is full. Try again later.",
+            ));
+        }
+        self.used.insert(bytes, (expires_at, key));
+        *self.used_by_key.entry(key).or_insert(0) += 1;
+        Ok(())
+    }
+}
 
 #[derive(Default)]
 struct State {
@@ -28,6 +198,8 @@ struct State {
     // This table deliberately contains no role, member, public key, or bearer token.
     access: HashMap<TokenHash, (DeviceId, u64)>,
     access_order: VecDeque<TokenHash>,
+    /// The nonces of a vault store (`TeamKind::Account`), which keep no state until used.
+    store: StoreNonces,
 }
 
 impl State {
@@ -165,7 +337,10 @@ pub fn challenge_origin<'a>(origins: &[&'a str], host: Option<&str>) -> &'a str 
 }
 
 /// `POST /v1/auth/challenge`: a nonce for a live device of the team, and the origin to
-/// sign (`challenge_origin` of the request's `Host`).
+/// sign (`challenge_origin` of the request's `Host`). A team keeps 4 open nonces for each
+/// device (a fifth ends the oldest) and 1000 in all; a vault store keeps none
+/// (`StoreNonces`), so a challenge there never ends another one. The nonce is b64u of 32
+/// bytes either way.
 pub fn challenge_for(
     core: &Core,
     request: &ChallengeRequest,
@@ -202,9 +377,25 @@ pub fn challenge_for(
         Ok(id)
     })?;
     account_device_live(core, id)?;
+    let expires_at = now.saturating_add(NONCE_SECS);
+    if core.kind == TeamKind::Account {
+        let key_hash: [u8; 32] = Sha256::digest(public).into();
+        let nonce = core
+            .device_auth
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .store
+            .issue(&core.team, &key_hash, now)?;
+        let origin = challenge_origin(&core.config.sign_in_origins(), host).to_string();
+        return json_value(&Challenge {
+            nonce,
+            expires_at,
+            origin,
+        });
+    }
     let nonce = device::new_nonce()
         .map_err(|_| RelayError::internal("The system has no random source."))?;
-    let expires_at = now.saturating_add(60);
     let mut state = core
         .device_auth
         .0
@@ -258,9 +449,50 @@ fn account_device_live(core: &Core, id: DeviceId) -> RelayResult<()> {
     }
 }
 
+/// The device and the nonce of a vault store's sign-in (`StoreNonces`): a nonce of this
+/// process for this store and this key, not expired, and the live device of that key.
+/// Nothing is used here; `None` for anything else.
+fn store_challenge(
+    core: &Core,
+    request: &TokenRequest,
+    now: u64,
+) -> Option<(DeviceId, StoreNonce)> {
+    let public = device::decode_public_key(&request.public_key).ok()?;
+    let key_hash: [u8; 32] = Sha256::digest(public).into();
+    let (bytes, expires_at) = core
+        .device_auth
+        .0
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .store
+        .check(&request.nonce, &core.team, &key_hash, now)?;
+    let id = core
+        .store
+        .with(|conn| {
+            conn.query_row(
+                "SELECT d.id FROM device d JOIN member m ON m.id = d.member_id \
+                 WHERE d.public_key = ?1 AND d.revoked_at IS NULL AND m.revoked_at IS NULL",
+                params![public.as_slice()],
+                |row| Ok(DeviceId(to_u(row.get(0)?))),
+            )
+            .optional()
+            .map_err(db)
+        })
+        .ok()??;
+    Some((id, (bytes, expires_at, key_hash)))
+}
+
+/// `POST /v1/auth/token`. A team's nonce is used up by any call that names it; a vault
+/// store's nonce (`StoreNonces`) only by the sign-in that it grants, under the lock of the
+/// access tokens.
 pub fn token(core: &Core, request: &TokenRequest, now: u64) -> RelayResult<Value> {
-    // Consume before any validation, including the key encoding and team check.
-    let challenge = {
+    let (challenge, store_nonce) = if core.kind == TeamKind::Account {
+        match store_challenge(core, request, now) {
+            Some((id, nonce)) => (Some((id, now.saturating_add(1))), Some(nonce)),
+            None => (None, None),
+        }
+    } else {
+        // Consume before any validation, including the key encoding and team check.
         let mut state = core
             .device_auth
             .0
@@ -268,7 +500,7 @@ pub fn token(core: &Core, request: &TokenRequest, now: u64) -> RelayResult<Value
             .unwrap_or_else(PoisonError::into_inner);
         let challenge = state.nonces.remove(&request.nonce);
         state.compact();
-        challenge
+        (challenge, None)
     };
     let result = (|| {
         let (id, expiry) = challenge.ok_or_else(RelayError::unauthenticated)?;
@@ -308,6 +540,10 @@ pub fn token(core: &Core, request: &TokenRequest, now: u64) -> RelayResult<Value
                 team_kind: core.kind,
             })?;
             let mut state = core.device_auth.0.lock().unwrap_or_else(PoisonError::into_inner);
+            // A vault store's nonce is used with the token, once.
+            if let Some(nonce) = store_nonce {
+                state.store.grant(nonce, now, STORE_CAPS)?;
+            }
             state.purge(now);
             if state.access.values().filter(|(d, _)| *d == id).count() >= 8
                 && let Some(oldest) = state.access_order.iter().find(|h| state.access.get(*h).is_some_and(|(d, _)| *d == id)).copied() {
@@ -317,9 +553,25 @@ pub fn token(core: &Core, request: &TokenRequest, now: u64) -> RelayResult<Value
             let hash = token_hash(access.expose());
             state.access.insert(hash, (id, expires_at));
             state.access_order.push_back(hash);
-            Ok(response)
+            Ok((response, id, hash))
         })
-    })();
+    })()
+    .and_then(|(response, id, hash)| {
+        // A removal from a vault store that committed between the check above and the
+        // token: the removal drops the tokens after its commit, and this check after the
+        // token, so no token outlives it.
+        if let Err(error) = account_device_live(core, id) {
+            let mut state = core
+                .device_auth
+                .0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            state.access.remove(&hash);
+            state.compact();
+            return Err(error);
+        }
+        Ok(response)
+    });
     if result
         .as_ref()
         .is_err_and(|e| e.code == codes::UNAUTHENTICATED)
@@ -796,5 +1048,84 @@ mod tests {
             enroll(&core, &second, &request, now).unwrap_err().code,
             codes::CONFLICT
         );
+    }
+}
+
+#[cfg(test)]
+mod store_nonce_tests {
+    use super::*;
+
+    fn team() -> TeamId {
+        TeamId::parse("t_aaaaaaaaaa").unwrap()
+    }
+
+    #[test]
+    fn a_store_nonce_keeps_no_state_and_is_bound_to_its_team_and_key() {
+        let mut nonces = StoreNonces::default();
+        let (key, other) = ([1u8; 32], [2u8; 32]);
+        let first = nonces.issue(&team(), &key, 1_000).unwrap();
+        // Many challenges of the same key: the first stays good, and nothing is kept.
+        for _ in 0..100 {
+            nonces.issue(&team(), &key, 1_000).unwrap();
+        }
+        assert!(nonces.used.is_empty());
+        assert_eq!(decode_b64(&first, 32).unwrap().len(), 32);
+        assert!(nonces.check(&first, &team(), &key, 1_010).is_some());
+        assert!(nonces.check(&first, &team(), &other, 1_010).is_none());
+        let other_team = TeamId::parse("t_bbbbbbbbbb").unwrap();
+        assert!(nonces.check(&first, &other_team, &key, 1_010).is_none());
+        // It expires after 60 s, also when the wall clock goes back after that.
+        assert!(nonces.check(&first, &team(), &key, 1_060).is_none());
+        assert!(nonces.check(&first, &team(), &key, 1_010).is_none());
+        // A new process key ends every open nonce.
+        let mut fresh = StoreNonces::default();
+        let nonce = nonces.issue(&team(), &key, 2_000).unwrap();
+        fresh.issue(&team(), &key, 2_000).unwrap();
+        assert!(fresh.check(&nonce, &team(), &key, 2_001).is_none());
+    }
+
+    #[test]
+    fn a_store_nonce_is_used_once_within_its_bounds() {
+        fn take(nonces: &mut StoreNonces, key: &[u8; 32], now: u64) -> StoreNonce {
+            let text = nonces.issue(&team(), key, now).unwrap();
+            let (bytes, expiry) = nonces.check(&text, &team(), key, now).unwrap();
+            (bytes, expiry, *key)
+        }
+        let mut nonces = StoreNonces::default();
+        let caps = StoreCaps {
+            used: 5,
+            used_per_key: 2,
+        };
+        let (key, other) = ([1u8; 32], [2u8; 32]);
+        let first = take(&mut nonces, &key, 1_000);
+        nonces.grant(first, 1_000, caps).unwrap();
+        assert_eq!(
+            nonces.grant(first, 1_001, caps).unwrap_err().code,
+            codes::UNAUTHENTICATED
+        );
+        let second = take(&mut nonces, &key, 1_000);
+        nonces.grant(second, 1_000, caps).unwrap();
+        // The key holds its two: 429 for it, its nonce unused; another key goes on.
+        let third = take(&mut nonces, &key, 1_000);
+        assert_eq!(
+            nonces.grant(third, 1_000, caps).unwrap_err().code,
+            codes::RATE_LIMITED
+        );
+        for _ in 0..2 {
+            let nonce = take(&mut nonces, &other, 1_000);
+            nonces.grant(nonce, 1_000, caps).unwrap();
+        }
+        // A full table: 503, the nonce unused; at their expiry the used nonces go.
+        let fourth = take(&mut nonces, &[3u8; 32], 1_000);
+        let nonce = take(&mut nonces, &[4u8; 32], 1_000);
+        nonces.grant(nonce, 1_000, caps).unwrap();
+        assert_eq!(
+            nonces.grant(fourth, 1_000, caps).unwrap_err().code,
+            codes::BUSY
+        );
+        nonces.grant(third, 1_000, caps).unwrap_err();
+        let late = take(&mut nonces, &key, 1_061);
+        nonces.grant(late, 1_061, caps).unwrap();
+        assert_eq!(nonces.used.len(), 1);
     }
 }

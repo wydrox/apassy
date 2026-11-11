@@ -465,22 +465,39 @@ pub enum OwnerAction {
         words: String,
     },
     /// Revoke a device of the Apassy Connect account (section 7.4), also this Mac
-    /// itself ("Forget this device"). The proof names the account and the device.
+    /// itself ("Forget this device"). The proof names the account, the device, the name
+    /// that the signed device list holds for its key, and the short fingerprint of that
+    /// key (`crate::connect::key_fingerprint`): the key that the signed removal names.
     RevokeConnectDevice {
         account_id: String,
         device_id: String,
         device_name: String,
+        fingerprint: String,
     },
     /// Delete the Apassy Connect account (section 6): its vault stores, devices, and
     /// subscription end.
     DeleteConnectAccount {
         account_id: String,
     },
+    /// Forget an account file of an earlier version of Apassy on this Mac, with the account
+    /// key: the device joins its account again after it. Connect is not asked.
+    ForgetOldConnectAccount,
     /// Delete a vault store of the Apassy Connect account (connect-account-v1 section 8):
     /// the relay copy of one vault and its snapshots go at Connect. The proof names the
     /// store by its relay team.
     DeleteVaultStore {
         team_id: String,
+    },
+    /// End the wait of a vault store of the Apassy Connect account on the head `head`
+    /// (version `version`) that a device that left the account pushed last
+    /// (connect-account-v1 section 7.5): take exactly that copy once (`replace` false), or
+    /// replace it with this device's vault (`replace` true). The proof names the store, the
+    /// head, and the choice.
+    TakeDepartedCopy {
+        team_id: String,
+        version: u64,
+        head: String,
+        replace: bool,
     },
     /// Add a device of the Apassy Connect account, or of its group, to a vault store
     /// (section 8): the device can then read and write the relay copy of that vault. The
@@ -724,7 +741,12 @@ impl OwnerAction {
             Self::ConfirmConnectDevice { .. } => "Add a device to Apassy Connect",
             Self::RevokeConnectDevice { .. } => "Remove a device from Apassy Connect",
             Self::DeleteConnectAccount { .. } => "Delete the Apassy Connect account",
+            Self::ForgetOldConnectAccount => "Forget the Apassy Connect account here",
             Self::DeleteVaultStore { .. } => "Delete a relay copy at Apassy Connect",
+            Self::TakeDepartedCopy { replace: false, .. } => "Use the copy of a device that left",
+            Self::TakeDepartedCopy { replace: true, .. } => {
+                "Replace the copy of a device that left"
+            }
             Self::AddStoreDevice { .. } => "Add a device to a relay copy",
             Self::ChangeConnectGroup { .. } => "Change your family or team",
             Self::SetTailnetRoute { on: true } => {
@@ -938,15 +960,33 @@ impl OwnerAction {
                     .take(80)
                     .collect::<String>()
             ),
-            Self::RevokeConnectDevice { device_name, .. } => format!(
-                "remove the device \"{}\" from your Apassy Connect account",
-                short_device_name(device_name)
+            Self::RevokeConnectDevice {
+                device_name,
+                fingerprint,
+                ..
+            } => format!(
+                "remove the device \"{}\" (key {}) from your Apassy Connect account",
+                short_device_name(device_name),
+                fingerprint
+                    .chars()
+                    .filter(|c| c.is_ascii_hexdigit() || *c == ' ')
+                    .take(14)
+                    .collect::<String>()
             ),
             Self::DeleteConnectAccount { .. } => {
                 "delete your Apassy Connect account, its vault stores, and its plan".to_owned()
             }
+            Self::ForgetOldConnectAccount => {
+                "forget the Apassy Connect account on this device".to_owned()
+            }
             Self::DeleteVaultStore { .. } => {
                 "delete the relay copy of this vault and its snapshots at Apassy Connect".to_owned()
+            }
+            Self::TakeDepartedCopy { replace: false, .. } => {
+                "merge the relay copy that a device that left your Apassy Connect account saved last".to_owned()
+            }
+            Self::TakeDepartedCopy { replace: true, .. } => {
+                "replace the relay copy that a device that left your Apassy Connect account saved last".to_owned()
             }
             Self::AddStoreDevice { .. } => {
                 "let another device sync the relay copy of this vault at Apassy Connect".to_owned()
@@ -1039,7 +1079,9 @@ impl OwnerAction {
                 | Self::ConfirmConnectDevice { .. }
                 | Self::RevokeConnectDevice { .. }
                 | Self::DeleteConnectAccount { .. }
+                | Self::ForgetOldConnectAccount
                 | Self::DeleteVaultStore { .. }
+                | Self::TakeDepartedCopy { .. }
                 | Self::AddStoreDevice { .. }
                 | Self::ChangeConnectGroup { .. }
         )
@@ -2303,6 +2345,7 @@ mod evaluation_tests {
                 account_id: "acc_k7m2q4x3ca".into(),
                 device_id: "dev_p4n6r2t7bc".into(),
                 device_name: long.clone(),
+                fingerprint: "1a2b 3c4d 5e6f".into(),
             },
             OwnerAction::DeleteConnectAccount {
                 account_id: "acc_k7m2q4x3ca".into(),
@@ -2322,6 +2365,18 @@ mod evaluation_tests {
             },
             OwnerAction::DeleteVaultStore {
                 team_id: "t".repeat(32),
+            },
+            OwnerAction::TakeDepartedCopy {
+                team_id: "t".repeat(32),
+                version: 7,
+                head: "a".repeat(64),
+                replace: false,
+            },
+            OwnerAction::TakeDepartedCopy {
+                team_id: "t".repeat(32),
+                version: 7,
+                head: "a".repeat(64),
+                replace: true,
             },
             OwnerAction::AddStoreDevice {
                 team_id: "t".repeat(32),
@@ -2373,6 +2428,22 @@ mod evaluation_tests {
             confirm_with(4, vec![4; 65], "blaze cable flute board seal tile"),
         ] {
             assert_ne!(other, confirm);
+        }
+        // The copy of a device that left: another head, or the other choice, is another
+        // action.
+        let departed = |version: u64, head: &str, replace: bool| OwnerAction::TakeDepartedCopy {
+            team_id: "t_abcdefgh23".into(),
+            version,
+            head: head.into(),
+            replace,
+        };
+        let take = departed(7, "aa", false);
+        for other in [
+            departed(8, "aa", false),
+            departed(7, "ab", false),
+            departed(7, "aa", true),
+        ] {
+            assert_ne!(other, take);
         }
     }
 

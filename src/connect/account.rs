@@ -11,9 +11,10 @@
 //!   after a valid signature of this device, is [`ConnectError::Revoked`]; a `401` is
 //!   never a removal. Even then nothing is deleted on this device: the owner forgets the
 //!   account here with an explicit confirmation ([`forget_this_device`]).
-//! - The device list has a cryptographic root ([`super::trust`]): [`ConnectAccount::view`]
-//!   verifies the chain of every device against the trust store of the account file, and
-//!   only a verified device counts as a device of the account.
+//! - The device list is signed and has a cryptographic root ([`super::trust`]):
+//!   [`ConnectAccount::view`] verifies it from the pinned root and from the pinned version
+//!   on, and only a device of the verified list counts as a device of the account. A
+//!   confirmation and a revoke are entries of that list that this Mac signs.
 //! - "Add a device…" on this Mac: [`ConnectAccount::start_link`],
 //!   [`ConnectAccount::pending_joins`] with the six safety words, and
 //!   [`ConnectAccount::confirm_join`] with a fresh owner check
@@ -27,9 +28,9 @@
 //!
 //! The account file ([`account_file`], `connect/account.json` in the data directory,
 //! mode 0600 in a 0700 directory) is [`AccountState`]: the origin, the ids, the names, the
-//! public key, the creation time, and the trust store (the pinned root, the known keys,
-//! the keys that left the account). It holds no private key, no token, no email, no
-//! link code, and no recovery code.
+//! public key, the creation time, and the trust store (the pinned root, the pinned version
+//! and hash of the device list, the known keys, the keys that left the account). It holds
+//! no private key, no token, no email, no link code, and no recovery code.
 
 use std::fmt;
 use std::fs::{self, OpenOptions};
@@ -43,17 +44,17 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use super::client::{
-    AccountDeleted, AccountView, Challenge, ChallengeRequest, CheckoutAnswer, CheckoutRequest,
-    ConnectClient, CreateAccount, DeviceView, GroupDetail, GroupJoined, GroupMember, InviteAnswer,
-    JoinBody, JoinCancel, MemberRemoved, PlanView, PortalAnswer, RecoverBody, RevokeAnswer,
-    SeatsAnswer, StoreDevice, TokenRequest, VaultStoreView,
+    AccountCreated, AccountDeleted, AccountView, Challenge, ChallengeRequest, CheckoutAnswer,
+    CheckoutRequest, ConnectClient, CreateAccount, DeviceView, GroupDetail, GroupJoined,
+    GroupMember, InviteAnswer, JoinBody, JoinCancel, MemberRemoved, PlanView, PortalAnswer,
+    RecoverBody, RevokeAnswer, SeatsAnswer, StoreDevice, TokenRequest, VaultStoreView,
 };
 use super::device_key::{AccountSigner, DeviceKeyStore, recover_message};
 use super::entitlement::Entitlement;
-use super::trust::{self, Listed, MAX_KNOWN, MAX_REVOKED, Trust, point};
+use super::trust::{self, MAX_KNOWN, MAX_LEFT, Pin, point, valid_list_hash};
 use super::words::{
-    LinkCode, RecoveryCode, link_fingerprint, safety_words, valid_account_id, valid_device_id,
-    valid_group_id,
+    LinkCode, RecoveryCode, key_fingerprint, link_fingerprint, new_account_id, safety_words,
+    valid_account_id, valid_device_id, valid_group_id,
 };
 use super::{ConnectError, PLATFORM};
 use crate::broker::approvals::{ConnectGroupChange, OwnerAction, OwnerProof};
@@ -64,9 +65,9 @@ use crate::vault::{Vault, VaultResult};
 pub const TOKEN_SECONDS: u64 = 900;
 /// A token is renewed when it has less than this left.
 const TOKEN_MARGIN: u64 = 60;
-/// The version of the account file: 2 adds the trust store. A file of version 1 is
-/// refused.
-const STATE_VERSION: u8 = 2;
+/// The version of the account file: 3 pins the signed device list. A file of an earlier
+/// version is refused.
+const STATE_VERSION: u8 = 3;
 /// The longest account file that is read.
 const MAX_STATE_BYTES: u64 = 64 * 1024;
 /// A sign-in tries at most this many rounds, each with a fresh challenge.
@@ -74,8 +75,6 @@ const SIGN_IN_ROUNDS: usize = 3;
 /// The waits before the second and the third round.
 const SIGN_IN_WAITS: [Duration; SIGN_IN_ROUNDS - 1] =
     [Duration::from_secs(1), Duration::from_secs(3)];
-/// A person's name or a device name: 1 to 64 bytes (section 2).
-const MAX_NAME_BYTES: usize = 64;
 
 /// The time source: Unix seconds. Tests move it.
 pub type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
@@ -95,18 +94,158 @@ fn system_clock() -> Clock {
     })
 }
 
+/// The waits between the tries of one account creation: the same body again after a lost
+/// answer, until Connect answers or the last try is lost too (the creation stays pending).
+const CREATE_WAITS: [Duration; 4] = [
+    Duration::from_millis(250),
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+];
+/// A creation signs a new id at most this many times (`409 account_id_taken`).
+const CREATE_ID_ROUNDS: usize = 4;
+
+/// The pending creation of an account on this device, next to the account file
+/// (`connect/pending-account.json`): the exact body of `POST /v1/account`, written before
+/// the first try and removed when Connect answered it. Public values only: ids, names,
+/// the public key, the public recovery key, and signatures; never the recovery code.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PendingCreation {
+    v: u8,
+    origin: String,
+    account_id: String,
+    name: String,
+    device_name: String,
+    platform: String,
+    public_key: String,
+    recovery_key: String,
+    signature: String,
+    statement: String,
+}
+
+impl PendingCreation {
+    fn path(account_file: &Path) -> PathBuf {
+        account_file.with_file_name("pending-account.json")
+    }
+
+    /// The pending creation of `account_file` for this origin and key; `None` when there is
+    /// none, or one of another shape, origin, or key (it goes).
+    fn load(account_file: &Path, origin: &str, public_key: &str) -> Option<Self> {
+        let path = Self::path(account_file);
+        let meta = fs::symlink_metadata(&path).ok()?;
+        let pending = (meta.is_file() && meta.permissions().mode() & 0o077 == 0)
+            .then(|| fs::read(&path).ok())
+            .flatten()
+            .filter(|text| text.len() as u64 <= MAX_STATE_BYTES)
+            .and_then(|text| serde_json::from_slice::<Self>(&text).ok())
+            .filter(|pending| {
+                pending.v == STATE_VERSION
+                    && pending.origin == origin
+                    && pending.public_key == public_key
+                    && valid_account_id(&pending.account_id)
+            });
+        if pending.is_none() {
+            let _ = fs::remove_file(&path);
+        }
+        pending
+    }
+
+    fn body(&self) -> CreateAccount<'_> {
+        CreateAccount {
+            account_id: &self.account_id,
+            name: &self.name,
+            device_name: &self.device_name,
+            platform: &self.platform,
+            public_key: &self.public_key,
+            recovery_key: &self.recovery_key,
+            signature: &self.signature,
+            statement: &self.statement,
+        }
+    }
+
+    /// Write it with mode 0600 next to the account file, before the first try.
+    fn save(&self, account_file: &Path) -> Result<(), ConnectError> {
+        let text = serde_json::to_vec_pretty(self).map_err(|_| ConnectError::Local)?;
+        write_private(&Self::path(account_file), &text)
+    }
+
+    fn remove(account_file: &Path) {
+        let _ = fs::remove_file(Self::path(account_file));
+    }
+}
+
+/// The recovery codes of the pending creations of this process, by the pending file and
+/// the account id: in memory only, so a creation that is repeated in the same run still
+/// shows its code once. A restart forgets them ([`ConnectError::RecoveryCodeNotShown`]).
+static PENDING_CODES: std::sync::Mutex<Vec<(PathBuf, String, RecoveryCode)>> =
+    std::sync::Mutex::new(Vec::new());
+
+fn pending_codes() -> std::sync::MutexGuard<'static, Vec<(PathBuf, String, RecoveryCode)>> {
+    PENDING_CODES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Take the recovery code of the pending creation `account_id` of `account_file` out of
+/// memory.
+fn take_pending_code(account_file: &Path, account_id: &str) -> Option<RecoveryCode> {
+    let mut codes = pending_codes();
+    let index = codes
+        .iter()
+        .position(|(path, id, _)| path == account_file && id == account_id)?;
+    Some(codes.swap_remove(index).2)
+}
+
+/// Forget the recovery codes of the pending creations of this process (tests: a restart).
+#[doc(hidden)]
+pub fn forget_pending_creation_codes() {
+    pending_codes().clear();
+}
+
+/// Write `text` at `path` with mode 0600, in a 0700 directory, through a temporary file
+/// and a rename.
+fn write_private(path: &Path, text: &[u8]) -> Result<(), ConnectError> {
+    let dir = path.parent().ok_or(ConnectError::Local)?;
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .map_err(|_| ConnectError::Local)?;
+    let meta = fs::symlink_metadata(dir).map_err(|_| ConnectError::Local)?;
+    if !meta.is_dir() {
+        return Err(ConnectError::Local);
+    }
+    if meta.permissions().mode() & 0o077 != 0 {
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+            .map_err(|_| ConnectError::Local)?;
+    }
+    let temporary = path.with_extension("json.new");
+    let _ = fs::remove_file(&temporary);
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temporary)
+        .map_err(|_| ConnectError::Local)?;
+    file.write_all(text)
+        .and_then(|()| file.sync_all())
+        .map_err(|_| ConnectError::Local)?;
+    drop(file);
+    fs::rename(&temporary, path).map_err(|_| ConnectError::Local)
+}
+
 /// The account file in `data_dir` (`crate::paths::data_dir()` in the app).
 pub fn account_file(data_dir: &Path) -> PathBuf {
     data_dir.join("connect").join("account.json")
 }
 
-/// A name of section 2: trimmed, 1 to 64 bytes of UTF-8, no control character.
+/// A name of section 2 in its canonical form ([`trust::canonical_name`]): trimmed, 1 to
+/// 64 bytes of UTF-8, no control character, not `-`.
 fn clean_name(text: &str) -> Result<String, ConnectError> {
-    let name = text.trim();
-    if name.is_empty() || name.len() > MAX_NAME_BYTES || name.chars().any(char::is_control) {
-        return Err(ConnectError::Invalid);
-    }
-    Ok(name.to_owned())
+    trust::canonical_name(text)
+        .map(str::to_owned)
+        .ok_or(ConnectError::Invalid)
 }
 
 /// What the account file holds. No secret: see the module documentation.
@@ -128,35 +267,63 @@ pub struct AccountState {
     /// Unix seconds when this Mac became a device of the account.
     pub created_at: u64,
     /// b64u of the account root that this Mac pinned: its own key after a creation or a
-    /// recovery, the root of the confirming device's chain after a join.
+    /// recovery, the root that the link fingerprint named after a join.
     pub root: String,
-    /// b64u of the keys that this Mac knows as devices of the account (at most 64).
+    /// The highest version of the signed device list that this Mac verified.
+    pub list_version: u64,
+    /// The list hash of that version: a later list must hold it (no fork).
+    pub list_head: String,
+    /// b64u of the devices of the list at `list_version` (at most 64).
     pub known: Vec<String>,
-    /// b64u of the keys that this Mac saw leave the account (at most 128): never a
-    /// device of the account again.
-    pub revoked: Vec<String>,
+    /// b64u of the keys that left the list (that this Mac knew as devices, or that the list
+    /// that it verified removed before it joined; at most 128): as the current head each
+    /// signs only the versions of a vault store that this Mac had merged already, and below
+    /// a head of a device of the list any (`crate::sync::SignerPolicy`).
+    pub left: Vec<String>,
 }
 
 impl AccountState {
-    /// The trust store of a new account file: `root`, with this Mac's key and `others`
-    /// known.
-    pub(super) fn new_trust(
+    /// The account file of the root of an account (a creation, a recovery): the device list
+    /// at version 1 with `public_key` (b64u) as its root and only device, named
+    /// `device_name`.
+    pub fn for_root(
+        origin: &str,
+        account_id: &str,
+        device_id: &str,
+        device_name: &str,
         public_key: &str,
-        root: &[u8],
-        others: &[&[u8]],
-    ) -> (String, Vec<String>) {
-        let mut known = vec![public_key.to_owned()];
-        for key in others {
-            let text = encode_b64u(key);
-            if !known.contains(&text) {
-                known.push(text);
-            }
+        created_at: u64,
+    ) -> Self {
+        let list_head = point(public_key)
+            .map(|key| trust::root_hash(origin, account_id, &key, device_name))
+            .unwrap_or_default();
+        Self {
+            v: STATE_VERSION,
+            origin: origin.to_owned(),
+            account_id: account_id.to_owned(),
+            device_id: device_id.to_owned(),
+            name: None,
+            device_name: device_name.to_owned(),
+            public_key: public_key.to_owned(),
+            created_at,
+            root: public_key.to_owned(),
+            list_version: 1,
+            list_head,
+            known: vec![public_key.to_owned()],
+            left: Vec::new(),
         }
-        (encode_b64u(root), known)
     }
 
     fn keys(texts: &[String]) -> Vec<Vec<u8>> {
         texts.iter().filter_map(|text| point(text)).collect()
+    }
+
+    /// The pin of the device list.
+    fn pin(&self) -> Pin<'_> {
+        Pin {
+            version: self.list_version,
+            head: &self.list_head,
+        }
     }
 
     fn is_valid(&self) -> bool {
@@ -171,12 +338,14 @@ impl AccountState {
             && clean_name(&self.device_name).is_ok_and(|clean| clean == self.device_name)
             && point(&self.public_key).is_some()
             && point(&self.root).is_some()
+            && self.list_version >= 1
+            && valid_list_hash(&self.list_head)
             && self.known.len() <= MAX_KNOWN
-            && self.revoked.len() <= MAX_REVOKED
+            && self.left.len() <= MAX_LEFT
             && self
                 .known
                 .iter()
-                .chain(&self.revoked)
+                .chain(&self.left)
                 .all(|key| point(key).is_some())
     }
 
@@ -198,12 +367,29 @@ impl AccountState {
         if text.len() as u64 > MAX_STATE_BYTES {
             return Err(ConnectError::Local);
         }
-        let state: Self = serde_json::from_slice(&text).map_err(|_| ConnectError::Local)?;
+        let state: Self = match serde_json::from_slice(&text) {
+            Ok(state) => state,
+            // A file of an earlier version (no signed device list): this device joins its
+            // account again after the owner forgets it here (`forget_old_account_file`).
+            Err(_) if Self::earlier_version(&text) => return Err(ConnectError::OldAccountFile),
+            Err(_) => return Err(ConnectError::Local),
+        };
         if state.is_valid() {
             Ok(Some(state))
+        } else if state.v < STATE_VERSION {
+            Err(ConnectError::OldAccountFile)
         } else {
             Err(ConnectError::Local)
         }
+    }
+
+    /// Whether `text` is an account file of an earlier version: a JSON object whose `v` is
+    /// a number below [`STATE_VERSION`].
+    fn earlier_version(text: &[u8]) -> bool {
+        serde_json::from_slice::<serde_json::Value>(text)
+            .ok()
+            .and_then(|value| value.get("v").and_then(serde_json::Value::as_u64))
+            .is_some_and(|v| v < u64::from(STATE_VERSION))
     }
 
     /// Write the file at `path` with mode 0600, in a 0700 directory, through a temporary
@@ -212,34 +398,8 @@ impl AccountState {
         if !self.is_valid() {
             return Err(ConnectError::Invalid);
         }
-        let dir = path.parent().ok_or(ConnectError::Local)?;
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)
-            .map_err(|_| ConnectError::Local)?;
-        let meta = fs::symlink_metadata(dir).map_err(|_| ConnectError::Local)?;
-        if !meta.is_dir() {
-            return Err(ConnectError::Local);
-        }
-        if meta.permissions().mode() & 0o077 != 0 {
-            fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
-                .map_err(|_| ConnectError::Local)?;
-        }
         let text = serde_json::to_vec_pretty(self).map_err(|_| ConnectError::Local)?;
-        let temporary = path.with_extension("json.new");
-        let _ = fs::remove_file(&temporary);
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temporary)
-            .map_err(|_| ConnectError::Local)?;
-        file.write_all(&text)
-            .and_then(|()| file.sync_all())
-            .map_err(|_| ConnectError::Local)?;
-        drop(file);
-        fs::rename(&temporary, path).map_err(|_| ConnectError::Local)
+        write_private(path, &text)
     }
 }
 
@@ -267,6 +427,32 @@ pub fn forget_this_device(
     Ok(Forgotten(()))
 }
 
+/// Whether the account file at `path` is of an earlier version of Apassy
+/// ([`ConnectError::OldAccountFile`]): this device must join its account again.
+pub fn is_old_account_file(path: &Path) -> bool {
+    matches!(AccountState::load(path), Err(ConnectError::OldAccountFile))
+}
+
+/// Forget an account file of an earlier version of Apassy at `path`, with the account key,
+/// after a fresh owner check for [`OwnerAction::ForgetOldConnectAccount`] in the vault
+/// session `epoch`; then a creation or a join works again on this device. A file of this
+/// version is not forgotten here ([`ConnectError::Invalid`]). The proof is used up.
+pub fn forget_old_account_file(
+    store: &dyn DeviceKeyStore,
+    path: &Path,
+    proof: OwnerProof,
+    epoch: &[u8; 32],
+) -> Result<Forgotten, ConnectError> {
+    proof
+        .check(&OwnerAction::ForgetOldConnectAccount, epoch)
+        .map_err(ConnectError::OwnerCheck)?;
+    drop(proof);
+    if !is_old_account_file(path) {
+        return Err(ConnectError::Invalid);
+    }
+    forget_this_device(store, path)
+}
+
 /// Remove the vault store rows of `vault` (schema 34, `key_source = 'account'`) of
 /// another public key than the account key of `state`: rows that this account can no
 /// longer sign for. Call it when a vault opens and the account file loaded. Without an
@@ -291,41 +477,17 @@ pub fn drop_stale_account_rows(vault: &mut Vault, state: &AccountState) -> Vault
     Ok(removed)
 }
 
-/// Which keys may sign the heads of a vault store of the account of `state`, after `view`
-/// was verified ([`ConnectAccount::view`]): the verified devices of the account; never a
-/// device that `view` lists without its verification, nor a key that this device knew as
-/// a device of the account and saw leave it; a device of another account only while the
-/// account is an active member of a family or team (relay-sync-v1 admits it through the
-/// device link and the passphrase).
-pub fn signer_policy(view: &AccountView, state: &AccountState) -> crate::sync::SignerPolicy {
-    let accepted: Vec<Vec<u8>> = view
-        .devices
-        .iter()
-        .filter(|device| device.verified)
-        .filter_map(|device| point(&device.public_key))
-        .collect();
-    let mut refused: Vec<Vec<u8>> = view
-        .devices
-        .iter()
-        .filter(|device| !device.verified)
-        .filter_map(|device| decode_b64u(&device.public_key))
-        .collect();
-    for key in state.revoked.iter().chain(&state.known) {
-        if let Some(key) = decode_b64u(key)
-            && !accepted.contains(&key)
-            && !refused.contains(&key)
-        {
-            refused.push(key);
-        }
-    }
-    let others = view
-        .group
-        .as_ref()
-        .is_some_and(|group| group.state == "active");
+/// Which keys may sign the heads of a vault store of the account of `state`: the devices
+/// of the signed device list that this Mac verified, and the keys that left that list (as
+/// the current head only for the versions that this Mac had merged of that store, and
+/// below a head of a device of the list; `crate::sync::SignerPolicy`). The trust store of the account file
+/// decides alone: no answer of Connect (a group, a store marked shared, a device it
+/// lists) adds a key. A key of another account signs nothing: no step of this version pins
+/// the root of another account.
+pub fn signer_policy(state: &AccountState) -> crate::sync::SignerPolicy {
     crate::sync::SignerPolicy {
-        accepted,
-        refused,
-        others,
+        accepted: AccountState::keys(&state.known),
+        left: AccountState::keys(&state.left),
     }
 }
 
@@ -459,6 +621,10 @@ pub struct PendingJoin {
     pub platform: String,
     /// The joining key, X9.63 (65 bytes).
     pub public_key: Vec<u8>,
+    /// The joining key's signature over the `apassy-connect join v1` message of this
+    /// link, which names `device_name`: this Mac checked it before it showed the name, and
+    /// checks it again before it signs the name.
+    pub signature: Vec<u8>,
     /// The six words: `"iPhone" asks to join your Apassy Connect account. Both devices
     /// show: <words>.`
     pub words: String,
@@ -512,6 +678,9 @@ pub struct ConnectAccount {
     /// later call is [`ConnectError::Revoked`], also without the key in memory. The key
     /// and the account file stay until the owner forgets the account here.
     revoked: bool,
+    /// The device list of the last view that counted ([`Self::verify`]): the signed name
+    /// of each device for the owner checks.
+    list: Option<trust::Verified>,
     clock: Clock,
     sleeper: Sleeper,
 }
@@ -549,6 +718,7 @@ impl ConnectAccount {
             token: None,
             entitlement: None,
             revoked: false,
+            list: None,
             clock: system_clock(),
             sleeper: system_sleeper(),
         }
@@ -559,6 +729,17 @@ impl ConnectAccount {
     /// `path`. The recovery code comes back once: show it as 16 words with "Save it in
     /// another password manager"; Apassy never stores it. The first sign-in happens at
     /// the first call that needs the token.
+    ///
+    /// The body of the creation is written as the pending creation of this device before
+    /// the first try (public values only), and the same body goes again after a lost
+    /// answer, until Connect answers: a creation never ends with a key that Connect used
+    /// while this Mac has no account file. A later call with a pending creation of this
+    /// origin and key repeats its body (with its names) and Connect answers the account
+    /// that it made. Its recovery code is in memory until the creation is answered: after a
+    /// restart the account is still made and its file written, and the call answers
+    /// [`ConnectError::RecoveryCodeNotShown`]. An id that Connect holds or held (`409
+    /// account_id_taken`) gets a new id and a new body; a used key (`409 conflict`) and any
+    /// other refusal end the creation.
     pub fn create(
         client: ConnectClient,
         store: &dyn DeviceKeyStore,
@@ -572,38 +753,104 @@ impl ConnectAccount {
         let name = clean_name(name)?;
         let device_name = clean_name(device_name)?;
         let signer = AccountSigner::open_or_create(store)?;
-        let recovery = RecoveryCode::generate()?;
-        let recovery_key = recovery.key()?.public_key_b64u();
         let public_key = signer.public_key_b64u();
-        let signature = encode_b64u(&signer.sign_account(client.origin(), &recovery_key)?);
-        let body = CreateAccount {
-            name: &name,
-            device_name: &device_name,
-            platform: PLATFORM,
-            public_key: &public_key,
-            recovery_key: &recovery_key,
-            signature: &signature,
-        };
-        let created = twice(|| client.create_account(&body))?;
-        if !valid_account_id(&created.account_id) || !valid_device_id(&created.device_id) {
+        let mut pending = PendingCreation::load(path, client.origin(), &public_key);
+        for _ in 0..CREATE_ID_ROUNDS {
+            let creation = match pending.take() {
+                Some(creation) => creation,
+                None => {
+                    // This device makes the account id: the root entry of the device list
+                    // names it.
+                    let recovery = RecoveryCode::generate()?;
+                    let recovery_key = recovery.key()?.public_key_b64u();
+                    let account_id = new_account_id()?;
+                    let (root, _) = signer.sign_root(client.origin(), &account_id, &device_name)?;
+                    let creation = PendingCreation {
+                        v: STATE_VERSION,
+                        origin: client.origin().to_owned(),
+                        signature: encode_b64u(
+                            &signer.sign_account(client.origin(), &recovery_key)?,
+                        ),
+                        account_id,
+                        name: name.clone(),
+                        device_name: device_name.clone(),
+                        platform: PLATFORM.to_owned(),
+                        public_key: public_key.clone(),
+                        recovery_key,
+                        statement: encode_b64u(&root),
+                    };
+                    // Nothing is sent before the pending creation is on disk.
+                    creation.save(path)?;
+                    pending_codes().push((path.to_owned(), creation.account_id.clone(), recovery));
+                    creation
+                }
+            };
+            let mut answer = client.create_account(&creation.body());
+            for wait in CREATE_WAITS {
+                if !matches!(answer, Err(ConnectError::Offline | ConnectError::Broken)) {
+                    break;
+                }
+                std::thread::sleep(wait);
+                answer = client.create_account(&creation.body());
+            }
+            match answer {
+                Ok(created) => return Self::created(client, signer, path, &creation, &created),
+                Err(ConnectError::AccountIdTaken) => {
+                    // A new id and a new body; the code of this one is of no account.
+                    PendingCreation::remove(path);
+                    drop(take_pending_code(path, &creation.account_id));
+                }
+                // No answer: the creation stays pending, and the next call repeats it.
+                Err(error @ (ConnectError::Offline | ConnectError::Broken)) => return Err(error),
+                // Connect made nothing for now (a limit, a busy or failing service): the
+                // same body goes again later.
+                Err(
+                    error @ (ConnectError::RateLimited(_)
+                    | ConnectError::Refused {
+                        status: 500..=599, ..
+                    }),
+                ) => return Err(error),
+                Err(error) => {
+                    PendingCreation::remove(path);
+                    drop(take_pending_code(path, &creation.account_id));
+                    return Err(error);
+                }
+            }
+        }
+        Err(ConnectError::AccountIdTaken)
+    }
+
+    /// The account that Connect made for the pending creation `creation`: the account
+    /// file, then the end of the pending creation, and its recovery code when this process
+    /// still holds it.
+    fn created(
+        client: ConnectClient,
+        signer: AccountSigner,
+        path: &Path,
+        creation: &PendingCreation,
+        created: &AccountCreated,
+    ) -> Result<(Self, RecoveryCode), ConnectError> {
+        if created.account_id != creation.account_id || !valid_device_id(&created.device_id) {
             return Err(ConnectError::BadAnswer);
         }
-        // This Mac is the account root.
-        let (root, known) = AccountState::new_trust(&public_key, signer.public_key(), &[]);
+        // This Mac is the account root: version 1 of the device list.
         let state = AccountState {
-            v: STATE_VERSION,
-            origin: client.origin().to_owned(),
-            account_id: created.account_id,
-            device_id: created.device_id,
-            name: Some(name),
-            device_name,
-            public_key,
-            created_at: created.created_at,
-            root,
-            known,
-            revoked: Vec::new(),
+            name: Some(creation.name.clone()),
+            ..AccountState::for_root(
+                client.origin(),
+                &created.account_id,
+                &created.device_id,
+                &creation.device_name,
+                &creation.public_key,
+                created.created_at,
+            )
         };
+        // A failed save keeps the creation pending (and its code in memory): the next call
+        // repeats it and writes the file.
         state.save(path)?;
+        PendingCreation::remove(path);
+        let recovery = take_pending_code(path, &creation.account_id)
+            .ok_or(ConnectError::RecoveryCodeNotShown)?;
         Ok((Self::build(client, state, path, Arc::new(signer)), recovery))
     }
 
@@ -653,6 +900,9 @@ impl ConnectAccount {
         let signature = encode_b64u(&signer.sign(&message)?);
         let recovery_signature = encode_b64u(&old.key()?.sign_recover(&message)?);
         drop(old);
+        // This device is the root of the new device list: its entry, signed over its name.
+        let (root, _) = signer.sign_root(client.origin(), account_id, &device_name)?;
+        let statement = encode_b64u(&root);
         let body = RecoverBody {
             account_id,
             device_name: &device_name,
@@ -661,32 +911,22 @@ impl ConnectAccount {
             recovery_key: &recovery_key,
             signature: &signature,
             recovery_signature: &recovery_signature,
+            statement: &statement,
         };
         let answer = twice(|| client.recover(&body))?;
         if answer.account_id != account_id || !valid_device_id(&answer.device_id) {
             return Err(ConnectError::BadAnswer);
         }
-        // This Mac is the new account root.
-        let (root, known) = AccountState::new_trust(&public_key, signer.public_key(), &[]);
-        let mut account = Self::build(
-            client,
-            AccountState {
-                v: STATE_VERSION,
-                origin: String::new(),
-                account_id: answer.account_id,
-                device_id: answer.device_id,
-                name: None,
-                device_name,
-                public_key,
-                created_at: 0,
-                root,
-                known,
-                revoked: Vec::new(),
-            },
-            path,
-            Arc::new(signer),
+        // This Mac is the new account root: version 1 of a new device list.
+        let state = AccountState::for_root(
+            client.origin(),
+            &answer.account_id,
+            &answer.device_id,
+            &device_name,
+            &public_key,
+            0,
         );
-        account.state.origin = account.client.origin().to_owned();
+        let mut account = Self::build(client, state, path, Arc::new(signer));
         account.state.created_at = account.now();
         account.state.save(path)?;
         Ok((account, new, answer.deleted_stores))
@@ -852,62 +1092,157 @@ impl ConnectAccount {
         }
     }
 
-    /// The trust store of the account file.
-    fn trust_keys(&self) -> (Vec<u8>, Vec<Vec<u8>>, Vec<Vec<u8>>) {
-        (
-            point(&self.state.root).unwrap_or_default(),
-            AccountState::keys(&self.state.known),
-            AccountState::keys(&self.state.revoked),
-        )
+    /// The pinned root of the account file (X9.63).
+    fn root_key(&self) -> Vec<u8> {
+        point(&self.state.root).unwrap_or_default()
     }
 
-    /// Mark each device of `devices` verified or not against the trust store, and learn
-    /// the verified keys. Writes the account file when the trust store changed.
-    fn verify(&mut self, devices: &mut [DeviceView]) -> Result<(), ConnectError> {
-        let (root, mut known, mut revoked) = self.trust_keys();
-        let list: Vec<Listed<'_>> = devices
-            .iter()
-            .map(|device| Listed {
-                public_key: &device.public_key,
-                chain: &device.chain,
-            })
-            .collect();
-        let verified = trust::verify_devices(
+    /// Verify the device list of `view` from the pinned root and the pin, mark each device
+    /// verified when the list holds its key (with the name that the list signed for it),
+    /// and learn the list: the pin moves to its head, the known keys become its devices, and
+    /// the keys that left are kept. Writes the account file when the trust store changed. A
+    /// list that does not verify, is older than the pin, forks from it, or does not hold
+    /// this Mac's own key as a device marks no device verified and changes nothing here. A
+    /// row whose key is this Mac's own while its id is not, or the reverse, is not verified.
+    fn verify(&mut self, view: &mut AccountView) -> Result<(), ConnectError> {
+        let own = self.own_public_key();
+        let verified = trust::verify_list(
             self.client.origin(),
             &self.state.account_id,
-            &list,
-            Trust {
-                root: &root,
-                known: &known,
-                revoked: &revoked,
-            },
-        );
-        let mut keys = Vec::new();
-        for (device, verified) in devices.iter_mut().zip(verified) {
-            device.verified = verified;
-            if verified && let Some(key) = point(&device.public_key) {
-                keys.push(key);
+            &self.root_key(),
+            &view.device_list,
+        )
+        .filter(|list| self.state.pin().accepts(list))
+        .filter(|list| list.live.contains(&own));
+        for device in &mut view.devices {
+            device.fingerprint = point(&device.public_key)
+                .map(|key| key_fingerprint(&key))
+                .unwrap_or_default();
+            device.verified = false;
+            device.signed_name = None;
+        }
+        let Some(list) = verified else {
+            view.list_verified = false;
+            return Ok(());
+        };
+        view.list_verified = true;
+        for device in &mut view.devices {
+            let Some(key) = point(&device.public_key) else {
+                continue;
+            };
+            let own_row = device.device_id == self.state.device_id;
+            device.verified = list.live.contains(&key) && (key == own) == own_row;
+            if device.verified {
+                device.signed_name = list.name_of(&key).map(str::to_owned);
             }
         }
-        if trust::learn(&mut known, &mut revoked, &self.own_public_key(), &keys) {
-            self.state.known = known.iter().map(|key| encode_b64u(key)).collect();
-            self.state.revoked = revoked.iter().map(|key| encode_b64u(key)).collect();
-            self.state.save(&self.path)?;
-        }
+        self.advance(list.version, list.head(), &list.live, &list.removed)?;
+        self.list = Some(list);
         Ok(())
     }
 
-    /// `GET /v1/account`: the account, its plan, its devices, its group. The Mac polls
-    /// it every 3 s while the checkout sheet is open (M2). Every device is verified
-    /// against the trust store ([`DeviceView::verified`]), and the trust store learns the
-    /// verified keys. The name of the person goes into the account file when this Mac did
+    /// The device list of the last view that counted, when this Mac has one.
+    pub fn verified_list(&self) -> Option<&trust::Verified> {
+        self.list.as_ref()
+    }
+
+    /// Move the trust store to the list version `version` with the hash `head`, the
+    /// devices `live`, and the keys that the list removed `removed`, and write the account
+    /// file when anything changed.
+    fn advance(
+        &mut self,
+        version: u64,
+        head: &str,
+        live: &[Vec<u8>],
+        removed: &[Vec<u8>],
+    ) -> Result<(), ConnectError> {
+        let mut known = AccountState::keys(&self.state.known);
+        let mut left = AccountState::keys(&self.state.left);
+        let moved = trust::learn(&mut known, &mut left, live, removed);
+        if !moved && version == self.state.list_version && head == self.state.list_head {
+            return Ok(());
+        }
+        self.state.list_version = version;
+        self.state.list_head = head.to_owned();
+        self.state.known = known.iter().map(|key| encode_b64u(key)).collect();
+        self.state.left = left.iter().map(|key| encode_b64u(key)).collect();
+        self.state.save(&self.path)
+    }
+
+    /// A fresh [`Self::view`] whose device list verified: the head that the next entry of
+    /// this Mac names. A list that does not verify is [`ConnectError::BadAnswer`], and
+    /// nothing is signed.
+    fn verified_view(&mut self) -> Result<AccountView, ConnectError> {
+        let view = self.view()?;
+        if !view.list_verified {
+            return Err(ConnectError::BadAnswer);
+        }
+        Ok(view)
+    }
+
+    /// Sign the next entry of the device list (`op` for `key`, with `link_hash` for an
+    /// `add`) from the head that this Mac verified, and send it with `send`. A `409` (the
+    /// list moved: another device signed in between) reads the list again and signs once
+    /// more. On success this Mac pins the entry it signed: the list hash it computed and
+    /// the devices after the change.
+    fn signed_change<T>(
+        &mut self,
+        op: &str,
+        key: &[u8],
+        (link_hash, name): (Option<&str>, Option<&str>),
+        mut send: impl FnMut(&ConnectClient, &str, (u64, &str)) -> Result<T, ConnectError>,
+    ) -> Result<T, ConnectError> {
+        let signer = self.signer()?;
+        let key_b64u = encode_b64u(key);
+        for round in 0..2 {
+            self.verified_view()?;
+            let (version, previous) = (self.state.list_version + 1, self.state.list_head.clone());
+            let (signature, hash) = signer.sign_list_entry(
+                self.client.origin(),
+                &self.state.account_id,
+                (version, &previous),
+                op,
+                &key_b64u,
+                link_hash,
+                name,
+            )?;
+            let statement = encode_b64u(&signature);
+            match self.with_token(|client, token| send(client, token, (version, &statement))) {
+                Ok(answer) => {
+                    let mut live = AccountState::keys(&self.state.known);
+                    let mut removed = Vec::new();
+                    match op {
+                        "add" if !live.contains(&key.to_vec()) => live.push(key.to_vec()),
+                        "remove" => {
+                            live.retain(|held| held != key);
+                            removed.push(key.to_vec());
+                        }
+                        _ => {}
+                    }
+                    self.advance(version, &hash, &live, &removed)?;
+                    // The names of the list come again with the next view.
+                    self.list = None;
+                    return Ok(answer);
+                }
+                Err(ConnectError::Conflict) if round == 0 => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Err(ConnectError::Conflict)
+    }
+
+    /// `GET /v1/account`: the account, its plan, its devices, its group, and the signed
+    /// device list. The Mac polls it every 3 s while the checkout sheet is open (M2). The
+    /// list is verified from the pinned root and the pin ([`AccountView::list_verified`]),
+    /// each device is verified when the list holds its key ([`DeviceView::verified`]), and
+    /// the trust store learns the list. The name of the person goes into the account file when this Mac did
     /// not know it; the email never does.
     pub fn view(&mut self) -> Result<AccountView, ConnectError> {
         let mut view = self.with_token(|client, token| client.account(token))?;
         if view.account_id != self.state.account_id {
             return Err(ConnectError::BadAnswer);
         }
-        self.verify(&mut view.devices)?;
+        self.verify(&mut view)?;
         if self.state.name.is_none()
             && let Ok(name) = clean_name(&view.name)
         {
@@ -930,11 +1265,11 @@ impl ConnectAccount {
             .collect())
     }
 
-    /// Which keys may sign the heads of a vault store of this account, from a fresh
-    /// [`Self::view`] ([`signer_policy`]).
+    /// Which keys may sign the heads of a vault store of this account, after a fresh
+    /// [`Self::view`] ([`signer_policy`]: from the trust store only).
     pub fn signer_policy(&mut self) -> Result<crate::sync::SignerPolicy, ConnectError> {
-        let view = self.view()?;
-        Ok(signer_policy(&view, &self.state))
+        self.view()?;
+        Ok(signer_policy(&self.state))
     }
 
     /// The owner action of the deletion of this account.
@@ -974,7 +1309,7 @@ impl ConnectAccount {
     /// the account root that this Mac pinned and this Mac's key, so the new device checks
     /// the keys that Connect gives it. The link works once and for 10 minutes.
     pub fn start_link(&mut self) -> Result<DeviceLink, ConnectError> {
-        let (root, _, _) = self.trust_keys();
+        let root = self.root_key();
         let code = LinkCode::generate(&self.state.account_id, &root, &self.own_public_key())?;
         let hash = code.link_hash();
         let answer = self.with_token(|client, token| client.link(token, &hash))?;
@@ -987,7 +1322,8 @@ impl ConnectAccount {
 
     /// The devices that ask to join through `link`, each with the safety words that this
     /// Mac computes from the code it holds, its own key, and the joining key. Ask every
-    /// 5 s while the sheet is open. An entry with a bad key is left out.
+    /// 5 s while the sheet is open. An entry with a bad key, or a name that the joining
+    /// key did not sign for this link ([`Self::join_signed`]), is left out.
     pub fn pending_joins(&mut self, link: &DeviceLink) -> Result<Vec<PendingJoin>, ConnectError> {
         let pending = self.with_token(|client, token| client.pending(token))?;
         let own_key = self.own_public_key();
@@ -997,6 +1333,10 @@ impl ConnectAccount {
             .filter_map(|join| {
                 let public_key = point(&join.public_key)?;
                 let device_name = clean_name(&join.device_name).ok()?;
+                let signature = decode_b64u(&join.signature)?;
+                if !self.join_signed(link, &public_key, &device_name, &signature) {
+                    return None;
+                }
                 let words = safety_words(
                     &self.state.account_id,
                     link.code.expose(),
@@ -1009,6 +1349,7 @@ impl ConnectAccount {
                     device_name,
                     platform: join.platform,
                     public_key,
+                    signature,
                     words,
                     created_at: join.created_at,
                     expires_at: join.expires_at,
@@ -1017,13 +1358,39 @@ impl ConnectAccount {
             .collect())
     }
 
+    /// Whether `signature` is the joining key `public_key`'s over the `apassy-connect join
+    /// v1` message of `link` with the canonical device name `device_name`: the name that
+    /// the joining device asked for, whatever Connect reports.
+    fn join_signed(
+        &self,
+        link: &DeviceLink,
+        public_key: &[u8],
+        device_name: &str,
+        signature: &[u8],
+    ) -> bool {
+        trust::valid_name(device_name)
+            && crate::sync::verify_signature(
+                public_key,
+                &super::device_key::join_message(
+                    self.client.origin(),
+                    &self.state.account_id,
+                    &link.code.link_hash(),
+                    &encode_b64u(public_key),
+                    device_name,
+                ),
+                signature,
+            )
+    }
+
     /// Confirm `join` of `link` after a fresh owner check for
-    /// [`PendingJoin::owner_action`] in the vault session `epoch`: this Mac signs the
-    /// device statement for exactly the key for which it computed the words, and Connect
-    /// adds that key. The words are computed again from the code and the key, so a
-    /// changed entry is [`ConnectError::WordsMismatch`] and nothing is sent. The answer's
-    /// chain must verify to the root of this Mac; its key is then known here. The proof
-    /// is used up, also when the call fails.
+    /// [`PendingJoin::owner_action`] in the vault session `epoch`: this Mac signs the `add`
+    /// entry of the device list for exactly the key for which it computed the words and the
+    /// link of the join, after the head that it verified, and Connect adds that key. The
+    /// words are computed again from the code and the key, so a changed entry is
+    /// [`ConnectError::WordsMismatch`] and nothing is sent; a name that the joining key did
+    /// not sign is [`ConnectError::NotVerified`], and nothing is sent. The key is then a
+    /// device of the list here, with the name that it signed. The proof is used up, also
+    /// when the call fails.
     pub fn confirm_join(
         &mut self,
         link: &DeviceLink,
@@ -1041,48 +1408,29 @@ impl ConnectAccount {
         {
             return Err(ConnectError::WordsMismatch);
         }
+        if !self.join_signed(link, &join.public_key, &join.device_name, &join.signature) {
+            return Err(ConnectError::NotVerified);
+        }
         proof
             .check(&join.owner_action(&self.state.account_id), epoch)
             .map_err(ConnectError::OwnerCheck)?;
         drop(proof);
         let public_key = encode_b64u(&join.public_key);
-        let signer = self.signer()?;
-        let statement = encode_b64u(&signer.sign_device(
-            self.client.origin(),
-            &self.state.account_id,
-            &link.code.link_hash(),
-            &public_key,
-        )?);
-        drop(signer);
-        let mut device = self.with_token(|client, token| {
-            client.confirm(token, join.join_id, &public_key, &statement)
-        })?;
-        let (root, mut known, revoked) = self.trust_keys();
-        let own = encode_b64u(&self.own_public_key());
-        let by_this_mac = device
-            .chain
-            .first()
-            .is_some_and(|entry| entry.confirmer_key == own);
-        let chained = trust::chain_root(
-            self.client.origin(),
-            &self.state.account_id,
-            &device.public_key,
-            &device.chain,
-        )
-        .is_some_and(|found| found == root);
-        if device.public_key != public_key
-            || !valid_device_id(&device.device_id)
-            || !by_this_mac
-            || !chained
-        {
+        let link_hash = link.code.link_hash();
+        let join_id = join.join_id;
+        let name = join.device_name.clone();
+        let mut device = self.signed_change(
+            "add",
+            &join.public_key,
+            (Some(&link_hash), Some(&name)),
+            |client, token, entry| client.confirm(token, join_id, &public_key, entry),
+        )?;
+        if device.public_key != public_key || !valid_device_id(&device.device_id) {
             return Err(ConnectError::BadAnswer);
         }
-        device.verified = !revoked.contains(&join.public_key);
-        if device.verified && !known.contains(&join.public_key) && known.len() < MAX_KNOWN {
-            known.push(join.public_key.clone());
-            self.state.known = known.iter().map(|key| encode_b64u(key)).collect();
-            self.state.save(&self.path)?;
-        }
+        device.verified = true;
+        device.signed_name = Some(name);
+        device.fingerprint = key_fingerprint(&join.public_key);
         Ok(device)
     }
 
@@ -1095,48 +1443,66 @@ impl ConnectAccount {
         Ok(())
     }
 
-    /// The owner action of the revoke of `device`.
+    /// The owner action of the revoke of `device`: the name that the signed device list
+    /// holds for its key ([`DeviceView::shown_name`]) and the short fingerprint of that key,
+    /// the key that the signed removal names.
     pub fn revoke_action(&self, device: &DeviceView) -> OwnerAction {
         OwnerAction::RevokeConnectDevice {
             account_id: self.state.account_id.clone(),
             device_id: device.device_id.clone(),
-            device_name: device.name.clone(),
+            device_name: device.shown_name().to_owned(),
+            fingerprint: point(&device.public_key)
+                .map(|key| key_fingerprint(&key))
+                .unwrap_or_default(),
         }
     }
 
     /// Revoke `device` (section 7.4) after a fresh owner check for
-    /// [`Self::revoke_action`] in the vault session `epoch`. This Mac may revoke itself
-    /// ("Forget this device"): its token goes, and the caller runs
-    /// [`forget_this_device`] and [`drop_account_rows`]. The proof is used up, also when
-    /// the call fails.
+    /// [`Self::revoke_action`] in the vault session `epoch`: this Mac signs the `remove`
+    /// entry of the device list for the device's key, after the head that it verified. The
+    /// key must be a device of that list, the row as this Mac verifies it now must give the
+    /// same owner action (the same signed name and fingerprint), and a row whose key is this
+    /// Mac's own must be this Mac's own row, and the reverse ([`ConnectError::NotVerified`]
+    /// otherwise, and nothing is sent). This Mac may revoke itself ("Forget this device"):
+    /// its token goes, and the caller runs [`forget_this_device`] and [`drop_account_rows`].
+    /// The proof is used up, also when the call fails.
     pub fn revoke(
         &mut self,
         device: &DeviceView,
         proof: OwnerProof,
         epoch: &[u8; 32],
     ) -> Result<RevokeOutcome, ConnectError> {
+        let action = self.revoke_action(device);
         proof
-            .check(&self.revoke_action(device), epoch)
+            .check(&action, epoch)
             .map_err(ConnectError::OwnerCheck)?;
         drop(proof);
-        let answer = self.with_token(|client, token| client.revoke(token, &device.device_id))?;
+        let key = point(&device.public_key).ok_or(ConnectError::NotVerified)?;
+        if (key == self.own_public_key()) != (device.device_id == self.state.device_id) {
+            return Err(ConnectError::NotVerified);
+        }
+        let fresh = self
+            .verified_view()?
+            .devices
+            .into_iter()
+            .find(|row| row.device_id == device.device_id && row.public_key == device.public_key)
+            .filter(|row| row.verified)
+            .ok_or(ConnectError::NotVerified)?;
+        if self.revoke_action(&fresh) != action
+            || !AccountState::keys(&self.state.known).contains(&key)
+        {
+            return Err(ConnectError::NotVerified);
+        }
+        let device_id = device.device_id.clone();
+        let answer = self.signed_change("remove", &key, (None, None), |client, token, entry| {
+            client.revoke(token, &device_id, entry)
+        })?;
         if answer.device_id != device.device_id {
             return Err(ConnectError::BadAnswer);
         }
         let this_device = answer.device_id == self.state.device_id;
         if this_device {
             self.sign_out();
-        } else if let Some(key) = point(&device.public_key) {
-            // The key left the account: it is never a device of it again here.
-            let text = encode_b64u(&key);
-            self.state.known.retain(|known| *known != text);
-            if !self.state.revoked.contains(&text) {
-                self.state.revoked.push(text);
-                if self.state.revoked.len() > MAX_REVOKED {
-                    self.state.revoked.remove(0);
-                }
-            }
-            self.state.save(&self.path)?;
         }
         Ok(RevokeOutcome {
             answer,
@@ -1188,9 +1554,13 @@ impl ConnectAccount {
         if !crate::sync::relay_crypto::valid_vault_id(vault_id) {
             return Err(ConnectError::Invalid);
         }
-        let name = clean_name(name)?;
+        // A vault name is signed into no message: `-` is a vault name too.
+        let name = name.trim();
+        if name.is_empty() || name.len() > 64 || name.chars().any(char::is_control) {
+            return Err(ConnectError::Invalid);
+        }
         let store =
-            self.with_token(|client, token| client.create_vault_store(token, vault_id, &name))?;
+            self.with_token(|client, token| client.create_vault_store(token, vault_id, name))?;
         if store.vault_id != vault_id || !crate::sync::relay_crypto::valid_team_id(&store.team_id) {
             return Err(ConnectError::BadAnswer);
         }
@@ -1564,10 +1934,14 @@ pub struct JoinRequest {
     device_name: String,
     join_id: u64,
     confirmer_name: String,
-    /// The key of the confirming device and the account root of its chain, both named by
-    /// the fingerprint of the code.
-    confirmer_key: Vec<u8>,
+    /// The account root, named by the fingerprint of the code with the confirming
+    /// device's key.
     root: Vec<u8>,
+    /// The key of the confirming device that the code named (X9.63).
+    confirmer: Vec<u8>,
+    /// The device list of the join answer, verified from that root. The list that the new
+    /// account file pins goes on from it and holds this device's own `add`.
+    list: trust::Verified,
     words: String,
     expires_at: u64,
     clock: Clock,
@@ -1608,9 +1982,10 @@ impl JoinRequest {
     /// key of the confirming device. Show: `Waiting for <confirmer>… Both devices show:
     /// <words>.`
     ///
-    /// The confirming device that Connect names must be the one of the code: its key and
-    /// the root of its chain give the fingerprint of the code. Any other device is
-    /// [`ConnectError::LinkMismatch`], and the join is cancelled.
+    /// The confirming device that Connect names must be the one of the code: the root of the
+    /// signed device list of the answer and the confirmer's key give the fingerprint of the
+    /// code, the list verifies from that root, and the confirmer is a device of it. Any
+    /// other answer is [`ConnectError::LinkMismatch`], and the join is cancelled.
     pub fn start(
         client: ConnectClient,
         store: &dyn DeviceKeyStore,
@@ -1643,7 +2018,14 @@ impl JoinRequest {
         let account_id = code.account_id().to_owned();
         let link_hash = code.link_hash();
         let public_key = signer.public_key_b64u();
-        let signature = encode_b64u(&signer.sign_join(client.origin(), &account_id, &link_hash)?);
+        // The signature covers the canonical device name; the confirming device signs that
+        // name into the device list only when it verifies.
+        let signature = encode_b64u(&signer.sign_join(
+            client.origin(),
+            &account_id,
+            &link_hash,
+            &device_name,
+        )?);
         let body = JoinBody {
             account_id: &account_id,
             link_hash: &link_hash,
@@ -1657,14 +2039,17 @@ impl JoinRequest {
         if answer.account_id != account_id || !valid_device_id(&answer.confirmer.device_id) {
             return Err(ConnectError::BadAnswer);
         }
-        let root = trust::chain_root(
-            client.origin(),
-            &account_id,
-            &answer.confirmer.public_key,
-            &answer.confirmer.chain,
-        )
-        .filter(|root| link_fingerprint(root, &confirmer_key) == code.fingerprint());
-        let Some(root) = root else {
+        let checked = answer
+            .device_list
+            .first()
+            .and_then(|entry| point(&entry.key))
+            .filter(|root| link_fingerprint(root, &confirmer_key) == code.fingerprint())
+            .and_then(|root| {
+                trust::verify_list(client.origin(), &account_id, &root, &answer.device_list)
+                    .filter(|list| list.live.contains(&confirmer_key))
+                    .map(|list| (root, list))
+            });
+        let Some((root, list)) = checked else {
             // Best effort: the link of the code is used up anyway.
             let _ = cancel_join(&client, &signer, &code);
             return Err(ConnectError::LinkMismatch);
@@ -1684,8 +2069,9 @@ impl JoinRequest {
             join_id: answer.join_id,
             confirmer_name: clean_name(&answer.confirmer.name)
                 .unwrap_or_else(|_| "your other device".to_owned()),
-            confirmer_key,
             root,
+            confirmer: confirmer_key,
+            list,
             words,
             expires_at: answer.expires_at,
             clock: system_clock(),
@@ -1720,9 +2106,15 @@ impl JoinRequest {
     }
 
     /// Ask whether the other device confirmed: `403 join_pending` waits, `403
-    /// join_refused` ends, a nonce means confirmed, and this Mac signs in and writes the
-    /// account file with the root of the code and the confirming device known. A token
-    /// call refused with `401` or `503` waits for the next poll.
+    /// join_refused` ends, a nonce means confirmed, and this Mac signs in, reads the
+    /// account, and writes the account file with the root of the code pinned and the
+    /// device list that it verified: a list that goes on from the list of the join answer
+    /// and holds this Mac's own `add`, made by the confirming device that the code named,
+    /// with the link of the code, and with the device name that this Mac asked for. Any
+    /// other list (an older one, one without that entry, or one whose entry names this Mac
+    /// otherwise) is [`ConnectError::LinkMismatch`], and no account file is written. A token call
+    /// refused with `401` or `503`, or a read of the account that fails on the way, waits
+    /// for the next poll.
     pub fn poll(&mut self) -> Result<JoinPoll, ConnectError> {
         let public_key = self.signer.public_key_b64u();
         let account_id = self.code.account_id().to_owned();
@@ -1748,20 +2140,56 @@ impl JoinRequest {
             Err(error) if next_round(&error) => return Ok(JoinPoll::Waiting),
             Err(error) => return Err(error),
         };
-        let (root, known) =
-            AccountState::new_trust(&public_key, &self.root, &[&self.confirmer_key]);
+        let view = match self.client.account(token.value.as_str()) {
+            Ok(view) if view.account_id == account_id => view,
+            Ok(_) => return Err(ConnectError::BadAnswer),
+            Err(
+                ConnectError::Offline
+                | ConnectError::Broken
+                | ConnectError::Unauthenticated
+                | ConnectError::Refused { status: 503, .. },
+            ) => return Ok(JoinPoll::Waiting),
+            Err(error) => return Err(error),
+        };
+        let start = Pin {
+            version: self.list.version,
+            head: self.list.head(),
+        };
+        let link_hash = self.code.link_hash();
+        let list = trust::verify_list(
+            self.client.origin(),
+            &account_id,
+            &self.root,
+            &view.device_list,
+        )
+        .filter(|list| start.accepts(list))
+        .filter(|list| list.added(self.signer.public_key(), &self.confirmer, &link_hash))
+        .filter(|list| list.name_of(self.signer.public_key()) == Some(self.device_name.as_str()))
+        .ok_or(ConnectError::LinkMismatch)?;
         let state = AccountState {
             v: STATE_VERSION,
             origin: self.client.origin().to_owned(),
             account_id,
             device_id,
-            name: None,
+            name: clean_name(&view.name).ok(),
             device_name: self.device_name.clone(),
             public_key,
             created_at: now,
-            root,
-            known,
-            revoked: Vec::new(),
+            root: encode_b64u(&self.root),
+            list_version: list.version,
+            list_head: list.head().to_owned(),
+            known: list.live.iter().map(|key| encode_b64u(key)).collect(),
+            // The keys that the list removed before this device joined: each signs only
+            // what a live device vouches for (`crate::sync::SignerPolicy`).
+            left: list
+                .removed
+                .iter()
+                .rev()
+                .take(MAX_LEFT)
+                .rev()
+                .filter(|key| !list.live.contains(key))
+                .map(|key| encode_b64u(key))
+                .collect(),
         };
         state.save(&self.path)?;
         let mut account = ConnectAccount::build(
@@ -1772,8 +2200,7 @@ impl JoinRequest {
         );
         account.clock = Arc::clone(&self.clock);
         account.token = Some(token);
-        // The person's name for the account file; the join is done without it.
-        let _ = account.view();
+        account.list = Some(list);
         Ok(JoinPoll::Confirmed(Box::new(account)))
     }
 
@@ -1795,7 +2222,7 @@ mod tests {
 
     fn state() -> AccountState {
         AccountState {
-            v: 2,
+            v: 3,
             origin: "https://connect.example.test".to_owned(),
             account_id: "acc_k7m2q4x3ca".to_owned(),
             device_id: "dev_m2k7q3x4ab".to_owned(),
@@ -1804,26 +2231,44 @@ mod tests {
             public_key: KEY.to_owned(),
             created_at: 1_790_000_000,
             root: KEY.to_owned(),
+            list_version: 1,
+            list_head: trust::root_hash(
+                "https://connect.example.test",
+                "acc_k7m2q4x3ca",
+                &point(KEY).unwrap(),
+                "MacBook Pro",
+            ),
             known: vec![KEY.to_owned()],
-            revoked: Vec::new(),
+            left: Vec::new(),
         }
     }
 
     #[test]
-    fn an_account_file_without_a_trust_store_is_refused() {
+    fn an_account_file_without_a_pinned_list_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let path = account_file(dir.path());
         state().save(&path).unwrap();
         let mut value: serde_json::Value =
             serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        // The earlier version: no root, no known, no revoked keys.
+        // The earlier version: a trust store of chains, no pinned list.
         let object = value.as_object_mut().unwrap();
-        object.insert("v".to_owned(), serde_json::json!(1));
-        for field in ["root", "known", "revoked"] {
+        object.insert("v".to_owned(), serde_json::json!(2));
+        for field in ["list_version", "list_head", "left"] {
             object.remove(field);
         }
+        object.insert("revoked".to_owned(), serde_json::json!([]));
         fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        // A file of an earlier version: this device joins its account again after the
+        // owner forgets it here; a creation or a join says so.
+        assert_eq!(
+            AccountState::load(&path).unwrap_err(),
+            ConnectError::OldAccountFile
+        );
+        assert!(is_old_account_file(&path));
+        // A file of this version with a bad shape is no old file.
+        fs::write(&path, b"{\"v\":3}").unwrap();
         assert_eq!(AccountState::load(&path).unwrap_err(), ConnectError::Local);
+        assert!(!is_old_account_file(&path));
         // A key of the trust store that is not a point of the curve is refused too.
         let mut off = vec![4u8];
         off.extend_from_slice(&[9; 64]);
@@ -1837,7 +2282,15 @@ mod tests {
                 ..state()
             },
             AccountState {
-                revoked: vec![KEY.to_owned(); MAX_REVOKED + 1],
+                left: vec![KEY.to_owned(); MAX_LEFT + 1],
+                ..state()
+            },
+            AccountState {
+                list_version: 0,
+                ..state()
+            },
+            AccountState {
+                list_head: "short".to_owned(),
                 ..state()
             },
         ] {
@@ -1928,5 +2381,21 @@ mod tests {
         assert!(clean_name("   ").is_err());
         assert!(clean_name(&"a".repeat(65)).is_err());
         assert!(clean_name("Mac\u{7}").is_err());
+        // The same canonical form as Connect's (`apassy_relay::device::canonical_name`):
+        // bytes, not characters, count; NUL and other control characters never pass; the
+        // placeholder `-` of the device-list message is never a name.
+        let zoe = "Zoë’s iPhone";
+        assert_eq!(clean_name(&format!("\t {zoe} \n")).unwrap(), zoe);
+        let at_limit = format!("{}é", "a".repeat(62));
+        assert_eq!(at_limit.len(), 64);
+        assert_eq!(clean_name(&format!(" {at_limit} ")).unwrap(), at_limit);
+        let over = format!("{}é", "a".repeat(63));
+        assert_eq!(over.len(), 65);
+        assert!(clean_name(&over).is_err());
+        assert!(clean_name("Mac\u{0}mini").is_err());
+        assert!(clean_name("-").is_err());
+        assert!(clean_name(" - ").is_err());
+        assert_eq!(clean_name("-Mac-").unwrap(), "-Mac-");
+        assert!(trust::valid_name(zoe) && !trust::valid_name(" Mac") && !trust::valid_name("-"));
     }
 }

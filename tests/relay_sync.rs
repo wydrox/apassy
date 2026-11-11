@@ -2137,9 +2137,9 @@ fn a_new_relay_copy_without_a_code_joins_the_team_that_another_mac_holds() {
 // and account file.
 
 mod connect_sync {
-    use super::{Mac, PASS, WRONG, item, mac, titles};
+    use super::{Mac, PASS, item, mac, titles};
     use crate::common::fake_connect::FakeConnect;
-    use crate::common::fake_relay::FakeRelay;
+    use crate::common::fake_relay::{FakeRelay, StoredHead};
 
     use std::fs;
     use std::path::PathBuf;
@@ -2149,15 +2149,24 @@ mod connect_sync {
     use apassy::broker::SharedVault;
     use apassy::broker::approvals::{OwnerCheck, OwnerGate};
     use apassy::connect::{
-        ConnectAccount, ConnectClient, ConnectError, JoinPoll, JoinRequest, MemoryKeyStore,
-        account_file,
+        AccountSigner, ConnectAccount, ConnectClient, ConnectError, JoinPoll, JoinRequest,
+        MemoryKeyStore, account_file, signer_policy,
     };
     use apassy::sync::{
-        MoveStep, PendingJoin, RelayConfig, RelayRefusal, RelaySync, StoreError, StorePlan,
-        SyncError, is_plan_refusal,
+        HeadFields, MoveStep, RelayConfig, RelayRefusal, RelaySync, StoreError, StorePlan,
+        SyncError, is_plan_refusal, sha256_hex,
     };
     use apassy::vault::Vault;
     use ring::signature::{ECDSA_P256_SHA256_ASN1, UnparsedPublicKey};
+
+    /// A head by a key that the policy of `sync` does not hold: the sync first waits for a
+    /// fresh device list ("Checking the device list"), and changes nothing; with a list
+    /// fetched after that (`note_device_list`) the refusal of the next sync is returned.
+    fn refused_after_a_fresh_list(sync: &RelaySync, vault: &mut Vault) -> SyncError {
+        assert_eq!(sync.sync(vault).unwrap_err(), SyncError::ChecksDeviceList);
+        sync.note_device_list();
+        sync.sync(vault).unwrap_err()
+    }
     use serde_json::json;
     use tempfile::TempDir;
 
@@ -2469,15 +2478,342 @@ mod connect_sync {
         assert_eq!(titles(&vault_c), vec!["Alpha", "Beta"]);
     }
 
+    /// A head after `last` that `signer` signs with `device_id` as its store device: what
+    /// a hostile relay serves.
+    fn forged_after(
+        last: &StoredHead,
+        device_id: u64,
+        signer: &AccountSigner,
+    ) -> (StoredHead, Vec<u8>) {
+        let bytes = b"synthetic copy".to_vec();
+        let fields = HeadFields {
+            version: last.version + 1,
+            previous: last.hash(),
+            snapshot_sha256: sha256_hex(&bytes),
+            size: bytes.len() as u64,
+            device_id,
+            ..HeadFields::parse(&last.text).expect("head")
+        };
+        let signed = signer.sign_head(fields).expect("sign");
+        (
+            StoredHead {
+                version: last.version + 1,
+                text: signed.text,
+                signature: signed.signature,
+                device_id,
+            },
+            bytes,
+        )
+    }
+
+    /// The heads of a vault store come only from the trust store of this Mac: a key that
+    /// Connect lists as a store device signs nothing, though Connect says the account is an
+    /// active member of a family, both in a store of this account alone and in one that
+    /// Connect marks shared (with a device of a member's account in it). The member's own
+    /// device signs nothing here either: no step pinned the root of its account.
     #[test]
-    fn a_family_members_mac_joins_a_shared_vault_only_with_a_link_the_words_and_the_passphrase() {
+    fn a_key_that_connect_lists_in_a_store_signs_nothing_also_in_an_active_group() {
+        for shared in [false, true] {
+            let cloud = cloud();
+            let a = connect_mac(&cloud, "a");
+            let m = connect_mac(&cloud, "m");
+            let mut account_a = new_account(&cloud, &a, "Rafal", true);
+            let account_m = new_account(&cloud, &m, "Ola", false);
+            let owner_id = account_a.state().account_id.clone();
+            cloud.connect.make_group(&owner_id, "family");
+            cloud
+                .connect
+                .add_member(&owner_id, &account_m.state().account_id);
+            let mut vault_a = a.mac.create();
+            vault_a.add(item("Family", "SYNTH-family")).expect("add");
+            let team = a
+                .mac
+                .sync
+                .enable_on_connect(&mut vault_a, &mut account_a, "Family")
+                .expect("enable")
+                .team_id;
+            let view = account_a.view().expect("view");
+            assert_eq!(
+                view.group.as_ref().map(|group| group.state.as_str()),
+                Some("active")
+            );
+            let member = shared.then(|| {
+                cloud
+                    .connect
+                    .list_in_store(&team, &account_m.state().device_id)
+            });
+            if shared {
+                let stores = account_a.vault_stores().expect("stores");
+                assert!(stores[0].shared, "Connect marks the store shared");
+            }
+            // The relay's own key, listed as a device of the store.
+            let first = cloud.relay.heads_of(&team)[0].clone();
+            let relay_key = AccountSigner::open_or_create(&MemoryKeyStore::new()).unwrap();
+            let number = cloud
+                .relay
+                .add_store_device(&team, "Mac Studio", relay_key.public_key());
+            cloud
+                .relay
+                .replace_store_from(&team, vec![forged_after(&first, number, &relay_key)]);
+            assert_eq!(
+                refused_after_a_fresh_list(&a.mac.sync, &mut vault_a),
+                SyncError::Damaged,
+                "shared: {shared}"
+            );
+            assert_eq!(titles(&vault_a), vec!["Family"]);
+            if let Some(member) = member {
+                // The member's device, which Connect lists in the store: refused too.
+                cloud.relay.replace_store_from(
+                    &team,
+                    vec![forged_after(&first, member, &account_m.signer().unwrap())],
+                );
+                assert_eq!(
+                    refused_after_a_fresh_list(&a.mac.sync, &mut vault_a),
+                    SyncError::Damaged
+                );
+            }
+            // The policy of this Mac holds its own key only.
+            let policy = signer_policy(account_a.state());
+            assert_eq!(
+                policy.accepted,
+                vec![account_a.signer().unwrap().public_key().to_vec()]
+            );
+            assert!(policy.left.is_empty());
+        }
+    }
+
+    /// A device that left the account: the store does not get stuck on the head it pushed
+    /// before it left (the version that this Mac merged), and no later version that it
+    /// signs is taken.
+    #[test]
+    fn a_device_that_left_keeps_its_merged_head_and_signs_no_later_one() {
+        let cloud = cloud();
+        let a = connect_mac(&cloud, "a");
+        let b = connect_mac(&cloud, "b");
+        let mut account_a = new_account(&cloud, &a, "Rafal", true);
+        let mut account_b = join_account(&cloud, &mut account_a, &b, "Synthetic Mac mini");
+        let (mut vault_a, mut vault_b) = shared_vault(&a.mac, &b.mac);
+        let team = a
+            .mac
+            .sync
+            .enable_on_connect(&mut vault_a, &mut account_a, "Personal")
+            .expect("enable on A")
+            .team_id;
+        vault_b.add(item("Beta", "SYNTH-beta")).expect("add");
+        b.mac
+            .sync
+            .enable_on_connect(&mut vault_b, &mut account_b, "Personal")
+            .expect("enable on B");
+        assert_eq!(cloud.relay.version_of(&team), 2);
+        a.mac
+            .sync
+            .sync(&mut vault_a)
+            .expect("A merges B's version 2");
+        assert_eq!(titles(&vault_a), vec!["Alpha", "Beta"]);
+
+        // A removes B with a signed entry, and its relay sync takes the new policy, as the
+        // window does after each refresh.
+        let owner = owner();
+        let target = account_a
+            .view()
+            .unwrap()
+            .devices
+            .into_iter()
+            .find(|device| device.device_id == account_b.state().device_id)
+            .unwrap();
+        let (proof, epoch) = owner.proof(account_a.revoke_action(&target));
+        account_a.revoke(&target, proof, &epoch).expect("revoke");
+        a.mac
+            .sync
+            .set_account_signers(Some(signer_policy(account_a.state())));
+        // The current head is still B's version 2: the store goes on, and A signs a head
+        // of its own over it with the same content.
+        assert!(a.mac.sync.sync(&mut vault_a).expect("not stuck").pushed);
+        assert_eq!(cloud.relay.version_of(&team), 3);
+        // A later version that B signs (a relay that still takes it): not taken.
+        let heads = cloud.relay.heads_of(&team);
+        let b_number = HeadFields::parse(&heads[1].text).unwrap().device_id;
+        cloud.relay.replace_store_from(
+            &team,
+            vec![forged_after(
+                &heads[2],
+                b_number,
+                &account_b.signer().unwrap(),
+            )],
+        );
+        assert_eq!(
+            a.mac.sync.sync(&mut vault_a).unwrap_err(),
+            SyncError::WaitsForAccountDevice
+        );
+        assert_eq!(titles(&vault_a), vec!["Alpha", "Beta"]);
+    }
+
+    /// Revoke the device `device_id` from `account` with a fresh owner check, as Settings ›
+    /// Connect does.
+    fn revoke_device(account: &mut ConnectAccount, device_id: &str) {
+        let owner = owner();
+        let target = account
+            .view()
+            .expect("view")
+            .devices
+            .into_iter()
+            .find(|device| device.device_id == device_id)
+            .expect("the device");
+        let (proof, epoch) = owner.proof(account.revoke_action(&target));
+        account.revoke(&target, proof, &epoch).expect("revoke");
+    }
+
+    /// A head after `last` signed by `signer` as store device `device_id`, over a real
+    /// sync copy of `vault`: a copy that merges.
+    fn copy_after(
+        last: &StoredHead,
+        device_id: u64,
+        signer: &AccountSigner,
+        vault: &mut Vault,
+        work: &std::path::Path,
+    ) -> (StoredHead, Vec<u8>) {
+        let path = work.join(format!("forged-{}", last.version + 1));
+        let copy = vault.write_sync_copy(&path, "Synthetic").expect("copy");
+        let bytes = fs::read(&path).expect("read copy");
+        fs::remove_file(&path).expect("remove copy");
+        let fields = HeadFields {
+            version: last.version + 1,
+            previous: last.hash(),
+            snapshot_sha256: sha256_hex(&bytes),
+            size: bytes.len() as u64,
+            device_id,
+            ..HeadFields::parse(&last.text).expect("head")
+        };
+        let hex: String = copy.sha256.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(sha256_hex(&bytes), hex);
+        let signed = signer.sign_head(fields).expect("sign");
+        (
+            StoredHead {
+                version: last.version + 1,
+                text: signed.text,
+                signature: signed.signature,
+                device_id,
+            },
+            bytes,
+        )
+    }
+
+    /// The device that signed the head of version `version` of `team`, by its store number.
+    fn signer_of(cloud: &Cloud, team: &str, version: u64) -> u64 {
+        let heads = cloud.relay.heads_of(team);
+        let head = heads
+            .iter()
+            .find(|head| head.version == version)
+            .expect("head");
+        HeadFields::parse(&head.text).expect("fields").device_id
+    }
+
+    /// A second device of the same account gets the vault from the account's store with no
+    /// link and no local copy: the join, the download, the adoption, and later syncs, with
+    /// the policy of its own account file from the first request on. A removal reaches its
+    /// running session through the policy slot of its relay sync, as the window sets it.
+    #[test]
+    fn a_second_device_gets_the_vault_from_the_store_and_follows_removals() {
+        let cloud = cloud();
+        let a = connect_mac(&cloud, "a");
+        let b = connect_mac(&cloud, "b");
+        let c = connect_mac(&cloud, "c");
+        let mut account_a = new_account(&cloud, &a, "Rafal", true);
+        let mut account_b = join_account(&cloud, &mut account_a, &b, "Synthetic Mac mini");
+        let mut account_c = join_account(&cloud, &mut account_a, &c, "Synthetic iMac");
+        let (mut vault_a, mut vault_c) = shared_vault(&a.mac, &c.mac);
+        let team = a
+            .mac
+            .sync
+            .enable_on_connect(&mut vault_a, &mut account_a, "Personal")
+            .expect("enable on A")
+            .team_id;
+        c.mac
+            .sync
+            .enable_on_connect(&mut vault_c, &mut account_c, "Personal")
+            .expect("enable on C");
+
+        // B has no copy of the vault: it takes the copy of the store that lists it.
+        let store = account_b
+            .vault_stores()
+            .expect("stores")
+            .into_iter()
+            .find(|store| store.team_id == team)
+            .expect("B is in the store");
+        let joined = RelaySync::joined_from_store(&mut account_b, &store).expect("joined");
+        let download = joined.download(&b.mac.data.join("sync")).expect("download");
+        let (vault, _) = b.mac.sync.adopt(&joined, &download, PASS).expect("adopt");
+        drop((vault, download, joined));
+        // The window hands the key and the policy to the relay sync of the new vault.
+        b.mac
+            .sync
+            .set_account_signer(Some(account_b.signer().expect("signer")));
+        b.mac
+            .sync
+            .set_account_signers(Some(signer_policy(account_b.state())));
+        let mut vault_b = Vault::open(&b.mac.vault_path).expect("open");
+        vault_b.unlock(PASS).expect("unlock");
+        assert_eq!(titles(&vault_b), vec!["Alpha"]);
+        assert!(
+            vault_b
+                .relay_device()
+                .expect("row")
+                .expect("on")
+                .uses_account_key()
+        );
+
+        // Later syncs: A's change reaches B, and B's reaches A.
+        vault_a.add(item("Beta", "SYNTH-beta")).expect("add");
+        assert!(a.mac.sync.sync(&mut vault_a).expect("A").pushed);
+        b.mac.sync.sync(&mut vault_b).expect("B merges A");
+        assert_eq!(titles(&vault_b), vec!["Alpha", "Beta"]);
+        vault_b.add(item("Gamma", "SYNTH-gamma")).expect("add");
+        assert!(b.mac.sync.sync(&mut vault_b).expect("B").pushed);
+        a.mac.sync.sync(&mut vault_a).expect("A merges B");
+        assert_eq!(titles(&vault_a), vec!["Alpha", "Beta", "Gamma"]);
+
+        // A removes C; B learns it at its next view, and its running session takes the
+        // new policy from the slot: a later head of C is not merged.
+        revoke_device(&mut account_a, &account_c.state().device_id.clone());
+        account_b.view().expect("B views the account");
+        b.mac
+            .sync
+            .set_account_signers(Some(signer_policy(account_b.state())));
+        let heads = cloud.relay.heads_of(&team);
+        let last = heads.last().expect("head").clone();
+        let c_key = account_c.signer().expect("signer").public_key().to_vec();
+        let c_number = cloud
+            .relay
+            .team_devices(&team)
+            .into_iter()
+            .find(|(_, key)| *key == c_key)
+            .map(|(number, _)| number)
+            .expect("C is a device of the store at the relay");
+        vault_c.add(item("Delta", "SYNTH-delta")).expect("add");
+        let forged = copy_after(
+            &last,
+            c_number,
+            &account_c.signer().expect("signer"),
+            &mut vault_c,
+            &c.mac.data,
+        );
+        cloud.relay.replace_store_from(&team, vec![forged]);
+        assert!(
+            b.mac.sync.sync(&mut vault_b).is_err(),
+            "a head of a device that left is not merged by the running session"
+        );
+        assert_eq!(titles(&vault_b), vec!["Alpha", "Beta", "Gamma"]);
+    }
+
+    /// A store of another account (a shared Family or Team vault) is refused before
+    /// anything is asked or made: sharing a vault between accounts is not available yet.
+    #[test]
+    fn a_store_of_another_account_is_refused_before_any_request() {
         let cloud = cloud();
         let a = connect_mac(&cloud, "a");
         let m = connect_mac(&cloud, "m");
-        let s = connect_mac(&cloud, "s");
         let mut account_a = new_account(&cloud, &a, "Rafal", true);
         let mut account_m = new_account(&cloud, &m, "Ola", false);
-        let account_s = new_account(&cloud, &s, "Stranger", true);
         let owner_id = account_a.state().account_id.clone();
         cloud.connect.make_group(&owner_id, "family");
         cloud
@@ -2491,74 +2827,207 @@ mod connect_sync {
             .enable_on_connect(&mut vault_a, &mut account_a, "Family")
             .expect("enable")
             .team_id;
+        cloud
+            .connect
+            .list_in_store(&team, &account_m.state().device_id);
+        let store = account_m
+            .vault_stores()
+            .expect("stores")
+            .into_iter()
+            .find(|store| store.team_id == team)
+            .expect("the store lists the member's device");
+        let before = cloud.connect.log().len();
+        let refused = RelaySync::joined_from_store(&mut account_m, &store);
+        let text = refused
+            .as_ref()
+            .err()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        assert_eq!(
+            text, "Sharing a vault between accounts is not available yet.",
+            "refused with its own text"
+        );
+        assert_eq!(cloud.connect.log().len(), before, "nothing was asked");
+        assert!(!m.mac.vault_path.exists());
+    }
 
-        // Without a link the member's Mac has no way in: no store lists it.
-        assert!(account_m.vault_stores().expect("stores").is_empty());
-
-        // A stranger with a link: the words match, and Connect refuses the confirmation.
-        let code = a.mac.sync.create_link(&vault_a).expect("link");
-        let stranger = PendingJoin::request_with_account(
-            &code.link,
-            "",
-            "Stranger Mac",
-            account_s.signer().expect("signer"),
-        )
-        .expect("request");
-        let links = a
+    /// Three devices of one account; B is behind when C pushes, and C then leaves. B waits
+    /// with a text of its own (never "damaged"), and so does a new device with no anchor.
+    /// A, whose own anchor head is C's, pushes a head of its own over it at its next sync
+    /// (the same content), so B and the new device take the copy again.
+    #[test]
+    fn a_device_behind_a_head_of_a_device_that_left_waits_and_a_live_device_signs_over_it() {
+        let cloud = cloud();
+        let a = connect_mac(&cloud, "a");
+        let b = connect_mac(&cloud, "b");
+        let c = connect_mac(&cloud, "c");
+        let d = connect_mac(&cloud, "d");
+        let mut account_a = new_account(&cloud, &a, "Rafal", true);
+        let mut account_b = join_account(&cloud, &mut account_a, &b, "Synthetic Mac mini");
+        let mut account_c = join_account(&cloud, &mut account_a, &c, "Synthetic iMac");
+        let mut vaults = shared_vaults(&a.mac, &[&b.mac, &c.mac]);
+        let mut vault_c = vaults.pop().expect("c");
+        let mut vault_b = vaults.pop().expect("b");
+        let mut vault_a = vaults.pop().expect("a");
+        let team = a
             .mac
             .sync
-            .pending_links(&vault_a, Some(&code))
-            .expect("links");
-        assert_eq!(links[0].safety.as_deref(), Some(stranger.safety.as_str()));
+            .enable_on_connect(&mut vault_a, &mut account_a, "Personal")
+            .expect("enable on A")
+            .team_id;
+        b.mac
+            .sync
+            .enable_on_connect(&mut vault_b, &mut account_b, "Personal")
+            .expect("enable on B");
+        c.mac
+            .sync
+            .enable_on_connect(&mut vault_c, &mut account_c, "Personal")
+            .expect("enable on C");
+        // C pushes; A merges it; B is behind.
+        vault_c.add(item("Gamma", "SYNTH-gamma")).expect("add");
+        assert!(c.mac.sync.sync(&mut vault_c).expect("C").pushed);
+        let c_version = cloud.relay.version_of(&team);
+        a.mac.sync.sync(&mut vault_a).expect("A merges C");
+        assert_eq!(titles(&vault_a), vec!["Alpha", "Gamma"]);
+
+        // C leaves the account.
+        revoke_device(&mut account_a, &account_c.state().device_id.clone());
+        a.mac
+            .sync
+            .set_account_signers(Some(signer_policy(account_a.state())));
+        account_b.view().expect("B views");
+        b.mac
+            .sync
+            .set_account_signers(Some(signer_policy(account_b.state())));
+        // A device that joins now, with no anchor.
+        let mut account_d = join_account(&cloud, &mut account_a, &d, "Synthetic MacBook Air");
+        a.mac
+            .sync
+            .register_account_devices(&mut account_a)
+            .expect("register D");
+        let waiting = "waiting for another device of this account to sync";
+        let behind = b.mac.sync.sync(&mut vault_b).unwrap_err();
         assert!(
-            a.mac.sync.confirm_link(&vault_a, &links[0]).is_err(),
-            "not_in_group"
+            behind.to_string().to_lowercase().contains(waiting),
+            "B waits: {behind}"
         );
+        assert_ne!(behind, SyncError::Damaged);
+        let store = account_d
+            .vault_stores()
+            .expect("stores")
+            .into_iter()
+            .find(|store| store.team_id == team)
+            .expect("D is in the store");
+        let joined_d = RelaySync::joined_from_store(&mut account_d, &store).expect("joined");
+        let early = joined_d.download(&d.mac.data.join("sync")).map(|_| ());
         assert!(
-            stranger.poll().expect("poll").is_none(),
-            "still not a device"
+            early
+                .unwrap_err()
+                .to_string()
+                .to_lowercase()
+                .contains(waiting),
+            "a device with no anchor waits too"
+        );
+
+        // A's next sync: its own anchor head is C's, so it pushes a head of its own over
+        // it with the same content.
+        let outcome = a.mac.sync.sync(&mut vault_a).expect("A");
+        assert!(outcome.pushed, "A signs over the head of C");
+        assert_eq!(cloud.relay.version_of(&team), c_version + 1);
+        assert_ne!(
+            signer_of(&cloud, &team, c_version + 1),
+            signer_of(&cloud, &team, c_version)
+        );
+        // Nothing more to push after that.
+        assert!(!a.mac.sync.sync(&mut vault_a).expect("A again").pushed);
+        // B takes the copy now: C's head is vouched for by A's head after it.
+        b.mac.sync.sync(&mut vault_b).expect("B goes on");
+        assert_eq!(titles(&vault_b), vec!["Alpha", "Gamma"]);
+        // The new device downloads and adopts it.
+        let download = joined_d
+            .download(&d.mac.data.join("sync"))
+            .expect("D downloads");
+        let (vault_d, _) = d.mac.sync.adopt(&joined_d, &download, PASS).expect("adopt");
+        drop(vault_d);
+    }
+
+    /// A live device changed the vault after the head of a device that left: a device that
+    /// is behind both takes the chain (the head of the live device vouches for the one
+    /// before it), so its copy is not forked.
+    #[test]
+    fn a_head_of_a_device_that_left_inside_the_chain_is_vouched_for_by_a_live_head() {
+        let cloud = cloud();
+        let a = connect_mac(&cloud, "a");
+        let b = connect_mac(&cloud, "b");
+        let c = connect_mac(&cloud, "c");
+        let mut account_a = new_account(&cloud, &a, "Rafal", true);
+        let mut account_b = join_account(&cloud, &mut account_a, &b, "Synthetic Mac mini");
+        let mut account_c = join_account(&cloud, &mut account_a, &c, "Synthetic iMac");
+        let mut vaults = shared_vaults(&a.mac, &[&b.mac, &c.mac]);
+        let mut vault_c = vaults.pop().expect("c");
+        let mut vault_b = vaults.pop().expect("b");
+        let mut vault_a = vaults.pop().expect("a");
+        for (mac, vault, account) in [
+            (&a, &mut vault_a, &mut account_a),
+            (&b, &mut vault_b, &mut account_b),
+            (&c, &mut vault_c, &mut account_c),
+        ] {
+            mac.mac
+                .sync
+                .enable_on_connect(vault, account, "Personal")
+                .expect("enable");
+        }
+        vault_c.add(item("Gamma", "SYNTH-gamma")).expect("add");
+        assert!(c.mac.sync.sync(&mut vault_c).expect("C").pushed);
+        a.mac.sync.sync(&mut vault_a).expect("A merges C");
+        revoke_device(&mut account_a, &account_c.state().device_id.clone());
+        a.mac
+            .sync
+            .set_account_signers(Some(signer_policy(account_a.state())));
+        vault_a.add(item("Delta", "SYNTH-delta")).expect("add");
+        assert!(a.mac.sync.sync(&mut vault_a).expect("A").pushed);
+        account_b.view().expect("B views");
+        b.mac
+            .sync
+            .set_account_signers(Some(signer_policy(account_b.state())));
+        b.mac.sync.sync(&mut vault_b).expect("not forked");
+        assert_eq!(titles(&vault_b), vec!["Alpha", "Delta", "Gamma"]);
+    }
+
+    /// A vault store has no device link: the relay refuses to make one (its devices come
+    /// from the account), so no Mac joins a store with a link, of this account or of
+    /// another. A member of a family has no way into a store of another account: no store
+    /// lists its device, and one that Connect marks shared is refused before any request
+    /// (`a_store_of_another_account_is_refused_before_any_request`). Against a service that
+    /// hides that flag only the signer policy refuses: the heads of a device of another
+    /// account are not merged
+    /// (`a_device_of_another_account_in_a_store_not_marked_shared_signs_nothing`).
+    #[test]
+    fn a_vault_store_has_no_device_link() {
+        let cloud = cloud();
+        let a = connect_mac(&cloud, "a");
+        let m = connect_mac(&cloud, "m");
+        let mut account_a = new_account(&cloud, &a, "Rafal", true);
+        let mut account_m = new_account(&cloud, &m, "Ola", false);
+        let owner_id = account_a.state().account_id.clone();
+        cloud.connect.make_group(&owner_id, "family");
+        cloud
+            .connect
+            .add_member(&owner_id, &account_m.state().account_id);
+        let mut vault_a = a.mac.create();
+        vault_a.add(item("Family", "SYNTH-family")).expect("add");
+        let team = a
+            .mac
+            .sync
+            .enable_on_connect(&mut vault_a, &mut account_a, "Family")
+            .expect("enable")
+            .team_id;
+        assert!(account_m.vault_stores().expect("stores").is_empty());
+        assert!(
+            a.mac.sync.create_link(&vault_a).is_err(),
+            "the relay makes no device link for a vault store"
         );
         assert_eq!(cloud.relay.team_devices(&team).len(), 1);
-
-        // The member with a link: the same words on both Macs, then the confirmation.
-        let code = a.mac.sync.create_link(&vault_a).expect("link");
-        let signer_m = account_m.signer().expect("signer");
-        let pending =
-            PendingJoin::request_with_account(&code.link, "", "Ola's Mac", Arc::clone(&signer_m))
-                .expect("request");
-        let links = a
-            .mac
-            .sync
-            .pending_links(&vault_a, Some(&code))
-            .expect("links");
-        let link = links
-            .iter()
-            .find(|link| link.device_name == "Ola's Mac")
-            .expect("the member waits");
-        assert_eq!(link.safety.as_deref(), Some(pending.safety.as_str()));
-        a.mac.sync.confirm_link(&vault_a, link).expect("confirm");
-        let joined = pending.poll().expect("poll").expect("confirmed");
-        let download = joined.download(&m.mac.data.join("sync")).expect("download");
-        // The passphrase opens the copy: a wrong one makes no vault.
-        assert!(m.mac.sync.adopt(&joined, &download, WRONG).is_err());
-        assert!(!m.mac.vault_path.exists());
-        let (mut vault_m, _) = m.mac.sync.adopt(&joined, &download, PASS).expect("adopt");
-        vault_m.unlock(PASS).expect("unlock");
-        assert_eq!(titles(&vault_m), vec!["Family"]);
-        let row = vault_m.relay_device().expect("row").expect("on");
-        assert!(
-            row.uses_account_key(),
-            "the member signs with its account key"
-        );
-        assert_eq!(row.public_key, signer_m.public_key());
-        // The store is shared now, and both sides sync.
-        let stores = account_m.vault_stores().expect("stores");
-        assert_eq!(stores.len(), 1);
-        assert!(stores[0].shared);
-        vault_m.add(item("Ola", "SYNTH-ola")).expect("add");
-        assert!(m.mac.sync.sync(&mut vault_m).expect("sync M").pushed);
-        a.mac.sync.sync(&mut vault_a).expect("sync A");
-        assert_eq!(titles(&vault_a), vec!["Family", "Ola"]);
     }
 
     /// A vault of Mac A on the old (hosted) relay with a team code, and the relay sync
@@ -2817,5 +3286,511 @@ mod connect_sync {
         );
         assert!(b.mac.sync.local_changed(&vault_b).expect("changed"));
         assert_eq!(titles(&vault_b), vec!["Alpha", "Delta", "Gamma"]);
+    }
+
+    /// Two devices of one account: B pushes last, then A removes it before A merged that
+    /// head. A waits, and the core keeps the details of the head for the window: B's key
+    /// (which A's verified list names), the version, the hash, and B's time.
+    struct LeftLast {
+        cloud: Cloud,
+        a: ConnectMac,
+        account_a: ConnectAccount,
+        account_b: ConnectAccount,
+        vault_a: Vault,
+        team: String,
+    }
+
+    fn b_pushed_last_and_left() -> LeftLast {
+        let cloud = cloud();
+        let a = connect_mac(&cloud, "a");
+        let b = connect_mac(&cloud, "b");
+        let mut account_a = new_account(&cloud, &a, "Rafal", true);
+        let mut account_b = join_account(&cloud, &mut account_a, &b, "Synthetic Mac mini");
+        let (mut vault_a, mut vault_b) = shared_vault(&a.mac, &b.mac);
+        let team = a
+            .mac
+            .sync
+            .enable_on_connect(&mut vault_a, &mut account_a, "Personal")
+            .expect("enable on A")
+            .team_id;
+        b.mac
+            .sync
+            .enable_on_connect(&mut vault_b, &mut account_b, "Personal")
+            .expect("enable on B");
+        // B pushes last; A has not merged it.
+        vault_b.add(item("Beta", "SYNTH-beta")).expect("add");
+        assert!(b.mac.sync.sync(&mut vault_b).expect("B").pushed);
+        revoke_device(&mut account_a, &account_b.state().device_id.clone());
+        a.mac
+            .sync
+            .set_account_signers(Some(signer_policy(account_a.state())));
+        LeftLast {
+            cloud,
+            a,
+            account_a,
+            account_b,
+            vault_a,
+            team,
+        }
+    }
+
+    impl LeftLast {
+        /// A waits on B's last head; the details name it.
+        fn waits(&mut self) -> apassy::sync::DepartedHead {
+            assert_eq!(
+                self.a.mac.sync.sync(&mut self.vault_a).unwrap_err(),
+                SyncError::WaitsForAccountDevice
+            );
+            let head = self.a.mac.sync.waiting_head().expect("the waiting head");
+            let last = self
+                .cloud
+                .relay
+                .heads_of(&self.team)
+                .last()
+                .cloned()
+                .unwrap();
+            let fields = HeadFields::parse(&last.text).expect("fields");
+            assert_eq!(head.version, last.version);
+            assert_eq!(head.head_hash, last.hash());
+            assert_eq!(head.time, fields.time);
+            assert_eq!(head.device_id, fields.device_id);
+            let b_key = self.account_b.signer().unwrap().public_key().to_vec();
+            assert_eq!(head.key, b_key);
+            // The signed name of the removed device, from the list verified from version 1.
+            self.account_a.view().expect("view");
+            assert_eq!(
+                self.account_a
+                    .verified_list()
+                    .and_then(|list| list.removed_name(&head.key)),
+                Some("Synthetic Mac mini")
+            );
+            head
+        }
+    }
+
+    /// "Use the Copy That … Left…": A takes B's last head once, merges it, and signs a head
+    /// of its own over it; the next sync is a plain one.
+    #[test]
+    fn the_owner_takes_the_copy_that_a_removed_device_left_once() {
+        let mut left = b_pushed_last_and_left();
+        let head = left.waits();
+        let version = left.cloud.relay.version_of(&left.team);
+        let outcome = left
+            .a
+            .mac
+            .sync
+            .use_departed_copy(&mut left.vault_a, &head)
+            .expect("the owner takes the copy");
+        assert!(outcome.merge.is_some(), "B's copy merged");
+        assert!(outcome.pushed, "A signs over it");
+        assert_eq!(titles(&left.vault_a), vec!["Alpha", "Beta"]);
+        assert_eq!(left.cloud.relay.version_of(&left.team), version + 1);
+        assert_ne!(
+            signer_of(&left.cloud, &left.team, version + 1),
+            signer_of(&left.cloud, &left.team, version)
+        );
+        assert_eq!(left.a.mac.sync.waiting_head(), None, "nothing waits");
+        let again = left
+            .a
+            .mac
+            .sync
+            .sync(&mut left.vault_a)
+            .expect("a plain sync");
+        assert!(!again.pushed);
+        assert!(again.merge.is_none());
+    }
+
+    /// The step re-checks the relay copy: a later head of the removed device is not the one
+    /// that the owner saw, so it is not taken, and the details name the new head.
+    #[test]
+    fn a_head_that_changed_meanwhile_is_not_taken() {
+        let mut left = b_pushed_last_and_left();
+        let head = left.waits();
+        let last = left
+            .cloud
+            .relay
+            .heads_of(&left.team)
+            .last()
+            .cloned()
+            .unwrap();
+        left.cloud.relay.replace_store_from(
+            &left.team,
+            vec![forged_after(
+                &last,
+                head.device_id,
+                &left.account_b.signer().unwrap(),
+            )],
+        );
+        assert_eq!(
+            left.a
+                .mac
+                .sync
+                .use_departed_copy(&mut left.vault_a, &head)
+                .unwrap_err(),
+            SyncError::WaitsForAccountDevice
+        );
+        assert_eq!(titles(&left.vault_a), vec!["Alpha"]);
+        let now = left.a.mac.sync.waiting_head().expect("the new head");
+        assert_eq!(now.version, head.version + 1);
+        assert_ne!(now.head_hash, head.head_hash);
+        // Another signer than the one that the owner saw is not taken either.
+        let mut other = now.clone();
+        other.key = left.account_a.signer().unwrap().public_key().to_vec();
+        assert_eq!(
+            left.a
+                .mac
+                .sync
+                .use_departed_copy(&mut left.vault_a, &other)
+                .unwrap_err(),
+            SyncError::Damaged,
+            "a key that did not leave the list is refused"
+        );
+    }
+
+    /// "Replace It with This Mac's Copy…": A pushes its own copy over B's last head; the
+    /// next sync is a plain one.
+    #[test]
+    fn the_owner_replaces_the_copy_that_a_removed_device_left() {
+        let mut left = b_pushed_last_and_left();
+        left.waits();
+        let version = left.cloud.relay.version_of(&left.team);
+        let outcome = left
+            .a
+            .mac
+            .sync
+            .replace_relay_copy(&mut left.vault_a)
+            .expect("replace");
+        assert!(outcome.pushed);
+        assert_eq!(left.cloud.relay.version_of(&left.team), version + 1);
+        assert_eq!(titles(&left.vault_a), vec!["Alpha"], "no merge");
+        let again = left
+            .a
+            .mac
+            .sync
+            .sync(&mut left.vault_a)
+            .expect("a plain sync");
+        assert!(!again.pushed);
+        assert_eq!(left.a.mac.sync.waiting_head(), None);
+    }
+
+    /// A new device with no anchor waits on the head that a removed device left too; the
+    /// owner takes it once at the download, the adoption makes it the anchor, and the first
+    /// sync signs a head of the new device over it. The device was removed before the new
+    /// device joined: its signed name comes from the list verified from version 1.
+    #[test]
+    fn a_new_device_takes_the_copy_that_a_removed_device_left() {
+        let mut left = b_pushed_last_and_left();
+        let d = connect_mac(&left.cloud, "d");
+        let mut account_d = join_account(&left.cloud, &mut left.account_a, &d, "Synthetic iMac");
+        left.a
+            .mac
+            .sync
+            .register_account_devices(&mut left.account_a)
+            .expect("register D");
+        left.a
+            .mac
+            .sync
+            .set_account_signers(Some(signer_policy(left.account_a.state())));
+        let store = account_d
+            .vault_stores()
+            .expect("stores")
+            .into_iter()
+            .find(|store| store.team_id == left.team)
+            .expect("D is in the store");
+        let joined = RelaySync::joined_from_store(&mut account_d, &store).expect("joined");
+        let work = d.mac.data.join("sync");
+        assert_eq!(
+            joined.download(&work).unwrap_err(),
+            SyncError::WaitsForAccountDevice
+        );
+        let head = joined.waiting_head().expect("the waiting head");
+        assert_eq!(head.version, left.cloud.relay.version_of(&left.team));
+        assert_eq!(
+            account_d
+                .verified_list()
+                .and_then(|list| list.removed_name(&head.key)),
+            Some("Synthetic Mac mini")
+        );
+        let download = joined.download_departed(&work, &head).expect("download");
+        let (vault, _) = d.mac.sync.adopt(&joined, &download, PASS).expect("adopt");
+        drop((vault, download, joined));
+        d.mac
+            .sync
+            .set_account_signer(Some(account_d.signer().expect("signer")));
+        d.mac
+            .sync
+            .set_account_signers(Some(signer_policy(account_d.state())));
+        let mut vault_d = Vault::open(&d.mac.vault_path).expect("open");
+        vault_d.unlock(PASS).expect("unlock");
+        assert_eq!(titles(&vault_d), vec!["Alpha", "Beta"]);
+        assert!(
+            d.mac.sync.sync(&mut vault_d).expect("D").pushed,
+            "D signs over the head that B left"
+        );
+        assert!(!d.mac.sync.sync(&mut vault_d).expect("D again").pushed);
+        // A, which was behind, takes the copy now as usual.
+        left.a.mac.sync.sync(&mut left.vault_a).expect("A goes on");
+        assert_eq!(titles(&left.vault_a), vec!["Alpha", "Beta"]);
+    }
+
+    /// A head by a key that the device list never held stays refused: no waiting head is
+    /// kept, and the core refuses to take it, for a vault and at a download.
+    #[test]
+    fn a_head_by_a_key_never_in_the_list_cannot_be_taken() {
+        let cloud = cloud();
+        let a = connect_mac(&cloud, "a");
+        let mut account_a = new_account(&cloud, &a, "Rafal", true);
+        let mut vault_a = a.mac.create();
+        vault_a.add(item("Alpha", "SYNTH-alpha")).expect("add");
+        let team = a
+            .mac
+            .sync
+            .enable_on_connect(&mut vault_a, &mut account_a, "Personal")
+            .expect("enable")
+            .team_id;
+        let first = cloud.relay.heads_of(&team)[0].clone();
+        let stranger = AccountSigner::open_or_create(&MemoryKeyStore::new()).unwrap();
+        let number = cloud
+            .relay
+            .add_store_device(&team, "Mac Studio", stranger.public_key());
+        let (forged, bytes) = forged_after(&first, number, &stranger);
+        let hash = forged.hash();
+        cloud.relay.replace_store_from(&team, vec![(forged, bytes)]);
+        assert_eq!(
+            refused_after_a_fresh_list(&a.mac.sync, &mut vault_a),
+            SyncError::Damaged
+        );
+        assert_eq!(a.mac.sync.waiting_head(), None, "nothing to offer");
+        let attempt = apassy::sync::DepartedHead {
+            key: stranger.public_key().to_vec(),
+            device_id: number,
+            version: 2,
+            head_hash: hash,
+            time: 0,
+        };
+        assert_eq!(
+            a.mac
+                .sync
+                .use_departed_copy(&mut vault_a, &attempt)
+                .unwrap_err(),
+            SyncError::Damaged
+        );
+        assert_eq!(titles(&vault_a), vec!["Alpha"]);
+        assert_eq!(cloud.relay.version_of(&team), 2, "nothing pushed");
+        // A new device of the account refuses it at the download too.
+        let d = connect_mac(&cloud, "d");
+        let mut account_d = join_account(&cloud, &mut account_a, &d, "Synthetic iMac");
+        a.mac
+            .sync
+            .register_account_devices(&mut account_a)
+            .expect("register D");
+        let store = account_d
+            .vault_stores()
+            .expect("stores")
+            .into_iter()
+            .find(|store| store.team_id == team)
+            .expect("D is in the store");
+        let joined = RelaySync::joined_from_store(&mut account_d, &store).expect("joined");
+        let work = d.mac.data.join("sync");
+        assert_eq!(joined.download(&work).unwrap_err(), SyncError::Damaged);
+        assert_eq!(joined.waiting_head(), None);
+        assert_eq!(
+            joined.download_departed(&work, &attempt).unwrap_err(),
+            SyncError::Damaged
+        );
+    }
+
+    /// Three devices of one account; A's relay sync has the policy of before C joined. A
+    /// chain entry of C below a head of B is not a fork: A checks the device list first,
+    /// and merges the chain once the fresh list holds C, with no offer.
+    #[test]
+    fn a_chain_entry_by_a_device_of_a_fresh_list_merges_after_the_refresh() {
+        let cloud = cloud();
+        let a = connect_mac(&cloud, "a");
+        let b = connect_mac(&cloud, "b");
+        let c = connect_mac(&cloud, "c");
+        let mut account_a = new_account(&cloud, &a, "Rafal", true);
+        let mut account_b = join_account(&cloud, &mut account_a, &b, "Synthetic Mac mini");
+        let mut vaults = shared_vaults(&a.mac, &[&b.mac, &c.mac]);
+        let mut vault_c = vaults.pop().expect("c");
+        let mut vault_b = vaults.pop().expect("b");
+        let mut vault_a = vaults.pop().expect("a");
+        a.mac
+            .sync
+            .enable_on_connect(&mut vault_a, &mut account_a, "Personal")
+            .expect("enable on A");
+        b.mac
+            .sync
+            .enable_on_connect(&mut vault_b, &mut account_b, "Personal")
+            .expect("enable on B");
+        a.mac.sync.sync(&mut vault_a).expect("A");
+        // C joins through B; A's relay sync keeps the policy it had.
+        let mut account_c = join_account(&cloud, &mut account_b, &c, "Synthetic iMac");
+        b.mac
+            .sync
+            .set_account_signers(Some(signer_policy(account_b.state())));
+        b.mac
+            .sync
+            .register_account_devices(&mut account_b)
+            .expect("register C");
+        c.mac
+            .sync
+            .enable_on_connect(&mut vault_c, &mut account_c, "Personal")
+            .expect("enable on C");
+        vault_c.add(item("Gamma", "SYNTH-gamma")).expect("add");
+        assert!(c.mac.sync.sync(&mut vault_c).expect("C").pushed);
+        b.mac.sync.sync(&mut vault_b).expect("B merges C");
+        vault_b.add(item("Beta", "SYNTH-beta")).expect("add");
+        assert!(b.mac.sync.sync(&mut vault_b).expect("B").pushed);
+
+        assert_eq!(
+            a.mac.sync.sync(&mut vault_a).unwrap_err(),
+            SyncError::ChecksDeviceList,
+            "not a forked copy"
+        );
+        assert_eq!(
+            a.mac.sync.sync(&mut vault_a).unwrap_err(),
+            SyncError::ChecksDeviceList,
+            "no fresh list yet"
+        );
+        assert_eq!(titles(&vault_a), vec!["Alpha"]);
+        // The window's refresh: the fresh list holds C.
+        account_a.view().expect("A views the account");
+        a.mac
+            .sync
+            .set_account_signers(Some(signer_policy(account_a.state())));
+        a.mac.sync.note_device_list();
+        a.mac
+            .sync
+            .sync(&mut vault_a)
+            .expect("merged after the refresh");
+        assert_eq!(titles(&vault_a), vec!["Alpha", "Beta", "Gamma"]);
+    }
+
+    /// A chain entry by a key that no device list holds: A checks the device list first;
+    /// a fresh list still refuses it, and only then is the copy refused, with "Use the
+    /// relay copy…" as the way on, which takes the head of a device of the account.
+    #[test]
+    fn a_chain_entry_by_an_unknown_key_is_refused_after_a_fresh_list() {
+        let cloud = cloud();
+        let a = connect_mac(&cloud, "a");
+        let b = connect_mac(&cloud, "b");
+        let mut account_a = new_account(&cloud, &a, "Rafal", true);
+        let mut account_b = join_account(&cloud, &mut account_a, &b, "Synthetic Mac mini");
+        let (mut vault_a, mut vault_b) = shared_vault(&a.mac, &b.mac);
+        let team = a
+            .mac
+            .sync
+            .enable_on_connect(&mut vault_a, &mut account_a, "Personal")
+            .expect("enable on A")
+            .team_id;
+        b.mac
+            .sync
+            .enable_on_connect(&mut vault_b, &mut account_b, "Personal")
+            .expect("enable on B");
+        a.mac.sync.sync(&mut vault_a).expect("A");
+        let last = cloud.relay.heads_of(&team).last().cloned().unwrap();
+        let stranger = AccountSigner::open_or_create(&MemoryKeyStore::new()).unwrap();
+        let number = cloud
+            .relay
+            .add_store_device(&team, "Mac Studio", stranger.public_key());
+        let entry = forged_after(&last, number, &stranger);
+        let b_key = account_b.signer().unwrap().public_key().to_vec();
+        let b_number = cloud
+            .relay
+            .team_devices(&team)
+            .into_iter()
+            .find(|(_, key)| *key == b_key)
+            .map(|(number, _)| number)
+            .expect("B is a device of the store");
+        vault_b.add(item("Beta", "SYNTH-beta")).expect("add");
+        let head = copy_after(
+            &entry.0,
+            b_number,
+            &account_b.signer().unwrap(),
+            &mut vault_b,
+            &b.mac.data,
+        );
+        cloud.relay.replace_store_from(&team, vec![entry, head]);
+
+        assert_eq!(
+            a.mac.sync.sync(&mut vault_a).unwrap_err(),
+            SyncError::ChecksDeviceList
+        );
+        account_a.view().expect("A views the account");
+        a.mac
+            .sync
+            .set_account_signers(Some(signer_policy(account_a.state())));
+        a.mac.sync.note_device_list();
+        assert_eq!(
+            a.mac.sync.sync(&mut vault_a).unwrap_err(),
+            SyncError::UnknownSigner,
+            "the fresh list still refuses it"
+        );
+        assert_eq!(titles(&vault_a), vec!["Alpha"]);
+        a.mac
+            .sync
+            .use_relay_copy(&mut vault_a)
+            .expect("the owner uses the relay copy");
+        assert_eq!(titles(&vault_a), vec!["Alpha", "Beta"]);
+    }
+
+    /// A store that Connect does not mark shared, with a device of another account among
+    /// its signers at the relay: the signer policy of this Mac refuses its heads, so nothing
+    /// is merged. Against a service that hides the flag only the policy refuses.
+    #[test]
+    fn a_device_of_another_account_in_a_store_not_marked_shared_signs_nothing() {
+        let cloud = cloud();
+        let a = connect_mac(&cloud, "a");
+        let m = connect_mac(&cloud, "m");
+        let mut account_a = new_account(&cloud, &a, "Rafal", true);
+        let mut account_m = new_account(&cloud, &m, "Ola", false);
+        let owner_id = account_a.state().account_id.clone();
+        cloud.connect.make_group(&owner_id, "family");
+        cloud
+            .connect
+            .add_member(&owner_id, &account_m.state().account_id);
+        let mut vault_a = a.mac.create();
+        vault_a.add(item("Family", "SYNTH-family")).expect("add");
+        let team = a
+            .mac
+            .sync
+            .enable_on_connect(&mut vault_a, &mut account_a, "Family")
+            .expect("enable")
+            .team_id;
+        // The member's device is a signer of the store at the relay; Connect lists nothing
+        // of it, and does not mark the store shared.
+        let member_key = account_m.signer().unwrap();
+        let number = cloud
+            .relay
+            .add_store_device(&team, "Synthetic iMac", member_key.public_key());
+        let stores = account_a.vault_stores().expect("stores");
+        let store = stores
+            .iter()
+            .find(|store| store.team_id == team)
+            .expect("the store");
+        assert!(!store.shared, "Connect does not mark it shared");
+        let first = cloud.relay.heads_of(&team)[0].clone();
+        let copy_path = m.mac.data.join("copy-of-a.db");
+        fs::copy(&a.mac.vault_path, &copy_path).expect("copy");
+        let mut copy = Vault::open(&copy_path).expect("open");
+        copy.unlock(PASS).expect("unlock");
+        copy.add(item("From the member", "SYNTH-member"))
+            .expect("add");
+        let forged = copy_after(&first, number, &member_key, &mut copy, &m.mac.data);
+        drop(copy);
+        cloud.relay.replace_store_from(&team, vec![forged]);
+        assert_eq!(
+            refused_after_a_fresh_list(&a.mac.sync, &mut vault_a),
+            SyncError::Damaged
+        );
+        assert_eq!(titles(&vault_a), vec!["Family"], "nothing merged");
+        assert!(
+            !account_m
+                .vault_stores()
+                .expect("stores")
+                .iter()
+                .any(|s| s.team_id == team)
+        );
     }
 }

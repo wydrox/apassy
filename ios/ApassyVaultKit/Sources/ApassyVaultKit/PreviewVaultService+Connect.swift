@@ -13,8 +13,12 @@ struct PreviewConnect {
     var links: [String] = []
     /// Test support: Connect says this iPhone is no device of the account any more.
     var removed = false
+    /// Test support: the account file is from an earlier version: this iPhone must join again.
+    var joinAgain = false
     /// Test support: the devices of the account, the dial route, and the dial state.
     var devices: [ConnectDevice] = []
+    /// Test support: whether the signed device list verified (false: as the core, no device is).
+    var listVerified = true
     var dialRoute = false
     var dialState: ConnectDialState = .unused
     /// Test support: the number of `connectForget` calls.
@@ -68,10 +72,16 @@ extension PreviewVaultService {
             return ConnectStatus(
                 state: .none, dialRoute: false, dialState: connectState.dialState, join: connectState.join)
         }
+        // As the core: an account file of an earlier version gives no account details.
+        if connectState.joinAgain {
+            return ConnectStatus(
+                state: .account, joinAgain: true, dialRoute: false, dialState: connectState.dialState,
+                join: connectState.join)
+        }
         return ConnectStatus(
             state: .account, removed: connectState.removed, accountID: account, deviceName: "iPhone",
             plan: connectState.plan, dialRoute: connectState.dialRoute, dialState: connectState.dialState,
-            devices: connectState.devices)
+            devices: connectState.devices, listVerified: connectState.removed ? nil : connectState.listVerified)
     }
 
     /// As the core: the key, the state, and a join that waits go; Connect is not asked.
@@ -86,10 +96,24 @@ extension PreviewVaultService {
     }
 
     /// Test support: this iPhone is a device of the synthetic account `accountID` (no join).
-    public func setConnectAccount(_ accountID: String?, removed: Bool = false, devices: [ConnectDevice] = []) {
+    /// With `listVerified` false the signed device list did not verify, and no device is verified.
+    /// With `joinAgain` the account file is from an earlier version of Apassy.
+    public func setConnectAccount(
+        _ accountID: String?, removed: Bool = false, joinAgain: Bool = false, devices: [ConnectDevice] = [],
+        listVerified: Bool = true
+    ) {
         connectState.accountID = accountID
         connectState.removed = removed
-        connectState.devices = devices
+        connectState.joinAgain = joinAgain
+        connectState.listVerified = listVerified
+        connectState.devices =
+            listVerified
+            ? devices
+            : devices.map {
+                var device = $0
+                device.verified = false
+                return device
+            }
     }
 
     /// Test support: the route and the state of the dial that `connectStatus` reports.

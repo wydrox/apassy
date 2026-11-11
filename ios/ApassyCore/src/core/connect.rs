@@ -32,14 +32,24 @@
 //! the key and the state file stay until `connect_forget`. A key that the Keychain lost
 //! is shown the same way. A `401` is never a removal.
 //!
+//! **An account file of an earlier version** (`ConnectError::OldAccountFile`): this
+//! iPhone must join its account again. `connect_status` says `join_again` with
+//! `state: "account"`; `connect_forget` deletes the file and the key (Connect is not
+//! asked), and then a join works.
+//!
 //! **Devices.** `connect_status` lists the devices of the account with `verified`: the
-//! core checks the chain of statements of each device against the trust store of the
-//! state file (`apassy::connect::trust`), and the app shows "Not verified" for the others.
+//! core verifies the signed device list of the account from the pinned root and the
+//! pinned version of the state file (`apassy::connect::trust`), and the app shows "Not
+//! verified" for the others. `list_verified` says whether the signed list itself verified:
+//! when it is false, no device is verified, the trust store keeps what it had, and the app
+//! says that Apassy could not verify the device list and changed nothing. It is absent
+//! when Connect did not answer.
 //!
 //! **The state file** is the Mac's account file, `connect/account.json` in the data
 //! directory (mode 0600): the origin, the ids, the names, the public key, and the trust
-//! store (the pinned account root and the known and departed device keys). No private
-//! key, no token, no email, no code, no plan.
+//! store (the pinned account root, the pinned version and hash of the device list, and
+//! the known and departed device keys). No private key, no token, no email, no code, no
+//! plan.
 //!
 //! The account token stays inside the core: [`Accounts::with_token`] gives it to a call
 //! of the Connect client of the account's origin only. The dials of `transport.rs` (unit
@@ -133,7 +143,7 @@ pub struct DeviceOut {
     pub platform: String,
     /// This iPhone.
     pub this: bool,
-    /// The core verified the device's chain of statements to the account root. The app
+    /// The signed device list that the core verified holds the device's key. The app
     /// shows "Not verified" when it is false.
     pub verified: bool,
 }
@@ -149,6 +159,12 @@ pub struct StatusOut {
     /// the key and the state file stay until `connect_forget`.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub removed: bool,
+    /// True when the account file of this iPhone is from an earlier version of Apassy
+    /// (`ConnectError::OldAccountFile`): this iPhone must join its account again. With
+    /// `state: "account"`: `connect_forget` deletes the file and the key, then a join
+    /// works. Connect is not asked.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub join_again: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -173,6 +189,12 @@ pub struct StatusOut {
     /// answer.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub devices: Vec<DeviceOut>,
+    /// When Connect answered: the signed device list verified from the pinned root and
+    /// went on from the pinned version (`AccountView::list_verified`). When it is false, no
+    /// device is verified and the trust store keeps what it had. `None` (absent) when
+    /// Connect did not answer, and without an account.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub list_verified: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -209,6 +231,10 @@ fn core_error(error: ConnectError) -> CoreError {
         ConnectError::AccountExists => CoreError::new(
             "already_connected",
             "This iPhone is a device of an Apassy Connect account already.",
+        ),
+        ConnectError::OldAccountFile => CoreError::new(
+            "already_connected",
+            "This iPhone must join its Apassy Connect account again: its account file is from an earlier version of Apassy. In Settings > Devices, use “Forget This iPhone…”, then add this iPhone again from your Mac.",
         ),
         ConnectError::Revoked => CoreError::new(
             "removed",
@@ -523,16 +549,9 @@ impl Core {
         }
     }
 
-    /// [`Accounts::with_account`] with the errors of the core. After Connect said that this
-    /// iPhone was removed, nothing is deleted until `connect_forget`.
-    fn with_account<T>(
-        &self,
-        call: impl FnOnce(&mut ConnectAccount) -> Result<T, ConnectError>,
-    ) -> CoreResult<Option<T>> {
-        self.connect.with_account(call).map_err(core_error)
-    }
-
-    /// The plan of the account of this iPhone, as the app shows it.
+    /// The plan of the account of this iPhone, as the app shows it. After Connect said that
+    /// this iPhone was removed, nothing is deleted until `connect_forget`; an account file
+    /// of an earlier version is the state `join_again`, not an error.
     fn connect_status(&self) -> CoreResult<StatusOut> {
         let join = guard(&self.connect.state)
             .join
@@ -542,6 +561,7 @@ impl Core {
         let none = |join: Option<JoinOut>| StatusOut {
             state: "none",
             removed: false,
+            join_again: false,
             account_id: None,
             device_name: None,
             plan: None,
@@ -550,8 +570,9 @@ impl Core {
             dial_state: dial_state.text(),
             join,
             devices: Vec::new(),
+            list_verified: None,
         };
-        let answer = self.with_account(|account| {
+        let answer = self.connect.with_account(|account| {
             let view = account.view()?;
             let group = view.group.as_ref().map(|group| StatusGroup {
                 kind: group.kind.clone(),
@@ -582,7 +603,8 @@ impl Core {
                 .iter()
                 .map(|device| DeviceOut {
                     device_id: device.device_id.clone(),
-                    name: device.name.clone(),
+                    // The name that the signed device list holds for the key.
+                    name: device.shown_name().to_owned(),
                     platform: device.platform.clone(),
                     this: device.device_id == state.device_id,
                     verified: device.verified,
@@ -593,9 +615,22 @@ impl Core {
                 state.device_name.clone(),
                 status_plan(&view.plan, group, people),
                 devices,
+                view.list_verified,
             ))
         });
-        let (account_id, device_name, plan, devices) = match answer {
+        let answer = match answer {
+            // An account file of an earlier version: a state, not an error. This iPhone
+            // must join its account again after `connect_forget`.
+            Err(ConnectError::OldAccountFile) => {
+                return Ok(StatusOut {
+                    state: "account",
+                    join_again: true,
+                    ..none(join)
+                });
+            }
+            other => other.map_err(core_error),
+        };
+        let (account_id, device_name, plan, devices, list_verified) = match answer {
             Ok(Some(found)) => found,
             Ok(None) => return Ok(none(join)),
             Err(error) if error.code == "removed" => {
@@ -606,6 +641,7 @@ impl Core {
                 return Ok(StatusOut {
                     state: "account",
                     removed: true,
+                    join_again: false,
                     account_id: Some(state.account_id),
                     device_name: Some(state.device_name),
                     plan: None,
@@ -614,6 +650,7 @@ impl Core {
                     dial_state: dial_state.text(),
                     join,
                     devices: Vec::new(),
+                    list_verified: None,
                 });
             }
             Err(error) if matches!(error.code, "relay_unreachable" | "rate_limited") => {
@@ -631,6 +668,7 @@ impl Core {
                 return Ok(StatusOut {
                     state: "account",
                     removed: false,
+                    join_again: false,
                     account_id: Some(state.account_id),
                     device_name: Some(state.device_name),
                     plan: last,
@@ -639,6 +677,7 @@ impl Core {
                     dial_state: dial_state.text(),
                     join,
                     devices: Vec::new(),
+                    list_verified: None,
                 });
             }
             Err(error) => return Err(error),
@@ -647,6 +686,7 @@ impl Core {
         Ok(StatusOut {
             state: "account",
             removed: false,
+            join_again: false,
             account_id: Some(account_id),
             device_name: Some(device_name),
             plan: Some(plan),
@@ -655,6 +695,7 @@ impl Core {
             dial_state: dial_state.text(),
             join,
             devices,
+            list_verified: Some(list_verified),
         })
     }
 

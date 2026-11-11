@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
 use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
 
 use apassy::broker::packs::RuleSet;
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use serde_json::json;
 
@@ -85,6 +85,45 @@ fn revoke_in_store(
         })
     };
     write(true).or_else(|_| write(false))
+}
+
+/// One removal of an account device from a vault store: the store, the account device,
+/// and its device number in the store file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoreRemoval {
+    pub team: TeamId,
+    pub device: String,
+    pub store_device: u64,
+}
+
+/// The first half of every removal from a vault store, inside the directory transaction
+/// of the change that causes it (a revoke, a group removal): the row of
+/// `account_store_device` goes, so the relay-sync sign-in to the store refuses the device
+/// from the commit on (`account::store_device_live`), and an `account_store_removal` row
+/// waits for the store file. The second half is `Hub::apply_removals` after the
+/// commit; the open of the store and the maintenance pass apply a row that is left.
+pub(crate) fn queue_store_removal(
+    tx: &Connection,
+    removal: &StoreRemoval,
+    now: u64,
+) -> RelayResult<()> {
+    tx.execute(
+        "DELETE FROM account_store_device WHERE team_id = ?1 AND device_id = ?2",
+        params![removal.team.as_str(), removal.device],
+    )
+    .map_err(db)?;
+    tx.execute(
+        "INSERT INTO account_store_removal (team_id, store_device, device_id, created_at, attempts, next_at) \
+         VALUES (?1, ?2, ?3, ?4, 0, ?4) ON CONFLICT(team_id, store_device) DO NOTHING",
+        params![
+            removal.team.as_str(),
+            to_i(removal.store_device),
+            removal.device,
+            to_i(now)
+        ],
+    )
+    .map_err(db)?;
+    Ok(())
 }
 
 /// A team that was just made, with its owner.
@@ -437,6 +476,10 @@ pub struct Hub {
     /// The Connect tunnel broker (`server::tunnel_routes`): set once by `Relay::start`
     /// when the account routes are on, else never.
     pub(crate) tunnel: std::sync::OnceLock<crate::server::tunnel::Broker>,
+    /// Held while a removal is applied to a store file and while a device is added to a
+    /// store, so an add that clears a waiting removal and the apply of that removal never
+    /// cross (`add_store_device`, `apply_removal`).
+    store_changes: Mutex<()>,
 }
 
 impl Hub {
@@ -499,6 +542,7 @@ impl Hub {
             connect_feed_polls: Arc::new(AtomicUsize::new(0)),
             oauth_failures: crate::server::oauth::ClientFailures::default(),
             tunnel: std::sync::OnceLock::new(),
+            store_changes: Mutex::new(()),
         });
         if hub.config.connect.accounts {
             crate::server::account::record_keys(&hub, crate::now_unix())?;
@@ -812,6 +856,14 @@ impl Hub {
     /// `team`: a member named by the account id (made when it is not there) and a device
     /// named by the device id, without the item keys. Returns the store device id. A
     /// device whose key is in the store already keeps its id.
+    ///
+    /// The map row goes into the directory in a transaction that checks again that the
+    /// device is live and may be in the store (`account::may_join_store`): when it may not
+    /// any more (a revoke or a group removal since the caller's checks), that transaction
+    /// queues the removal of the row the store file just took, the removal is applied, and
+    /// the answer is 403 `not_in_group`. A store device id that is used again ends the
+    /// removal that waited for it, so it does not revoke the device later. Under
+    /// `store_changes`, so no removal is applied to the row in between.
     pub fn add_store_device(
         &self,
         team: &TeamId,
@@ -824,6 +876,10 @@ impl Hub {
             .team(team)
             .filter(|core| core.kind == TeamKind::Account)
             .ok_or_else(|| RelayError::internal("The vault store is not open."))?;
+        let _changes = self
+            .store_changes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let store_device = core.store.tx(|tx| {
             let existing: Option<i64> = tx
                 .query_row(
@@ -871,24 +927,46 @@ impl Hub {
             )?;
             Ok(id)
         })?;
-        self.directory.store.with(|conn| {
-            conn.execute(
+        let removal = StoreRemoval {
+            team: team.clone(),
+            device: device.to_string(),
+            store_device,
+        };
+        let mapped = self.directory.store.tx(|tx| {
+            if !crate::server::account::may_join_store(tx, team, account, device, public_key)? {
+                queue_store_removal(tx, &removal, now)?;
+                return Ok(false);
+            }
+            tx.execute(
+                "DELETE FROM account_store_removal WHERE team_id = ?1 AND store_device = ?2",
+                params![team.as_str(), to_i(store_device)],
+            )
+            .map_err(db)?;
+            tx.execute(
                 "INSERT INTO account_store_device (team_id, device_id, account_id, store_device, added_at) \
                  VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(team_id, device_id) DO NOTHING",
                 params![team.as_str(), device, account, to_i(store_device), to_i(now)],
             )
-            .map_err(db)
+            .map_err(db)?;
+            Ok(true)
         })?;
+        if !mapped {
+            self.apply_removal(&core, &removal, now);
+            return Err(RelayError::new(
+                codes::NOT_IN_GROUP,
+                "That device is not a live device of your account or of your family or team.",
+            ));
+        }
         Ok(store_device)
     }
 
     /// Removes the account device `device` (store device `store_device`) from the vault
-    /// store `team`: its row of `account_store_device` goes, so the relay-sync sign-in to
-    /// the store refuses it from now on (`account::store_device_live`); when the store is
-    /// open its relay-sync tokens end and its long polls wake, also if the file write
-    /// fails, and its device row there is revoked. When the store is not open or the write
-    /// fails (a full file, also without the audit row), an `account_store_removal` row
-    /// waits: the open of the store applies it before it serves, and the maintenance pass
+    /// store `team`: the row of `account_store_device` goes with a waiting removal in one
+    /// transaction (`queue_store_removal`), so the relay-sync sign-in to the store refuses
+    /// it from now on (`account::store_device_live`), then the removal is applied to the
+    /// store file when it is open (`Self::apply_removals`). A store that is not open,
+    /// or a write that fails (a full file, also without the audit row), keeps the waiting
+    /// row: the open of the store applies it before it serves, and the maintenance pass
     /// retries it (`retry_store_removals`). The heads it signed stay verifiable
     /// (relay-sync-v1: a removed device keeps its key).
     pub fn remove_store_device(
@@ -898,35 +976,96 @@ impl Hub {
         store_device: u64,
         now: u64,
     ) -> RelayResult<()> {
-        let written = match self
-            .team(team)
-            .filter(|core| core.kind == TeamKind::Account)
-        {
-            Some(core) => {
-                let written =
-                    revoke_in_store(&core.store, &core.audit, device, store_device, now).is_ok();
-                crate::server::devices::drop_tokens(&core, &[DeviceId(store_device)]);
-                core.notify.notify();
-                written
-            }
-            None => false,
+        let removal = StoreRemoval {
+            team: team.clone(),
+            device: device.to_string(),
+            store_device,
         };
-        self.directory.store.tx(|tx| {
-            tx.execute(
-                "DELETE FROM account_store_device WHERE team_id = ?1 AND device_id = ?2",
-                params![team.as_str(), device],
-            )
-            .map_err(db)?;
-            if !written {
-                tx.execute(
-                    "INSERT INTO account_store_removal (team_id, store_device, device_id, created_at, attempts, next_at) \
-                     VALUES (?1, ?2, ?3, ?4, 0, ?4) ON CONFLICT(team_id, store_device) DO NOTHING",
-                    params![team.as_str(), to_i(store_device), device, to_i(now)],
-                )
-                .map_err(db)?;
+        self.directory
+            .store
+            .tx(|tx| queue_store_removal(tx, &removal, now))?;
+        self.apply_removals(std::slice::from_ref(&removal), now);
+        Ok(())
+    }
+
+    /// The second half of removals that `queue_store_removal` wrote and committed: for each
+    /// store that is open, its relay-sync tokens of the device end and its long polls wake,
+    /// and its device row is revoked; the waiting row goes when that write worked. A store
+    /// that is not open, or a write that fails, keeps its waiting row for the open of the
+    /// store or the maintenance pass. Answers how many store files took the write.
+    pub fn apply_removals(&self, removals: &[StoreRemoval], now: u64) -> usize {
+        let mut written = 0;
+        for removal in removals {
+            let Some(core) = self
+                .team(&removal.team)
+                .filter(|core| core.kind == TeamKind::Account)
+            else {
+                continue;
+            };
+            let _changes = self
+                .store_changes
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if self.apply_removal(&core, removal, now) {
+                written += 1;
             }
-            Ok(())
-        })
+        }
+        written
+    }
+
+    /// One removal of `apply_removals` to the open store `core`, under `store_changes`:
+    /// only while its waiting row is there (an add of the device since then ended it).
+    /// Its tokens end and its polls wake, its row is revoked, and the waiting row goes when
+    /// the write worked. True when the store file took the write.
+    fn apply_removal(&self, core: &Core, removal: &StoreRemoval, now: u64) -> bool {
+        let waiting = self.directory.store.with(|conn| {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM account_store_removal WHERE team_id = ?1 \
+                 AND store_device = ?2 AND device_id = ?3)",
+                params![
+                    removal.team.as_str(),
+                    to_i(removal.store_device),
+                    removal.device
+                ],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(db)
+        });
+        if matches!(waiting, Ok(false)) {
+            return false;
+        }
+        let done = revoke_in_store(
+            &core.store,
+            &core.audit,
+            &removal.device,
+            removal.store_device,
+            now,
+        )
+        .is_ok();
+        crate::server::devices::drop_tokens(core, &[DeviceId(removal.store_device)]);
+        core.notify.notify();
+        if !done {
+            return false;
+        }
+        let settled = self.directory.store.with(|conn| {
+            conn.execute(
+                "DELETE FROM account_store_removal WHERE team_id = ?1 AND store_device = ?2",
+                params![removal.team.as_str(), to_i(removal.store_device)],
+            )
+            .map_err(db)
+            .map(drop)
+        });
+        match settled {
+            Ok(()) => true,
+            // The row waits: the next pass finds the device revoked and ends it.
+            Err(error) => {
+                eprintln!(
+                    "apassy-relay: a removal from vault store {} was applied, and its row stays for the next pass: {}",
+                    removal.team, error.message
+                );
+                false
+            }
+        }
     }
 
     /// The removals that wait for the vault store `team` (`account_store_removal`),
@@ -999,23 +1138,29 @@ impl Hub {
                 })?;
                 continue;
             };
-            let done = match self
+            let Some(core) = self
                 .team(&team)
                 .filter(|core| core.kind == TeamKind::Account)
-            {
-                Some(core) => {
-                    let done =
-                        revoke_in_store(&core.store, &core.audit, &device, to_u(store_device), now)
-                            .is_ok();
-                    crate::server::devices::drop_tokens(&core, &[DeviceId(to_u(store_device))]);
-                    done
-                }
-                None => false,
+            else {
+                self.settle_store_removal(&team, store_device, attempts, false, now)?;
+                continue;
             };
-            if done {
+            let removal = StoreRemoval {
+                team: team.clone(),
+                device,
+                store_device: to_u(store_device),
+            };
+            let _changes = self
+                .store_changes
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if self.apply_removal(&core, &removal, now) {
                 applied += 1;
+            } else {
+                // Not written, or ended by an add of the device: a row that is left waits
+                // twice as long.
+                self.settle_store_removal(&team, store_device, attempts, false, now)?;
             }
-            self.settle_store_removal(&team, store_device, attempts, done, now)?;
         }
         Ok(applied)
     }

@@ -26,7 +26,7 @@ use crate::ids::TeamId;
 use crate::secret::is_connect_id;
 use crate::server::account::{AccountCaller, Groups};
 use crate::server::auth::Need;
-use crate::server::hub::Hub;
+use crate::server::hub::{Hub, StoreRemoval};
 use crate::server::store::{Store, db, to_i, to_u};
 
 /// An invite lives 7 days.
@@ -689,7 +689,9 @@ fn confirm(hub: &Hub, caller: &AccountCaller, target: &str, now: u64) -> RelayRe
 /// (only the owner an admin), or a member removes itself; the owner cannot be removed. The
 /// removed account keeps a free account; its devices leave the stores of the group's
 /// other accounts, theirs leave its stores, and the tunnel grants between it and the group
-/// end.
+/// end. The membership and the store rows go in one transaction, with a waiting removal
+/// for each store file; the files take them after the commit, at their next open, or at a
+/// maintenance pass.
 fn remove(hub: &Hub, caller: &AccountCaller, target: &str, now: u64) -> RelayResult<RemovedAnswer> {
     let member = hub
         .directory
@@ -727,9 +729,9 @@ fn remove(hub: &Hub, caller: &AccountCaller, target: &str, now: u64) -> RelayRes
         .directory
         .store
         .with(|conn| other_accounts(conn, &other.group_id, target))?;
-    let removed_from_stores = leave_group_stores(hub, target, &others, now)?;
     crate::server::billing_store::tunnel_grants_end(hub, target, &others, now)?;
-    hub.directory.store.tx(|tx| {
+    let (removals, removed_from_stores) = hub.directory.store.tx(|tx| {
+        let (removals, removed_from_stores) = queue_group_store_removals(tx, target, &others, now)?;
         tx.execute(
             "DELETE FROM group_member WHERE group_id = ?1 AND account_id = ?2",
             params![other.group_id, target],
@@ -748,8 +750,10 @@ fn remove(hub: &Hub, caller: &AccountCaller, target: &str, now: u64) -> RelayRes
             None,
             &json!({"group_id": other.group_id, "account_id": target,
                     "removed_from_stores": removed_from_stores}),
-        )
+        )?;
+        Ok((removals, removed_from_stores))
     })?;
+    hub.apply_removals(&removals, now);
     Ok(RemovedAnswer {
         account_id: target.to_string(),
         removed_from_stores,
@@ -757,10 +761,18 @@ fn remove(hub: &Hub, caller: &AccountCaller, target: &str, now: u64) -> RelayRes
 }
 
 /// The devices of `account` leave the vault stores of `others`, and the devices of
-/// `others` leave the stores of `account`. Answers how many device rows of `account` left.
-fn leave_group_stores(hub: &Hub, account: &str, others: &[String], now: u64) -> RelayResult<u64> {
-    let rows: Vec<(String, String, String, String, i64)> = hub.directory.store.with(|conn| {
-        let mut statement = conn
+/// `others` leave the stores of `account`, inside the transaction `tx` of the removal: the
+/// store rows go with a waiting removal for each store file
+/// (`hub::queue_store_removal`). Answers the removals and how many device rows of
+/// `account` left.
+fn queue_group_store_removals(
+    tx: &Connection,
+    account: &str,
+    others: &[String],
+    now: u64,
+) -> RelayResult<(Vec<StoreRemoval>, u64)> {
+    let rows: Vec<(String, String, String, String, i64)> = {
+        let mut statement = tx
             .prepare(
                 "SELECT s.team_id, t.account_id, s.device_id, s.account_id, s.store_device \
                  FROM account_store_device s JOIN team t ON t.id = s.team_id \
@@ -780,8 +792,9 @@ fn leave_group_stores(hub: &Hub, account: &str, others: &[String], now: u64) -> 
             })
             .map_err(db)?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(db)
-    })?;
+            .map_err(db)?
+    };
+    let mut removals = Vec::new();
     let mut left = 0;
     for (team, owner, device, device_account, store_device) in rows {
         let theirs = device_account == account && others.contains(&owner);
@@ -789,20 +802,21 @@ fn leave_group_stores(hub: &Hub, account: &str, others: &[String], now: u64) -> 
         if !(theirs || ours) {
             continue;
         }
-        if let Some(team) = TeamId::parse(&team) {
-            // One store that fails does not keep the others: each removal is done now or
-            // waits for its store (`Hub::remove_store_device`).
-            match hub.remove_store_device(&team, &device, to_u(store_device), now) {
-                Ok(()) if theirs => left += 1,
-                Ok(()) => {}
-                Err(error) => eprintln!(
-                    "apassy-relay: a device could not leave vault store {team}: {}",
-                    error.message
-                ),
-            }
+        let Some(team) = TeamId::parse(&team) else {
+            continue;
+        };
+        let removal = StoreRemoval {
+            team,
+            device,
+            store_device: to_u(store_device),
+        };
+        crate::server::hub::queue_store_removal(tx, &removal, now)?;
+        removals.push(removal);
+        if theirs {
+            left += 1;
         }
     }
-    Ok(left)
+    Ok((removals, left))
 }
 
 /// The group rows of an account that is deleted (in the transaction of `DELETE

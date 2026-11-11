@@ -700,6 +700,21 @@ impl FakeRelay {
         self.shared.1.notify_all();
     }
 
+    /// A forged history of the store `team_id`: the heads from `heads[0].version` on are
+    /// replaced, with their snapshots. The heads are trusted as they are.
+    pub fn replace_store_from(&self, team_id: &str, heads: Vec<(StoredHead, Vec<u8>)>) {
+        let first = heads.first().expect("a head").0.version;
+        let mut relay = lock(&self.shared.0);
+        let team = relay.teams.get_mut(team_id).expect("store");
+        team.heads.retain(|head| head.version < first);
+        team.snapshots.retain(|stored, _| *stored < first);
+        for (head, bytes) in heads {
+            team.snapshots.insert(head.version, bytes);
+            team.heads.push(head);
+        }
+        self.shared.1.notify_all();
+    }
+
     /// The body of each request that had one, in the order they came (a snapshot push
     /// is read as lossy text).
     pub fn request_bodies(&self) -> Vec<String> {
@@ -1564,6 +1579,12 @@ fn route(shared: &Arc<(Mutex<Relay>, Condvar)>, request: &Incoming) -> Outgoing 
                         }
                         None => fail(404, "not_found"),
                     }
+                }
+                // A vault store of an account serves relay sync only, as the relay does
+                // (connect-account-v1 section 8): its devices come from the account, never
+                // from a device link.
+                (_, ["devices", "links", ..]) if relay.store_teams.contains(&team_id) => {
+                    fail(403, "forbidden")
                 }
                 ("POST", ["devices", "links"]) => {
                     relay.next_secret += 1;

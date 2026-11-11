@@ -53,9 +53,13 @@ pub const SIGN_IN_TAG: &str = "apassy-connect sign-in v1";
 pub const JOIN_TAG: &str = "apassy-connect join v1";
 /// `POST /v1/account/devices/join/cancel`.
 pub const JOIN_CANCEL_TAG: &str = "apassy-connect join-cancel v1";
-/// The device statement of `POST …/pending/{join_id}/confirm`: the confirming device
-/// signs the key that it adds. The chain of a device is made of these statements.
-pub const DEVICE_TAG: &str = "apassy-connect device v1";
+/// An entry of the signed device list (section 7.5): the `add` of
+/// `POST …/pending/{join_id}/confirm` and the `remove` of
+/// `DELETE /v1/account/devices/{device_id}`, each signed by a device of the list.
+pub const LIST_TAG: &str = "apassy-connect device-list v1";
+/// The `previous` of version 1 of a device list, and the `link_hash` of an entry without
+/// a link.
+pub const LIST_NONE: &str = "-";
 /// `POST /v1/account/recover`.
 pub const RECOVER_TAG: &str = "apassy-connect recover v1";
 /// The sign-in of the hosted bouncer brain (bouncer-brain-v2, plan 0035 A and H).
@@ -71,7 +75,7 @@ pub const SIGNING_TAGS: [&str; 9] = [
     SIGN_IN_TAG,
     JOIN_TAG,
     JOIN_CANCEL_TAG,
-    DEVICE_TAG,
+    LIST_TAG,
     RECOVER_TAG,
     BRAIN_SIGN_IN_TAG,
     RELAY_SIGN_IN_TAG,
@@ -109,14 +113,24 @@ pub fn sign_in_message(
     joined(&[SIGN_IN_TAG, origin, account_id, public_key_b64u, nonce_b64u])
 }
 
-/// The `apassy-connect join v1` message.
+/// The `apassy-connect join v1` message: it names the device name in its canonical form
+/// (`super::trust::canonical_name`), so the confirming device signs that name into the
+/// device list only when this signature verifies.
 pub fn join_message(
     origin: &str,
     account_id: &str,
     link_hash: &str,
     public_key_b64u: &str,
+    device_name: &str,
 ) -> Vec<u8> {
-    joined(&[JOIN_TAG, origin, account_id, link_hash, public_key_b64u])
+    joined(&[
+        JOIN_TAG,
+        origin,
+        account_id,
+        link_hash,
+        public_key_b64u,
+        device_name,
+    ])
 }
 
 /// The `apassy-connect join-cancel v1` message.
@@ -135,15 +149,40 @@ pub fn join_cancel_message(
     ])
 }
 
-/// The `apassy-connect device v1` message: the statement that adds the key
-/// `added_key_b64u` through the link of `link_hash`, signed by the confirming device.
-pub fn device_message(
+/// The `apassy-connect device-list v1` message of version `version` of a device list:
+/// `previous` is the list hash of the entry before ([`list_hash`]), or [`LIST_NONE`] for
+/// version 1; `op` is `root`, `add`, or `remove`; `link_hash` is the link of an `add`, else
+/// [`LIST_NONE`]; `name` is the device name of a `root` or an `add`, else [`LIST_NONE`];
+/// `by_b64u` is the key that signs the entry (for the `root`, the root key itself).
+#[allow(clippy::too_many_arguments)]
+pub fn list_message(
     origin: &str,
     account_id: &str,
+    version: u64,
+    previous: &str,
+    op: &str,
+    key_b64u: &str,
     link_hash: &str,
-    added_key_b64u: &str,
+    name: &str,
+    by_b64u: &str,
 ) -> Vec<u8> {
-    joined(&[DEVICE_TAG, origin, account_id, link_hash, added_key_b64u])
+    joined(&[
+        LIST_TAG,
+        origin,
+        account_id,
+        &version.to_string(),
+        previous,
+        op,
+        key_b64u,
+        link_hash,
+        name,
+        by_b64u,
+    ])
+}
+
+/// The list hash of an entry: b64u of SHA-256 of its message (43 characters).
+pub fn list_hash(message: &[u8]) -> String {
+    encode_b64u(ring::digest::digest(&ring::digest::SHA256, message).as_ref())
 }
 
 /// The `apassy-connect recover v1` message: the new device key and the public key of the
@@ -452,18 +491,21 @@ impl AccountSigner {
         ))
     }
 
-    /// The signature of `POST /v1/account/devices/join`.
+    /// The signature of `POST /v1/account/devices/join`, over the canonical
+    /// `device_name`.
     pub fn sign_join(
         &self,
         origin: &str,
         account_id: &str,
         link_hash: &str,
+        device_name: &str,
     ) -> Result<Vec<u8>, ConnectError> {
         self.sign(&join_message(
             origin,
             account_id,
             link_hash,
             &self.public_key_b64u(),
+            device_name,
         ))
     }
 
@@ -482,21 +524,54 @@ impl AccountSigner {
         ))
     }
 
-    /// The device statement of a confirmation: this device adds `added_key_b64u` through
-    /// the link of `link_hash`.
-    pub fn sign_device(
+    /// An entry of the device list signed by this device: version `version` after the
+    /// entry with the list hash `previous`, `op` (`add` with its `link_hash` and the name of
+    /// the new device, or `remove`) for `key_b64u`. Returns the signature and the list hash
+    /// of the entry.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sign_list_entry(
         &self,
         origin: &str,
         account_id: &str,
-        link_hash: &str,
-        added_key_b64u: &str,
-    ) -> Result<Vec<u8>, ConnectError> {
-        self.sign(&device_message(
+        (version, previous): (u64, &str),
+        op: &str,
+        key_b64u: &str,
+        link_hash: Option<&str>,
+        name: Option<&str>,
+    ) -> Result<(Vec<u8>, String), ConnectError> {
+        let message = list_message(
             origin,
             account_id,
-            link_hash,
-            added_key_b64u,
-        ))
+            version,
+            previous,
+            op,
+            key_b64u,
+            link_hash.unwrap_or(LIST_NONE),
+            name.unwrap_or(LIST_NONE),
+            &self.public_key_b64u(),
+        );
+        Ok((self.sign(&message)?, list_hash(&message)))
+    }
+
+    /// The root entry of a new device list (version 1) with this device as its root and
+    /// only device, named `name`: what `POST /v1/account` and `POST /v1/account/recover`
+    /// carry as `statement`. Returns the signature and the list hash of the entry.
+    pub fn sign_root(
+        &self,
+        origin: &str,
+        account_id: &str,
+        name: &str,
+    ) -> Result<(Vec<u8>, String), ConnectError> {
+        let key = self.public_key_b64u();
+        self.sign_list_entry(
+            origin,
+            account_id,
+            (1, LIST_NONE),
+            "root",
+            &key,
+            None,
+            Some(name),
+        )
     }
 
     /// The signature of `POST /v1/account/recover` by the new device, with the public key
@@ -605,11 +680,23 @@ mod tests {
         for signature in [
             signer.sign_account(origin, recovery).unwrap(),
             signer.sign_sign_in(origin, account, nonce).unwrap(),
-            signer.sign_join(origin, account, "K6tgKp").unwrap(),
+            signer
+                .sign_join(origin, account, "K6tgKp", "Synthetic")
+                .unwrap(),
             signer.sign_join_cancel(origin, account, "K6tgKp").unwrap(),
             signer
-                .sign_device(origin, account, "K6tgKp", &signer.public_key_b64u())
-                .unwrap(),
+                .sign_list_entry(
+                    origin,
+                    account,
+                    (2, "K6tgKp"),
+                    "add",
+                    &signer.public_key_b64u(),
+                    Some("K6tgKp"),
+                    Some("Synthetic"),
+                )
+                .unwrap()
+                .0,
+            signer.sign_root(origin, account, "Synthetic").unwrap().0,
             signer.sign_recover(origin, account, recovery).unwrap(),
             signer
                 .sign_brain_sign_in("https://brain.example.test", account, nonce)

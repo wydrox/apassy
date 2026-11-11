@@ -243,6 +243,35 @@ enum DeviceRoute: Equatable {
     }
 }
 
+/// How the sync status of the vault looks (contract ios-core-v1 section 5.5): its tint and whether it
+/// asks for a look in Settings. A vault store of Apassy Connect that waits for another device of the
+/// account (`waits_for_device`) is a plain line: no error style, no warning.
+enum SyncStatusLook: Equatable {
+    /// No tint, no warning: off, not synced yet, changes waiting, or waiting for another device.
+    case plain
+    case ok
+    /// Orange, no warning: another device saves now, and the next sync tries again.
+    case busy
+    /// Orange: offline, or a new passphrase to type.
+    case attention
+    /// Red: a state that the owner solves in Settings.
+    case critical
+
+    static func of(_ state: SyncStatus.State?) -> SyncStatusLook {
+        guard let state else { return .plain }
+        return switch state {
+        case .ok: .ok
+        case .busy: .busy
+        case .offline, .needsPassphrase: .attention
+        case .removed, .damaged, .staleCopy, .forkedCopy, .error: .critical
+        case .off, .never, .pending, .waitsForDevice: .plain
+        }
+    }
+
+    /// Whether the status asks for a look in Settings ("Opens sync settings").
+    var isProblem: Bool { self == .attention || self == .critical }
+}
+
 /// The row "Apassy Connect" of Settings > General (plan s7 unit I1, section 6): the plan of the
 /// account of this iPhone, as text. App Store Review Guideline 3.1 allows the iPhone to show the
 /// plan of the account it belongs to and where it is managed; it never shows a price, a currency,
@@ -258,6 +287,9 @@ enum ConnectPlanRow: Equatable {
     /// account was deleted), or the Keychain lost the key. The key and the account file stay until
     /// "Forget This iPhone…" in Settings > Devices.
     case removed
+    /// The account file of this iPhone is from an earlier version of Apassy: this iPhone must join
+    /// its account again after "Forget This iPhone…" in Settings > Devices.
+    case joinAgain
     /// "Connect Personal · renews 3 Dec 2026" (or Team).
     case active(plan: String?, renews: Date?)
     /// "Connect Family · 3 of 4 people".
@@ -273,6 +305,10 @@ enum ConnectPlanRow: Equatable {
     /// link).
     static let removedLine =
         "This iPhone is no longer a device of its Apassy Connect account. To join an account again, forget it in Settings > Devices."
+    /// The line of `.joinAgain`: what happened, and where this iPhone forgets the account file
+    /// (text, no link).
+    static let joinAgainLine =
+        "This iPhone must join its Apassy Connect account again: its account file is from an earlier version of Apassy. Forget it in Settings > Devices, then add this iPhone again from your Mac."
 
     /// What the row shows: its value and the lines under it, all of them text.
     struct Content: Equatable {
@@ -286,6 +322,7 @@ enum ConnectPlanRow: Equatable {
         guard let status else { return failed ? .unavailable : .checking }
         // `removed` comes with an account; a core never sends it without one, but the row would say
         // the same.
+        if status.joinAgain { return .joinAgain }
         if status.removed { return .removed }
         guard status.state == .account else { return .notOnConnect }
         guard let plan = status.plan else { return .unavailable }
@@ -329,6 +366,7 @@ enum ConnectPlanRow: Equatable {
         case .unavailable: "Not available"
         case .notOnConnect: "Not on Connect"
         case .removed: "Removed from the account"
+        case .joinAgain: "Join the account again"
         case .active(let plan, let renews):
             renews.map { "\(Self.planName(plan)) · renews \(Self.day($0, timeZone: timeZone))" } ?? Self.planName(plan)
         case .family(let active, let of): "Connect Family · \(active) of \(of) people"
@@ -342,7 +380,7 @@ enum ConnectPlanRow: Equatable {
     var isOnAccount: Bool {
         switch self {
         case .active, .family, .pastDue, .ending: true
-        case .checking, .unavailable, .notOnConnect, .removed: false
+        case .checking, .unavailable, .notOnConnect, .removed, .joinAgain: false
         }
     }
 
@@ -353,6 +391,7 @@ enum ConnectPlanRow: Equatable {
         var lines: [String] = []
         if row.isOnAccount { lines.append(managedLine) }
         if row == .removed { lines.append(removedLine) }
+        if row == .joinAgain { lines.append(joinAgainLine) }
         return Content(title: title, value: row.value(timeZone: timeZone), lines: lines)
     }
 }
@@ -372,19 +411,36 @@ enum ConnectDevicesText {
     /// The message of the confirmation after the removal.
     static let confirmRemoved =
         "This iPhone forgets its Apassy Connect account and its account key. To join an account again, use a new code from Apassy on your Mac."
+    /// The message of the confirmation for an account file of an earlier version.
+    static let confirmJoinAgain =
+        "This iPhone forgets the account file of an earlier version of Apassy and its account key. Nothing changes at Connect. To join again, use a new code from Apassy on your Mac."
     /// The footer while the section shows.
     static let footer = "Your vaults, approvals over Tailscale, and Wi-Fi stay on this iPhone."
     /// After a forget that failed.
     static let forgetFailed = "This iPhone could not forget the account. Try again."
+    /// When the signed device list of Connect did not verify (`list_verified: false`): no device is
+    /// verified, and the core kept what it knew.
+    static let listNotVerifiedLine = "Apassy could not verify the device list from Connect. Nothing was changed."
 
-    /// Whether the section shows: only on an account (also a removed one). Without an account the
-    /// iPhone shows nothing here: no call to action.
+    /// Whether the section shows: only on an account (also a removed one, and an account file of an
+    /// earlier version). Without an account the iPhone shows nothing here: no call to action.
     static func shows(_ status: ConnectStatus?) -> Bool { status?.state == .account }
 
+    /// The line of a state that only "Forget This iPhone…" ends: an account file of an earlier
+    /// version, or a removal. Nil otherwise.
+    static func stateLine(_ status: ConnectStatus?) -> String? {
+        guard let status else { return nil }
+        if status.joinAgain { return ConnectPlanRow.joinAgainLine }
+        if status.removed { return ConnectPlanRow.removedLine }
+        return nil
+    }
+
     /// "1 device of the account is not verified. Check Apassy on your Mac.", or nil when every
-    /// device is verified. After a removal the list is not the iPhone's any more: nil.
+    /// device is verified. When the device list itself did not verify, `listNotVerifiedLine` in its
+    /// place. After a removal the list is not the iPhone's any more: nil.
     static func notVerifiedLine(_ status: ConnectStatus?) -> String? {
-        guard let status, status.state == .account, !status.removed else { return nil }
+        guard let status, status.state == .account, !status.removed, !status.joinAgain else { return nil }
+        if status.listVerified == false { return listNotVerifiedLine }
         let count = status.unverifiedDevices.count
         switch count {
         case 0: return nil
@@ -395,7 +451,8 @@ enum ConnectDevicesText {
 
     /// The message of the confirmation for `status`.
     static func confirmMessage(_ status: ConnectStatus?) -> String {
-        status?.removed == true ? confirmRemoved : confirmOnAccount
+        if status?.joinAgain == true { return confirmJoinAgain }
+        return status?.removed == true ? confirmRemoved : confirmOnAccount
     }
 }
 

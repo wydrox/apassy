@@ -606,6 +606,9 @@ public struct SyncStatus: Codable, Sendable, Equatable {
         case removed, damaged
         case staleCopy = "stale_copy"
         case forkedCopy = "forked_copy"
+        /// A vault store of Apassy Connect: the sync waits until another device of the account
+        /// syncs. A plain state, not an error; nothing was changed.
+        case waitsForDevice = "waits_for_device"
         case busy, error
 
         public init(from decoder: any Decoder) throws {

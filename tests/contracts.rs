@@ -3832,11 +3832,12 @@ mod connect_v1 {
 
     /// connect-account-v1 section 4: every Connect code with its status, and the
     /// relay-sync-v1 codes that the Connect examples use.
-    const CODES: [(&str, u16); 15] = [
+    const CODES: [(&str, u16); 16] = [
         ("account_required", 403),
         ("not_in_group", 403),
         ("plan_required", 403),
         ("account_limit", 403),
+        ("account_id_taken", 409),
         ("seat_limit", 409),
         ("tunnel_limit", 429),
         ("node_unknown", 404),
@@ -3864,7 +3865,7 @@ mod connect_v1 {
     ];
 
     pub fn check_error_table() {
-        for (code, status) in CODES.iter().take(10) {
+        for (code, status) in CODES.iter().take(11) {
             let row = format!("| {status} | `{code}` |");
             assert!(
                 ACCOUNT_CONTRACT.contains(&row),
@@ -4062,8 +4063,10 @@ mod connect_v1 {
     }
 
     /// A name of connect-account-v1 section 2.
+    /// A name of section 2 in its canonical form: trimmed, 1 to 64 bytes, no control
+    /// character, not the placeholder `-`.
     pub fn is_name(text: &str) -> bool {
-        !text.is_empty() && text.len() <= 64 && text.trim() == text && is_text(text)
+        !text.is_empty() && text.len() <= 64 && text.trim() == text && is_text(text) && text != "-"
     }
 
     pub fn is_text(text: &str) -> bool {
@@ -4148,7 +4151,7 @@ mod connect_v1 {
             "apassy-connect sign-in v1",
             "apassy-connect join v1",
             "apassy-connect join-cancel v1",
-            "apassy-connect device v1",
+            "apassy-connect device-list v1",
             "apassy-connect recover v1",
             "apassy-bouncer sign-in v1",
             "apassy-relay sign-in v1",
@@ -4158,12 +4161,14 @@ mod connect_v1 {
         #[derive(Debug, Deserialize)]
         #[serde(deny_unknown_fields)]
         struct AccountCreate {
+            account_id: String,
             name: String,
             device_name: String,
             platform: String,
             public_key: String,
             recovery_key: String,
             signature: String,
+            statement: String,
         }
 
         #[derive(Debug, Deserialize)]
@@ -4207,13 +4212,17 @@ mod connect_v1 {
             device_id: String,
         }
 
-        /// One device statement of a chain.
-        #[derive(Debug, Deserialize)]
+        /// One entry of the signed device list (section 7.5).
+        #[derive(Debug, Clone, Deserialize)]
         #[serde(deny_unknown_fields)]
-        struct ChainEntry {
-            link_hash: String,
-            confirmer_key: String,
-            statement: String,
+        struct ListEntry {
+            version: u64,
+            op: String,
+            key: String,
+            link_hash: Option<String>,
+            name: Option<String>,
+            by: String,
+            signature: Option<String>,
         }
 
         #[derive(Debug, Deserialize)]
@@ -4225,7 +4234,6 @@ mod connect_v1 {
             public_key: String,
             created_at: u64,
             last_seen_at: Option<u64>,
-            chain: Vec<ChainEntry>,
         }
 
         #[derive(Debug, Deserialize)]
@@ -4247,6 +4255,7 @@ mod connect_v1 {
             plan: PlanView,
             devices: Vec<DeviceView>,
             group: Option<GroupRef>,
+            device_list: Vec<ListEntry>,
         }
 
         #[derive(Debug, Deserialize)]
@@ -4291,7 +4300,6 @@ mod connect_v1 {
             device_id: String,
             name: String,
             public_key: String,
-            chain: Vec<ChainEntry>,
         }
 
         #[derive(Debug, Deserialize)]
@@ -4301,6 +4309,7 @@ mod connect_v1 {
             account_id: String,
             confirmer: Confirmer,
             expires_at: u64,
+            device_list: Vec<ListEntry>,
         }
 
         #[derive(Debug, Deserialize)]
@@ -4326,6 +4335,7 @@ mod connect_v1 {
             device_name: String,
             platform: String,
             public_key: String,
+            signature: String,
             created_at: u64,
             expires_at: u64,
         }
@@ -4334,6 +4344,14 @@ mod connect_v1 {
         #[serde(deny_unknown_fields)]
         struct Confirm {
             public_key: String,
+            version: u64,
+            statement: String,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Revoke {
+            version: u64,
             statement: String,
         }
 
@@ -4393,6 +4411,7 @@ mod connect_v1 {
             recovery_key: String,
             signature: String,
             recovery_signature: String,
+            statement: String,
         }
 
         #[derive(Debug, Deserialize)]
@@ -4481,12 +4500,35 @@ mod connect_v1 {
             text.len() == 43 && b64u_decode(text).is_some_and(|key| key.len() == 32)
         }
 
-        fn chain_is_valid(chain: &[ChainEntry]) -> bool {
-            chain.len() <= 64
-                && chain.iter().all(|entry| {
-                    is_link_hash(&entry.link_hash)
-                        && is_public_key(&entry.confirmer_key)
-                        && is_signature(&entry.statement)
+        /// The form of a device list: versions from 1, a root without a signature first,
+        /// then `add` (with a link) and `remove` (without one), each signed; at most 256.
+        fn list_is_valid(list: &[ListEntry]) -> bool {
+            !list.is_empty()
+                && list.len() <= 256
+                && list.iter().enumerate().all(|(index, entry)| {
+                    let shape = match (index, entry.op.as_str()) {
+                        (0, "root") => {
+                            entry.signature.as_deref().is_some_and(is_signature)
+                                && entry.link_hash.is_none()
+                                && entry.name.as_deref().is_some_and(is_name)
+                                && entry.key == entry.by
+                        }
+                        (1.., "add") => {
+                            entry.link_hash.as_deref().is_some_and(is_link_hash)
+                                && entry.name.as_deref().is_some_and(is_name)
+                                && entry.signature.as_deref().is_some_and(is_signature)
+                        }
+                        (1.., "remove") => {
+                            entry.link_hash.is_none()
+                                && entry.name.is_none()
+                                && entry.signature.as_deref().is_some_and(is_signature)
+                        }
+                        _ => false,
+                    };
+                    entry.version == index as u64 + 1
+                        && shape
+                        && is_public_key(&entry.key)
+                        && is_public_key(&entry.by)
                 })
         }
 
@@ -4505,7 +4547,6 @@ mod connect_v1 {
                 && view
                     .last_seen_at
                     .is_none_or(|t| t.is_multiple_of(3600) && t >= view.created_at)
-                && chain_is_valid(&view.chain)
         }
 
         fn store_view(view: &VaultStoreView) -> bool {
@@ -4529,9 +4570,11 @@ mod connect_v1 {
             match example.name.as_str() {
                 "account_create" => {
                     let body: AccountCreate = strict(example);
+                    assert!(is_id(&body.account_id, "acc_"));
                     assert!(is_name(&body.name) && is_name(&body.device_name));
                     assert!(is_platform(&body.platform) && is_public_key(&body.public_key));
                     assert!(is_recovery_key(&body.recovery_key) && is_signature(&body.signature));
+                    assert!(is_signature(&body.statement));
                 }
                 "account_created" => {
                     let body: AccountCreated = strict(example);
@@ -4561,6 +4604,7 @@ mod connect_v1 {
                     assert!(is_id(&body.account_id, "acc_") && is_name(&body.name));
                     assert!(plan_view_is_valid(&body.plan));
                     assert!(body.devices.iter().all(device_view));
+                    assert!(list_is_valid(&body.device_list));
                     if let Some(group) = &body.group {
                         assert!(is_id(&group.group_id, "grp_"));
                         assert!(["family", "team"].contains(&group.kind.as_str()));
@@ -4594,7 +4638,7 @@ mod connect_v1 {
                     let body: JoinAnswer = strict(example);
                     assert!(is_id(&body.confirmer.device_id, "dev_"));
                     assert!(is_public_key(&body.confirmer.public_key));
-                    assert!(chain_is_valid(&body.confirmer.chain));
+                    assert!(list_is_valid(&body.device_list));
                 }
                 "join_cancel" => {
                     let body: JoinCancel = strict(example);
@@ -4611,16 +4655,22 @@ mod connect_v1 {
                         is_public_key(&p.public_key)
                             && is_platform(&p.platform)
                             && is_name(&p.device_name)
+                            && is_signature(&p.signature)
                             && p.created_at < p.expires_at
                     }));
                 }
                 "confirm" => {
                     let body: Confirm = strict(example);
                     assert!(is_public_key(&body.public_key) && is_signature(&body.statement));
+                    assert!(body.version >= 2);
                 }
                 "confirm_answer" => {
                     let body: DeviceView = strict(example);
-                    assert!(device_view(&body) && !body.chain.is_empty());
+                    assert!(device_view(&body));
+                }
+                "revoke" => {
+                    let body: Revoke = strict(example);
+                    assert!(is_signature(&body.statement) && body.version >= 2);
                 }
                 "revoke_answer" => {
                     let body: Revoked = strict(example);
@@ -4653,6 +4703,7 @@ mod connect_v1 {
                 "recover" => {
                     let body: Recover = strict(example);
                     assert!(is_recovery_key(&body.recovery_key) && is_signature(&body.signature));
+                    assert!(is_signature(&body.statement));
                     assert_eq!(
                         b64u_decode(&body.recovery_signature).map(|s| s.len()),
                         Some(64)
@@ -4729,7 +4780,7 @@ mod connect_v1 {
             nonce_b64u: String,
             messages: Vec<VectorMessage>,
             link: VectorLink,
-            device_b_chain: Vec<ChainEntry>,
+            device_list: VectorList,
             safety: VectorSafety,
             recovery: VectorRecovery,
             new_recovery: VectorNewRecovery,
@@ -4740,6 +4791,7 @@ mod connect_v1 {
         #[serde(deny_unknown_fields)]
         struct VectorDevice {
             device_id: String,
+            name: String,
             private_hex: String,
             public_hex: String,
             public_b64u: String,
@@ -4765,6 +4817,15 @@ mod connect_v1 {
             root: String,
             confirmer: String,
             fingerprint: String,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct VectorList {
+            root_message_b64u: String,
+            entries: Vec<ListEntry>,
+            hashes: Vec<String>,
+            live_at: std::collections::BTreeMap<String, Vec<String>>,
         }
 
         #[derive(Debug, Deserialize)]
@@ -4893,6 +4954,18 @@ mod connect_v1 {
         }
 
         #[cfg(feature = "vault")]
+        /// The message bytes of the vector `device_list_root`.
+        fn message_of_root(v: &Vectors) -> Vec<u8> {
+            b64u_decode(
+                &v.messages
+                    .iter()
+                    .find(|m| m.name == "device_list_root")
+                    .expect("the root message")
+                    .message_b64u,
+            )
+            .expect("message")
+        }
+
         fn message_signature<'a>(v: &'a Vectors, name: &str) -> &'a str {
             &v.messages
                 .iter()
@@ -4994,9 +5067,78 @@ mod connect_v1 {
                 let expected = match m.name.as_str() {
                     "account" => joined(&[m.tag.as_bytes(), origin, a64, rec64]),
                     "sign_in" => joined(&[m.tag.as_bytes(), origin, account, a64, nonce]),
-                    "join" | "join_cancel" | "device" => {
+                    // The join signs the device name of the joining device.
+                    "join" => joined(&[
+                        m.tag.as_bytes(),
+                        origin,
+                        account,
+                        link_hash.as_bytes(),
+                        b64,
+                        v.device_b.name.as_bytes(),
+                    ]),
+                    "join_cancel" => {
                         joined(&[m.tag.as_bytes(), origin, account, link_hash.as_bytes(), b64])
                     }
+                    "device_list_root" => joined(&[
+                        m.tag.as_bytes(),
+                        origin,
+                        account,
+                        b"1",
+                        b"-",
+                        b"root",
+                        a64,
+                        b"-",
+                        v.device_a.name.as_bytes(),
+                        a64,
+                    ]),
+                    "device_list_add" => joined(&[
+                        m.tag.as_bytes(),
+                        origin,
+                        account,
+                        b"2",
+                        v.device_list.hashes[0].as_bytes(),
+                        b"add",
+                        b64,
+                        link_hash.as_bytes(),
+                        v.device_b.name.as_bytes(),
+                        a64,
+                    ]),
+                    "device_list_remove" => joined(&[
+                        m.tag.as_bytes(),
+                        origin,
+                        account,
+                        b"3",
+                        v.device_list.hashes[1].as_bytes(),
+                        b"remove",
+                        b64,
+                        b"-",
+                        b"-",
+                        a64,
+                    ]),
+                    "device_list_member_root" => joined(&[
+                        m.tag.as_bytes(),
+                        origin,
+                        b"acc_m3n5p7q2rb",
+                        b"1",
+                        b"-",
+                        b"root",
+                        b64,
+                        b"-",
+                        v.device_b.name.as_bytes(),
+                        b64,
+                    ]),
+                    "device_list_recovery_root" => joined(&[
+                        m.tag.as_bytes(),
+                        origin,
+                        account,
+                        b"1",
+                        b"-",
+                        b"root",
+                        b64,
+                        b"-",
+                        b"MacBook Air",
+                        b64,
+                    ]),
                     "recover" => joined(&[m.tag.as_bytes(), origin, account, b64, new64]),
                     "brain_sign_in" => joined(&[
                         m.tag.as_bytes(),
@@ -5035,8 +5177,12 @@ mod connect_v1 {
                     "sign_in",
                     "join",
                     "join_cancel",
-                    "device",
+                    "device_list_root",
+                    "device_list_add",
+                    "device_list_remove",
                     "recover",
+                    "device_list_member_root",
+                    "device_list_recovery_root",
                     "brain_sign_in"
                 ]
             );
@@ -5048,23 +5194,72 @@ mod connect_v1 {
                     .expect("message")
             };
             assert_eq!(tag_of("join_cancel"), "apassy-connect join-cancel v1");
-            assert_eq!(tag_of("device"), "apassy-connect device v1");
+            assert_eq!(tag_of("device_list_add"), "apassy-connect device-list v1");
 
-            // The chain of device B: one statement of device A, the root.
-            assert_eq!(v.device_b_chain.len(), 1);
-            let entry = &v.device_b_chain[0];
-            assert_eq!(entry.link_hash, link_hash);
-            assert_eq!(entry.confirmer_key, v.device_a.public_b64u);
-            assert_eq!(entry.statement, message_signature(&v, "device"));
-            let statement = b64u_decode(&entry.statement).expect("statement");
-            let device = joined(&[
-                b"apassy-connect device v1",
+            // The device list: A is the root, A adds B, A removes B. Each hash is the
+            // SHA-256 of its message, and the next entry names it.
+            let list = &v.device_list;
+            assert!(list_is_valid(&list.entries));
+            let root = joined(&[
+                b"apassy-connect device-list v1",
                 origin,
                 account,
-                entry.link_hash.as_bytes(),
-                b64,
+                b"1",
+                b"-",
+                b"root",
+                a64,
+                b"-",
+                v.device_a.name.as_bytes(),
+                a64,
             ]);
-            assert!(ecdsa_verifies(&a, &device, &statement));
+            assert_eq!(b64u_decode(&list.root_message_b64u).expect("root"), root);
+            assert_eq!(root, message_of_root(&v));
+            assert_eq!(
+                list.entries[0].signature.as_deref(),
+                Some(message_signature(&v, "device_list_root"))
+            );
+            assert_eq!(
+                list.entries[0].name.as_deref(),
+                Some(v.device_a.name.as_str())
+            );
+            assert_eq!(
+                list.entries[1].name.as_deref(),
+                Some(v.device_b.name.as_str())
+            );
+            assert_eq!(list.entries[2].name, None);
+            let message_of = |name: &str| {
+                b64u_decode(
+                    &v.messages
+                        .iter()
+                        .find(|m| m.name == name)
+                        .expect("message")
+                        .message_b64u,
+                )
+                .expect("message")
+            };
+            let messages = [
+                root,
+                message_of("device_list_add"),
+                message_of("device_list_remove"),
+            ];
+            for (index, message) in messages.iter().enumerate() {
+                assert_eq!(list.hashes[index], b64u_encode(&sha256(message)));
+            }
+            assert_eq!(list.entries[1].key, v.device_b.public_b64u);
+            assert_eq!(
+                list.entries[1].link_hash.as_deref(),
+                Some(link_hash.as_str())
+            );
+            assert_eq!(
+                list.entries[1].signature.as_deref(),
+                Some(message_signature(&v, "device_list_add"))
+            );
+            assert_eq!(
+                list.entries[2].signature.as_deref(),
+                Some(message_signature(&v, "device_list_remove"))
+            );
+            assert_eq!(list.live_at["2"], ["device_a", "device_b"]);
+            assert_eq!(list.live_at["3"], ["device_a"]);
 
             // The recovery signature: the old recovery key over the recover message.
             let recover = joined(&[b"apassy-connect recover v1", origin, account, b64, new64]);
@@ -5236,10 +5431,19 @@ mod connect_v1 {
                 body("confirm")["public_key"],
                 v.device_b.public_b64u.as_str()
             );
-            assert_eq!(body("confirm")["statement"], signature("device").as_str());
             assert_eq!(
-                body("confirm_answer")["chain"][0]["statement"],
-                signature("device").as_str()
+                body("confirm")["statement"],
+                signature("device_list_add").as_str()
+            );
+            assert_eq!(body("confirm")["version"], 2);
+            assert_eq!(
+                body("revoke")["statement"],
+                signature("device_list_remove").as_str()
+            );
+            assert_eq!(body("revoke")["version"], 3);
+            assert_eq!(
+                body("account_view")["device_list"][1]["signature"],
+                signature("device_list_add").as_str()
             );
             assert_eq!(body("join_cancel")["link_hash"], v.link.link_hash.as_str());
             assert_eq!(

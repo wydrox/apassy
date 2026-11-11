@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::ConnectError;
-use super::trust::ChainEntry;
+use super::trust::ListEntry;
 use crate::sync::relay::{ApiError, call, call_without_busy_retries, json_request};
 use crate::sync::relay_http::Request;
 use crate::sync::{RelayUrl, SyncError};
@@ -68,7 +68,9 @@ pub(super) fn connect_error(error: ApiError) -> ConnectError {
             retry_after,
         } => match (status, code.as_str()) {
             (401, _) => ConnectError::Unauthenticated,
-            (403, "device_removed") => ConnectError::Revoked,
+            // `403 device_removed` is a removal only as the answer of the token call to a
+            // signature of this device ([`ConnectClient::token`]): from any other route it is
+            // a refusal like any other.
             (403, "join_pending") => ConnectError::JoinPending,
             (403, "join_refused") => ConnectError::JoinRefused,
             (403, "plan_required") => ConnectError::PlanRequired,
@@ -78,6 +80,7 @@ pub(super) fn connect_error(error: ApiError) -> ConnectError {
             (403, "forbidden") => ConnectError::Forbidden,
             (404 | 405, _) => ConnectError::NotFound,
             (409, "conflict") => ConnectError::Conflict,
+            (409, "account_id_taken") => ConnectError::AccountIdTaken,
             (409, "seat_limit") => ConnectError::SeatLimit,
             (429, _) => ConnectError::RateLimited(retry_after.unwrap_or(60).max(1)),
             _ => ConnectError::Refused { status, code },
@@ -110,6 +113,8 @@ pub struct TunnelNodeView {
 
 #[derive(Serialize)]
 pub(super) struct CreateAccount<'a> {
+    /// The id of the new account, made by this device: the root entry names it.
+    pub account_id: &'a str,
     pub name: &'a str,
     pub device_name: &'a str,
     pub platform: &'a str,
@@ -117,6 +122,9 @@ pub(super) struct CreateAccount<'a> {
     /// b64u of the Ed25519 public key of the recovery code.
     pub recovery_key: &'a str,
     pub signature: &'a str,
+    /// The root entry of the device list (version 1), signed by the new device key over
+    /// its name.
+    pub statement: &'a str,
 }
 
 #[derive(Serialize)]
@@ -142,6 +150,16 @@ struct LinkRequest<'a> {
 #[derive(Serialize)]
 struct ConfirmRequest<'a> {
     public_key: &'a str,
+    /// The version of the `add` entry of the device list.
+    version: u64,
+    statement: &'a str,
+}
+
+/// The body of `DELETE /v1/account/devices/{device_id}`: the `remove` entry of the device
+/// list.
+#[derive(Serialize)]
+struct RevokeRequest<'a> {
+    version: u64,
     statement: &'a str,
 }
 
@@ -188,6 +206,9 @@ pub(super) struct RecoverBody<'a> {
     pub signature: &'a str,
     /// The old recovery key's Ed25519 signature over the same message.
     pub recovery_signature: &'a str,
+    /// The root entry of the new device list (version 1), signed by the new device key
+    /// over its name.
+    pub statement: &'a str,
 }
 
 /// `POST /v1/account/checkout` (connect-billing-v1 section 4): `people` only for Family,
@@ -305,15 +326,27 @@ pub struct DeviceView {
     /// Rounded down to the hour, or `None`.
     #[serde(default)]
     pub last_seen_at: Option<u64>,
-    /// The statements that added this device, from its own key to the account root
-    /// ([`super::trust`]). Empty for the root.
-    #[serde(default)]
-    pub chain: Vec<ChainEntry>,
-    /// Set by this device, never by Connect: the chain of the device verified against the
-    /// trust store of this device ([`super::ConnectAccount::view`]). An unverified device
-    /// is not an account device for any decision.
+    /// Set by this device, never by Connect: the key is a device of the signed device list
+    /// that this device verified ([`super::ConnectAccount::view`]). An unverified device is
+    /// not an account device for any decision.
     #[serde(skip)]
     pub verified: bool,
+    /// Set by this device for a verified device: the name that the signed device list
+    /// holds for its key (the name that its `root` or `add` signed). Show it, not
+    /// [`Self::name`], wherever the owner decides about the device.
+    #[serde(skip)]
+    pub signed_name: Option<String>,
+    /// Set by this device: the short fingerprint of [`Self::public_key`]
+    /// (`super::key_fingerprint`), empty for a key that is not a point.
+    #[serde(skip)]
+    pub fingerprint: String,
+}
+
+impl DeviceView {
+    /// The name to show: the signed name of a verified device, else the name of Connect.
+    pub fn shown_name(&self) -> &str {
+        self.signed_name.as_deref().unwrap_or(&self.name)
+    }
 }
 
 /// The group of the account (connect-billing-v1).
@@ -341,6 +374,14 @@ pub struct AccountView {
     pub devices: Vec<DeviceView>,
     #[serde(default)]
     pub group: Option<GroupView>,
+    /// The signed device list, from version 1 ([`super::trust`]).
+    #[serde(default)]
+    pub device_list: Vec<ListEntry>,
+    /// Set by this device, never by Connect: `device_list` verified from the pinned root and
+    /// went on from the pinned version. When it is false, no device of the view is
+    /// verified, and the trust store keeps what it had.
+    #[serde(skip)]
+    pub list_verified: bool,
 }
 
 /// `DELETE /v1/account`.
@@ -366,18 +407,20 @@ pub(super) struct PendingView {
     pub device_name: String,
     pub platform: String,
     pub public_key: String,
+    /// The joining key's signature over the `apassy-connect join v1` message, which names
+    /// `device_name`. A join whose signature does not verify is not offered.
+    #[serde(default)]
+    pub signature: String,
     pub created_at: u64,
     pub expires_at: u64,
 }
 
-/// The device that confirms a join, with its chain.
+/// The device that confirms a join.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub(super) struct Confirmer {
     pub device_id: String,
     pub name: String,
     pub public_key: String,
-    #[serde(default)]
-    pub chain: Vec<ChainEntry>,
 }
 
 /// `POST /v1/account/devices/join`.
@@ -387,6 +430,9 @@ pub(super) struct JoinAnswer {
     pub account_id: String,
     pub confirmer: Confirmer,
     pub expires_at: u64,
+    /// The signed device list of the account, from version 1.
+    #[serde(default)]
+    pub device_list: Vec<ListEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -685,11 +731,18 @@ impl ConnectClient {
     }
 
     /// The token call never repeats a body after `503 busy`: the nonce of a refused body
-    /// stays unused, and the sign-in takes a fresh challenge instead.
+    /// stays unused, and the sign-in takes a fresh challenge instead. It is the only call
+    /// whose `403 device_removed` is [`ConnectError::Revoked`]: Connect gives it to a valid
+    /// signature of this device.
     pub(super) fn token(&self, body: &TokenRequest<'_>) -> Result<TokenAnswer, ConnectError> {
         let mut request = json_request("POST", "/v1/account/token", None, body);
         request.deadline = Some(Instant::now() + CALL_DEADLINE);
-        call_without_busy_retries(&self.url, &request).map_err(connect_error)
+        call_without_busy_retries(&self.url, &request).map_err(|error| match error {
+            ApiError::Relay {
+                status: 403, code, ..
+            } if code == "device_removed" => ConnectError::Revoked,
+            other => connect_error(other),
+        })
     }
 
     pub(super) fn join(&self, body: &JoinBody<'_>) -> Result<JoinAnswer, ConnectError> {
@@ -770,13 +823,14 @@ impl ConnectClient {
         token: &str,
         join_id: u64,
         public_key: &str,
-        statement: &str,
+        (version, statement): (u64, &str),
     ) -> Result<DeviceView, ConnectError> {
         self.post(
             &format!("/v1/account/devices/pending/{join_id}/confirm"),
             Some(token),
             &ConfirmRequest {
                 public_key,
+                version,
                 statement,
             },
         )
@@ -794,14 +848,16 @@ impl ConnectClient {
         &self,
         token: &str,
         device_id: &str,
+        (version, statement): (u64, &str),
     ) -> Result<RevokeAnswer, ConnectError> {
         if !super::words::valid_device_id(device_id) {
             return Err(ConnectError::Invalid);
         }
-        self.send(Request::new(
+        self.send(json_request(
             "DELETE",
-            format!("/v1/account/devices/{device_id}"),
+            &format!("/v1/account/devices/{device_id}"),
             Some(token),
+            &RevokeRequest { version, statement },
         ))
     }
 

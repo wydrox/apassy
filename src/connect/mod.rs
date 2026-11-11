@@ -7,8 +7,8 @@
 //!   messages of section 5 ([`SIGNING_TAGS`]) and refuses any other.
 //! - [`words`]: the ids, the link code with its key fingerprint and its hash, the six
 //!   safety words, and the recovery code with its Ed25519 key.
-//! - [`trust`]: the chains of device statements and their check against the trust store
-//!   of this device: an account device is one that this device verified.
+//! - [`trust`]: the signed device list and its check against the pin of this device: an
+//!   account device is one that the list that this device verified holds.
 //! - [`client`]: one call for each route of the contract, over the relay HTTP client of
 //!   the app (`https://` anywhere, `http://` on loopback only).
 //! - [`account`]: the account of this Mac. Creation with the device key and a recovery
@@ -43,7 +43,8 @@ use std::fmt;
 pub use account::{
     AccountState, Clock, ConnectAccount, DeviceLink, Forgotten, JoinPoll, JoinRequest, PendingJoin,
     RevokeOutcome, Sleeper, account_file, drop_account_rows, drop_stale_account_rows,
-    forget_this_device, group_invite_code, signer_policy,
+    forget_old_account_file, forget_this_device, group_invite_code, is_old_account_file,
+    signer_policy,
 };
 pub use client::{
     AccountCreated, AccountDeleted, AccountView, CheckoutAnswer, CheckoutRequest, ConnectClient,
@@ -58,10 +59,10 @@ pub use device_key::{
 pub use entitlement::{Entitlement, EntitlementClaims, EntitlementError, EntitlementKey, Feature};
 pub use key_file::{FileKeyStore, KEYRING_WARNING, key_file, platform_store};
 pub use session::{AccountSession, AccountSlot, Follow, OpenTicket, SessionState};
-pub use trust::ChainEntry;
+pub use trust::ListEntry;
 pub use words::{
-    LinkCode, RecoveryCode, RecoveryKey, link_fingerprint, link_hash, safety_words,
-    same_safety_words,
+    LinkCode, RecoveryCode, RecoveryKey, key_fingerprint, link_fingerprint, link_hash,
+    new_account_id, safety_words, same_safety_words,
 };
 
 use crate::broker::approvals::ProofRefusal;
@@ -122,6 +123,13 @@ pub enum ConnectError {
     NotFound,
     /// `409 conflict`.
     Conflict,
+    /// `409 account_id_taken`: an account creation names an id that Connect holds or held
+    /// already. The device makes a new id and signs again.
+    AccountIdTaken,
+    /// The account was made, but the recovery code that its creation made is no longer in
+    /// memory (Apassy was closed while the creation waited for Connect): it was never
+    /// shown. The account works; a second device of the account keeps it reachable.
+    RecoveryCodeNotShown,
     /// `409 seat_limit`: people or seats below the confirmed members, or above the
     /// maximum of the plan (connect-billing-v1 section 6).
     SeatLimit,
@@ -151,13 +159,18 @@ pub enum ConnectError {
     /// The safety words of a join are not those of its link and keys.
     WordsMismatch,
     /// The device that Connect names for a link code is not the one of the code: its key
-    /// or the root of its chain does not give the fingerprint of the code.
+    /// or the root of the device list does not give the fingerprint of the code, or the
+    /// list does not verify or does not hold it.
     LinkMismatch,
-    /// This device did not verify that device as a device of the account (its chain of
-    /// statements does not reach the account root, or its key left the account).
+    /// This device did not verify that device as a device of the account (the signed
+    /// device list that this device verified does not hold its key).
     NotVerified,
     /// This Mac already has a Connect account.
     AccountExists,
+    /// The account file is from an earlier version of Apassy that kept no signed device
+    /// list: this device must join its account again, after the owner forgets the
+    /// account here.
+    OldAccountFile,
     /// This Mac has no Connect account.
     NoAccount,
     /// A value of a bad shape was given.
@@ -198,6 +211,14 @@ impl fmt::Display for ConnectError {
             Self::Conflict => {
                 "Apassy Connect has a different state for this. Reload and try again."
             }
+            Self::AccountIdTaken => {
+                "Apassy Connect holds that account id already. Apassy makes a new one; try again."
+            }
+            Self::RecoveryCodeNotShown => concat!(
+                "Your Connect account is made, but Apassy was closed before it could show its recovery code, so it was not shown. Add a second device in Settings › Connect › Add a Device…, so that you can reach the account from it if this ",
+                crate::computer!(),
+                " is lost."
+            ),
             Self::SeatLimit => {
                 "That number is below the members of your family or team, or above the most the plan allows. Remove members first, or choose another number."
             }
@@ -247,6 +268,13 @@ impl fmt::Display for ConnectError {
                 "This ",
                 crate::computer_cap!(),
                 " already has an Apassy Connect account."
+            ),
+            Self::OldAccountFile => concat!(
+                "This ",
+                crate::computer!(),
+                " must join its Apassy Connect account again: its account file is from an earlier version of Apassy. Forget the account on this ",
+                crate::computer!(),
+                ", then join it again from another device of the account."
             ),
             Self::NoAccount => concat!(
                 "This ",

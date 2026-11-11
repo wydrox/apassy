@@ -99,6 +99,18 @@ pub fn start_with_config(edit: impl FnOnce(&mut RelayConfig)) -> Connect {
     }
 }
 
+/// A new account id as a device makes it: `acc_` and 10 random characters of `a-z2-7`.
+pub fn new_account_id() -> String {
+    const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+    let mut bytes = [0u8; 10];
+    getrandom::fill(&mut bytes).unwrap();
+    let id: String = bytes
+        .iter()
+        .map(|byte| char::from(ALPHABET[usize::from(byte & 31)]))
+        .collect();
+    format!("acc_{id}")
+}
+
 pub fn now() -> u64 {
     apassy_relay::now_unix()
 }
@@ -190,7 +202,18 @@ impl Connect {
 
     /// A new account with one Mac, signed in.
     pub fn account(&self, name: &str) -> Dev {
-        let key = DeviceKey::generate().unwrap();
+        self.try_account(name, &new_account_id(), DeviceKey::generate().unwrap())
+            .unwrap_or_else(|(status, error)| panic!("POST /v1/account: {status} {error}"))
+    }
+
+    /// `POST /v1/account` of a new account with the id `account` and the device key `key`:
+    /// the device, signed in, or the status and the body of the refusal.
+    pub fn try_account(
+        &self,
+        name: &str,
+        account: &str,
+        key: DeviceKey,
+    ) -> Result<Dev, (u16, Value)> {
         let public_key = key.public_key_b64();
         let recovery_key = device::RecoveryKey::from_code(&[9u8; 16])
             .unwrap()
@@ -202,16 +225,36 @@ impl Connect {
                 &recovery_key,
             ))
             .unwrap();
-        let made = self.ok(
+        // The device makes the account id and signs the root entry of the device list.
+        let device_name = format!("{name}'s Mac");
+        let statement = key
+            .sign(&device::account_list_message(
+                self.origin(),
+                account,
+                1,
+                device::LIST_NONE,
+                "root",
+                &public_key,
+                device::LIST_NONE,
+                &device_name,
+                &public_key,
+            ))
+            .unwrap();
+        let (status, answer) = self.call(
             "POST",
             "/v1/account",
             None,
             Some(
-                &json!({"name": name, "device_name": format!("{name}'s Mac"), "platform": "mac",
-                         "public_key": public_key, "recovery_key": recovery_key,
-                         "signature": encode_b64(&signature)}),
+                &json!({"account_id": account, "name": name, "device_name": device_name,
+                         "platform": "mac", "public_key": public_key,
+                         "recovery_key": recovery_key, "signature": encode_b64(&signature),
+                         "statement": encode_b64(&statement)}),
             ),
         );
+        if status != 200 {
+            return Err((status, answer));
+        }
+        let made = &answer["result"];
         let mut dev = Dev {
             key,
             account: made["account_id"].as_str().unwrap().to_string(),
@@ -219,7 +262,7 @@ impl Connect {
             token: String::new(),
         };
         dev.token = self.sign_in(&dev);
-        dev
+        Ok(dev)
     }
 
     /// The account token of `dev`.

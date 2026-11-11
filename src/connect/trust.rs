@@ -1,42 +1,87 @@
-//! The device list of a Connect account has a cryptographic root (contract
-//! connect-account-v1, the device statements): every device but the first one was added
-//! by a statement of the device that confirmed it, and this device checks the statements
-//! itself. Connect only carries them.
+//! The device list of a Connect account is a signed list with a cryptographic root
+//! (contract connect-account-v1 section 7.5): this device checks it itself, and Connect
+//! only carries it.
 //!
-//! - The **chain** of a device ([`ChainEntry`]): entry `i` is the statement that added key
-//!   `K_i` (`K_0` is the device's own key), signed by `K_{i+1}`, the entry's
-//!   `confirmer_key`, over `apassy-connect device v1` (origin, account id, link hash,
-//!   `K_i`). The root key of a device is the last `confirmer_key`, or its own key for an
-//!   empty chain (the device that made the account, or recovered it).
-//! - The **trust store** of this device (in the account file): the pinned root, the keys
-//!   it knows as devices of the account, and the keys it saw leave the account.
-//! - [`verify_devices`]: a device is verified when its chain ends at the pinned root, its
-//!   key never left the account, and it is known here, or it was confirmed by a device
-//!   that is verified. [`learn`] then updates the trust store from the list.
+//! - The **list** ([`ListEntry`]): version 1 is the root key (the device that made the
+//!   account, or the device of the last recovery), signed by that key over its own name.
+//!   Each later version is one change, an `add` (through a link, with the name of the new
+//!   device) or a `remove`, signed by a device that the list holds at the version before,
+//!   over `apassy-connect device-list v1` with the hash of the entry before
+//!   (`super::device_key::list_message`). So every change names the whole history before
+//!   it, a name stays with the key it was signed for, and a device confirmed by a device
+//!   that left later stays a device: its `add` precedes the `remove`. A key that was in the
+//!   list is never added again, and an `add` comes only while every device can still be
+//!   removed before the list is full ([`MAX_ADD_VERSION`]).
+//! - The **pin** of this device (in the account file): the root, and the highest version
+//!   and the hash of the list that it verified. [`verify_list`] takes a list only when it
+//!   starts at the pinned root and every entry verifies; [`Pin::accepts`] takes it only when
+//!   it is not older than the pin and holds the pinned entry at its version (no fork).
+//! - [`learn`] then moves the known keys (the devices of the list at the pin) and the keys
+//!   that this device knew and that left.
 //!
 //! Every key taken from Connect must be a point of P-256 ([`valid_key`]).
 
 use serde::Deserialize;
 
-use super::device_key::device_message;
+use super::device_key::{LIST_NONE, list_hash, list_message};
 use crate::sync::{decode_b64u, encode_b64u, verify_signature};
 
-/// The most entries of a chain.
-pub const MAX_CHAIN: usize = 64;
+/// The most entries of a device list (the relay's limit).
+pub const MAX_LIST: usize = 256;
+/// The most live devices of an account (contract section 13).
+pub const MAX_LIVE: usize = 10;
+/// The highest version of an `add`: the list keeps room to remove every live device
+/// (also the last one, by itself) before it is full, and a recovery starts a new list.
+pub const MAX_ADD_VERSION: u64 = (MAX_LIST - MAX_LIVE) as u64;
+/// The list is nearly full when this many versions or fewer are left for an `add`: the
+/// app says so ahead of time.
+pub const ADDS_LEFT_WARNING: u64 = 20;
+/// The most bytes of a device name (section 2).
+const MAX_NAME_BYTES: usize = 64;
 /// The most keys of the known devices in the trust store.
 pub const MAX_KNOWN: usize = 64;
-/// The most keys of devices that left the account in the trust store.
-pub const MAX_REVOKED: usize = 128;
+/// The most keys of devices that left the account in the trust store. A key that drops
+/// out signs nothing here any more: that is the safe side.
+pub const MAX_LEFT: usize = 128;
 
-/// One statement of a chain, as Connect carries it.
+/// One entry of the device list, as Connect carries it.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct ChainEntry {
-    /// The link hash of the link through which the key was added.
-    pub link_hash: String,
-    /// b64u of the key of the device that confirmed, which signed the statement.
-    pub confirmer_key: String,
-    /// b64u of the DER signature over the `apassy-connect device v1` message.
-    pub statement: String,
+pub struct ListEntry {
+    pub version: u64,
+    /// `root`, `add`, or `remove`.
+    pub op: String,
+    /// b64u of the key that the entry adds or removes (the root key for `root`).
+    pub key: String,
+    /// The link of an `add`, else `None`.
+    #[serde(default)]
+    pub link_hash: Option<String>,
+    /// The device name that a `root` or an `add` signed, else `None`.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// b64u of the key that signed the entry (the root key for `root`).
+    pub by: String,
+    /// b64u of the DER signature.
+    #[serde(default)]
+    pub signature: Option<String>,
+}
+
+/// The canonical form of a person's name or a device name (section 2): trimmed of white
+/// space, 1 to 64 bytes of UTF-8, no control character (so no NUL, the separator of the
+/// signed messages), and never `-` (the placeholder of the device-list message). `None`
+/// for any other text. A device signs, sends, and compares only this form; Connect keeps
+/// the same form.
+pub fn canonical_name(text: &str) -> Option<&str> {
+    let name = text.trim();
+    (!name.is_empty()
+        && name.len() <= MAX_NAME_BYTES
+        && name != LIST_NONE
+        && !name.chars().any(char::is_control))
+    .then_some(name)
+}
+
+/// A name that is already in its canonical form ([`canonical_name`]).
+pub fn valid_name(name: &str) -> bool {
+    canonical_name(name) == Some(name)
 }
 
 /// Whether `bytes` is a P-256 public key in X9.63 uncompressed form whose point is on the
@@ -55,144 +100,227 @@ fn valid_link_hash(text: &str) -> bool {
     decode_b64u(text).is_some_and(|hash| hash.len() == 32)
 }
 
-/// The root key of the device with `public_key` (b64u) when every statement of `chain`
-/// verifies for `origin` and `account_id`. `None` for a chain of more than
-/// [`MAX_CHAIN`] entries, a key that is not a point, or a statement that does not verify.
-pub fn chain_root(
+/// A list hash: b64u of 32 bytes (43 characters).
+pub fn valid_list_hash(text: &str) -> bool {
+    text.len() == 43 && valid_link_hash(text)
+}
+
+/// A device list that verified from its root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Verified {
+    /// The version of its head.
+    pub version: u64,
+    /// The list hash of each version, from version 1.
+    pub hashes: Vec<String>,
+    /// The devices of the list at its head (X9.63), in the order they were added.
+    pub live: Vec<Vec<u8>>,
+    /// The name that each device of [`Self::live`] was signed with (the same order).
+    pub names: Vec<String>,
+    /// For each device of [`Self::live`], the key that signed its entry: itself for the
+    /// root, the confirming device for an `add`.
+    pub added_by: Vec<Vec<u8>>,
+    /// The link hash of each `add` of [`Self::live`] (`None` for the root).
+    pub links: Vec<Option<String>>,
+    /// The keys that the list removed, in the order of their removal: each was a device of
+    /// the account before.
+    pub removed: Vec<Vec<u8>>,
+    /// The name that each key of [`Self::removed`] was signed with in its `root` or `add`
+    /// (the same order).
+    pub removed_names: Vec<String>,
+}
+
+impl Verified {
+    /// The list hash of its head.
+    pub fn head(&self) -> &str {
+        self.hashes.last().map_or("", String::as_str)
+    }
+
+    /// The signed name of the live device `key`.
+    pub fn name_of(&self, key: &[u8]) -> Option<&str> {
+        self.position(key).map(|index| self.names[index].as_str())
+    }
+
+    /// The signed name of `key` when the list removed it: the name of its `root` or `add`.
+    pub fn removed_name(&self, key: &[u8]) -> Option<&str> {
+        self.removed
+            .iter()
+            .position(|held| held == key)
+            .map(|index| self.removed_names[index].as_str())
+    }
+
+    /// Whether `key` is a live device that `by` added with the link `link_hash`.
+    pub fn added(&self, key: &[u8], by: &[u8], link_hash: &str) -> bool {
+        self.position(key).is_some_and(|index| {
+            self.added_by[index] == by && self.links[index].as_deref() == Some(link_hash)
+        })
+    }
+
+    fn position(&self, key: &[u8]) -> Option<usize> {
+        self.live.iter().position(|held| held == key)
+    }
+}
+
+/// The list `entries` of `account_id` at `origin` when it starts at `root` (X9.63) and
+/// each entry verifies: version 1 is the root, signed by itself over its name; each later
+/// entry is signed by a device of the list at the version before, over its message with
+/// the hash of the entry before; an `add` names a link, a name, and a key that was never
+/// in the list, at most at [`MAX_ADD_VERSION`]; a `remove` names a key that the list holds.
+/// `None` for anything else: another root, a gap, a bad signature, a bad name, a key that
+/// is not a point, a list of more than [`MAX_LIST`] entries.
+pub fn verify_list(
     origin: &str,
     account_id: &str,
-    public_key: &str,
-    chain: &[ChainEntry],
-) -> Option<Vec<u8>> {
-    if chain.len() > MAX_CHAIN {
+    root: &[u8],
+    entries: &[ListEntry],
+) -> Option<Verified> {
+    if entries.is_empty() || entries.len() > MAX_LIST {
         return None;
     }
-    let mut key = point(public_key)?;
-    for entry in chain {
-        let confirmer = point(&entry.confirmer_key)?;
-        let statement = decode_b64u(&entry.statement)?;
-        if !valid_link_hash(&entry.link_hash) {
+    let mut hashes: Vec<String> = Vec::with_capacity(entries.len());
+    let mut list = Verified {
+        version: entries.len() as u64,
+        hashes: Vec::new(),
+        live: Vec::new(),
+        names: Vec::new(),
+        added_by: Vec::new(),
+        links: Vec::new(),
+        removed: Vec::new(),
+        removed_names: Vec::new(),
+    };
+    // Every key that was in the list: none is added again.
+    let mut ever: Vec<Vec<u8>> = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        let version = index as u64 + 1;
+        if entry.version != version {
             return None;
         }
-        let message = device_message(origin, account_id, &entry.link_hash, &encode_b64u(&key));
-        if !verify_signature(&confirmer, &message, &statement) {
-            return None;
-        }
-        key = confirmer;
-    }
-    Some(key)
-}
-
-/// One device of a list, as [`verify_devices`] reads it.
-#[derive(Debug, Clone, Copy)]
-pub struct Listed<'a> {
-    pub public_key: &'a str,
-    pub chain: &'a [ChainEntry],
-}
-
-/// What this device trusts: the pinned root, the known keys, and the keys that left the
-/// account (X9.63 each).
-#[derive(Debug, Clone, Copy)]
-pub struct Trust<'a> {
-    pub root: &'a [u8],
-    pub known: &'a [Vec<u8>],
-    pub revoked: &'a [Vec<u8>],
-}
-
-/// Which devices of `list` are verified, in the order of the list:
-///
-/// 1. A device is chain-valid when its chain verifies and ends at the pinned root.
-/// 2. The verified set starts with the chain-valid devices whose key never left the
-///    account and that are known here (or are the root). A chain-valid device whose key
-///    never left the account joins the set when the first statement of its chain was
-///    signed by a device of the set; this repeats until nothing changes.
-pub fn verify_devices(
-    origin: &str,
-    account_id: &str,
-    list: &[Listed<'_>],
-    trust: Trust<'_>,
-) -> Vec<bool> {
-    let keys: Vec<Option<Vec<u8>>> = list.iter().map(|device| point(device.public_key)).collect();
-    let candidate: Vec<bool> = list
-        .iter()
-        .zip(&keys)
-        .map(|(device, key)| {
-            key.as_ref().is_some_and(|key| {
-                !trust.revoked.contains(key)
-                    && chain_root(origin, account_id, device.public_key, device.chain)
-                        .is_some_and(|root| root == trust.root)
-            })
-        })
-        .collect();
-    let mut verified: Vec<bool> = keys
-        .iter()
-        .zip(&candidate)
-        .map(|(key, candidate)| {
-            *candidate
-                && key
-                    .as_ref()
-                    .is_some_and(|key| key == trust.root || trust.known.contains(key))
-        })
-        .collect();
-    loop {
-        let mut changed = false;
-        for (index, device) in list.iter().enumerate() {
-            if verified[index] || !candidate[index] {
-                continue;
+        let key = point(&entry.key)?;
+        let by = point(&entry.by)?;
+        let previous = hashes.last().map_or(LIST_NONE, String::as_str);
+        let link_hash = entry.link_hash.as_deref();
+        let name = entry.name.as_deref();
+        let message = list_message(
+            origin,
+            account_id,
+            version,
+            previous,
+            &entry.op,
+            &entry.key,
+            link_hash.unwrap_or(LIST_NONE),
+            name.unwrap_or(LIST_NONE),
+            &entry.by,
+        );
+        let signature = decode_b64u(entry.signature.as_deref()?)?;
+        if version == 1 {
+            // The root: the key that this device pinned, signed by itself over its name.
+            // Its authority is the pin; the signature binds its name.
+            let name = name.filter(|name| valid_name(name))?;
+            if entry.op != "root"
+                || key != root
+                || by != root
+                || link_hash.is_some()
+                || !verify_signature(&by, &message, &signature)
+            {
+                return None;
             }
-            let Some(confirmer) = device
-                .chain
-                .first()
-                .and_then(|entry| point(&entry.confirmer_key))
-            else {
-                continue;
-            };
-            let by_verified = keys
-                .iter()
-                .zip(&verified)
-                .any(|(key, verified)| *verified && key.as_ref() == Some(&confirmer));
-            if by_verified {
-                verified[index] = true;
-                changed = true;
+            list.names.push(name.to_owned());
+            list.added_by.push(key.clone());
+            list.links.push(None);
+            ever.push(key.clone());
+            list.live.push(key);
+        } else {
+            if !list.live.contains(&by) || !verify_signature(&by, &message, &signature) {
+                return None;
+            }
+            match (entry.op.as_str(), link_hash, name) {
+                ("add", Some(link), Some(name))
+                    if valid_link_hash(link)
+                        && valid_name(name)
+                        && version <= MAX_ADD_VERSION
+                        && !ever.contains(&key) =>
+                {
+                    if list.live.len() >= MAX_KNOWN {
+                        return None;
+                    }
+                    list.names.push(name.to_owned());
+                    list.added_by.push(by);
+                    list.links.push(Some(link.to_owned()));
+                    ever.push(key.clone());
+                    list.live.push(key);
+                }
+                ("remove", None, None) if list.live.contains(&key) => {
+                    let at = list.live.iter().position(|held| *held == key)?;
+                    list.live.remove(at);
+                    let name = list.names.remove(at);
+                    list.added_by.remove(at);
+                    list.links.remove(at);
+                    list.removed.push(key);
+                    list.removed_names.push(name);
+                }
+                _ => return None,
             }
         }
-        if !changed {
-            return verified;
-        }
+        hashes.push(list_hash(&message));
+    }
+    list.hashes = hashes;
+    Some(list)
+}
+
+/// What this device pinned of the list: the version and the hash of the newest list that
+/// it verified.
+#[derive(Debug, Clone, Copy)]
+pub struct Pin<'a> {
+    pub version: u64,
+    pub head: &'a str,
+}
+
+impl Pin<'_> {
+    /// Whether `list` goes on from this pin: not older, and its entry at the pinned version
+    /// is the pinned one. An older list (a rollback) or another history (a fork) is not
+    /// taken.
+    pub fn accepts(&self, list: &Verified) -> bool {
+        self.version >= 1
+            && list.version >= self.version
+            && usize::try_from(self.version - 1)
+                .ok()
+                .and_then(|index| list.hashes.get(index))
+                .is_some_and(|hash| hash == self.head)
     }
 }
 
-/// Update the trust store after a list: the keys of the verified devices are known, and
-/// every known key that is not among them (except `own`, the key of this device) moves to
-/// the keys that left the account. Returns whether anything changed.
+/// Update the trust store after a list that the pin accepts: the known keys become the
+/// devices of the list (`live`), and every key that was known and is not among them moves
+/// to the keys that left, and so does every key that the list removed (`removed`), also one
+/// that this device never knew as a device (at most [`MAX_LEFT`], the oldest first out). A
+/// key that is a device again leaves `left`. Returns whether anything changed.
 pub fn learn(
     known: &mut Vec<Vec<u8>>,
-    revoked: &mut Vec<Vec<u8>>,
-    own: &[u8],
-    verified_keys: &[Vec<u8>],
+    left: &mut Vec<Vec<u8>>,
+    live: &[Vec<u8>],
+    removed: &[Vec<u8>],
 ) -> bool {
-    let known_before = known.clone();
-    let mut next: Vec<Vec<u8>> = Vec::with_capacity(verified_keys.len() + 1);
-    if known.iter().any(|key| key == own) {
-        next.push(own.to_vec());
-    }
-    for key in verified_keys {
-        if !next.contains(key) && next.len() < MAX_KNOWN {
-            next.push(key.clone());
+    let before = (known.clone(), left.clone());
+    for key in known.iter().chain(removed) {
+        if !live.contains(key) && !left.contains(key) {
+            left.push(key.clone());
         }
     }
-    for key in known.iter() {
-        if !next.contains(key) && !revoked.contains(key) {
-            revoked.push(key.clone());
-        }
+    left.retain(|key| !live.contains(key));
+    if left.len() > MAX_LEFT {
+        let extra = left.len() - MAX_LEFT;
+        left.drain(..extra);
     }
-    if revoked.len() > MAX_REVOKED {
-        let extra = revoked.len() - MAX_REVOKED;
-        revoked.drain(..extra);
-    }
-    // A key that moved to the keys that left is gone from the known keys too.
-    *known = next;
-    *known != known_before
+    *known = live.iter().take(MAX_KNOWN).cloned().collect();
+    (known.clone(), left.clone()) != before
+}
+
+/// The list hash of the entry of version 1 of a list with `root` (X9.63) named `name`:
+/// what a device that makes or recovers an account pins.
+pub fn root_hash(origin: &str, account_id: &str, root: &[u8], name: &str) -> String {
+    let key = encode_b64u(root);
+    list_hash(&list_message(
+        origin, account_id, 1, LIST_NONE, "root", &key, LIST_NONE, name, &key,
+    ))
 }
 
 #[cfg(test)]
@@ -207,59 +335,248 @@ mod tests {
         DeviceKey::generate().unwrap()
     }
 
-    fn hash(seed: u8) -> String {
-        encode_b64u(&[seed; 32])
-    }
-
-    /// The statement by `confirmer` that adds `added` through the link `seed`.
-    fn statement(confirmer: &DeviceKey, added: &DeviceKey, seed: u8) -> ChainEntry {
-        let message = device_message(
-            ORIGIN,
-            ACCOUNT,
-            &hash(seed),
-            &encode_b64u(added.public_key()),
-        );
-        ChainEntry {
-            link_hash: hash(seed),
-            confirmer_key: encode_b64u(confirmer.public_key()),
-            statement: encode_b64u(&confirmer.sign(&message).unwrap()),
-        }
-    }
-
     fn b64(key: &DeviceKey) -> String {
         encode_b64u(key.public_key())
     }
 
+    fn link(seed: u8) -> String {
+        encode_b64u(&[seed; 32])
+    }
+
+    /// A list under construction, as a relay would keep it.
+    struct List {
+        entries: Vec<ListEntry>,
+        hashes: Vec<String>,
+    }
+
+    impl List {
+        fn new(root: &DeviceKey) -> Self {
+            let mut list = Self {
+                entries: Vec::new(),
+                hashes: Vec::new(),
+            };
+            list.change(root, "root", root, None, Some("Synthetic root"));
+            assert_eq!(
+                list.hashes[0],
+                root_hash(ORIGIN, ACCOUNT, root.public_key(), "Synthetic root")
+            );
+            list
+        }
+
+        fn change(
+            &mut self,
+            by: &DeviceKey,
+            op: &str,
+            key: &DeviceKey,
+            link_hash: Option<String>,
+            name: Option<&str>,
+        ) {
+            let version = self.entries.len() as u64 + 1;
+            let message = list_message(
+                ORIGIN,
+                ACCOUNT,
+                version,
+                self.hashes.last().map_or(LIST_NONE, String::as_str),
+                op,
+                &b64(key),
+                link_hash.as_deref().unwrap_or(LIST_NONE),
+                name.unwrap_or(LIST_NONE),
+                &b64(by),
+            );
+            self.entries.push(ListEntry {
+                version,
+                op: op.into(),
+                key: b64(key),
+                link_hash,
+                name: name.map(str::to_owned),
+                by: b64(by),
+                signature: Some(encode_b64u(&by.sign(&message).unwrap())),
+            });
+            self.hashes.push(list_hash(&message));
+        }
+
+        fn add(&mut self, by: &DeviceKey, key: &DeviceKey, seed: u8) {
+            self.change(by, "add", key, Some(link(seed)), Some("Synthetic device"));
+        }
+
+        fn remove(&mut self, by: &DeviceKey, key: &DeviceKey) {
+            self.change(by, "remove", key, None, None);
+        }
+    }
+
     #[test]
-    fn a_chain_ends_at_the_key_that_made_the_account() {
+    fn a_list_starts_at_the_pinned_root_and_each_entry_names_the_one_before() {
         let (root, b, c) = (key(), key(), key());
-        let chain_b = vec![statement(&root, &b, 1)];
-        let chain_c = vec![statement(&b, &c, 2), statement(&root, &b, 1)];
+        let mut list = List::new(&root);
+        list.add(&root, &b, 1);
+        list.add(&b, &c, 2);
+        let verified = verify_list(ORIGIN, ACCOUNT, root.public_key(), &list.entries).unwrap();
+        assert_eq!(verified.version, 3);
+        assert_eq!(verified.hashes, list.hashes);
         assert_eq!(
-            chain_root(ORIGIN, ACCOUNT, &b64(&root), &[]).unwrap(),
-            root.public_key()
+            verified.live,
+            [root.public_key(), b.public_key(), c.public_key()]
         );
-        assert_eq!(
-            chain_root(ORIGIN, ACCOUNT, &b64(&b), &chain_b).unwrap(),
-            root.public_key()
+        // Another root, origin, or account verifies nothing.
+        assert!(verify_list(ORIGIN, ACCOUNT, b.public_key(), &list.entries).is_none());
+        assert!(
+            verify_list(
+                "https://other.example.test",
+                ACCOUNT,
+                root.public_key(),
+                &list.entries
+            )
+            .is_none()
         );
-        assert_eq!(
-            chain_root(ORIGIN, ACCOUNT, &b64(&c), &chain_c).unwrap(),
-            root.public_key()
+        assert!(verify_list(ORIGIN, "acc_aaaaaaaaaa", root.public_key(), &list.entries).is_none());
+        // A changed link, a gap, an entry signed by a key that is not in the list, an
+        // entry that names another entry before it: refused.
+        let mut moved = list.entries.clone();
+        moved[1].link_hash = Some(link(9));
+        assert!(verify_list(ORIGIN, ACCOUNT, root.public_key(), &moved).is_none());
+        let mut gap = list.entries.clone();
+        gap.remove(1);
+        assert!(verify_list(ORIGIN, ACCOUNT, root.public_key(), &gap).is_none());
+        let stranger = key();
+        let mut by_stranger = List::new(&root);
+        by_stranger.add(&stranger, &b, 1);
+        assert!(verify_list(ORIGIN, ACCOUNT, root.public_key(), &by_stranger.entries).is_none());
+        let mut swapped = list.entries.clone();
+        swapped.swap(1, 2);
+        swapped[1].version = 2;
+        swapped[2].version = 3;
+        assert!(verify_list(ORIGIN, ACCOUNT, root.public_key(), &swapped).is_none());
+        // A root without its signature, a root or an add whose name was changed, a name
+        // on a remove, or a later root, is refused too.
+        let mut unsigned_root = list.entries.clone();
+        unsigned_root[0].signature = None;
+        assert!(verify_list(ORIGIN, ACCOUNT, root.public_key(), &unsigned_root).is_none());
+        let mut renamed = list.entries.clone();
+        renamed[0].name = Some("Other name".into());
+        assert!(verify_list(ORIGIN, ACCOUNT, root.public_key(), &renamed).is_none());
+        let mut renamed = list.entries.clone();
+        renamed[1].name = Some("Other name".into());
+        assert!(verify_list(ORIGIN, ACCOUNT, root.public_key(), &renamed).is_none());
+        let mut nameless = list.entries.clone();
+        nameless[2].name = None;
+        assert!(verify_list(ORIGIN, ACCOUNT, root.public_key(), &nameless).is_none());
+        assert_eq!(verified.name_of(b.public_key()), Some("Synthetic device"));
+        assert_eq!(verified.name_of(root.public_key()), Some("Synthetic root"));
+        assert!(verified.added(c.public_key(), b.public_key(), &link(2)));
+        assert!(!verified.added(c.public_key(), root.public_key(), &link(2)));
+        let mut second_root = list.entries.clone();
+        second_root[2].op = "root".into();
+        assert!(verify_list(ORIGIN, ACCOUNT, root.public_key(), &second_root).is_none());
+        // An empty list and a list that is too long.
+        assert!(verify_list(ORIGIN, ACCOUNT, root.public_key(), &[]).is_none());
+        let long = vec![list.entries[0].clone(); MAX_LIST + 1];
+        assert!(verify_list(ORIGIN, ACCOUNT, root.public_key(), &long).is_none());
+    }
+
+    #[test]
+    fn a_device_added_before_its_confirmer_left_stays_a_device() {
+        let (root, b, c) = (key(), key(), key());
+        let mut list = List::new(&root);
+        list.add(&root, &b, 1);
+        list.add(&b, &c, 2);
+        list.remove(&root, &b);
+        let verified = verify_list(ORIGIN, ACCOUNT, root.public_key(), &list.entries).unwrap();
+        assert_eq!(verified.live, [root.public_key(), c.public_key()]);
+        // After it left, the device signs no change any more.
+        let d = key();
+        let mut late = list;
+        late.add(&b, &d, 3);
+        assert!(verify_list(ORIGIN, ACCOUNT, root.public_key(), &late.entries).is_none());
+        // A removal of a key that the list does not hold, and an add of one that it holds.
+        let mut list = List::new(&root);
+        list.remove(&root, &b);
+        assert!(verify_list(ORIGIN, ACCOUNT, root.public_key(), &list.entries).is_none());
+        let mut list = List::new(&root);
+        list.add(&root, &root, 1);
+        assert!(verify_list(ORIGIN, ACCOUNT, root.public_key(), &list.entries).is_none());
+        // A key that left is never added again.
+        let mut list = List::new(&root);
+        list.add(&root, &b, 1);
+        list.remove(&root, &b);
+        list.add(&root, &b, 2);
+        assert!(verify_list(ORIGIN, ACCOUNT, root.public_key(), &list.entries).is_none());
+        // A device removes itself; the last device too.
+        let mut list = List::new(&root);
+        list.remove(&root, &root);
+        let verified = verify_list(ORIGIN, ACCOUNT, root.public_key(), &list.entries).unwrap();
+        assert!(verified.live.is_empty());
+    }
+
+    #[test]
+    fn the_pin_refuses_an_older_list_and_another_history() {
+        let (root, b, c) = (key(), key(), key());
+        let mut list = List::new(&root);
+        list.add(&root, &b, 1);
+        let at_two = verify_list(ORIGIN, ACCOUNT, root.public_key(), &list.entries).unwrap();
+        let pin = Pin {
+            version: 2,
+            head: at_two.head(),
+        };
+        assert!(pin.accepts(&at_two));
+        list.add(&b, &c, 2);
+        let at_three = verify_list(ORIGIN, ACCOUNT, root.public_key(), &list.entries).unwrap();
+        assert!(pin.accepts(&at_three));
+        // An older list: refused.
+        let at_one = verify_list(ORIGIN, ACCOUNT, root.public_key(), &list.entries[..1]).unwrap();
+        assert!(!pin.accepts(&at_one));
+        // Another history from version 2 on: refused.
+        let mut fork = List::new(&root);
+        fork.add(&root, &c, 7);
+        let forked = verify_list(ORIGIN, ACCOUNT, root.public_key(), &fork.entries).unwrap();
+        assert!(!pin.accepts(&forked));
+        assert!(
+            !Pin {
+                version: 0,
+                head: ""
+            }
+            .accepts(&at_three)
         );
-        // A statement for another key, origin, or account, or a changed link hash.
-        assert!(chain_root(ORIGIN, ACCOUNT, &b64(&c), &chain_b).is_none());
-        assert!(chain_root("https://other.example.test", ACCOUNT, &b64(&b), &chain_b).is_none());
-        assert!(chain_root(ORIGIN, "acc_aaaaaaaaaa", &b64(&b), &chain_b).is_none());
-        let mut moved = chain_b.clone();
-        moved[0].link_hash = hash(9);
-        assert!(chain_root(ORIGIN, ACCOUNT, &b64(&b), &moved).is_none());
-        // A key that is not a point of the curve, and a chain that is too long.
-        let mut off = vec![4u8];
-        off.extend_from_slice(&[9; 64]);
-        assert!(chain_root(ORIGIN, ACCOUNT, &encode_b64u(&off), &[]).is_none());
-        let long = vec![statement(&root, &root, 1); MAX_CHAIN + 1];
-        assert!(chain_root(ORIGIN, ACCOUNT, &b64(&root), &long).is_none());
+    }
+
+    /// An `add` may come only while every device of the list can still be removed before
+    /// the list is full: at most version 246 (256 entries, 10 devices); a `remove` may come
+    /// up to version 256, also the last device's own.
+    #[test]
+    fn an_add_leaves_room_to_remove_every_device() {
+        let root = key();
+        let mut list = List::new(&root);
+        let mut seed = 0u8;
+        // Adds and removes of a passing device up to version 237.
+        while list.entries.len() < 237 {
+            let passing = key();
+            seed = seed.wrapping_add(1);
+            list.add(&root, &passing, seed);
+            list.remove(&root, &passing);
+        }
+        // Nine more devices: ten live devices at version 246.
+        let others: Vec<DeviceKey> = (0..9).map(|_| key()).collect();
+        for (index, other) in others.iter().enumerate() {
+            list.add(&root, other, 200 + index as u8);
+        }
+        assert_eq!(list.entries.len(), 246);
+        let at_246 = verify_list(ORIGIN, ACCOUNT, root.public_key(), &list.entries).unwrap();
+        assert_eq!(at_246.live.len(), 10);
+        // An add at 247 is past the room.
+        let mut late = List {
+            entries: list.entries.clone(),
+            hashes: list.hashes.clone(),
+        };
+        late.add(&root, &key(), 251);
+        assert!(verify_list(ORIGIN, ACCOUNT, root.public_key(), &late.entries).is_none());
+        // Every device is removed up to version 256, the root last, by itself.
+        for other in &others {
+            list.remove(&root, other);
+        }
+        assert_eq!(list.entries.len(), 255);
+        list.remove(&root, &root);
+        assert_eq!(list.entries.len(), 256);
+        let full = verify_list(ORIGIN, ACCOUNT, root.public_key(), &list.entries).unwrap();
+        assert!(full.live.is_empty());
     }
 
     #[test]
@@ -279,99 +596,51 @@ mod tests {
     }
 
     #[test]
-    fn a_device_is_verified_through_the_root_and_the_known_keys() {
-        let (root, b, c, stranger) = (key(), key(), key(), key());
-        let chains = [
-            vec![],
-            vec![statement(&root, &b, 1)],
-            vec![statement(&b, &c, 2), statement(&root, &b, 1)],
-            // A device with a chain that does not end at the root.
-            vec![statement(&stranger, &stranger, 3)],
-        ];
-        let keys = [b64(&root), b64(&b), b64(&c), b64(&stranger)];
-        let list: Vec<Listed<'_>> = keys
-            .iter()
-            .zip(&chains)
-            .map(|(public_key, chain)| Listed { public_key, chain })
-            .collect();
-        let known = vec![root.public_key().to_vec()];
-        let trust = Trust {
-            root: root.public_key(),
-            known: &known,
-            revoked: &[],
-        };
-        assert_eq!(
-            verify_devices(ORIGIN, ACCOUNT, &list, trust),
-            [true, true, true, false]
-        );
-        // A key that left the account is not verified, and neither is a device that only
-        // it confirmed and that is not known here.
-        let revoked = vec![b.public_key().to_vec()];
-        let trust = Trust {
-            root: root.public_key(),
-            known: &known,
-            revoked: &revoked,
-        };
-        assert_eq!(
-            verify_devices(ORIGIN, ACCOUNT, &list, trust),
-            [true, false, false, false]
-        );
-        let known_c = vec![root.public_key().to_vec(), c.public_key().to_vec()];
-        let trust = Trust {
-            root: root.public_key(),
-            known: &known_c,
-            revoked: &revoked,
-        };
-        assert_eq!(
-            verify_devices(ORIGIN, ACCOUNT, &list, trust),
-            [true, false, true, false]
-        );
-        // Another pinned root verifies nothing of this account.
-        let trust = Trust {
-            root: stranger.public_key(),
-            known: &known,
-            revoked: &[],
-        };
-        assert_eq!(
-            verify_devices(ORIGIN, ACCOUNT, &list[..3], trust),
-            [false, false, false]
-        );
-    }
-
-    #[test]
-    fn the_trust_store_learns_the_verified_keys_and_keeps_the_ones_that_left() {
+    fn the_trust_store_learns_the_devices_and_keeps_the_ones_that_left() {
         let (own, b, c) = (vec![1u8], vec![2u8], vec![3u8]);
         let mut known = vec![own.clone(), b.clone()];
-        let mut revoked = Vec::new();
+        let mut left = Vec::new();
         assert!(learn(
             &mut known,
-            &mut revoked,
-            &own,
-            &[own.clone(), b.clone(), c.clone()]
+            &mut left,
+            &[own.clone(), b.clone(), c.clone()],
+            &[]
         ));
         assert_eq!(known, [own.clone(), b.clone(), c.clone()]);
         assert!(!learn(
             &mut known,
-            &mut revoked,
-            &own,
-            &[own.clone(), b.clone(), c.clone()]
+            &mut left,
+            &[own.clone(), b.clone(), c.clone()],
+            &[]
         ));
-        // `b` is gone from the verified list: it left the account. This device stays.
+        // `b` is not in the list any more: it left the account.
+        assert!(learn(&mut known, &mut left, &[own.clone(), c.clone()], &[]));
+        assert_eq!(known, [own.clone(), c.clone()]);
+        assert_eq!(left, std::slice::from_ref(&b));
+        // A key that comes back by a new `add` is known again and leaves `left`.
         assert!(learn(
             &mut known,
-            &mut revoked,
-            &own,
-            std::slice::from_ref(&c)
+            &mut left,
+            &[own.clone(), c.clone(), b.clone()],
+            &[]
         ));
-        assert_eq!(known, [own.clone(), c.clone()]);
-        assert_eq!(revoked, std::slice::from_ref(&b));
-        // The list of the keys that left is bounded, oldest out first.
-        for index in 0..(MAX_REVOKED as u16 + 5) {
+        assert!(left.is_empty());
+        // The keys that left are bounded, oldest out first.
+        for index in 0..(MAX_LEFT as u16 + 5) {
             known.push(index.to_be_bytes().to_vec());
-            learn(&mut known, &mut revoked, &own, &[]);
+            learn(&mut known, &mut left, std::slice::from_ref(&own), &[]);
         }
-        assert_eq!(revoked.len(), MAX_REVOKED);
-        assert!(!revoked.contains(&b));
-        assert_eq!(known, [own]);
+        assert_eq!(left.len(), MAX_LEFT);
+        assert_eq!(known, std::slice::from_ref(&own));
+        // A key that the list removed counts as one that left, also unknown here before.
+        let (mut known, mut left) = (vec![own.clone()], Vec::new());
+        let gone = vec![9u8];
+        assert!(learn(
+            &mut known,
+            &mut left,
+            std::slice::from_ref(&own),
+            std::slice::from_ref(&gone)
+        ));
+        assert_eq!(left, [gone]);
     }
 }

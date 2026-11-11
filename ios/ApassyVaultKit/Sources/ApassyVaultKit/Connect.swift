@@ -119,8 +119,8 @@ public struct ConnectDevice: Codable, Sendable, Equatable {
     public var platform: String
     /// True for this iPhone.
     public var isThisDevice: Bool
-    /// True when the core verified the chain of statements of this device. When false, the app
-    /// shows "Not verified".
+    /// True when the signed device list that the core verified holds this device. When
+    /// false, the app shows "Not verified".
     public var verified: Bool
 
     public init(deviceID: String, name: String, platform: String, isThisDevice: Bool, verified: Bool) {
@@ -182,6 +182,10 @@ public struct ConnectStatus: Codable, Sendable, Equatable {
     /// or the account was deleted), or the Keychain lost the key. It comes with state `account`:
     /// the key and the account file stay until `connectForget`. A refused sign-in is no removal.
     public var removed: Bool
+    /// True when the account file of this iPhone is from an earlier version of Apassy: this iPhone
+    /// must join its account again. It comes with state `account` and no account details;
+    /// `connectForget` deletes the file and the key, and then a join works.
+    public var joinAgain: Bool
     public var accountID: String?
     public var deviceName: String?
     /// Nil when Connect did not answer and no earlier answer is known.
@@ -197,17 +201,23 @@ public struct ConnectStatus: Codable, Sendable, Equatable {
     public var join: ConnectJoin?
     /// The devices of the account, each with `verified`; empty when Connect did not answer.
     public var devices: [ConnectDevice]
+    /// When Connect answered: whether the signed device list itself verified from the pinned root and
+    /// the pinned version. False: no device is verified, and the core changed nothing. Nil when Connect
+    /// did not answer, without an account, after a removal, or from a core that does not report it.
+    public var listVerified: Bool?
 
     /// The devices of the account that this iPhone could not verify.
     public var unverifiedDevices: [ConnectDevice] { devices.filter { !$0.verified } }
 
     public init(
-        state: State, removed: Bool = false, accountID: String? = nil, deviceName: String? = nil,
+        state: State, removed: Bool = false, joinAgain: Bool = false, accountID: String? = nil,
+        deviceName: String? = nil,
         plan: ConnectPlan? = nil, stale: Bool = false, dialRoute: Bool = false, dialState: ConnectDialState = .unused,
-        join: ConnectJoin? = nil, devices: [ConnectDevice] = []
+        join: ConnectJoin? = nil, devices: [ConnectDevice] = [], listVerified: Bool? = nil
     ) {
         self.state = state
         self.removed = removed
+        self.joinAgain = joinAgain
         self.accountID = accountID
         self.deviceName = deviceName
         self.plan = plan
@@ -216,12 +226,14 @@ public struct ConnectStatus: Codable, Sendable, Equatable {
         self.dialState = dialState
         self.join = join
         self.devices = devices
+        self.listVerified = listVerified
     }
 
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         state = try container.decode(State.self, forKey: .state)
         removed = try container.decodeIfPresent(Bool.self, forKey: .removed) ?? false
+        joinAgain = try container.decodeIfPresent(Bool.self, forKey: .joinAgain) ?? false
         accountID = try container.decodeIfPresent(String.self, forKey: .accountID)
         deviceName = try container.decodeIfPresent(String.self, forKey: .deviceName)
         plan = try container.decodeIfPresent(ConnectPlan.self, forKey: .plan)
@@ -232,6 +244,8 @@ public struct ConnectStatus: Codable, Sendable, Equatable {
         // A device that this app cannot read is left out; the others still show.
         devices = (try? container.decodeIfPresent([Lossy<ConnectDevice>].self, forKey: .devices))?
             .compactMap(\.value) ?? []
+        // Missing or unreadable: nil, and the app shows what it showed before.
+        listVerified = try? container.decodeIfPresent(Bool.self, forKey: .listVerified)
     }
 
     /// One element of a list that decodes to nil when it cannot be read.
@@ -243,9 +257,11 @@ public struct ConnectStatus: Codable, Sendable, Equatable {
     enum CodingKeys: String, CodingKey {
         case state, removed, plan, stale, join, devices
         case accountID = "account_id"
+        case joinAgain = "join_again"
         case deviceName = "device_name"
         case dialRoute = "dial_route"
         case dialState = "dial_state"
+        case listVerified = "list_verified"
     }
 }
 

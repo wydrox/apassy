@@ -13,6 +13,14 @@
 //!   Apassy Connect…"), again every [`REFRESH_EVERY`], and after [`RETRY_UNREACHABLE`]
 //!   when Connect could not be reached ("Connect unreachable"). Neither blocks the unlock
 //!   or the vault.
+//! - **The start-screen step** ([`AccountSession::open_for_start`]): while no vault is
+//!   unlocked, "Use a vault from another Mac" › "Apassy Connect" on the start screen opens
+//!   the session for that step only ([`start_path`]): one read of the key, or, without an
+//!   account file, the join of this device with the code of another device of the
+//!   account (the same sheets and steps as Settings › Connect: [`sheets`], [`act`],
+//!   [`choose`]). The session closes when the owner leaves the step, at a lock, and when a
+//!   vault session starts; that vault's session then opens as above. A link for the
+//!   account's origin there opens it too ([`DesktopApp::connect_open_for_link`]).
 //! - One step at a time runs on a worker ([`Task`]); the UI thread never waits on the
 //!   network and never holds the account lock.
 //! - The account file is read on the UI thread (a small file, no secret).
@@ -60,6 +68,9 @@ fn slot<T>() -> Slot<T> {
 pub(crate) const REFRESH_EVERY: Duration = Duration::from_secs(30 * 60);
 /// A refresh that could not reach Connect is tried again after this long.
 pub(crate) const RETRY_UNREACHABLE: Duration = Duration::from_secs(60);
+/// A sync of a vault store that was refused asks for the account again after at least
+/// this long since the last answer ([`Live::refresh_soon`]).
+pub(crate) const REFRESH_SOON_AFTER: Duration = Duration::from_secs(60);
 
 /// A step that waits for the proof of its owner check.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +82,8 @@ pub(crate) enum Guarded {
         device_id: String,
     },
     Delete,
+    /// "Forget the Account on This Mac…" of an account file of an earlier version.
+    ForgetOld,
     Group {
         group_id: String,
         change: ConnectGroupChange,
@@ -82,6 +95,9 @@ pub(crate) enum Guarded {
 struct Snapshot {
     view: AccountView,
     group: Option<GroupDetail>,
+    /// Which keys may sign the heads of a vault store: from the trust store of the account
+    /// after this view (`crate::connect::signer_policy`), never from the view itself.
+    signers: crate::sync::SignerPolicy,
 }
 
 /// The result of one worker step.
@@ -156,13 +172,20 @@ pub(crate) struct SyncAccount {
     pub(crate) account: Slot<ConnectAccount>,
     /// The Connect origin of the account.
     pub(crate) origin: String,
-    /// The plan state of the last refresh.
-    pub(crate) plan: StorePlan,
+    /// The plan state of the last refresh; `None` before Connect answered once.
+    pub(crate) plan: Option<StorePlan>,
     /// The account key of the session.
     pub(crate) signer: Option<Arc<AccountSigner>>,
-    /// Which keys may sign the heads of a vault store, from the last refresh
-    /// (connect-account-v1 section 7.5, `crate::connect::signer_policy`).
+    /// Which keys may sign the heads of a vault store (connect-account-v1 section 7.5,
+    /// `crate::connect::signer_policy`): of the last refresh, else of the account file.
     pub(crate) signers: crate::sync::SignerPolicy,
+    /// The signed names of the devices that the verified device list removed (from
+    /// version 1, so also a device removed before this one joined), by key; empty while
+    /// no verified list is in memory, or while a worker holds the account.
+    pub(crate) removed_names: Vec<(Vec<u8>, String)>,
+    /// When the refresh whose answer gave `signers` was asked; `None` before an answer,
+    /// while a step of the section runs, or after Connect could not be reached.
+    pub(crate) listed_at: Option<Instant>,
 }
 
 /// The vault build's part of the section state.
@@ -191,6 +214,11 @@ pub(crate) struct Live {
     refreshed_at: Option<Instant>,
     /// The last refresh could not reach Connect, and when.
     unreachable: Option<(ConnectError, Instant)>,
+    /// The start screen showed the Connect path at the last frame ([`start_path`]).
+    start_path: bool,
+    /// A link for the account's origin on the start screen waits for the session of the
+    /// start-screen step: the target of `relay_join_request`.
+    link_after_open: Option<Option<String>>,
     /// Tests: the Connect origin of a creation or a join.
     pub(crate) origin: Option<String>,
     /// Tests: shorter polls than [`POLL_EVERY`] and [`JOIN_POLL_EVERY`].
@@ -258,20 +286,64 @@ impl Live {
     }
 
     /// The account of this device for the sync through Apassy Connect (plan s7 unit M3):
-    /// `Some` while the session is open and Connect answered once.
+    /// `Some` while the session is open. The sync of a vault store does not wait for an
+    /// answer of Connect: before the first refresh the signers come from the trust store
+    /// of the account file, and the plan is not known yet.
     pub(crate) fn sync_account(&self) -> Option<SyncAccount> {
         if !self.session.is_open() {
             return None;
         }
-        let snapshot = self.snapshot.as_ref()?;
         let file = self.file()?;
+        let snapshot = self.snapshot.as_ref();
         Some(SyncAccount {
             account: self.session.slot(),
             origin: file.origin.clone(),
-            plan: StorePlan::from_view(&snapshot.view.plan),
+            plan: snapshot.map(|snapshot| StorePlan::from_view(&snapshot.view.plan)),
             signer: self.session.signer(),
-            signers: crate::connect::signer_policy(&snapshot.view, file),
+            signers: snapshot.map_or_else(
+                || crate::connect::signer_policy(file),
+                |snapshot| snapshot.signers.clone(),
+            ),
+            removed_names: self
+                .session
+                .slot()
+                .try_lock()
+                .ok()
+                .and_then(|account| {
+                    account
+                        .as_ref()
+                        .and_then(ConnectAccount::verified_list)
+                        .map(|list| {
+                            list.removed
+                                .iter()
+                                .cloned()
+                                .zip(list.removed_names.iter().cloned())
+                                .collect()
+                        })
+                })
+                .unwrap_or_default(),
+            listed_at: snapshot
+                .and(self.refreshed_at)
+                .filter(|_| self.task.is_none() && self.unreachable.is_none()),
         })
+    }
+
+    /// The Connect origin of the account file of this device, also while the session is
+    /// not open: a link for that origin needs the account ([`Self::sync_account`]).
+    pub(crate) fn account_origin(&self) -> Option<String> {
+        self.file().map(|file| file.origin.clone())
+    }
+
+    /// Ask Connect for the account at the next frame, at most once a minute: a sync of a
+    /// vault store was refused or waits for a device, so a removal or a new device reaches
+    /// the policy of the running sessions sooner than [`REFRESH_EVERY`].
+    pub(crate) fn refresh_soon(&mut self) {
+        if self
+            .refreshed_at
+            .is_some_and(|at| at.elapsed() >= REFRESH_SOON_AFTER)
+        {
+            self.refreshed_at = None;
+        }
     }
 
     /// The poll intervals.
@@ -317,13 +389,11 @@ impl Live {
     }
 
     /// Read the key for `ticket` on a worker.
-    fn open(&mut self, ctx: &egui::Context, ticket: OpenTicket) {
+    fn open(&mut self, ctx: Option<&egui::Context>, ticket: OpenTicket) {
         let session = Arc::clone(&self.session);
         self.refreshed_at = None;
         self.unreachable = None;
-        self.opening = Some(Task::spawn(Some(ctx.clone()), move || {
-            session.open_now(ticket)
-        }));
+        self.opening = Some(Task::spawn(ctx.cloned(), move || session.open_now(ticket)));
     }
 }
 
@@ -381,9 +451,26 @@ impl DesktopApp {
         let live = &mut self.ui.connect.live;
         live.session.close();
         live.opening = None;
+        live.link_after_open = None;
         live.reset();
         live.epoch = None;
         self.ui.connect.sheet = None;
+    }
+
+    /// A link for the origin of this device's Connect account on the start screen, while
+    /// the session is not open: the session opens for this start-screen step, and the
+    /// link goes on as with an open session when it is open (`relay_join_request` with
+    /// `target` again). Never while a vault is unlocked: Settings › Connect signs in then.
+    pub(crate) fn connect_open_for_link(
+        &mut self,
+        target: Option<String>,
+        ctx: Option<&egui::Context>,
+    ) {
+        if self.owner_ui.session.epoch().is_some() {
+            return;
+        }
+        self.ui.connect.live.link_after_open = Some(target);
+        start_sign_in(self, ctx);
     }
 }
 
@@ -442,12 +529,14 @@ fn account_of(snapshot: &Snapshot, this_device: &str) -> Account {
         .iter()
         .map(|device| Device {
             id: device.device_id.clone(),
-            name: device.name.clone(),
+            // The name that the signed device list holds for the key, when it verified.
+            name: device.shown_name().to_owned(),
             platform: device.platform.clone(),
             created_at: device.created_at,
             last_seen_at: device.last_seen_at,
             this: device.device_id == this_device,
             verified: device.verified,
+            fingerprint: device.fingerprint.clone(),
         })
         .collect();
     devices.sort_by_key(|device| !device.this);
@@ -492,6 +581,8 @@ fn account_of(snapshot: &Snapshot, this_device: &str) -> Account {
             members,
         }
     });
+    let adds_left =
+        crate::connect::trust::MAX_ADD_VERSION.saturating_sub(view.device_list.len() as u64);
     Account {
         account_id: view.account_id.clone(),
         name: view.name.clone(),
@@ -499,6 +590,9 @@ fn account_of(snapshot: &Snapshot, this_device: &str) -> Account {
         plan: plan_of(&view.plan),
         devices,
         group,
+        list_verified: view.list_verified,
+        list_nearly_full: view.list_verified
+            && adds_left <= crate::connect::trust::ADDS_LEFT_WARNING,
     }
 }
 
@@ -509,6 +603,7 @@ pub(crate) fn view(app: &DesktopApp) -> ConnectView {
     let file = live.file();
     let state = live.session.state();
     let shown = match (file, &state) {
+        (None, _) if live.session.has_old_account_file() => Shown::OldFile,
         (None, _) => Shown::None,
         (Some(file), SessionState::Removed(error)) => Shown::Removed {
             name: file.name.clone(),
@@ -548,6 +643,12 @@ pub(crate) fn view(app: &DesktopApp) -> ConnectView {
     }
 }
 
+/// The error of the last step, also while a sheet is open (the tests).
+#[cfg(test)]
+pub(crate) fn error_for_test(app: &DesktopApp) -> Option<String> {
+    app.ui.connect.live.error.clone()
+}
+
 /// The status line of Settings > Connect.
 pub(crate) fn status_line(app: &DesktopApp) -> String {
     view(app).status_line()
@@ -561,10 +662,17 @@ pub(crate) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     if let Some(action) = super::draw(ui, &view) {
         act(app, &ctx, action);
     }
+    sheets(app, &ctx);
+}
+
+/// Draw the open sheet of the account flows and act on what the owner chose: Settings ›
+/// Connect, and the join of this device on the start screen ([`start_account`]).
+pub(crate) fn sheets(app: &mut DesktopApp, ctx: &egui::Context) {
+    let ctx = ctx.clone();
     let live = &app.ui.connect.live;
     let busy = live.busy();
     let error = live.error.clone();
-    let now = view.now;
+    let now = crate::desktop::companion::now();
     let state = &mut app.ui.connect;
     let choice = state.sheet.as_mut().and_then(|sheet| {
         super::sheet(
@@ -599,7 +707,9 @@ pub(crate) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
 /// session, then the result of the worker, the owner proof, the polls, and the refresh
 /// of the account.
 pub(crate) fn step(app: &mut DesktopApp, ctx: &egui::Context) {
+    start_path(app, ctx);
     follow(app, ctx);
+    link_after_open(app, ctx);
     finish(app, ctx);
     guarded(app, ctx);
     polls(app, ctx);
@@ -607,10 +717,12 @@ pub(crate) fn step(app: &mut DesktopApp, ctx: &egui::Context) {
 }
 
 /// The session follows the vault session: it closes at a lock and at another vault
-/// session, and opens for an unlocked one with one read of the key store.
+/// session, and opens for an unlocked one with one read of the key store. While no vault
+/// is unlocked it follows the start-screen step, if one is on.
 fn follow(app: &mut DesktopApp, ctx: &egui::Context) {
-    let epoch = app.owner_ui.session.epoch();
+    let vault = app.owner_ui.session.epoch();
     let live = &mut app.ui.connect.live;
+    let epoch = vault.or_else(|| live.session.start_epoch());
     live.session.tidy();
     if live.epoch.is_some_and(|seen| seen != epoch) {
         // A lock or another unlock: what the section showed goes with the session.
@@ -621,7 +733,7 @@ fn follow(app: &mut DesktopApp, ctx: &egui::Context) {
     let live = &mut app.ui.connect.live;
     live.epoch = Some(epoch);
     if let Follow::Read(ticket) = live.session.follow(epoch) {
-        live.open(ctx, ticket);
+        live.open(Some(ctx), ticket);
     }
     if let Some(task) = &live.opening {
         match task.poll() {
@@ -631,6 +743,157 @@ fn follow(app: &mut DesktopApp, ctx: &egui::Context) {
                 live.file = OnceCell::new();
             }
         }
+    }
+}
+
+/// Whether the start screen shows a step that needs the account session: "Use a vault
+/// from another Mac" › "Apassy Connect" while no vault is unlocked, or its relay source
+/// while a link for the account's origin waits for the session or uses it.
+fn start_wanted(app: &DesktopApp) -> bool {
+    use crate::desktop::ui::start::Step;
+    use crate::desktop::ui::sync::OpenSource;
+    if app.owner_ui.session.epoch().is_some() || app.ui.start != Step::OpenSynced {
+        return false;
+    }
+    let live = &app.ui.connect.live;
+    match app.sync.relay.source {
+        OpenSource::Connect => true,
+        OpenSource::Relay => live.link_after_open.is_some() || live.session.start_epoch().is_some(),
+        OpenSource::Folder => false,
+    }
+}
+
+/// The start-screen step follows the screen: entering "Apassy Connect" opens the session
+/// for it, and leaving the screen closes it. Each visit lists the vault stores again.
+fn start_path(app: &mut DesktopApp, ctx: &egui::Context) {
+    let wanted = start_wanted(app);
+    if wanted == app.ui.connect.live.start_path {
+        return;
+    }
+    app.ui.connect.live.start_path = wanted;
+    app.relay_connect_forget_stores();
+    if !wanted {
+        let live = &mut app.ui.connect.live;
+        live.link_after_open = None;
+        live.session.end_start();
+    } else if app.sync.relay.source == crate::desktop::ui::sync::OpenSource::Connect {
+        begin_start(app, Some(ctx));
+    }
+}
+
+/// Open the session for the start-screen step. The section forgets what it showed of an
+/// earlier session.
+fn begin_start(app: &mut DesktopApp, ctx: Option<&egui::Context>) {
+    if app.owner_ui.session.epoch().is_some() {
+        return;
+    }
+    let live = &mut app.ui.connect.live;
+    let follow = live.session.open_for_start();
+    let epoch = live.session.start_epoch();
+    if live.epoch != Some(epoch) {
+        live.opening = None;
+        live.reset();
+        live.epoch = Some(epoch);
+    }
+    if let Follow::Read(ticket) = follow {
+        live.open(ctx, ticket);
+    }
+}
+
+/// "Sign In…" of the start screen: open the session for the start-screen step, or read
+/// the key again after a cancelled or failed read. Never while a vault is unlocked.
+pub(crate) fn start_sign_in(app: &mut DesktopApp, ctx: Option<&egui::Context>) {
+    if app.owner_ui.session.epoch().is_some() {
+        return;
+    }
+    if app.ui.connect.live.session.start_epoch().is_none() {
+        begin_start(app, ctx);
+        return;
+    }
+    let live = &mut app.ui.connect.live;
+    if live.busy() {
+        return;
+    }
+    if let Some(ticket) = live.session.retry() {
+        live.error = None;
+        live.open(ctx, ticket);
+    }
+}
+
+/// A link for the account's origin that waited for the session of the start-screen step
+/// goes on when the session is open, or says why it cannot.
+fn link_after_open(app: &mut DesktopApp, ctx: &egui::Context) {
+    let live = &app.ui.connect.live;
+    if live.link_after_open.is_none() || live.opening.is_some() {
+        return;
+    }
+    let state = live.session.state();
+    if state == SessionState::Opening {
+        return;
+    }
+    let target = app.ui.connect.live.link_after_open.take().flatten();
+    match state {
+        SessionState::Open => app.relay_join_request(target, Some(ctx)),
+        SessionState::Removed(error) => {
+            app.sync.relay.join_error = Some(removed_note(&error));
+        }
+        SessionState::SignedOut(error) => {
+            app.sync.relay.join_error = Some(message(&error));
+        }
+        _ => {
+            app.sync.relay.join_error = Some(message(&ConnectError::SignedOut));
+        }
+    }
+}
+
+/// What the start screen's Connect path shows of the account of this device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StartAccount {
+    /// No account file: this device joins the account with the code of another device
+    /// of it. `error`: why the last join failed.
+    Join { error: Option<String> },
+    /// The account file is of an earlier version of Apassy.
+    OldFile,
+    /// The key is being read.
+    Opening,
+    /// The key was not read (cancelled, or unavailable): "Sign In…" reads it again.
+    SignedOut { note: Option<String> },
+    /// Connect removed this device from its account, or its key cannot be used.
+    Removed { note: String },
+    /// The session is open: the vault stores can be listed.
+    Open,
+}
+
+/// The account part of the start screen's Connect path now.
+pub(crate) fn start_account(app: &DesktopApp) -> StartAccount {
+    let live = &app.ui.connect.live;
+    if live.file().is_none() {
+        if live.session.has_old_account_file() {
+            return StartAccount::OldFile;
+        }
+        let error = if app.ui.connect.sheet.is_none() {
+            live.error.clone()
+        } else {
+            None
+        };
+        return StartAccount::Join { error };
+    }
+    // The read ends when its worker is collected: "Sign In…" shows after that.
+    if live.opening.is_some() {
+        return StartAccount::Opening;
+    }
+    match live.session.state() {
+        SessionState::Open => StartAccount::Open,
+        SessionState::Opening => StartAccount::Opening,
+        SessionState::Removed(error) => StartAccount::Removed {
+            note: removed_note(&error),
+        },
+        SessionState::SignedOut(ConnectError::SignedOut) | SessionState::Closed => {
+            StartAccount::SignedOut { note: None }
+        }
+        SessionState::SignedOut(error) => StartAccount::SignedOut {
+            note: Some(message(&error)),
+        },
     }
 }
 
@@ -688,7 +951,11 @@ fn refresh(app: &mut DesktopApp, ctx: &egui::Context) {
             } else {
                 None
             };
-            Ok(Snapshot { view, group })
+            Ok(Snapshot {
+                view,
+                group,
+                signers: crate::connect::signer_policy(account.state()),
+            })
         });
         match snapshot {
             Ok(snapshot) => {
@@ -735,6 +1002,17 @@ fn apply(app: &mut DesktopApp, ctx: &egui::Context, outcome: Outcome) {
             live.file = OnceCell::new();
             live.refreshed_at = Some(Instant::now());
             app.ui.connect.sheet = Some(Sheet::Recovery { words });
+        }
+        Outcome::Created(Err(ConnectError::RecoveryCodeNotShown)) => {
+            // An earlier run left the creation pending: the account is made and its file
+            // written, but its recovery code was never shown. The section shows the
+            // account, and says so.
+            live.file = OnceCell::new();
+            app.ui.connect.sheet = None;
+            if let Some(ticket) = live.session.retry() {
+                live.open(Some(ctx), ticket);
+            }
+            live.error = Some(message(&ConnectError::RecoveryCodeNotShown));
         }
         Outcome::Refreshed(Ok((snapshot, plans))) => {
             live.snapshot = Some(snapshot);
@@ -1021,6 +1299,21 @@ fn run_guarded(
                 }))
             });
         }
+        Guarded::ForgetOld => {
+            let session = live.session();
+            live.spawn(ctx, move || {
+                drop(session.take_any());
+                let (Some(store), Some(path)) = (store, path) else {
+                    return Outcome::Forgot(Err(ConnectError::KeychainUnavailable));
+                };
+                Outcome::Forgot(crate::connect::forget_old_account_file(
+                    store.as_ref(),
+                    &path,
+                    proof,
+                    &epoch,
+                ))
+            });
+        }
         Guarded::Delete => {
             let session = live.session();
             live.spawn(ctx, move || {
@@ -1108,6 +1401,7 @@ fn polls(app: &mut DesktopApp, ctx: &egui::Context) {
         live.join_at = Some(now);
         let join = Arc::clone(&live.join);
         let session = live.session();
+        // The vault session, or the start-screen step, that the section belongs to.
         let epoch = live.epoch.flatten();
         live.spawn(ctx, move || {
             let mut guard = join
@@ -1274,6 +1568,11 @@ pub(crate) fn act(app: &mut DesktopApp, ctx: &egui::Context, action: Action) {
             });
         }
         Action::Delete => app.ui.connect.sheet = Some(Sheet::Delete),
+        Action::ForgetOld => {
+            app.ui.connect.live.error = None;
+            app.ui.connect.live.guarded = Some(Guarded::ForgetOld);
+            app.ask_owner(OwnerRequest::ForgetOldConnectAccount, Some(ctx));
+        }
         Action::ForgetRemoved => {
             app.ui.connect.live.error = None;
             app.ui.connect.sheet = Some(Sheet::ForgetRemoved);
@@ -1303,7 +1602,7 @@ fn sign_in(app: &mut DesktopApp, ctx: &egui::Context) {
     }
     if let Some(ticket) = live.session.retry() {
         live.error = None;
-        live.open(ctx, ticket);
+        live.open(Some(ctx), ticket);
     }
 }
 
@@ -1509,6 +1808,7 @@ pub(crate) fn choose(app: &mut DesktopApp, ctx: &egui::Context, choice: SheetCho
                     account_id: account.account_id,
                     device_id: device.id,
                     device_name: name,
+                    fingerprint: device.fingerprint,
                     this_device: this,
                 },
                 Some(ctx),

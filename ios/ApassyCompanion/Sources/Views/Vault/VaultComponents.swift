@@ -414,10 +414,7 @@ struct SyncCapsule: View {
 
     private var showsProblem: Bool {
         guard !vault.isSyncing else { return false }
-        return switch vault.syncStatus?.state {
-        case .offline?, .needsPassphrase?, .removed?, .damaged?, .staleCopy?, .forkedCopy?, .error?: true
-        default: false
-        }
+        return SyncStatusLook.of(vault.syncStatus?.state).isProblem
     }
 
     private var title: String {
@@ -431,17 +428,20 @@ struct SyncCapsule: View {
         case .ok?: "checkmark.circle.fill"
         case .offline?: "wifi.exclamationmark"
         case .needsPassphrase?: "key.fill"
-        case .removed?, .damaged?, .staleCopy?, .forkedCopy?, .error?: "exclamationmark.triangle.fill"
-        default: "arrow.triangle.2.circlepath"
+        // A plain wait for another device of the account: no warning sign.
+        case .waitsForDevice?: "clock"
+        default:
+            SyncStatusLook.of(vault.syncStatus?.state) == .critical
+                ? "exclamationmark.triangle.fill" : "arrow.triangle.2.circlepath"
         }
     }
 
     private var tint: Color? {
-        switch vault.syncStatus?.state {
-        case .ok?: .green
-        case .offline?, .busy?, .needsPassphrase?: .orange
-        case .removed?, .damaged?, .staleCopy?, .forkedCopy?, .error?: .red
-        default: nil
+        switch SyncStatusLook.of(vault.syncStatus?.state) {
+        case .ok: .green
+        case .busy, .attention: .orange
+        case .critical: .red
+        case .plain: nil
         }
     }
 }

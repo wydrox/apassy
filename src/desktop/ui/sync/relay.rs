@@ -59,10 +59,10 @@ use crate::desktop::{DesktopApp, Place};
 use crate::questions::device_link::{LinkedDeviceKind, shown_link_name, split_linked_device_name};
 use crate::questions::{QuestionsClient, TeamDevice};
 use crate::sync::{
-    DEFAULT_RELAY_URL, DeviceKey, DeviceView, JoinedDevice, KeySource, LinkCode, LinkKind,
-    PIN_CHANGED_TEXT, PairedLink, PendingJoin, PendingLink, Receipt, RelayAdoptReport, RelayConfig,
-    RelayDownload, RelayEnableReport, RelayRefusal, RelaySync, RelayUrl, SyncError, SyncOutcome,
-    TlsTrust, VaultSync, device_name, valid_team_code,
+    DEFAULT_RELAY_URL, DepartedHead, DeviceKey, DeviceView, JoinedDevice, KeySource, LinkCode,
+    LinkKind, PIN_CHANGED_TEXT, PairedLink, PendingJoin, PendingLink, Receipt, RelayAdoptReport,
+    RelayConfig, RelayDownload, RelayEnableReport, RelayRefusal, RelaySync, RelayUrl, StorePlan,
+    SyncError, SyncOutcome, TlsTrust, VaultSync, device_name, link_code_team, valid_team_code,
 };
 use crate::vault::{TrustedDeviceKind, Vault, VaultErrorKind};
 use crate::vaults::{self, Registry, SyncLink, VaultEntry};
@@ -100,9 +100,29 @@ const NOT_REMOVED: &str = concat!(
 );
 /// How often the window hands the account session to the relay syncs and the worker.
 pub(crate) const CONNECT_TICK_EVERY: Duration = Duration::from_secs(30);
+/// "Replace It with This Mac's Copy…" of a vault store that waits on the head of a device
+/// that left the account.
+pub(crate) const REPLACE_DEPARTED: &str =
+    concat!("Replace It with This ", crate::computer_cap!(), "'s Copy…");
+/// The click of "Use the Copy That … Left…" on a screen of a device that joins: the next
+/// step of the join takes it ([`DesktopApp::relay_join_step`]).
+const TAKE_DEPARTED: &str = "sync-relay-take-departed";
 
-/// "Use a vault from another Mac" › "Apassy Connect" without an account session.
-pub(crate) const CONNECT_SIGN_IN: &str = "Sign in to Apassy Connect in Settings › Connect first. Then the vaults of your account show here.";
+/// "Use a vault from another Mac" › "Apassy Connect" while the key of the account was not
+/// read (cancelled, or unavailable): "Sign In…" reads it again.
+pub(crate) const CONNECT_SIGN_IN: &str = concat!(
+    "Sign in to Apassy Connect with the key of this ",
+    crate::computer!(),
+    ". Then the vaults of your account show here."
+);
+
+/// A link for the origin of this Mac's Apassy Connect account while the account is not
+/// signed in: nothing is sent.
+pub(crate) const CONNECT_SIGN_IN_FOR_LINK: &str = concat!(
+    "This link is for Apassy Connect, where this ",
+    crate::computer!(),
+    " has an account. Choose Sign In… in Settings › Connect first, then paste the link again."
+);
 
 /// The end of the state name of a relay sync that turns on, until the relay answered.
 const STAGED: &str = ".relay-new";
@@ -175,6 +195,8 @@ pub(crate) enum Job {
     Passphrase,
     /// "Use the relay copy" after this Mac refused it.
     UseCopy,
+    /// "Use the Copy That … Left…" of a vault store that waits on a device that left.
+    UseDeparted,
     /// The cancel of a Mac that joins.
     Cancel,
     /// "Move the relay copy to Connect".
@@ -223,6 +245,9 @@ impl Job {
             ),
             Self::Passphrase => "Apassy checks the passphrase with the relay copy…",
             Self::UseCopy => "Apassy merges the relay copy and uploads the vault…",
+            Self::UseDeparted => {
+                "Apassy merges the copy that the device left and uploads the vault…"
+            }
             Self::Cancel => "Apassy cancels the link…",
             Self::Move => "Apassy moves the relay copy to Apassy Connect…",
             Self::UndoMove => "Apassy deletes the copy on Apassy Connect…",
@@ -312,6 +337,11 @@ enum Reply {
         result: Result<Result<SyncOutcome, SyncError>, SyncError>,
     },
     UsedCopy(Result<SyncOutcome, SyncError>),
+    /// "Use the Copy That … Left…", with the name of that device.
+    UsedDeparted {
+        name: Option<String>,
+        result: Result<SyncOutcome, SyncError>,
+    },
     /// A cancel of a Mac that joins: the note when the relay did not hear it.
     Cancelled(Option<String>),
     /// "Move the relay copy to Connect" ended: the relay sync of Connect that ran it,
@@ -439,9 +469,20 @@ struct Join {
     phase: Phase,
 }
 
+/// What a link for the origin of this Mac's Connect account turned out to be.
+enum Resolved {
+    /// A vault store of the account that lists this Mac: no link is used.
+    Store(JoinedDevice),
+    /// A relay team at that origin: the link was sent with a key of its own.
+    Link(PendingJoin),
+}
+
 enum Phase {
     /// `POST /v1/devices/link`.
     Requesting(Task<Result<PendingJoin, SyncError>>),
+    /// A link for the origin of the Connect account: the stores of the account first,
+    /// then the store or the link ([`Resolved`]).
+    Resolving(Task<Result<Resolved, String>>),
     /// The device of this Mac in a vault store of its Connect account
     /// (`RelaySync::joined_from_store`): no link and no confirmation.
     FromStore(Task<Result<JoinedDevice, String>>),
@@ -455,6 +496,12 @@ enum Phase {
     Downloading {
         joined: Arc<JoinedDevice>,
         task: Task<Result<RelayDownload, SyncError>>,
+    },
+    /// A vault store whose head a device that left the account pushed, and no live device
+    /// signed over it: the owner can take it once ("Use the Copy That … Left…").
+    Departed {
+        joined: Arc<JoinedDevice>,
+        head: DepartedHead,
     },
     /// Downloaded: the owner types the passphrase.
     Ready {
@@ -506,6 +553,65 @@ pub(crate) enum JoinView {
     Passphrase {
         team: String,
     },
+    /// The copy of a vault store waits on a device that left the account
+    /// ([`Departed::words`], [`Departed::use_label`]). No copy is on this Mac, so it cannot
+    /// replace it.
+    Departed {
+        words: String,
+        label: String,
+    },
+}
+
+/// The head that a vault store waits on ([`SyncError::WaitsForAccountDevice`]), for the
+/// steps of the owner: "Use the Copy That … Left…" and "Replace It with This Mac's Copy…".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Departed {
+    pub(crate) head: DepartedHead,
+    /// The signed name of the device, from the verified device list of the account;
+    /// `None` when no verified list is in memory.
+    pub(crate) name: Option<String>,
+}
+
+impl Departed {
+    /// The device at the start of a sentence.
+    fn who(&self) -> String {
+        match &self.name {
+            Some(name) => format!("“{name}”"),
+            None => "A device that left the account".to_owned(),
+        }
+    }
+
+    /// The device inside a sentence.
+    fn who_in(&self) -> String {
+        match &self.name {
+            Some(name) => format!("“{name}”"),
+            None => "a device that left the account".to_owned(),
+        }
+    }
+
+    /// The button that takes the copy.
+    pub(crate) fn use_label(&self) -> String {
+        match &self.name {
+            Some(name) => format!("Use the Copy That “{name}” Left…"),
+            None => "Use the Copy That a Removed Device Left…".to_owned(),
+        }
+    }
+
+    /// The line under the status: who saved the copy, and when (by its clock).
+    pub(crate) fn words(&self) -> String {
+        match &self.name {
+            Some(_) => format!(
+                "{} saved the last copy {} and then left the account.",
+                self.who(),
+                ago(self.head.time)
+            ),
+            None => format!(
+                "{} saved the last copy {}.",
+                self.who(),
+                ago(self.head.time)
+            ),
+        }
+    }
 }
 
 /// The relay part of the sync state of the app.
@@ -571,6 +677,16 @@ pub(crate) struct RelayUi {
     move_error: BTreeMap<String, String>,
     /// The vault whose "Undo the move" waits for its owner check.
     undo: Option<String>,
+    /// The vault whose step on the copy of a device that left waits for its owner check,
+    /// with the exact action that the check names.
+    departed_check: Option<(String, OwnerAction)>,
+    /// The signed names of the devices that the verified device list of the account
+    /// removed, by key, for the steps of a vault store that waits on one of them.
+    departed_names: BTreeMap<Vec<u8>, String>,
+    /// When Connect answered the refresh of the device list that the relay syncs have,
+    /// as of the last hand-over (`None` inside: no answer in the session view); `None`
+    /// before the first hand-over.
+    listed: Option<Option<Instant>>,
 }
 
 impl RelayUi {
@@ -604,7 +720,7 @@ impl RelayUi {
             .as_ref()
             .filter(|join| join.target.as_deref() == target)?;
         Some(match &join.phase {
-            Phase::Requesting(_) => JoinView::Sending,
+            Phase::Requesting(_) | Phase::Resolving(_) => JoinView::Sending,
             Phase::FromStore(_) => JoinView::Downloading {
                 team: join.team.clone(),
             },
@@ -614,6 +730,16 @@ impl RelayUi {
             Phase::Downloading { .. } => JoinView::Downloading {
                 team: join.team.clone(),
             },
+            Phase::Departed { head, .. } => {
+                let departed = Departed {
+                    head: head.clone(),
+                    name: self.departed_names.get(&head.key).cloned(),
+                };
+                JoinView::Departed {
+                    words: departed.words(),
+                    label: departed.use_label(),
+                }
+            }
             Phase::Ready { .. } => JoinView::Ready {
                 team: join.team.clone(),
             },
@@ -648,7 +774,10 @@ fn sentence(text: &str) -> String {
 /// a history without its last change. "Use the relay copy…" goes on from there.
 pub(crate) fn refused_copy(status: &UiStatus) -> bool {
     matches!(status, UiStatus::Problem(text)
-        if matches!(problem(text), Some(SyncError::StaleCopy | SyncError::ForkedCopy)))
+    if matches!(
+        problem(text),
+        Some(SyncError::StaleCopy | SyncError::ForkedCopy | SyncError::UnknownSigner)
+    ))
 }
 
 /// The relay problem of a status text ([`UiStatus::from_error`] keeps the text only).
@@ -659,6 +788,9 @@ fn problem(text: &str) -> Option<SyncError> {
         SyncError::RemovedFromRelay,
         SyncError::StaleCopy,
         SyncError::ForkedCopy,
+        SyncError::WaitsForAccountDevice,
+        SyncError::ChecksDeviceList,
+        SyncError::UnknownSigner,
         SyncError::Relay(RelayRefusal::RateLimited),
         SyncError::Relay(RelayRefusal::Busy),
         SyncError::Relay(RelayRefusal::TeamLimit),
@@ -683,9 +815,11 @@ pub(crate) fn tag(status: &UiStatus) -> (&'static str, Tone) {
             ) => ("Sync pending", Tone::Accent),
             Some(SyncError::Relay(RelayRefusal::TeamLimit)) => ("Sync paused", Tone::Warning),
             Some(SyncError::RemovedFromRelay) => ("Removed from the relay", Tone::Warning),
-            Some(SyncError::StaleCopy | SyncError::ForkedCopy) => {
+            Some(SyncError::StaleCopy | SyncError::ForkedCopy | SyncError::UnknownSigner) => {
                 ("Relay copy refused", Tone::Warning)
             }
+            Some(SyncError::WaitsForAccountDevice) => ("Waiting for another device", Tone::Accent),
+            Some(SyncError::ChecksDeviceList) => ("Checking the device list", Tone::Accent),
             Some(_) => ("Relay not reachable", Tone::Warning),
             None => ("Problem", Tone::Warning),
         },
@@ -1148,6 +1282,7 @@ impl DesktopApp {
             }
         }
         self.relay_undo_step();
+        self.relay_departed_step();
         self.relay_connect_tick();
     }
 
@@ -1166,6 +1301,23 @@ impl DesktopApp {
             return;
         }
         self.sync.relay.connect_tick = Some(Instant::now());
+        // A sync of a vault store that was refused, or waits for another device of the
+        // account, asks Connect for the account soon: a removal or a newer device reaches
+        // the policy of the running sessions within a minute, not at the next refresh.
+        let refused = self.sync.statuses.values().any(|status| {
+            matches!(status, UiStatus::Damaged)
+                || matches!(status, UiStatus::Problem(text) if matches!(
+                    problem(text),
+                    Some(
+                        SyncError::WaitsForAccountDevice
+                            | SyncError::RemovedFromRelay
+                            | SyncError::ChecksDeviceList
+                    )
+                ))
+        });
+        if refused {
+            self.ui.connect.live.refresh_soon();
+        }
         let account = self.ui.connect.live.sync_account();
         if let Some(account) = &account {
             for relay in lock(&self.sync.relay.cache).values() {
@@ -1173,8 +1325,11 @@ impl DesktopApp {
                     relay.set_account_signers(Some(account.signers.clone()));
                     relay.set_account_signer(Some(Arc::clone(signer)));
                 }
-                relay.set_store_plan(Some(account.plan));
+                if let Some(plan) = account.plan {
+                    relay.set_store_plan(Some(plan));
+                }
             }
+            self.relay_take_list(account);
         }
         self.sync
             .worker
@@ -1415,7 +1570,11 @@ impl DesktopApp {
                     }
                     self.relay_synced_status(id);
                     self.relay_close_sheet(id, |sheet| {
-                        matches!(sheet, SyncSheet::ReplaceDamaged { .. })
+                        matches!(
+                            sheet,
+                            SyncSheet::ReplaceDamaged { .. }
+                                | SyncSheet::ReplaceDepartedCopy { .. }
+                        )
                     });
                     self.set_ok(concat!(
                         "The relay has the vault of this ",
@@ -1482,6 +1641,41 @@ impl DesktopApp {
                 }
                 Err(error) => self.set_err(format!("Nothing changed: {error}.")),
             },
+            Reply::UsedDeparted { name, result } => {
+                self.relay_close_sheet(id, |sheet| {
+                    matches!(sheet, SyncSheet::UseDepartedCopy { .. })
+                });
+                match result {
+                    Ok(outcome) => {
+                        if self
+                            .sync
+                            .notice
+                            .as_ref()
+                            .is_some_and(|notice| notice.vault == id)
+                        {
+                            self.sync.notice = None;
+                        }
+                        self.sync_note_merge(id, &outcome);
+                        self.relay_synced_status(id);
+                        let device = name.map_or_else(
+                            || "the device that left the account".to_owned(),
+                            |name| format!("“{name}”"),
+                        );
+                        self.set_ok(format!(
+                            "Apassy merged the copy that {device} left with this vault and uploaded the result. Relay sync goes on."
+                        ));
+                    }
+                    Err(error) => {
+                        // A copy that changed meanwhile: the row shows its new state.
+                        if let Some(relay) = self.relay_of(id) {
+                            self.sync_take_result(id, &VaultSync::Relay(relay), &Err(error));
+                        }
+                        if error != SyncError::Vault(VaultErrorKind::Locked) {
+                            self.set_err(format!("Nothing changed: {error}."));
+                        }
+                    }
+                }
+            }
             Reply::UsedCopy(result) => match result {
                 Ok(outcome) => {
                     if self
@@ -2028,7 +2222,7 @@ impl DesktopApp {
             .connect
             .live
             .sync_account()
-            .filter(|account| account.plan.entitled())
+            .filter(|account| account.plan.is_some_and(StorePlan::entitled))
             .ok_or_else(|| CONNECT_NEEDS_PLAN.to_owned())?;
         let url = RelayUrl::parse(&account.origin).map_err(|error| sentence(&error.to_string()))?;
         if self.relay_changing(id) {
@@ -2080,7 +2274,7 @@ impl DesktopApp {
             .connect
             .live
             .sync_account()
-            .is_some_and(|account| account.plan.entitled())
+            .is_some_and(|account| account.plan.is_some_and(StorePlan::entitled))
     }
 
     /// Whether "Move the relay copy to Connect" fits the vault `id`: it syncs through the
@@ -2138,7 +2332,7 @@ impl DesktopApp {
             .connect
             .live
             .sync_account()
-            .filter(|account| account.plan.entitled())
+            .filter(|account| account.plan.is_some_and(StorePlan::entitled))
             .ok_or_else(|| CONNECT_NEEDS_PLAN.to_owned())?;
         let url = RelayUrl::parse(&account.origin).map_err(|error| sentence(&error.to_string()))?;
         if self.relay_changing(id) {
@@ -2304,8 +2498,11 @@ impl DesktopApp {
                 relay.set_account_signers(Some(account.signers.clone()));
                 relay.set_account_signer(Some(Arc::clone(signer)));
             }
-            relay.set_store_plan(Some(account.plan));
+            if let Some(plan) = account.plan {
+                relay.set_store_plan(Some(plan));
+            }
         }
+        self.relay_take_list(&account);
         // The open vault store takes the newer devices of the account (connect-account-v1
         // section 8); no owner check, as at its start (`register_own_store_device`).
         if let Some(id) = self.current_vault().map(|entry| entry.id.clone())
@@ -2835,6 +3032,168 @@ impl DesktopApp {
         let slot = self.relay_slot();
         self.relay_spawn_with(id, Job::Replace, Some(relay.clone()), move || {
             Reply::Replaced(relay.replace_relay_copy_shared(&slot, same_file(&relay)))
+        });
+    }
+
+    /// The device list of the account session reached the relay syncs (after their
+    /// policy): keep the signed names of the removed devices; and when Connect answered a
+    /// refresh since the last hand-over, tell each relay sync that a fetched list is in its
+    /// policy ([`RelaySync::note_device_list`]), and check again a vault store that waits for
+    /// it. The first hand-over of the app notes nothing: its list may be older than a
+    /// refusal, which then waits for the next refresh.
+    fn relay_take_list(&mut self, account: &crate::desktop::ui::connect::live::SyncAccount) {
+        for (key, name) in &account.removed_names {
+            self.sync
+                .relay
+                .departed_names
+                .insert(key.clone(), name.clone());
+        }
+        let before = self.sync.relay.listed.replace(account.listed_at);
+        let fresh =
+            matches!((before, account.listed_at), (Some(before), Some(now)) if before != Some(now));
+        if !fresh {
+            return;
+        }
+        for relay in lock(&self.sync.relay.cache).values() {
+            relay.note_device_list();
+        }
+        let checking: Vec<String> = self
+            .sync
+            .statuses
+            .iter()
+            .filter(|(_, status)| {
+                matches!(status, UiStatus::Problem(text)
+                    if problem(text) == Some(SyncError::ChecksDeviceList))
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in checking {
+            self.relay_sync_now(&id);
+        }
+    }
+
+    /// The head that the vault store `id` waits on, with the signed name of its device,
+    /// while its status is "Waiting for another device".
+    pub(crate) fn relay_departed(&self, id: &str) -> Option<Departed> {
+        let waiting = matches!(self.sync.statuses.get(id), Some(UiStatus::Problem(text))
+            if problem(text) == Some(SyncError::WaitsForAccountDevice));
+        if !waiting {
+            return None;
+        }
+        let head = self.relay_of(id)?.waiting_head()?;
+        let name = self.sync.relay.departed_names.get(&head.key).cloned();
+        Some(Departed { head, name })
+    }
+
+    /// "Use This Copy" or "Replace" of the copy that a device that left pushed to the
+    /// vault store `id`: a fresh owner check first, for exactly the head that the store
+    /// waits on and the choice ([`OwnerAction::TakeDepartedCopy`]).
+    pub(crate) fn relay_ask_departed(
+        &mut self,
+        id: &str,
+        replace: bool,
+        ctx: Option<&egui::Context>,
+    ) {
+        let Some(departed) = self.relay_departed(id) else {
+            self.set_err("The copy on the relay changed. Nothing changed.");
+            return;
+        };
+        let Some(team_id) = self
+            .relay_of(id)
+            .and_then(|relay| relay.state().ok().flatten())
+            .and_then(|state| state.team_id)
+        else {
+            self.set_err("Unlock the vault first. Nothing changed.");
+            return;
+        };
+        let vault_name = self
+            .vault_list
+            .registry
+            .get(id)
+            .map(|entry| entry.name.clone())
+            .unwrap_or_default();
+        let request = OwnerRequest::TakeDepartedCopy {
+            team_id,
+            version: departed.head.version,
+            head: departed.head.head_hash.clone(),
+            replace,
+            device_name: departed.who_in(),
+            vault_name,
+        };
+        self.sync.relay.departed_check = Some((id.to_owned(), request.action()));
+        self.ask_owner(request, ctx);
+    }
+
+    /// The step on the copy of a device that left, after its owner check: the proof must
+    /// name exactly the head that the store still waits on, in this vault session; then
+    /// the copy is taken or replaced.
+    fn relay_departed_step(&mut self) {
+        let Some((id, action)) = self.sync.relay.departed_check.clone() else {
+            return;
+        };
+        if self.ui.connect.live.guarded.is_some() || self.sync.relay.undo.is_some() {
+            return;
+        }
+        let Some(proof) = self.owner.take_connect_proof() else {
+            if self.owner.check.is_none() {
+                self.sync.relay.departed_check = None;
+            }
+            return;
+        };
+        self.sync.relay.departed_check = None;
+        let Some(epoch) = self.owner_ui.session.epoch() else {
+            self.set_err("Unlock the vault first. Nothing changed.");
+            return;
+        };
+        if let Err(refusal) = proof.check(&action, &epoch) {
+            self.set_err(refusal.message());
+            return;
+        }
+        drop(proof);
+        let OwnerAction::TakeDepartedCopy {
+            version,
+            head,
+            replace,
+            ..
+        } = action
+        else {
+            return;
+        };
+        let same = self.relay_departed(&id).is_some_and(|departed| {
+            departed.head.version == version && departed.head.head_hash == head
+        });
+        if !same {
+            self.set_err("The copy on the relay changed. Nothing changed.");
+            return;
+        }
+        if replace {
+            self.relay_replace(&id);
+        } else {
+            self.relay_use_departed(&id);
+        }
+    }
+
+    /// "Use the Copy That … Left…" for the open vault `id`: the head that it waits on
+    /// merges into the vault once, and the vault goes up over it. The relay copy is checked
+    /// again first. On its own thread.
+    pub(crate) fn relay_use_departed(&mut self, id: &str) {
+        if self.relay_busy(id, Job::UseDeparted) {
+            return;
+        }
+        let Some(departed) = self.relay_departed(id) else {
+            self.set_err("The copy on the relay changed. Nothing changed.");
+            return;
+        };
+        let Some(relay) = self.relay_of(id).filter(|_| self.relay_open(id)) else {
+            self.set_err("Unlock the vault first. Nothing changed.");
+            return;
+        };
+        let slot = self.relay_slot();
+        self.relay_spawn_with(id, Job::UseDeparted, Some(relay.clone()), move || {
+            Reply::UsedDeparted {
+                name: departed.name.clone(),
+                result: relay.use_departed_copy_shared(&slot, same_file(&relay), &departed.head),
+            }
         });
     }
 
@@ -3418,31 +3777,34 @@ impl DesktopApp {
             "" => device_name(),
             typed => typed.to_owned(),
         };
-        // A link of a vault store of Apassy Connect (a shared Family or Team vault, or a
-        // vault of the account): this Mac joins with its account key (plan s7 unit M3).
-        let account = self
-            .ui
-            .connect
-            .live
-            .sync_account()
-            .filter(|account| RelayUrl::parse(&account.origin).is_ok_and(|own| own.as_str() == url))
-            .and_then(|account| account.signer);
+        // A link for the origin of this Mac's Connect account, decided from the account
+        // file: a vault store of the account has no device link (its devices come from the
+        // account), so the store of the link's team is taken from the account, and only a
+        // relay team at that origin gets the link. That needs the open account session; a
+        // key of its own is never sent for a store of the account.
+        let for_account =
+            self.ui.connect.live.account_origin().is_some_and(|origin| {
+                RelayUrl::parse(&origin).is_ok_and(|own| own.as_str() == url)
+            });
+        let account = if for_account {
+            match self.ui.connect.live.sync_account() {
+                Some(account) => Some(account),
+                // The start screen: the session opens for this step there, and the link
+                // goes on when it is open.
+                None if self.owner_ui.session.epoch().is_none() => {
+                    self.sync.relay.join_error = Some(CONNECT_OPEN_SIGNING_IN.to_owned());
+                    self.connect_open_for_link(target, ctx);
+                    return;
+                }
+                None => {
+                    self.sync.relay.join_error = Some(CONNECT_SIGN_IN_FOR_LINK.to_owned());
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         let relay = &mut self.sync.relay;
-        if let Some(signer) = account {
-            relay.join_key = None;
-            self.relay_join_cancel();
-            let task = Task::spawn(ctx.cloned(), move || {
-                PendingJoin::request_with_account(&text, &url_field, &device, signer)
-            });
-            self.sync.relay.join = Some(Join {
-                target,
-                url,
-                team: String::new(),
-                safety: String::new(),
-                phase: Phase::Requesting(task),
-            });
-            return;
-        }
         // One key for each pasted code: a retry after a lost answer is the same request.
         let key = match relay
             .join_key
@@ -3459,8 +3821,46 @@ impl DesktopApp {
                 return;
             }
         };
+        let team = link_code_team(&code).unwrap_or_default().to_owned();
         relay.join_key = key.pkcs8().map(|pkcs8| (code, pkcs8.clone()));
         self.relay_join_cancel();
+        if let Some(account) = account {
+            self.sync.relay.store_join = false;
+            let task = Task::spawn(ctx.cloned(), move || {
+                let store = {
+                    let mut guard = lock(&account.account);
+                    let account = guard
+                        .as_mut()
+                        .ok_or_else(|| crate::connect::ConnectError::SignedOut.to_string())?;
+                    let store = account
+                        .vault_stores()
+                        .map_err(|error| error.to_string())?
+                        .into_iter()
+                        .find(|store| store.team_id == team);
+                    match store {
+                        Some(store) => Some(
+                            RelaySync::joined_from_store(account, &store)
+                                .map_err(|error| error.to_string())?,
+                        ),
+                        None => None,
+                    }
+                };
+                match store {
+                    Some(joined) => Ok(Resolved::Store(joined)),
+                    None => PendingJoin::request_with_key(&text, &url_field, &device, key)
+                        .map(Resolved::Link)
+                        .map_err(join_error),
+                }
+            });
+            self.sync.relay.join = Some(Join {
+                target,
+                url,
+                team: String::new(),
+                safety: String::new(),
+                phase: Phase::Resolving(task),
+            });
+            return;
+        }
         let task = Task::spawn(ctx.cloned(), move || {
             PendingJoin::request_with_key(&text, &url_field, &device, key)
         });
@@ -3526,6 +3926,27 @@ impl DesktopApp {
         });
     }
 
+    /// Cancel a link for the origin of the Connect account that is still resolving: wait
+    /// for its answer, then cancel the link when one was sent. A store of the account
+    /// needs nothing.
+    fn relay_end_resolving(&mut self, task: Task<Result<Resolved, String>>) {
+        self.relay_end(move || {
+            let deadline = Instant::now() + CANCEL_WAIT;
+            loop {
+                match task.poll() {
+                    TaskPoll::Waiting if Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                    TaskPoll::Waiting => return Some(NOT_CANCELLED.to_owned()),
+                    TaskPoll::Done(Ok(Resolved::Link(pending))) => {
+                        return pending.cancel().err().map(|_| NOT_CANCELLED.to_owned());
+                    }
+                    TaskPoll::Done(_) | TaskPoll::Lost => return None,
+                }
+            }
+        });
+    }
+
     /// Stop a Mac that joins: its link is cancelled, or its device leaves the relay,
     /// best effort. A vault that the passphrase opens already is not stopped: it opens
     /// in a moment.
@@ -3536,10 +3957,14 @@ impl DesktopApp {
         };
         match join.phase {
             Phase::Requesting(task) => self.relay_end_request(task),
+            // A link of a relay team is cancelled when it was sent; the account device
+            // stays in a store.
+            Phase::Resolving(task) => self.relay_end_resolving(task),
             // The account device stays in the store; nothing to cancel.
             Phase::FromStore(_) => self.sync.relay.store_join = false,
             Phase::Waiting { pending, .. } => self.relay_end_pending(pending),
             Phase::Downloading { joined, .. }
+            | Phase::Departed { joined, .. }
             | Phase::Ready { joined, .. }
             | Phase::Passphrase { joined } => {
                 self.relay_end_joined(joined);
@@ -3602,6 +4027,50 @@ impl DesktopApp {
         let mut failure = None;
         let now = Instant::now();
         let next = match phase {
+            Phase::Resolving(task) => match task.poll() {
+                TaskPoll::Waiting => Some(Phase::Resolving(task)),
+                TaskPoll::Done(Ok(Resolved::Store(joined))) => {
+                    // A store of the account: the copy downloads; no link was used.
+                    self.sync.relay.link_input.zeroize();
+                    self.sync.relay.join_key = None;
+                    self.sync.relay.store_join = true;
+                    let joined = Arc::new(joined);
+                    joined.team().clone_into(&mut team);
+                    match &target {
+                        None => {
+                            let work = self.vault_list.data_dir.join("sync");
+                            let device = Arc::clone(&joined);
+                            let task = Task::spawn(ctx.cloned(), move || device.download(&work));
+                            Some(Phase::Downloading { joined, task })
+                        }
+                        Some(id) => {
+                            if let Err(text) = self.relay_enable_joined(id, joined, &url, None) {
+                                failure = Some(text);
+                            }
+                            None
+                        }
+                    }
+                }
+                TaskPoll::Done(Ok(Resolved::Link(pending))) => {
+                    self.sync.relay.link_input.zeroize();
+                    self.sync.relay.join_key = None;
+                    team.clone_from(&pending.team);
+                    safety.clone_from(&pending.safety);
+                    Some(Phase::Waiting {
+                        pending: Arc::new(pending),
+                        poll: None,
+                        next_poll: now + POLL_EVERY,
+                    })
+                }
+                TaskPoll::Done(Err(text)) => {
+                    failure = Some(text);
+                    None
+                }
+                TaskPoll::Lost => {
+                    failure = Some(lost());
+                    None
+                }
+            },
             Phase::FromStore(task) => match task.poll() {
                 TaskPoll::Waiting => Some(Phase::FromStore(task)),
                 TaskPoll::Done(Ok(joined)) => {
@@ -3721,17 +4190,35 @@ impl DesktopApp {
                     self.ui.focus_start_field = true;
                     Some(Phase::Ready { joined, download })
                 }
-                TaskPoll::Done(Err(error)) => {
-                    self.relay_end_joined(joined);
-                    failure = Some(join_error(error));
-                    None
-                }
+                TaskPoll::Done(Err(error)) => match joined
+                    .waiting_head()
+                    .filter(|_| error == SyncError::WaitsForAccountDevice)
+                {
+                    // The owner can take the copy that a device that left pushed.
+                    Some(head) => Some(Phase::Departed { joined, head }),
+                    None => {
+                        self.relay_end_joined(joined);
+                        failure = Some(join_error(error));
+                        None
+                    }
+                },
                 TaskPoll::Lost => {
                     self.relay_end_joined(joined);
                     failure = Some(lost());
                     None
                 }
             },
+            Phase::Departed { joined, head } => {
+                let take = ctx.is_some_and(|ctx| {
+                    ctx.data_mut(|data| data.remove_temp::<bool>(egui::Id::new(TAKE_DEPARTED)))
+                        .is_some()
+                });
+                if take {
+                    Some(self.relay_join_departed(joined, head, ctx))
+                } else {
+                    Some(Phase::Departed { joined, head })
+                }
+            }
             ready @ (Phase::Ready { .. } | Phase::Passphrase { .. } | Phase::Merging { .. }) => {
                 Some(ready)
             }
@@ -3757,9 +4244,18 @@ impl DesktopApp {
         });
     }
 
+    /// Forget the vault stores that "Use a vault from another Mac" › "Apassy Connect"
+    /// listed: each visit of the screen, and "Try Again", ask Connect again.
+    pub(crate) fn relay_connect_forget_stores(&mut self) {
+        self.sync.relay.stores = None;
+        self.sync.relay.stores_task = None;
+    }
+
     /// The vault stores of the Connect account of this Mac that list this Mac and whose
     /// vault is not in the list here, for "Use a vault from another Mac" › "Apassy
-    /// Connect", read once on their own thread (`ConnectAccount::vault_stores`).
+    /// Connect", read once for each visit on their own thread
+    /// (`ConnectAccount::vault_stores`). `None` while they load, and while the account
+    /// session is not open (the screen shows the account then).
     pub(crate) fn relay_connect_stores(
         &mut self,
         ctx: &egui::Context,
@@ -3778,10 +4274,7 @@ impl DesktopApp {
             }
         }
         if self.sync.relay.stores.is_none() && self.sync.relay.stores_task.is_none() {
-            let Some(account) = self.ui.connect.live.sync_account() else {
-                self.sync.relay.stores = Some(Err(CONNECT_SIGN_IN.to_owned()));
-                return self.sync.relay.stores.as_ref();
-            };
+            let account = self.ui.connect.live.sync_account()?;
             // The vault ids of the list are in their sync states; a vault without sync
             // shows its store, and the adoption refuses a second copy of the same vault.
             let known: Vec<String> = lock(&self.sync.relay.cache)
@@ -3798,7 +4291,10 @@ impl DesktopApp {
                 Ok(stores
                     .into_iter()
                     .filter(|store| {
+                        // A store of another account (shared) is not offered: sharing a
+                        // vault between accounts is not available yet.
                         !known.contains(&store.vault_id)
+                            && !store.shared
                             && store
                                 .devices
                                 .iter()
@@ -4004,6 +4500,23 @@ impl DesktopApp {
     }
 }
 
+impl DesktopApp {
+    /// "Use the Copy That … Left…" of a device that joins: the download takes the head
+    /// that it waited on, once ([`JoinedDevice::download_departed`]); the adoption then
+    /// makes it the anchor, and the first sync pushes a head of this device over it.
+    fn relay_join_departed(
+        &mut self,
+        joined: Arc<JoinedDevice>,
+        head: DepartedHead,
+        ctx: Option<&egui::Context>,
+    ) -> Phase {
+        let work = self.vault_list.data_dir.join("sync");
+        let device = Arc::clone(&joined);
+        let task = Task::spawn(ctx.cloned(), move || device.download_departed(&work, &head));
+        Phase::Downloading { joined, task }
+    }
+}
+
 #[cfg(test)]
 impl DesktopApp {
     /// Take the answers of the relay calls and look at a Mac that joins until no
@@ -4016,6 +4529,7 @@ impl DesktopApp {
             let joining = match self.sync.relay.join.as_ref().map(|join| &join.phase) {
                 Some(
                     Phase::Requesting(_)
+                    | Phase::Resolving(_)
                     | Phase::FromStore(_)
                     | Phase::Downloading { .. }
                     | Phase::Adopting(_),
@@ -4125,6 +4639,21 @@ pub(super) fn safety_lines(ui: &mut egui::Ui, before: &str, words: &str, after: 
 /// What a Mac that joins shows while it waits: the words, the download.
 fn join_progress(ui: &mut egui::Ui, view: &JoinView) {
     match view {
+        JoinView::Departed { words, label } => {
+            kit::tone_note(
+                ui,
+                format!(
+                    "{words} No device of the account has saved a copy over it yet. Apassy can take this copy once, and the vault of this {} starts from it. Take it only if you know the change.",
+                    crate::computer!()
+                ),
+                Tone::Warning,
+            );
+            ui.add_space(6.0);
+            if kit::small_button(ui, label, Style::Prominent).clicked() {
+                ui.ctx()
+                    .data_mut(|data| data.insert_temp(egui::Id::new(TAKE_DEPARTED), true));
+            }
+        }
         JoinView::Sending => {
             kit::tone_note(ui, "Apassy sends the link to the relay…", Tone::Accent)
         }
@@ -5465,78 +5994,150 @@ pub(crate) const CONNECT_OPEN_EMPTY: &str = concat!(
 );
 /// The button of a vault store in the list.
 pub(crate) const CONNECT_OPEN_USE: &str = "Use This Vault…";
+/// No account file on this computer: it joins the account first.
+pub(crate) const CONNECT_OPEN_JOIN: &str = concat!(
+    "This ",
+    crate::computer!(),
+    " is not in an Apassy Connect account yet. On a device of the account, choose Add a Device…, then add this ",
+    crate::computer!(),
+    " with the code that it shows."
+);
+/// The account file of this computer is of an earlier version of Apassy.
+pub(crate) const CONNECT_OPEN_OLD_FILE: &str = concat!(
+    "This ",
+    crate::computer!(),
+    " must join its Apassy Connect account again: its account file is from an earlier version of Apassy. Open a vault, forget the account in Settings › Connect, then join it from another device of the account."
+);
+/// The key of the account is being read for this step.
+pub(crate) const CONNECT_OPEN_SIGNING_IN: &str = "Apassy signs in to Apassy Connect…";
+/// The list loads.
+pub(crate) const CONNECT_OPEN_LOADING: &str = "Apassy asks Apassy Connect for your vaults…";
 
 /// "Use a vault from another Mac" › "Apassy Connect" (plan s7 unit M5; mockup frames 10a
 /// to 10c): the vault stores of the account that list this Mac and are not on it yet,
 /// each with "Use This Vault…"; then the download, the passphrase of the vault, and the
-/// new vault with sync through Apassy Connect.
+/// new vault with sync through Apassy Connect. The screen is drawn while no vault is
+/// unlocked: the account session opens for this step only (`live::start_path`), and a
+/// computer without an account file joins the account here first, with the same sheets
+/// as Settings › Connect.
 pub(super) fn connect_open_screen(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    use super::super::connect::live::{self, StartAccount};
+    use super::super::connect::{ADD_THIS_MAC, Action, CHECK_AGAIN, SIGN_IN, TRY_AGAIN};
     let ctx = ui.ctx().clone();
     app.relay_join_step(Some(&ctx));
     let view = app.sync.relay.join_view(None);
     let mut cancel = false;
     let mut submit = false;
     let mut chosen = None;
+    let mut join = false;
+    let mut sign_in = false;
+    let mut again = false;
+    let spinner = |ui: &mut egui::Ui, text: &str| {
+        ui.horizontal(|ui| {
+            ui.add(egui::Spinner::new().size(12.0));
+            ui.label(rows_note(text));
+        });
+    };
     match &view {
         None => {
-            kit::paragraph(
-                ui,
-                CONNECT_OPEN_LEAD,
-                Font::Callout,
-                kit::palette().secondary,
-            );
-            ui.add_space(14.0);
-            match app.relay_connect_stores(&ctx).cloned() {
-                None => {
-                    ui.horizontal(|ui| {
-                        ui.add(egui::Spinner::new().size(12.0));
-                        ui.label(rows_note("Apassy asks Apassy Connect for your vaults…"));
-                    });
-                }
-                Some(Err(text)) => {
-                    kit::paragraph(ui, text, Font::Callout, kit::palette().secondary);
-                }
-                Some(Ok(stores)) if stores.is_empty() => {
+            let account = live::start_account(app);
+            if !matches!(account, StartAccount::Join { .. }) {
+                kit::paragraph(
+                    ui,
+                    CONNECT_OPEN_LEAD,
+                    Font::Callout,
+                    kit::palette().secondary,
+                );
+                ui.add_space(14.0);
+            }
+            match account {
+                StartAccount::Join { error } => {
                     kit::paragraph(
                         ui,
-                        CONNECT_OPEN_EMPTY,
+                        CONNECT_OPEN_JOIN,
                         Font::Callout,
                         kit::palette().secondary,
                     );
+                    ui.add_space(14.0);
+                    join = kit::wide_button(ui, ADD_THIS_MAC, Style::Bordered).clicked();
+                    if let Some(error) = error {
+                        ui.add_space(4.0);
+                        kit::paragraph(ui, error, Font::Callout, Tone::Critical.text());
+                    }
                 }
-                Some(Ok(stores)) => {
-                    kit::section(ui, Some("Vaults in Apassy Connect"), None, |s| {
-                        for store in &stores {
-                            let subtitle = if store.shared {
-                                "Shared vault"
-                            } else {
-                                "Your vault"
-                            };
-                            s.row(|ui| {
-                                egui::Sides::new().shrink_left().show(
-                                    ui,
-                                    |ui| {
-                                        ui.vertical(|ui| {
-                                            ui.spacing_mut().item_spacing.y = 1.0;
-                                            ui.label(
-                                                kit::text(&store.name, Font::Body)
-                                                    .color(kit::palette().label),
-                                            );
-                                            ui.label(rows_note(subtitle));
-                                        });
-                                    },
-                                    |ui| {
-                                        if kit::small_button(ui, CONNECT_OPEN_USE, Style::Bordered)
+                StartAccount::OldFile => kit::paragraph(
+                    ui,
+                    CONNECT_OPEN_OLD_FILE,
+                    Font::Callout,
+                    kit::palette().secondary,
+                ),
+                StartAccount::Opening => spinner(ui, CONNECT_OPEN_SIGNING_IN),
+                StartAccount::SignedOut { note } => {
+                    kit::paragraph(ui, CONNECT_SIGN_IN, Font::Callout, kit::palette().secondary);
+                    if let Some(note) = note {
+                        kit::paragraph(ui, note, Font::Callout, Tone::Critical.text());
+                    }
+                    ui.add_space(8.0);
+                    sign_in = kit::small_button(ui, SIGN_IN, Style::Bordered).clicked();
+                }
+                StartAccount::Removed { note } => {
+                    kit::paragraph(ui, note, Font::Callout, kit::palette().secondary);
+                }
+                StartAccount::Open => match app.relay_connect_stores(&ctx).cloned() {
+                    None => spinner(ui, CONNECT_OPEN_LOADING),
+                    Some(Err(text)) => {
+                        kit::paragraph(ui, sentence(&text), Font::Callout, Tone::Critical.text());
+                        ui.add_space(8.0);
+                        again = kit::small_button(ui, TRY_AGAIN, Style::Bordered).clicked();
+                    }
+                    Some(Ok(stores)) if stores.is_empty() => {
+                        kit::paragraph(
+                            ui,
+                            CONNECT_OPEN_EMPTY,
+                            Font::Callout,
+                            kit::palette().secondary,
+                        );
+                        ui.add_space(8.0);
+                        again = kit::small_button(ui, CHECK_AGAIN, Style::Bordered).clicked();
+                    }
+                    Some(Ok(stores)) => {
+                        kit::section(ui, Some("Vaults in Apassy Connect"), None, |s| {
+                            for store in &stores {
+                                let subtitle = if store.shared {
+                                    "Shared vault"
+                                } else {
+                                    "Your vault"
+                                };
+                                s.row(|ui| {
+                                    egui::Sides::new().shrink_left().show(
+                                        ui,
+                                        |ui| {
+                                            ui.vertical(|ui| {
+                                                ui.spacing_mut().item_spacing.y = 1.0;
+                                                ui.label(
+                                                    kit::text(&store.name, Font::Body)
+                                                        .color(kit::palette().label),
+                                                );
+                                                ui.label(rows_note(subtitle));
+                                            });
+                                        },
+                                        |ui| {
+                                            if kit::small_button(
+                                                ui,
+                                                CONNECT_OPEN_USE,
+                                                Style::Bordered,
+                                            )
                                             .clicked()
-                                        {
-                                            chosen = Some(store.clone());
-                                        }
-                                    },
-                                );
-                            });
-                        }
-                    });
-                }
+                                            {
+                                                chosen = Some(store.clone());
+                                            }
+                                        },
+                                    );
+                                });
+                            }
+                        });
+                    }
+                },
             }
         }
         Some(JoinView::Ready { team }) => {
@@ -5561,13 +6162,21 @@ pub(super) fn connect_open_screen(app: &mut DesktopApp, ui: &mut egui::Ui) {
             cancel = kit::small_button(ui, "Cancel", Style::Link).clicked();
         }
     }
+    // The join of this computer: the sheets of Settings › Connect.
+    live::sheets(app, &ctx);
     if let Some(store) = chosen {
         app.relay_connect_use(store, Some(&ctx));
     } else if submit {
         app.relay_open_vault(Some(&ctx));
     } else if cancel {
         app.relay_join_cancel();
-        app.sync.relay.stores = None;
+        app.relay_connect_forget_stores();
+    } else if join {
+        live::act(app, &ctx, Action::AddThisMac);
+    } else if sign_in {
+        live::start_sign_in(app, Some(&ctx));
+    } else if again {
+        app.relay_connect_forget_stores();
     }
 }
 
@@ -5630,6 +6239,115 @@ pub(super) fn use_copy_sheet(
     if use_copy {
         // The answer of the relay closes the sheet.
         app.relay_use_copy(&entry.id);
+    }
+    if cancel {
+        super::cancel_sheet(app, ctx);
+    }
+    response.escape
+}
+
+/// "Use the Copy That … Left…" (`replace` false) or "Replace It with This Mac's Copy…"
+/// (`replace` true): a vault store waits on the head that a device that left the account
+/// pushed, and no live device signed over it. The owner takes that copy once, or replaces
+/// it with the vault of this Mac. A copy that changed meanwhile closes the step: the row
+/// shows its new state.
+pub(super) fn departed_sheet(
+    app: &mut DesktopApp,
+    ctx: &egui::Context,
+    entry: &VaultEntry,
+    replace: bool,
+) -> bool {
+    let job = if replace {
+        Job::Replace
+    } else {
+        Job::UseDeparted
+    };
+    let busy = app.relay_busy(&entry.id, job);
+    let departed = app.relay_departed(&entry.id);
+    let mut go = false;
+    let mut take = false;
+    let mut cancel = false;
+    let id = if replace {
+        "sync-relay-replace-departed"
+    } else {
+        "sync-relay-use-departed"
+    };
+    let response = kit::sheet(ctx, id, 500.0, |ui| {
+        match &departed {
+            None if busy => kit::sheet_title(ui, job.progress(), None),
+            None => kit::sheet_title(
+                ui,
+                "The copy on the relay changed",
+                Some(
+                    "Nothing changed. The state of the vault in Settings > Vault > Sync shows the copy as it is now.",
+                ),
+            ),
+            Some(departed) if replace => kit::sheet_title(
+                ui,
+                &format!("Replace the copy that {} left?", departed.who_in()),
+                Some(&format!(
+                    concat!(
+                        "{who} saved the last copy of “{vault}” on the relay {ago}, then left the account. Apassy can upload the vault of this ",
+                        crate::computer!(),
+                        " as a new version over it. Changes that only that copy had are lost; a change that another device still has comes back when that device syncs."
+                    ),
+                    who = departed.who(),
+                    vault = entry.name,
+                    ago = ago(departed.head.time),
+                )),
+            ),
+            Some(departed) => kit::sheet_title(
+                ui,
+                &format!("Use the copy that {} left?", departed.who_in()),
+                Some(&format!(
+                    concat!(
+                        "{who} saved the last copy of “{vault}” on the relay {ago}, then left the account. No device of the account has saved a copy over it, so this ",
+                        crate::computer!(),
+                        " waits. Apassy can take this copy once, merge it with the vault on this ",
+                        crate::computer!(),
+                        ", and upload the result. Take it only if you know the change. Nothing on this ",
+                        crate::computer!(),
+                        " is lost."
+                    ),
+                    who = departed.who(),
+                    vault = entry.name,
+                    ago = ago(departed.head.time),
+                )),
+            ),
+        }
+        progress(app, ui, &entry.id, job);
+        kit::sheet_buttons(
+            ui,
+            |ui| {
+                if replace && departed.is_some() {
+                    go = ui
+                        .add_enabled_ui(!busy, |ui| kit::button(ui, "Replace", Style::Destructive))
+                        .inner
+                        .clicked();
+                }
+            },
+            |ui| {
+                if !replace && departed.is_some() {
+                    take = ui
+                        .add_enabled_ui(!busy, |ui| {
+                            kit::button(ui, "Use This Copy", Style::Prominent)
+                        })
+                        .inner
+                        .clicked();
+                }
+                let close = if departed.is_some() {
+                    "Cancel"
+                } else {
+                    "Close"
+                };
+                cancel = kit::button(ui, close, Style::Bordered).clicked();
+            },
+        );
+    });
+    if go || take {
+        // A fresh owner check for exactly this head and this choice; the answer of the
+        // relay closes the sheet.
+        app.relay_ask_departed(&entry.id, replace, Some(ctx));
     }
     if cancel {
         super::cancel_sheet(app, ctx);
@@ -5814,5 +6532,120 @@ mod access_repair_tests {
                 assert!(!text.contains(refused), "{refused}: {text}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod departed_tests {
+    use super::*;
+
+    fn head() -> DepartedHead {
+        DepartedHead {
+            key: vec![4; 65],
+            device_id: 3,
+            version: 7,
+            head_hash: "ab".repeat(32),
+            time: 1_700_000_000,
+        }
+    }
+
+    fn collect(shape: &egui::Shape, out: &mut String) {
+        match shape {
+            egui::Shape::Text(text) => {
+                out.push_str(text.galley.text());
+                out.push('\n');
+            }
+            egui::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    collect(shape, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The text that the screen of a device that joins paints for `view`.
+    fn painted(view: &JoinView) -> String {
+        let ctx = egui::Context::default();
+        let mut text = String::new();
+        for _ in 0..2 {
+            let output = ctx.run_ui(egui::RawInput::default(), |ui| join_progress(ui, view));
+            text.clear();
+            for clipped in &output.shapes {
+                collect(&clipped.shape, &mut text);
+            }
+            output.drop_without_applying_deltas();
+        }
+        text
+    }
+
+    /// A device that joins has no copy of the vault: it can take the copy that a removed
+    /// device left, named by its signed name, and it is offered no "Replace…".
+    #[test]
+    fn a_new_device_is_offered_the_copy_that_a_removed_device_left_and_no_replace() {
+        let departed = Departed {
+            head: head(),
+            name: Some("Synthetic Mac mini".to_owned()),
+        };
+        let text = painted(&JoinView::Departed {
+            words: departed.words(),
+            label: departed.use_label(),
+        });
+        assert!(
+            text.contains("Use the Copy That “Synthetic Mac mini” Left…"),
+            "{text}"
+        );
+        assert!(
+            text.contains("“Synthetic Mac mini” saved the last copy"),
+            "{text}"
+        );
+        assert!(!text.contains(REPLACE_DEPARTED), "{text}");
+        assert!(!text.contains("Replace"), "{text}");
+    }
+
+    /// Without a verified device list in memory the steps use a neutral phrase.
+    #[test]
+    fn without_a_verified_list_the_device_is_not_named() {
+        let departed = Departed {
+            head: head(),
+            name: None,
+        };
+        assert_eq!(
+            departed.use_label(),
+            "Use the Copy That a Removed Device Left…"
+        );
+        assert!(
+            departed
+                .words()
+                .starts_with("A device that left the account saved the last copy"),
+            "{}",
+            departed.words()
+        );
+        assert_eq!(departed.who_in(), "a device that left the account");
+    }
+
+    /// A chain entry by a device that this computer has not learned yet is a wait for the
+    /// device list, never the refused-copy offer; only a fresh list that still refuses it
+    /// offers "Use the relay copy…".
+    #[test]
+    fn a_chain_entry_of_an_unknown_device_waits_for_the_list_before_the_offer() {
+        let checking = UiStatus::from_error(SyncError::ChecksDeviceList);
+        assert_eq!(tag(&checking), ("Checking the device list", Tone::Accent));
+        assert!(!refused_copy(&checking));
+        assert!(
+            words(&checking, None).starts_with("Checking the device list of this account."),
+            "{}",
+            words(&checking, None)
+        );
+        let refused = UiStatus::from_error(SyncError::UnknownSigner);
+        assert_eq!(tag(&refused), ("Relay copy refused", Tone::Warning));
+        assert!(refused_copy(&refused));
+        assert!(
+            words(&refused, None).contains("“Use the relay copy…”"),
+            "{}",
+            words(&refused, None)
+        );
+        // A real fork stays the refused copy that it was.
+        assert!(refused_copy(&UiStatus::from_error(SyncError::ForkedCopy)));
     }
 }

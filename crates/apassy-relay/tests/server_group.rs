@@ -681,6 +681,129 @@ fn a_member_removal_goes_on_past_a_store_that_refuses_the_write() {
     );
 }
 
+/// A member removed while the store file refuses the write, who joins again and is added
+/// to the store again before the removal lands: the store keeps its row (the add clears
+/// the removal that waited for it), and a maintenance pass leaves the member in the store.
+#[test]
+fn a_store_device_added_again_clears_the_removal_that_waited_for_it() {
+    use apassy_relay::ids::TeamId;
+    use apassy_relay::server::store::db;
+    let c = start();
+    let owner = family(&c, 4);
+    let anna = c.account("Anna");
+    c.add_member(&owner, &anna);
+    let team = c.ok(
+        "POST",
+        "/v1/account/vaults",
+        Some(&owner.token),
+        Some(&json!({"vault_id": VAULT, "name": "Family"})),
+    )["team_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let path = format!("/v1/account/vaults/{team}/devices");
+    let first = c.ok(
+        "POST",
+        &path,
+        Some(&owner.token),
+        Some(&store_add_body(&anna)),
+    );
+    let id = TeamId::parse(&team).unwrap();
+    let hub = c.relay.hub();
+    let query_only = |on: bool| {
+        let sql = if on {
+            "PRAGMA query_only = 1;"
+        } else {
+            "PRAGMA query_only = 0;"
+        };
+        hub.team(&id)
+            .unwrap()
+            .store
+            .with(|conn| conn.execute_batch(sql).map_err(db))
+            .unwrap();
+    };
+    query_only(true);
+    let removed = remove(&c, &owner, &anna);
+    assert_eq!(removed.0, 200, "{}", removed.1);
+    query_only(false);
+    assert_eq!(
+        c.rows("SELECT team_id FROM account_store_removal"),
+        std::slice::from_ref(&team)
+    );
+    // Anna joins again and is added again: the live row of the store is hers again.
+    c.add_member(&owner, &anna);
+    let again = c.ok(
+        "POST",
+        &path,
+        Some(&owner.token),
+        Some(&store_add_body(&anna)),
+    );
+    assert_eq!(again["store_device_id"], first["store_device_id"]);
+    assert!(
+        c.rows("SELECT team_id FROM account_store_removal")
+            .is_empty()
+    );
+    apassy_relay::server::http::maintain(
+        &hub,
+        connect::now() + apassy_relay::server::hub::STORE_REMOVAL_MAX_WAIT_SECS,
+    );
+    let (status, answer) = c.call(
+        "POST",
+        "/v1/auth/challenge",
+        None,
+        Some(&json!({"team_id": team, "public_key": anna.key.public_key_b64()})),
+    );
+    assert_eq!(status, 200, "{answer}");
+}
+
+/// A store device of another account signs in to a store only while both accounts are/// A store device of another account signs in to a store only while both accounts are
+/// active members of one group: a membership that ends, also one whose store rows were
+/// left behind, ends its store sign-in.
+#[test]
+fn a_members_store_sign_in_needs_the_group() {
+    let c = start();
+    let owner = family(&c, 4);
+    let anna = c.account("Anna");
+    c.add_member(&owner, &anna);
+    let team = c.ok(
+        "POST",
+        "/v1/account/vaults",
+        Some(&owner.token),
+        Some(&json!({"vault_id": VAULT, "name": "Family"})),
+    )["team_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    c.ok(
+        "POST",
+        &format!("/v1/account/vaults/{team}/devices"),
+        Some(&owner.token),
+        Some(&store_add_body(&anna)),
+    );
+    let challenge = |dev: &Dev| {
+        c.call(
+            "POST",
+            "/v1/auth/challenge",
+            None,
+            Some(&json!({"team_id": team, "public_key": dev.key.public_key_b64()})),
+        )
+        .0
+    };
+    assert_eq!(challenge(&anna), 200);
+    // The membership goes and its store rows stay (a removal that did not run to its end):
+    // the sign-in is refused all the same; the owner's own device signs in.
+    c.edit_directory(&format!(
+        "DELETE FROM group_member WHERE account_id = '{}';",
+        anna.account
+    ));
+    assert_eq!(
+        c.rows("SELECT device_id FROM account_store_device").len(),
+        2
+    );
+    assert_eq!(challenge(&anna), 401);
+    assert_eq!(challenge(&owner), 200);
+}
+
 // ---- Paid seats under one lock of the group (the review of billing and groups). ----
 
 /// `who` joins the group of `owner` and stays pending.

@@ -287,6 +287,7 @@ fn the_iphone_joins_with_its_own_key_and_the_mac_confirms() {
         &mac.id(),
         &apassy::connect::link_hash(link.code()),
         body["public_key"].as_str().unwrap(),
+        "Synthetic iPhone",
     );
     let signature = decode_b64u(body["signature"].as_str().unwrap()).unwrap();
     assert!(verify_signature(&key, &message, &signature));
@@ -623,11 +624,24 @@ fn the_iphone_marks_every_device_that_it_cannot_verify() {
     assert_eq!(listed_verified(&status, &second_id), Some(true));
     assert_eq!(listed_verified(&status, &third_id), Some(true));
 
-    // (a) A row that no device confirmed.
+    // Connect says the account is an active member of a family: that changes nothing.
+    connect.make_group(&account_id, "family");
+    // (a) A row that no device of the signed list confirmed.
     let stranger = AccountSigner::open_or_create(&MemoryKeyStore::new()).unwrap();
     let inserted = connect.insert_device(&account_id, "Mac Studio", stranger.public_key());
-    // (b) A device that left the account and comes back.
-    connect.revoke(&second_id);
+    // (b) A device that the Mac removed with a signed entry, whose row comes back.
+    let second_view = mac
+        .account
+        .view()
+        .unwrap()
+        .devices
+        .into_iter()
+        .find(|device| device.device_id == second_id)
+        .unwrap();
+    let (proof, epoch) = owner.proof(mac.account.revoke_action(&second_view));
+    mac.account
+        .revoke(&second_view, proof, &epoch)
+        .expect("revoke");
     let status = call(&phone.core, json!({"op": "connect_status"}));
     assert_eq!(listed_verified(&status, &second_id), None);
     connect.unrevoke(&second_id);
@@ -660,6 +674,16 @@ fn the_iphone_marks_every_device_that_it_cannot_verify() {
     assert!(!keys.contains(&stranger.public_key().to_vec()));
     assert!(!keys.contains(&swapped.public_key().to_vec()));
     assert!(!keys.contains(&second.public_key()));
+    // The signers of a vault store come from the trust store: never a key that Connect
+    // added, though it says the account is in an active family.
+    assert_eq!(
+        account.view().unwrap().group.map(|group| group.state),
+        Some("active".to_owned())
+    );
+    let policy = apassy::connect::signer_policy(account.state());
+    assert!(!policy.allows(stranger.public_key(), 1, 9));
+    assert!(!policy.allows(swapped.public_key(), 1, 9));
+    assert!(policy.allows(&mac.public_key(), 9, 0));
     for device_id in [&inserted, &second_id, &third_id] {
         let (proof, epoch) = owner.proof(ConnectAccount::add_store_device_action(
             &store.team_id,
@@ -723,6 +747,75 @@ fn a_key_that_the_keychain_lost_shows_removed_until_forget() {
         call(&phone.core, json!({"op": "connect_status"}))["state"],
         "none"
     );
+}
+
+/// Write the account file of `phone` as an account file of an earlier version of Apassy
+/// (version 2: no pinned device list), mode 0600.
+fn make_earlier_account_file(phone: &Phone) {
+    use std::os::unix::fs::PermissionsExt;
+    let path = phone.state_file();
+    let mut value: Value = serde_json::from_slice(&std::fs::read(&path).expect("read")).unwrap();
+    let object = value.as_object_mut().expect("object");
+    object.insert("v".to_owned(), json!(2));
+    for field in ["list_version", "list_head", "left"] {
+        object.remove(field);
+    }
+    object.insert("revoked".to_owned(), json!([]));
+    std::fs::write(&path, serde_json::to_vec(&value).unwrap()).expect("write");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("mode");
+}
+
+#[test]
+fn an_account_file_of_an_earlier_version_asks_to_join_again_and_forget_clears_it() {
+    let connect = FakeConnect::start();
+    let owner = owner();
+    let mut mac = mac(&connect, "Rafal");
+    let phone = phone(&connect);
+    join(&mut mac, &owner, &phone);
+    // The app starts again after an update: the account is no longer in memory, and its
+    // file is of an earlier version.
+    call(&phone.core, json!({"op": "lock"}));
+    make_earlier_account_file(&phone);
+
+    // A status, not an error: this iPhone must join its account again.
+    let status = call(&phone.core, json!({"op": "connect_status"}));
+    assert_eq!(status["state"], "account", "{status}");
+    assert_eq!(status["join_again"], true, "{status}");
+    assert!(status.get("removed").is_none(), "{status}");
+    assert!(status["plan"].is_null(), "{status}");
+    assert!(status.get("devices").is_none(), "{status}");
+    assert!(status.get("list_verified").is_none(), "{status}");
+    assert_no_purchase_text(&status.to_string());
+    // Nothing was deleted, and nothing was asked of Connect for it.
+    assert!(phone.state_file().exists());
+    assert!(phone.keys.has_key());
+    // A join waits for the forget.
+    let link = mac.account.start_link().expect("link");
+    assert_eq!(
+        fail(
+            &phone.core,
+            json!({"op": "connect_join", "link": link.code()})
+        ),
+        "already_connected"
+    );
+
+    // "Forget This iPhone…": the file and the key go.
+    assert_eq!(
+        call(&phone.core, json!({"op": "connect_forget"}))["forgotten"],
+        true
+    );
+    assert!(!phone.state_file().exists());
+    assert!(!phone.keys.has_key());
+    let status = call(&phone.core, json!({"op": "connect_status"}));
+    assert_eq!(status["state"], "none");
+    assert!(status.get("join_again").is_none(), "{status}");
+
+    // Then this iPhone joins its account again, with a new key.
+    join(&mut mac, &owner, &phone);
+    let status = call(&phone.core, json!({"op": "connect_status"}));
+    assert_eq!(status["state"], "account");
+    assert!(status.get("join_again").is_none(), "{status}");
+    assert_eq!(status["list_verified"], true);
 }
 
 #[test]

@@ -373,11 +373,7 @@ struct ItemsView: View {
 
     private var showsSyncProblem: Bool {
         guard vault.vault?.syncs == true else { return false }
-        return switch vault.syncStatus?.state {
-        case .offline?, .needsPassphrase?, .removed?, .damaged?, .staleCopy?, .forkedCopy?, .error?:
-            true
-        default: false
-        }
+        return SyncStatusLook.of(vault.syncStatus?.state).isProblem
     }
 
     private var subtitle: String {

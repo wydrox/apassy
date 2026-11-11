@@ -55,6 +55,28 @@ pub fn valid_account_id(text: &str) -> bool {
     valid_id(text, "acc_")
 }
 
+/// A new account id, made by the device that makes the account (its root entry names
+/// it): `acc_` and 10 random characters of `a-z2-7`.
+pub fn new_account_id() -> Result<String, ConnectError> {
+    const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+    let bytes = random::<10>()?;
+    let mut id = String::from("acc_");
+    for byte in bytes.iter() {
+        id.push(char::from(ALPHABET[usize::from(byte & 31)]));
+    }
+    Ok(id)
+}
+
+/// The short fingerprint of a device key (X9.63) that an owner check shows: the first 6
+/// bytes of its SHA-256, as three groups of four lowercase hex characters
+/// (`1a2b 3c4d 5e6f`). Settings › Connect shows the fingerprint of this device's own key,
+/// so the owner can compare it on each device.
+pub fn key_fingerprint(key: &[u8]) -> String {
+    let digest = ring::digest::digest(&ring::digest::SHA256, key);
+    let hex = hex_lower(&digest.as_ref()[..6]);
+    format!("{} {} {}", &hex[..4], &hex[4..8], &hex[8..12])
+}
+
 /// An account device id: `dev_` and 10 characters of `a-z2-7`.
 pub fn valid_device_id(text: &str) -> bool {
     valid_id(text, "dev_")
@@ -342,6 +364,16 @@ impl RecoveryKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_account_id_has_the_form_of_section_2() {
+        let first = new_account_id().unwrap();
+        assert!(valid_account_id(&first), "{first}");
+        assert_ne!(first, new_account_id().unwrap());
+        let fingerprint = key_fingerprint(&[4; 65]);
+        assert_eq!(fingerprint.len(), 14);
+        assert_eq!(fingerprint.split(' ').count(), 3);
+    }
 
     #[test]
     fn ids_follow_the_grammar() {

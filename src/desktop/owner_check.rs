@@ -671,16 +671,31 @@ pub enum OwnerRequest {
         account_id: String,
         device_id: String,
         device_name: String,
+        /// The short fingerprint of the key that the signed removal names.
+        fingerprint: String,
         this_device: bool,
     },
     /// Delete the Apassy Connect account (section 6).
     DeleteConnectAccount {
         account_id: String,
     },
+    /// Forget an account file of an earlier version of Apassy on this Mac, with its key.
+    ForgetOldConnectAccount,
     /// Delete the vault store (relay copy) `team_id` of the vault `vault_name` at Apassy
     /// Connect (section 8).
     DeleteVaultStore {
         team_id: String,
+        vault_name: String,
+    },
+    /// Take the copy that the device "`device_name`" left on the vault store `team_id` of
+    /// the vault `vault_name` (the head `head` of version `version`) once, or replace it
+    /// with this device's vault (`replace`; connect-account-v1 section 7.5).
+    TakeDepartedCopy {
+        team_id: String,
+        version: u64,
+        head: String,
+        replace: bool,
+        device_name: String,
         vault_name: String,
     },
     /// Add the device `device_id` ("`device_name`") of the account `account_id` to the
@@ -1159,17 +1174,32 @@ impl OwnerRequest {
                 account_id,
                 device_id,
                 device_name,
+                fingerprint,
                 ..
             } => OwnerAction::RevokeConnectDevice {
                 account_id: account_id.clone(),
                 device_id: device_id.clone(),
                 device_name: device_name.clone(),
+                fingerprint: fingerprint.clone(),
             },
             Self::DeleteConnectAccount { account_id } => OwnerAction::DeleteConnectAccount {
                 account_id: account_id.clone(),
             },
+            Self::ForgetOldConnectAccount => OwnerAction::ForgetOldConnectAccount,
             Self::DeleteVaultStore { team_id, .. } => OwnerAction::DeleteVaultStore {
                 team_id: team_id.clone(),
+            },
+            Self::TakeDepartedCopy {
+                team_id,
+                version,
+                head,
+                replace,
+                ..
+            } => OwnerAction::TakeDepartedCopy {
+                team_id: team_id.clone(),
+                version: *version,
+                head: head.clone(),
+                replace: *replace,
             },
             Self::AddStoreDevice {
                 team_id,
@@ -1643,20 +1673,56 @@ impl OwnerRequest {
             ),
             Self::RevokeConnectDevice {
                 device_name,
+                fingerprint,
                 this_device: true,
                 ..
             } => format!(
-                concat!("Forget this ", crate::computer!(), " (\"{}\") in your Apassy Connect account? It leaves every vault store of the account and signs out. Your vaults stay on this ", crate::computer!(), "."),
-                page_text(device_name)
+                concat!("Forget this ", crate::computer!(), " (\"{}\", key {}) in your Apassy Connect account? It leaves every vault store of the account and signs out. Your vaults stay on this ", crate::computer!(), "."),
+                page_text(device_name),
+                page_text(fingerprint)
             ),
-            Self::RevokeConnectDevice { device_name, .. } => format!(
-                "Remove \"{}\" from your Apassy Connect account? It signs out at once and leaves every vault store of the account.",
-                page_text(device_name)
+            Self::RevokeConnectDevice {
+                device_name,
+                fingerprint,
+                ..
+            } => format!(
+                "Remove \"{}\" (key {}) from your Apassy Connect account? It signs out at once and leaves every vault store of the account. Its key fingerprint is shown in Settings › Connect on that device.",
+                page_text(device_name),
+                page_text(fingerprint)
             ),
             Self::DeleteConnectAccount { .. } => "Delete your Apassy Connect account? The subscription ends now, and every vault store, device, and link of the account is deleted at Connect. Your vaults stay on your devices.".to_owned(),
+            Self::ForgetOldConnectAccount => concat!("Forget the Apassy Connect account on this ", crate::computer!(), "? Its account file is from an earlier version of Apassy. The file and the account key go from this ", crate::computer!(), "; nothing changes at Connect, and your vaults stay. Then join the account again from another device of the account.").to_owned(),
             Self::DeleteVaultStore { vault_name, .. } => format!(
                 "Delete the relay copy of \"{}\" at Apassy Connect? Its snapshots go, and your devices stop syncing this vault through Connect. The vault stays on your devices.",
                 page_text(vault_name)
+            ),
+            Self::TakeDepartedCopy {
+                replace: false,
+                device_name,
+                vault_name,
+                ..
+            } => format!(
+                concat!(
+                    "Use the copy of \"{}\" that {} left on the relay? Apassy merges it with the vault on this ",
+                    crate::computer!(),
+                    " once, and uploads the result."
+                ),
+                page_text(vault_name),
+                page_text(device_name)
+            ),
+            Self::TakeDepartedCopy {
+                replace: true,
+                device_name,
+                vault_name,
+                ..
+            } => format!(
+                concat!(
+                    "Replace the copy of \"{}\" that {} left on the relay with the vault on this ",
+                    crate::computer!(),
+                    "? Changes that only that copy had are lost."
+                ),
+                page_text(vault_name),
+                page_text(device_name)
             ),
             Self::AddStoreDevice {
                 device_name,
@@ -2809,7 +2875,9 @@ impl DesktopApp {
             OwnerRequest::ConfirmConnectDevice { .. }
             | OwnerRequest::RevokeConnectDevice { .. }
             | OwnerRequest::DeleteConnectAccount { .. }
+            | OwnerRequest::ForgetOldConnectAccount
             | OwnerRequest::DeleteVaultStore { .. }
+            | OwnerRequest::TakeDepartedCopy { .. }
             | OwnerRequest::AddStoreDevice { .. }
             | OwnerRequest::ChangeConnectGroup { .. } => {
                 self.owner.connect_proof = Some(proof);
