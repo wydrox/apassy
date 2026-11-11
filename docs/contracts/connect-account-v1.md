@@ -146,7 +146,7 @@ The Mac polls this route every 3 s while the checkout sheet is open ([connect-bi
 
 ### `DELETE /v1/account`
 
-From a live device after an owner check on it (`OwnerAction::DeleteConnectAccount`), with an empty JSON body `{}`. Connect cancels the subscription at once ([connect-billing-v1](connect-billing-v1.md) section 9), deletes every vault store, device, link, grant, and node of the account, sends I-4 `forget` (section 11), and keeps the Stripe customer for the invoices. Answer: `{"account_id":"acc_…","deleted_stores":2,"subscription_canceled":true}`. An organizer or a Team owner with confirmed members is refused with `409 conflict` until the members are removed.
+From a live device after an owner check on it (`OwnerAction::DeleteConnectAccount`), with an empty JSON body `{}`. Connect cancels the subscription at once ([connect-billing-v1](connect-billing-v1.md) section 9), deletes every vault store, device, link, grant, and node of the account, records I-4 `forget` (section 11), and keeps the Stripe customer for the invoices. Answer: `{"account_id":"acc_…","deleted_stores":2,"subscription_canceled":true}`. An organizer or a Team owner with confirmed members is refused with `409 conflict` until the members are removed.
 
 ## 7. Account devices
 
@@ -237,12 +237,14 @@ works only when the account has no live device. The message is `apassy-connect r
 
 ## 11. The bouncer brain (plan 0035 I-1 to I-5)
 
+Status: this version of Connect records the I-4 events (`brain_event`) and serves none of the internal routes. The internal listener, the I-3 route, and the delivery of the I-4 events are a later unit; until it ships, Connect sends nothing to the brain and answers no request of it. The table is the contract of that unit.
+
 | Item | Here |
 | --- | --- |
 | I-1 device key | The account device key of section 5; `key_id` is the account device id. The brain signs in with `apassy-bouncer sign-in v1`, account id in the place of the team id (vector `brain_sign_in`, section 15). |
 | I-2 token | Section 3: the account token stays with the Connect client; the brain issues its own token. |
 | I-3 directory | `POST /internal/v1/brain/device` with `{"key_id":"dev_…","public_key_sha256":"<64 hex>"}` answers `{"account":"acc_…","entitled_hosting":true,"entitled_training":true,"revoked":false}`. `public_key_sha256` is the hex SHA-256 of the 65 raw key bytes. `account` is the account id, opaque to the brain. Both entitlements are `"brain" in feats` of the account now (the training consent stays with the brain, J1). A revoked device answers `revoked: true` with both entitlements `false`; an unknown key id, or a hash that differs from the device's key, is `404 not_found`. |
-| I-4 events | The routes of the brain: `POST /internal/v1/revoke` with `{"key_id":"dev_…"}` when a device is revoked, and `POST /internal/v1/forget` with `{"account":"acc_…"}` when the plan is deleted (90 days, [connect-billing-v1](connect-billing-v1.md) section 8) or the account is deleted. Both are idempotent. Connect records each event in the directory (`brain_event`) in the transaction of the revoke or the deletion, and prunes it after 90 days. The delivery of the events is not part of this version: until it is, the brain learns a revoke at the next sign-in of the device from I-3 (`revoked: true`), and the 15-minute life of its token bounds the rest. |
+| I-4 events | The routes of the brain: `POST /internal/v1/revoke` with `{"key_id":"dev_…"}` when a device is revoked, and `POST /internal/v1/forget` with `{"account":"acc_…"}` when the plan is deleted (90 days, [connect-billing-v1](connect-billing-v1.md) section 8) or the account is deleted. Both are idempotent. Connect records each event in the directory (`brain_event`) in the transaction of the revoke or the deletion, and prunes it after 90 days. The later unit delivers each recorded event until a 2xx; with I-3 the brain also learns a revoke at the next sign-in of the device (`revoked: true`). |
 | I-5 origin | The brain is `https://brain.apassy.wyderka.cc` (its own certificate and compose project), not behind the byte relay. The app has the origin as a build constant. |
 
 The internal routes are served only on the internal listener of the Connect host (`APASSY_CONNECT_INTERNAL_LISTEN`, the compose network), never through the Worker, with `Authorization: Bearer <service token>` from the compose secret file `APASSY_CONNECT_BRAIN_TOKEN_FILE`; another caller gets `401 unauthenticated`.

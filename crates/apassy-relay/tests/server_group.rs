@@ -681,6 +681,51 @@ fn a_member_removal_goes_on_past_a_store_that_refuses_the_write() {
     );
 }
 
+/// A store device of another account signs in to a store only while both accounts are
+/// active members of one group: a membership that ends, also one whose store rows were
+/// left behind, ends its store sign-in.
+#[test]
+fn a_members_store_sign_in_needs_the_group() {
+    let c = start();
+    let owner = family(&c, 4);
+    let anna = c.account("Anna");
+    c.add_member(&owner, &anna);
+    let team = c.ok(
+        "POST",
+        "/v1/account/vaults",
+        Some(&owner.token),
+        Some(&json!({"vault_id": VAULT, "name": "Family"})),
+    )["team_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    c.ok(
+        "POST",
+        &format!("/v1/account/vaults/{team}/devices"),
+        Some(&owner.token),
+        Some(&store_add_body(&anna)),
+    );
+    let challenge = |dev: &Dev| {
+        c.call(
+            "POST",
+            "/v1/auth/challenge",
+            None,
+            Some(&json!({"team_id": team, "public_key": dev.key.public_key_b64()})),
+        )
+        .0
+    };
+    assert_eq!(challenge(&anna), 200);
+    // The membership goes and its store rows stay (a removal that did not run to its end):
+    // the sign-in is refused all the same; the owner's own device signs in.
+    c.edit_directory(&format!(
+        "DELETE FROM group_member WHERE account_id = '{}';",
+        anna.account
+    ));
+    assert_eq!(c.rows("SELECT device_id FROM account_store_device").len(), 2);
+    assert_eq!(challenge(&anna), 401);
+    assert_eq!(challenge(&owner), 200);
+}
+
 // ---- Paid seats under one lock of the group (the review of billing and groups). ----
 
 /// `who` joins the group of `owner` and stays pending.
