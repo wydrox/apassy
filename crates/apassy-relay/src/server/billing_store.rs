@@ -447,6 +447,34 @@ impl BillingTx for SqlBilling<'_> {
         Ok(u32::try_from(count).unwrap_or(u32::MAX))
     }
 
+    fn group_size(&mut self, group_id: &str) -> RelayResult<u32> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT count(*) FROM group_member WHERE group_id = ?1",
+                params![group_id],
+                |row| row.get(0),
+            )
+            .map_err(db)?;
+        Ok(u32::try_from(count).unwrap_or(u32::MAX))
+    }
+
+    fn set_group_kind(&mut self, group_id: &str, kind: GroupKind) -> RelayResult<()> {
+        self.conn
+            .execute(
+                "UPDATE \"group\" SET kind = ?2 WHERE id = ?1",
+                params![group_id, kind_text(kind)],
+            )
+            .map_err(db)?;
+        self.conn
+            .execute(
+                "DELETE FROM group_invite WHERE group_id = ?1 AND used_at IS NULL",
+                params![group_id],
+            )
+            .map_err(db)?;
+        Ok(())
+    }
+
     fn member_rank(&mut self, group_id: &str, account: &str) -> RelayResult<Option<u32>> {
         let mut statement = self
             .conn
@@ -873,43 +901,83 @@ pub fn maintain(hub: &Hub, billing: &ConnectBilling, now: u64) -> RelayResult<us
     Ok(done)
 }
 
-/// One due plan of `maintain`, under the lock of its buying account.
+/// One due plan of `maintain`. Stripe is asked first, outside every lock (a slow Stripe
+/// holds no account): `Billing::verify_ended` applies Stripe's state of the subscription
+/// by the rules of an event, and `Billing::deletion_blocked` asks for each account whether
+/// anything at Stripe or an open problem keeps the data of an account whose plan is over
+/// here. While that keeps the buying account, nothing is deleted, its members' data
+/// neither. Then, under the lock of the buying
+/// account, the plan must still be due, and each account goes whose plan is `none`.
+///
+/// The audit row `plan_stores_deleted` and I-4 `forget` are written when something was
+/// deleted or the plan is done, so a plan that waits writes no row each pass. A plan is
+/// done only when every account of it was handled.
 fn delete_due(
     hub: &Hub,
     billing: &ConnectBilling,
     due: &DueDeletion,
     now: u64,
 ) -> RelayResult<bool> {
-    billing.with_account_lock(&due.account, || {
-        if billing.verify_ended(&due.subscription, now)? != StripeCheck::Ended
-            || !billing.still_due(&due.subscription, now)?
-        {
+    if billing.verify_ended(&due.subscription, now)? != StripeCheck::Ended {
+        return Ok(false);
+    }
+    let mut accounts = vec![due.account.clone()];
+    if let Some(group) = &due.group_id
+        && billing.deletes_members(&due.subscription, now)?
+    {
+        let members: Vec<String> = hub.directory.store.with(|conn| {
+            let mut statement = conn
+                .prepare(
+                    "SELECT account_id FROM group_member WHERE group_id = ?1 AND account_id <> ?2 \
+                     AND state = 'active' ORDER BY account_id",
+                )
+                .map_err(db)?;
+            statement
+                .query_map(params![group, due.account], |row| row.get(0))
+                .map_err(db)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(db)
+        })?;
+        accounts.extend(members);
+    }
+    let mut ready = Vec::new();
+    let mut waiting = 0usize;
+    for account in &accounts {
+        // An account with a plan here (its own, or another subscription of its group)
+        // keeps its data; Stripe is asked only for an account whose plan is over.
+        if billing.plan_view(account, now)?.status != PlanStatus::None {
+            continue;
+        }
+        match billing.deletion_blocked(account) {
+            Ok(None) => ready.push(account.clone()),
+            Ok(Some(why)) => {
+                waiting += 1;
+                billing.log(&format!(
+                    "the stores of {account} (subscription {}) stay: {why}",
+                    due.subscription
+                ));
+            }
+            Err(_) => {
+                waiting += 1;
+                billing.log(&format!(
+                    "the stores of {account} (subscription {}) stay: Stripe could not be asked; the next pass tries again",
+                    due.subscription
+                ));
+            }
+        }
+        if *account == due.account && waiting > 0 {
             return Ok(false);
         }
-        let mut accounts = vec![due.account.clone()];
-        if let Some(group) = &due.group_id
-            && billing.deletes_members(&due.subscription, now)?
-        {
-            let members: Vec<String> = hub.directory.store.with(|conn| {
-                let mut statement = conn
-                    .prepare(
-                        "SELECT account_id FROM group_member WHERE group_id = ?1 AND account_id <> ?2 \
-                         AND state = 'active' ORDER BY account_id",
-                    )
-                    .map_err(db)?;
-                statement
-                    .query_map(params![group, due.account], |row| row.get(0))
-                    .map_err(db)?
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(db)
-            })?;
-            accounts.extend(members);
+    }
+    billing.with_account_lock(&due.account, || {
+        if !billing.still_due(&due.subscription, now)? {
+            return Ok(false);
         }
         let mut stores = 0u64;
         let mut nodes = 0u64;
-        let mut deleted = Vec::new();
+        let mut deleted: Vec<(String, u64)> = Vec::new();
         let mut failed = 0usize;
-        for account in &accounts {
+        for account in &ready {
             let result = if *account == due.account {
                 delete_account_data(hub, billing, account, now)
             } else {
@@ -919,7 +987,7 @@ fn delete_due(
                 Ok(Some((s, n))) => {
                     stores += s;
                     nodes += n;
-                    deleted.push(account.clone());
+                    deleted.push((account.clone(), s + n));
                 }
                 Ok(None) => {}
                 Err(_) => {
@@ -931,26 +999,35 @@ fn delete_due(
                 }
             }
         }
-        hub.directory.store.tx(|tx| {
-            for account in &deleted {
-                tx.execute(
-                    "INSERT INTO brain_event (kind, subject, created_at, next_at) VALUES ('forget', ?1, ?2, ?2)",
-                    params![account, to_i(now)],
+        let done = failed == 0 && waiting == 0;
+        let forget: Vec<&String> = deleted
+            .iter()
+            .filter(|(_, count)| done || *count > 0)
+            .map(|(account, _)| account)
+            .collect();
+        if done || stores + nodes > 0 || failed > 0 {
+            hub.directory.store.tx(|tx| {
+                for account in &forget {
+                    tx.execute(
+                        "INSERT INTO brain_event (kind, subject, created_at, next_at) VALUES ('forget', ?1, ?2, ?2)",
+                        params![account, to_i(now)],
+                    )
+                    .map_err(db)?;
+                }
+                hub.directory.audit.write_on(
+                    tx,
+                    now,
+                    "billing",
+                    "plan_stores_deleted",
+                    None,
+                    &json!({"subscription": due.subscription, "account_id": due.account,
+                            "group_id": due.group_id, "accounts": deleted.len(),
+                            "deleted_stores": stores, "deleted_nodes": nodes, "failed": failed,
+                            "waiting": waiting}),
                 )
-                .map_err(db)?;
-            }
-            hub.directory.audit.write_on(
-                tx,
-                now,
-                "billing",
-                "plan_stores_deleted",
-                None,
-                &json!({"subscription": due.subscription, "account_id": due.account,
-                        "group_id": due.group_id, "accounts": deleted.len(),
-                        "deleted_stores": stores, "deleted_nodes": nodes, "failed": failed}),
-            )
-        })?;
-        if failed > 0 {
+            })?;
+        }
+        if !done {
             return Ok(false);
         }
         billing.mark_stores_deleted(&due.subscription, now)?;

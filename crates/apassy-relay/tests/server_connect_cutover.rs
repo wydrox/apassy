@@ -1175,9 +1175,15 @@ fn connect_mode_backs_up_plain_files_and_refuses_the_keyed_rollbacks() {
         rollback::check(&config).map(drop).unwrap_err(),
         rollback::downgrade_to_6(&config).map(drop).unwrap_err(),
         rollback::downgrade_to_7(&config).map(drop).unwrap_err(),
-        Directory::downgrade_to_1005(&config).map(drop).unwrap_err(),
-        Directory::downgrade_to_1004(&config).map(drop).unwrap_err(),
-        Directory::downgrade_to_1003(&config).map(drop).unwrap_err(),
+        Directory::downgrade_to_1005(&config, false)
+            .map(drop)
+            .unwrap_err(),
+        Directory::downgrade_to_1004(&config, false)
+            .map(drop)
+            .unwrap_err(),
+        Directory::downgrade_to_1003(&config, false)
+            .map(drop)
+            .unwrap_err(),
     ];
     for error in errors {
         assert!(

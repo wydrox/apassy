@@ -10,9 +10,11 @@
 //! The key must be a test key (`sk_test_…` or `rk_test_…`); a live key is refused. The
 //! sandbox needs the prices of `scripts/stripe-products.sh` (run without `--live`).
 //!
-//! The flow: the price lookup and `GET /v1/plans`; a Checkout Session made by Connect (Stripe
-//! checks the whole form, tax and consent included; a session cannot be paid without a
-//! browser, so it is left to expire); a customer on a **test clock** with a test card and a
+//! The flow: the price lookup and `GET /v1/plans`; a Family and a Team Checkout Session made
+//! by Connect for an account of their own, which names the Stripe customer Connect made
+//! (Stripe checks the whole form, tax, tax ids for an existing customer, and consent
+//! included; a session cannot be paid without a browser, so each one is expired); a
+//! customer on a **test clock** with a test card and a
 //! subscription with the account id in its metadata (what a paid checkout makes); then the
 //! clock goes through a renewal, a failed payment, and a cancellation. After each step the
 //! test reads the new events with `GET /v1/events`, signs each one with a synthetic endpoint
@@ -32,6 +34,9 @@ use apassy_relay::server::stripe::{
 use serde_json::Value;
 
 const ACCOUNT: &str = "acc_sandbx2tes";
+/// The account of the Checkout Sessions: Connect makes its Stripe customer, so the
+/// subscription of the test clock's own customer belongs to `ACCOUNT` alone.
+const CHECKOUT_ACCOUNT: &str = "acc_sandbx3tes";
 const DAY: u64 = 86_400;
 const WEBHOOK_SECRET: &str = "whsec_SYNTHETIC_sandbox_job_delivers_its_own_events";
 
@@ -170,6 +175,7 @@ fn the_plan_follows_a_test_clock_through_renewal_failure_and_cancellation() {
     };
     let store = MemoryBillingStore::new();
     store.add_account(ACCOUNT);
+    store.add_account(CHECKOUT_ACCOUNT);
     let client = StripeClient::new(StripeConfig::new(API_BASE, key).unwrap());
     let billing = Billing::new(
         store,
@@ -196,21 +202,36 @@ fn the_plan_follows_a_test_clock_through_renewal_failure_and_cancellation() {
         .expect("connect_personal_month")
         .clone();
 
-    // 2. A Checkout Session: Stripe checks the form of contract section 4.
-    let session = billing
-        .checkout(
-            ACCOUNT,
-            br#"{"plan":"family","interval":"month","people":6}"#,
-            started,
-        )
-        .expect("a checkout session");
-    assert!(session.url.starts_with("https://checkout.stripe.com/"));
-    assert!(session.session_id.starts_with("cs_test_"));
-    sandbox.call(
-        "POST",
-        &format!("/v1/checkout/sessions/{}/expire", session.session_id),
-        &[],
-    );
+    // 2. Checkout Sessions: Stripe checks the form of contract section 4. The Team one
+    //    collects tax ids for the customer Connect made with the Family one (Stripe needs
+    //    `customer_update[name]=auto` for that).
+    for body in [
+        br#"{"plan":"family","interval":"month","people":6}"#.as_slice(),
+        br#"{"plan":"team","interval":"month","seats":3}"#.as_slice(),
+    ] {
+        let session = billing
+            .checkout(CHECKOUT_ACCOUNT, body, started)
+            .expect("a checkout session");
+        assert!(session.url.starts_with("https://checkout.stripe.com/"));
+        assert!(session.session_id.starts_with("cs_test_"));
+        let read = sandbox.call(
+            "GET",
+            &format!("/v1/checkout/sessions/{}", session.session_id),
+            &[],
+        );
+        assert_eq!(read["status"], "open");
+        if read["tax_id_collection"]["enabled"] == true {
+            assert!(
+                read["customer"].is_string(),
+                "a session of an existing customer"
+            );
+        }
+        sandbox.call(
+            "POST",
+            &format!("/v1/checkout/sessions/{}/expire", session.session_id),
+            &[],
+        );
+    }
 
     // 3. A customer on a test clock with a test card, and its subscription.
     let frozen = started - started % DAY + DAY;

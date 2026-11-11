@@ -750,10 +750,21 @@ fn one_failed_deletion_does_not_stop_the_pass() {
         .collect();
     assert_eq!(failed.len(), 1);
     assert_eq!(failed[0]["account_id"], devs[first].account.as_str());
-    // Once the file can go, the next pass finishes the first plan.
+    // The next pass within a day does not read the unfinished plan again, and writes no
+    // row for it.
     std::fs::remove_dir_all(&blocker).unwrap();
-    assert_eq!(maintain(&hub, &billing, now()).unwrap(), 1);
-    assert_eq!(maintain(&hub, &billing, now()).unwrap(), 0);
+    assert_eq!(maintain(&hub, &billing, now() + 3600).unwrap(), 0);
+    assert_eq!(
+        c.rows("SELECT detail FROM audit WHERE action = 'plan_stores_deleted'")
+            .len(),
+        2
+    );
+    // A day later the pass finishes the first plan (Stripe's clock is a day on too).
+    let later = now() + DAY + 60;
+    c.stripe.set_date(Some(later));
+    assert_eq!(maintain(&hub, &billing, later).unwrap(), 1);
+    assert_eq!(store_count(&c, devs[first]), 0);
+    assert_eq!(maintain(&hub, &billing, later).unwrap(), 0);
 }
 
 #[test]
@@ -902,4 +913,36 @@ fn a_paid_subscription_connect_cannot_bind_is_shown_to_the_operator() {
     )
     .unwrap();
     assert_eq!(resolved["status"]["open_problems"], 0, "{resolved}");
+}
+
+#[test]
+fn the_deletion_waits_while_stripe_has_another_subscription_of_the_account() {
+    let c = start();
+    let a = c.account("Rafal");
+    let sub = c.subscribe(&a, "connect_personal_month", 1);
+    c.store(&a, VAULT);
+    c.update(&a, "connect_personal_month", 1, "canceled");
+    ended_days_ago(&c, &a, 91);
+    // A new subscription at Stripe whose events have not arrived (or that Connect cannot
+    // map): the account's data stays.
+    let mut newer = c.stripe.subscription(&sub).unwrap();
+    newer["id"] = json!(format!("{sub}2"));
+    newer["status"] = json!("active");
+    newer["ended_at"] = Value::Null;
+    c.stripe.put_subscription(newer.clone());
+    let hub = c.relay.hub();
+    let billing = hub.billing().expect("billing").clone();
+    assert_eq!(maintain(&hub, &billing, now()).unwrap(), 0);
+    assert_eq!(store_count(&c, &a), 1);
+    assert!(
+        c.rows("SELECT detail FROM audit WHERE action = 'plan_stores_deleted'")
+            .is_empty()
+    );
+    // Stripe ended that one too: a day later the data goes.
+    newer["status"] = json!("incomplete_expired");
+    c.stripe.put_subscription(newer);
+    let later = now() + DAY + 60;
+    c.stripe.set_date(Some(later));
+    assert_eq!(maintain(&hub, &billing, later).unwrap(), 1);
+    assert_eq!(store_count(&c, &a), 0);
 }

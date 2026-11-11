@@ -330,6 +330,17 @@ pub struct SubscriptionRead {
     pub date: Option<u64>,
 }
 
+/// The subscriptions of one customer at Stripe (`StripeClient::customer_subscriptions`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomerSubscriptions {
+    /// (subscription id, Stripe status), as Stripe lists them.
+    pub list: Vec<(String, String)>,
+    /// False when Stripe has more than one page.
+    pub complete: bool,
+    /// Stripe's time from the answer's `Date` header.
+    pub date: Option<u64>,
+}
+
 /// True for a URL that Connect may hand to a browser for this Stripe origin: the origin
 /// itself, a path, at most 4096 bytes, no space or control character.
 pub fn is_stripe_page(url: &str, origin: &str) -> bool {
@@ -409,6 +420,9 @@ pub struct StripeClient {
     config: StripeConfig,
     agent: ureq::Agent,
     prices: Mutex<Prices>,
+    /// Held by the one caller that asks Stripe for the prices: the others wait for its
+    /// answer and take it from the cache (one lookup at a time).
+    fetching: Mutex<()>,
     log: LogSink,
 }
 
@@ -442,6 +456,7 @@ impl StripeClient {
             config,
             agent,
             prices: Mutex::new(Prices::default()),
+            fetching: Mutex::new(()),
             log: stderr_log(),
         }
     }
@@ -460,28 +475,17 @@ impl StripeClient {
     /// `PRICE_TTL` and has the same keys. A failed lookup keeps the cached prices, if any,
     /// and the next lookup waits `PRICE_RETRY_SECS`: until then the cached prices answer,
     /// or `503 busy` without a call.
+    ///
+    /// One lookup at a time: callers that find the cache old while another one asks Stripe
+    /// wait for that answer and take it from the cache.
     pub fn prices(&self, keys: &[&str], now: u64) -> RelayResult<HashMap<String, StripePrice>> {
-        {
-            let prices = self.prices.lock().unwrap_or_else(PoisonError::into_inner);
-            let cached = prices.for_keys(keys);
-            if let Some(cache) = cached
-                && now.saturating_sub(cache.fetched_at) < PRICE_TTL
-                && now >= cache.fetched_at
-            {
-                return Ok(cache.prices.clone());
-            }
-            if prices
-                .failed_at
-                .is_some_and(|at| now >= at && now < at.saturating_add(PRICE_RETRY_SECS))
-            {
-                return match cached {
-                    Some(cache) => Ok(cache.prices.clone()),
-                    None => Err(RelayError::new(
-                        codes::BUSY,
-                        "Stripe cannot be reached. Try again later.",
-                    )),
-                };
-            }
+        if let Some(answer) = self.cached_prices(keys, now) {
+            return answer;
+        }
+        let _fetching = self.fetching.lock().unwrap_or_else(PoisonError::into_inner);
+        // Another caller may have asked Stripe while this one waited.
+        if let Some(answer) = self.cached_prices(keys, now) {
+            return answer;
         }
         match self.fetch_prices(keys) {
             Ok(fetched) => {
@@ -503,6 +507,37 @@ impl StripeClient {
                 }
             }
         }
+    }
+
+    /// The answer of `prices` without a call: the cache when it is fresh, the cache or
+    /// `503 busy` within `PRICE_RETRY_SECS` of a failed lookup; `None` when Stripe is to
+    /// be asked.
+    fn cached_prices(
+        &self,
+        keys: &[&str],
+        now: u64,
+    ) -> Option<RelayResult<HashMap<String, StripePrice>>> {
+        let prices = self.prices.lock().unwrap_or_else(PoisonError::into_inner);
+        let cached = prices.for_keys(keys);
+        if let Some(cache) = cached
+            && now.saturating_sub(cache.fetched_at) < PRICE_TTL
+            && now >= cache.fetched_at
+        {
+            return Some(Ok(cache.prices.clone()));
+        }
+        if prices
+            .failed_at
+            .is_some_and(|at| now >= at && now < at.saturating_add(PRICE_RETRY_SECS))
+        {
+            return Some(match cached {
+                Some(cache) => Ok(cache.prices.clone()),
+                None => Err(RelayError::new(
+                    codes::BUSY,
+                    "Stripe cannot be reached. Try again later.",
+                )),
+            });
+        }
+        None
     }
 
     /// Drops the cached prices: the next `prices` call asks Stripe.
@@ -642,6 +677,69 @@ impl StripeClient {
             return Err(self.bad_answer("/v1/subscriptions"));
         }
         Ok(SubscriptionRead { object, date })
+    }
+
+    /// `GET /v1/subscriptions?customer=…&status=all&limit=100`: every subscription of a
+    /// customer at Stripe, ended ones included, as (id, status). `complete` is false when
+    /// Stripe has more than one page: the caller treats the list as unknown.
+    pub fn customer_subscriptions(&self, customer: &str) -> RelayResult<CustomerSubscriptions> {
+        if !is_stripe_id("cus_", customer) {
+            return Err(RelayError::internal(
+                "The stored Stripe customer id is not valid.",
+            ));
+        }
+        let query = form_encode(&[
+            ("customer".to_owned(), customer.to_owned()),
+            ("status".to_owned(), "all".to_owned()),
+            ("limit".to_owned(), "100".to_owned()),
+        ]);
+        let (value, date) =
+            self.call_dated(Method::Get, "/v1/subscriptions", Some(&query), None, None)?;
+        let Some(data) = value.pointer("/data").and_then(Value::as_array) else {
+            return Err(self.bad_answer("/v1/subscriptions"));
+        };
+        let mut list = Vec::with_capacity(data.len());
+        for object in data {
+            let id = object.pointer("/id").and_then(Value::as_str);
+            let status = object.pointer("/status").and_then(Value::as_str);
+            let owner = object.pointer("/customer").and_then(Value::as_str);
+            match (id, status) {
+                (Some(id), Some(status)) if is_stripe_id("sub_", id) && owner == Some(customer) => {
+                    list.push((id.to_owned(), status.to_owned()));
+                }
+                _ => return Err(self.bad_answer("/v1/subscriptions")),
+            }
+        }
+        Ok(CustomerSubscriptions {
+            list,
+            complete: value.pointer("/has_more").and_then(Value::as_bool) == Some(false),
+            date,
+        })
+    }
+
+    /// `GET /v1/subscription_items/{item}`: the quantity Stripe has for an item (read back
+    /// after a quantity change whose answer was lost).
+    pub fn item_quantity(&self, item: &str) -> RelayResult<u32> {
+        if !is_stripe_id("si_", item) {
+            return Err(RelayError::internal(
+                "The stored subscription item id is not valid.",
+            ));
+        }
+        let value = self.call(
+            Method::Get,
+            &format!("/v1/subscription_items/{item}"),
+            None,
+            None,
+            None,
+        )?;
+        if value.pointer("/id").and_then(Value::as_str) != Some(item) {
+            return Err(self.bad_answer("/v1/subscription_items"));
+        }
+        value
+            .pointer("/quantity")
+            .and_then(Value::as_u64)
+            .and_then(|quantity| u32::try_from(quantity).ok())
+            .ok_or_else(|| self.bad_answer("/v1/subscription_items"))
     }
 
     /// `POST /v1/billing_portal/sessions` with `customer` and `return_url`.
