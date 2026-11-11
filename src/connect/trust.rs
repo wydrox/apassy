@@ -607,7 +607,7 @@ mod tests {
             learn(&mut known, &mut left, std::slice::from_ref(&own), &[]);
         }
         assert_eq!(left.len(), MAX_LEFT);
-        assert_eq!(known, [own.clone()]);
+        assert_eq!(known, std::slice::from_ref(&own));
         // A key that the list removed counts as one that left, also unknown here before.
         let (mut known, mut left) = (vec![own.clone()], Vec::new());
         let gone = vec![9u8];

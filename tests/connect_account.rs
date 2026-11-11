@@ -1459,8 +1459,8 @@ fn an_account_file_of_an_earlier_version_is_forgotten_with_an_owner_check() {
     assert!(apassy::connect::is_old_account_file(&a.path));
     let refused =
         ConnectAccount::create(client(&connect), &a.store, &a.path, "Rafal", "MacBook Pro")
-            .err()
-            .expect("refused");
+            .map(|_| ())
+            .unwrap_err();
     assert_eq!(refused, ConnectError::OldAccountFile);
     // Another owner action does not forget it.
     let (wrong, epoch) = owner.proof(OwnerAction::DeleteConnectAccount {
