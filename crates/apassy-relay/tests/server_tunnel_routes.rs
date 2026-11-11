@@ -1118,9 +1118,10 @@ fn a_revoked_dialer_and_a_removed_node_close_their_tunnels() {
         c.node_socket(&a.mac_token).err(),
         Some((404, "node_unknown".to_string()))
     );
-    // The device registers again: a new node.
+    // The device registers again: the same node id (one stable node for each account
+    // device, contract 2).
     let again = c.register(&a.mac_token, "MacBook Pro");
-    assert_ne!(again["node_id"], node_id.as_str());
+    assert_eq!(again["node_id"], node_id.as_str());
 }
 
 #[test]
