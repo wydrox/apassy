@@ -44,6 +44,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
+use super::client::RecoveryChange;
 use super::client::{
     AccountCreated, AccountDeleted, AccountView, Challenge, ChallengeRequest, CheckoutAnswer,
     CheckoutRequest, ConnectClient, CreateAccount, DeviceView, GroupDetail, GroupJoined,
@@ -302,11 +303,24 @@ pub struct AccountState {
     /// signs only the versions of a vault store that this Mac had merged already, and below
     /// a head of a device of the list any (`crate::sync::SignerPolicy`).
     pub left: Vec<String>,
-    /// The recovery code of this account was never shown on this device: a creation that a
-    /// restart interrupted finished without it. Settings › Connect says so until a new
-    /// code is made ([`ConnectAccount::new_recovery_code`]).
+    /// The account has no recovery code that the owner saw on this device: a creation that
+    /// a restart interrupted finished without it, or a new code that Connect took while
+    /// its sheet was not closed with "I Saved It" (a lost answer, a lock, a quit). Settings
+    /// › Connect says so until a new code is made and its sheet is closed
+    /// ([`ConnectAccount::recovery_code_seen`]).
     #[serde(default)]
     pub recovery_unseen: bool,
+    /// b64u of the recovery key of the account that this device saw last (section 9.1):
+    /// its own code (a creation, a recovery, a new code) or the key of the account when it
+    /// joined or when the owner took note of a change. Another key at a later read is a new
+    /// code of another device ([`super::client::RecoveryChange`]). `None` in a file of a
+    /// build before it: the next read pins the key that Connect holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_key: Option<String>,
+    /// A new recovery code that this device asked Connect to take and whose answer it has
+    /// not had yet ([`PendingRotation`]): public values only, never the code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_pending: Option<PendingRotation>,
     /// The other accounts whose root this account pinned (its own `peer` entries) or took
     /// from the `peer` entry of the account that made a store it joined (at most 64,
     /// section 16, [`PeerPin`]).
@@ -318,6 +332,53 @@ pub struct AccountState {
     #[serde(default)]
     pub stores: Vec<StoreShare>,
 }
+
+/// A new recovery code that this device sent to Connect (`POST /v1/account/recovery`,
+/// section 9.1), written to the account file before the request: the key that Connect held
+/// (`previous`), the public key of the new code, and the signed statement. Never the code
+/// or its private key. The next read of the account settles it: when Connect holds the new
+/// key, nobody saw the code ([`AccountState::recovery_unseen`]); else it goes, and the code
+/// of the account stays the one that works.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PendingRotation {
+    pub previous: String,
+    pub recovery_key: String,
+    pub signature: String,
+    /// [`AccountState::recovery_unseen`] before the request: it comes back when Connect
+    /// did not take the code.
+    pub unseen_before: bool,
+}
+
+/// Whether `text` is b64u of 32 bytes: a recovery key (section 2).
+fn valid_recovery_key(text: &str) -> bool {
+    decode_b64u(text).is_some_and(|bytes| bytes.len() == 32)
+}
+
+/// A new recovery code that Connect took (section 9.1): show it once as at the creation.
+/// `recorded` is false when this device could not write that to its account file: the
+/// sheet says so, and the next read of the account records it.
+pub struct RotatedCode {
+    pub code: RecoveryCode,
+    pub recorded: bool,
+}
+
+impl fmt::Debug for RotatedCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RotatedCode")
+            .field("recorded", &self.recorded)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The waits between the repeats of one new recovery code after a lost answer: the same
+/// body again, until Connect answers or the last repeat is lost too.
+const ROTATE_WAITS: [Duration; 4] = [
+    Duration::from_millis(250),
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+];
 
 impl AccountState {
     /// The account file of the root of an account (a creation, a recovery): the device list
@@ -349,6 +410,8 @@ impl AccountState {
             known: vec![public_key.to_owned()],
             left: Vec::new(),
             recovery_unseen: false,
+            recovery_key: None,
+            recovery_pending: None,
             peers: Vec::new(),
             stores: Vec::new(),
         }
@@ -388,6 +451,13 @@ impl AccountState {
                 .chain(&self.left)
                 .all(|key| point(key).is_some())
             && share::valid_state(&self.account_id, &self.peers, &self.stores)
+            && self.recovery_key.as_deref().is_none_or(valid_recovery_key)
+            && self.recovery_pending.as_ref().is_none_or(|pending| {
+                valid_recovery_key(&pending.previous)
+                    && valid_recovery_key(&pending.recovery_key)
+                    && decode_b64u(&pending.signature)
+                        .is_some_and(|bytes| !bytes.is_empty() && bytes.len() <= 128)
+            })
     }
 
     /// The account file at `path`, or `None` when there is none. A file of a bad shape,
@@ -743,6 +813,12 @@ pub struct ConnectAccount {
     /// The device list of the last view that counted ([`Self::verify`]): the signed name
     /// of each device for the owner checks.
     list: Option<trust::Verified>,
+    /// The recovery key that Connect held at the last view: "OK" of a change pins only it
+    /// ([`Self::recovery_change_seen`]).
+    held_recovery: Option<String>,
+    /// A write of the account file after Connect took a new recovery code failed: the next
+    /// read writes it again ([`Self::settle_recovery`]).
+    unsaved: bool,
     clock: Clock,
     sleeper: Sleeper,
     /// Where each write of the account file publishes its signers ([`SignerFeed`]).
@@ -787,6 +863,8 @@ impl ConnectAccount {
             entitlement: None,
             revoked: false,
             list: None,
+            held_recovery: None,
+            unsaved: false,
             clock: system_clock(),
             sleeper: system_sleeper(),
             feed: None,
@@ -852,6 +930,8 @@ impl ConnectAccount {
         let name = clean_name(name)?;
         let device_name = clean_name(device_name)?;
         let signer = AccountSigner::open_or_create(store)?;
+        // A join of this device that waits on disk ends first.
+        end_pending_join(path, &signer);
         let public_key = signer.public_key_b64u();
         let mut pending = PendingCreation::load(path, client.origin(), &public_key);
         for _ in 0..CREATE_ID_ROUNDS {
@@ -940,6 +1020,7 @@ impl ConnectAccount {
         let state = AccountState {
             name: Some(creation.name.clone()),
             recovery_unseen: !shown,
+            recovery_key: Some(creation.recovery_key.clone()),
             ..AccountState::for_root(
                 client.origin(),
                 &created.account_id,
@@ -997,6 +1078,8 @@ impl ConnectAccount {
         let old = RecoveryCode::parse(recovery).ok_or(ConnectError::Invalid)?;
         let device_name = clean_name(device_name)?;
         let signer = AccountSigner::open_or_create(store)?;
+        // A join of this device that waits on disk ends first.
+        end_pending_join(path, &signer);
         let new = RecoveryCode::generate()?;
         let recovery_key = new.key()?.public_key_b64u();
         let public_key = signer.public_key_b64u();
@@ -1032,6 +1115,7 @@ impl ConnectAccount {
         );
         let mut account = Self::build(client, state, path, Arc::new(signer));
         account.state.created_at = account.now();
+        account.state.recovery_key = Some(recovery_key);
         account.state.save(path)?;
         Ok((account, new, answer.deleted_stores))
     }
@@ -1379,6 +1463,7 @@ impl ConnectAccount {
             self.verified_at = Some(asked);
             self.publish();
         }
+        self.settle_recovery(&mut view)?;
         if self.state.name.is_none()
             && let Ok(name) = clean_name(&view.name)
         {
@@ -1450,31 +1535,41 @@ impl ConnectAccount {
     /// [`Self::new_recovery_code_action`] in the session `epoch`: this device makes a new
     /// recovery code and replaces the recovery key at Connect with its public key, in a
     /// statement that this device's key signs over the key that Connect stores now. Only a
-    /// device that the verified device list holds does it. The new code comes back once:
-    /// show it as at the creation; from now on only it recovers the account. A rotation
-    /// that another device made in the meantime (`409 conflict`) reads the account and
-    /// signs once more. Success also ends the mark of a code that was never shown
-    /// ([`AccountState::recovery_unseen`]). The proof is used up, also when the call fails.
+    /// device that the verified device list holds does it. The proof is used up, also when
+    /// the call fails.
+    ///
+    /// Before the request the account file gets the pending rotation ([`PendingRotation`]:
+    /// public values only) and the mark of a code that nobody saw
+    /// ([`AccountState::recovery_unseen`]); the code stays in memory. A lost answer sends
+    /// the same body again (Connect answers the same key with the same result). The code
+    /// comes back only when Connect names its key as the one it holds now; show it once as
+    /// at the creation, and call [`Self::recovery_code_seen`] when the owner closes that
+    /// sheet. A rotation that another device made in the meantime (`409 conflict`) reads
+    /// the account and signs once more. An answer that names another key is
+    /// [`ConnectError::RecoveryNotTaken`] after a read of the account; no answer after the
+    /// repeats is [`ConnectError::RecoveryUnanswered`], and the next read of the account
+    /// settles the pending rotation ([`Self::view`]). A file that cannot be written after
+    /// Connect took the code still gives the code, with [`RotatedCode::recorded`] false.
     pub fn new_recovery_code(
         &mut self,
         proof: OwnerProof,
         epoch: &[u8; 32],
-    ) -> Result<RecoveryCode, ConnectError> {
+    ) -> Result<RotatedCode, ConnectError> {
         proof
             .check(&self.new_recovery_code_action(), epoch)
             .map_err(ConnectError::OwnerCheck)?;
         drop(proof);
         let code = RecoveryCode::generate()?;
         let recovery_key = code.key()?.public_key_b64u();
-        let mut rotated = None;
         for _ in 0..2 {
+            // The read settles a pending rotation of an earlier try first.
             let view = self.view()?;
             if !view.list_verified {
                 return Err(ConnectError::NotVerified);
             }
             let previous = view
                 .recovery_key
-                .filter(|key| decode_b64u(key).is_some_and(|bytes| bytes.len() == 32))
+                .filter(|key| valid_recovery_key(key))
                 .ok_or(ConnectError::BadAnswer)?;
             let signer = self.signer()?;
             let signature = encode_b64u(&signer.sign_recovery_rotate(
@@ -1483,28 +1578,195 @@ impl ConnectAccount {
                 &previous,
                 &recovery_key,
             )?);
+            // Nothing is sent before the pending rotation is on disk.
+            let unseen_before = self.state.recovery_unseen;
+            self.state.recovery_pending = Some(PendingRotation {
+                previous: previous.clone(),
+                recovery_key: recovery_key.clone(),
+                signature: signature.clone(),
+                unseen_before,
+            });
+            self.state.recovery_unseen = true;
+            if let Err(error) = self.write_state() {
+                self.state.recovery_pending = None;
+                self.state.recovery_unseen = unseen_before;
+                return Err(error);
+            }
             let body = super::client::RecoveryRotate {
                 previous: &previous,
                 recovery_key: &recovery_key,
                 signature: &signature,
             };
-            match self.with_token(|client, token| client.rotate_recovery(token, &body)) {
-                Err(ConnectError::Conflict) => continue,
-                other => {
-                    rotated = Some(other?);
-                    break;
+            match self.send_rotation(&body) {
+                Ok(rotated) if rotated.account_id != self.state.account_id => {
+                    // Not an answer for this account: the next read settles it.
+                    return Err(ConnectError::BadAnswer);
+                }
+                Ok(rotated) if rotated.recovery_key.as_deref() == Some(recovery_key.as_str()) => {
+                    return Ok(self.rotation_taken(code, &recovery_key));
+                }
+                Ok(_) => {
+                    // An answer that does not name the new key: the account says which key
+                    // Connect holds, and the read settles the pending rotation. A read that
+                    // fails leaves it pending for the next one.
+                    self.view().map_err(|_| ConnectError::RecoveryUnanswered)?;
+                    if self.state.recovery_pending.is_none()
+                        && self.state.recovery_key.as_deref() == Some(recovery_key.as_str())
+                    {
+                        return Ok(self.rotation_taken(code, &recovery_key));
+                    }
+                    self.drop_rotation();
+                    return Err(ConnectError::RecoveryNotTaken);
+                }
+                // Another device made a new code in between: read and sign again.
+                Err(ConnectError::Conflict) => self.drop_rotation(),
+                // No answer, or a failing service: the pending rotation stays, and the next
+                // read of the account settles it.
+                Err(
+                    ConnectError::Offline
+                    | ConnectError::Broken
+                    | ConnectError::RateLimited(_)
+                    | ConnectError::Refused {
+                        status: 500..=599, ..
+                    },
+                ) => return Err(ConnectError::RecoveryUnanswered),
+                // Connect refused the request: it took nothing.
+                Err(error) => {
+                    self.drop_rotation();
+                    return Err(error);
                 }
             }
         }
-        let rotated = rotated.ok_or(ConnectError::Conflict)?;
-        if rotated.account_id != self.state.account_id {
-            return Err(ConnectError::BadAnswer);
+        Err(ConnectError::Conflict)
+    }
+
+    /// `POST /v1/account/recovery` with `body`, and the same body again after a lost answer
+    /// (or a busy or failing Connect), until an answer comes or the repeats end.
+    fn send_rotation(
+        &mut self,
+        body: &super::client::RecoveryRotate<'_>,
+    ) -> Result<super::client::RecoveryRotated, ConnectError> {
+        let mut answer = self.with_token(|client, token| client.rotate_recovery(token, body));
+        for wait in ROTATE_WAITS {
+            if !matches!(
+                answer,
+                Err(ConnectError::Offline
+                    | ConnectError::Broken
+                    | ConnectError::RateLimited(_)
+                    | ConnectError::Refused {
+                        status: 500..=599,
+                        ..
+                    })
+            ) {
+                break;
+            }
+            (self.sleeper)(wait);
+            answer = self.with_token(|client, token| client.rotate_recovery(token, body));
         }
-        if self.state.recovery_unseen {
-            self.state.recovery_unseen = false;
-            self.state.save(&self.path)?;
+        answer
+    }
+
+    /// Connect holds `recovery_key`, the key of `code`: the pending rotation goes, the key
+    /// is pinned, and the mark of a code that nobody saw stays until the owner closes the
+    /// sheet of the code ([`Self::recovery_code_seen`]).
+    fn rotation_taken(&mut self, code: RecoveryCode, recovery_key: &str) -> RotatedCode {
+        self.state.recovery_pending = None;
+        self.state.recovery_key = Some(recovery_key.to_owned());
+        self.state.recovery_unseen = true;
+        let recorded = self.write_state().is_ok();
+        self.unsaved = !recorded;
+        RotatedCode { code, recorded }
+    }
+
+    /// Connect did not take the pending rotation: it goes, and the mark of a code that
+    /// nobody saw is as before. The file is written best effort (the next read settles it
+    /// otherwise).
+    fn drop_rotation(&mut self) {
+        if let Some(pending) = self.state.recovery_pending.take() {
+            self.state.recovery_unseen = pending.unseen_before;
+            let _ = self.write_state();
         }
-        Ok(code)
+    }
+
+    /// The owner closed the sheet that showed the new recovery code ("I Saved It"): the
+    /// account has a code that the owner saw, and the mark of a code that nobody saw goes.
+    /// Nothing changes while a rotation is pending.
+    pub fn recovery_code_seen(&mut self) -> Result<(), ConnectError> {
+        if self.state.recovery_pending.is_some() || !self.state.recovery_unseen {
+            return Ok(());
+        }
+        self.state.recovery_unseen = false;
+        self.write_state()
+    }
+
+    /// "OK" of the line about a new recovery code that another device made: this device
+    /// pins `recovery_key`, the key that the line named ([`RecoveryChange::recovery_key`]),
+    /// and stops saying so. Only the key that Connect held at the last view is pinned
+    /// ([`ConnectError::Invalid`] otherwise).
+    pub fn recovery_change_seen(&mut self, recovery_key: &str) -> Result<(), ConnectError> {
+        if self.held_recovery.as_deref() != Some(recovery_key)
+            || self.state.recovery_pending.is_some()
+        {
+            return Err(ConnectError::Invalid);
+        }
+        if self.state.recovery_key.as_deref() == Some(recovery_key) {
+            return Ok(());
+        }
+        self.state.recovery_key = Some(recovery_key.to_owned());
+        self.write_state()
+    }
+
+    /// The recovery key of `view` against what this device knows (section 9.1): a pending
+    /// rotation of this device is settled (Connect holds its key: nobody saw the code, the
+    /// key is pinned; another key: it goes, and the mark is as before), a file without a pin
+    /// pins the key, and another key than the pin is a new code of another device
+    /// ([`AccountView::recovery_changed`]). Writes the account file when it changed.
+    fn settle_recovery(&mut self, view: &mut AccountView) -> Result<(), ConnectError> {
+        view.recovery_changed = None;
+        self.held_recovery = view
+            .recovery_key
+            .clone()
+            .filter(|key| valid_recovery_key(key));
+        let Some(held) = self.held_recovery.clone() else {
+            return Ok(());
+        };
+        let mut changed = false;
+        if let Some(pending) = self.state.recovery_pending.take() {
+            if held == pending.recovery_key {
+                self.state.recovery_key = Some(held.clone());
+                self.state.recovery_unseen = true;
+            } else {
+                self.state.recovery_unseen = pending.unseen_before;
+            }
+            changed = true;
+        }
+        match self.state.recovery_key.as_deref() {
+            None => {
+                self.state.recovery_key = Some(held.clone());
+                changed = true;
+            }
+            Some(pin) if pin != held => {
+                let device_id = view.recovery_rotated_by.clone();
+                let device_name = device_id.as_deref().and_then(|id| {
+                    view.devices
+                        .iter()
+                        .find(|device| device.device_id == id && device.verified)
+                        .map(|device| device.shown_name().to_owned())
+                });
+                view.recovery_changed = Some(RecoveryChange {
+                    recovery_key: held,
+                    at: view.recovery_rotated_at,
+                    device_id,
+                    device_name,
+                });
+            }
+            Some(_) => {}
+        }
+        if changed || self.unsaved {
+            self.write_state()?;
+            self.unsaved = false;
+        }
+        Ok(())
     }
 
     // ---- Devices (section 7). ----
@@ -2226,6 +2488,11 @@ pub struct JoinRequest {
     /// This device made a new account key for this join: its earlier key was used by a
     /// join that did not finish here.
     new_key: bool,
+    /// The account of an earlier join of this device that a device confirmed late, and
+    /// that still lists this device under its earlier key, which this device could not
+    /// remove there: the name of the device that confirmed it and the name of this device
+    /// in that account ([`Self::left_in_other_account`]).
+    left_behind: Option<(String, String)>,
     clock: Clock,
 }
 
@@ -2331,8 +2598,9 @@ pub fn has_pending_join(account_file: &Path) -> bool {
 }
 
 /// End the pending join of `account_file` that the key of `signer` made: cancel it at
-/// Connect, best effort, and remove the file. A device that starts another join, makes an
-/// account, or recovers one calls it first.
+/// Connect, best effort, and remove the file. A device that starts another join
+/// ([`JoinRequest::start`]), makes an account ([`ConnectAccount::create`]), or recovers one
+/// ([`ConnectAccount::recover`]) calls it first.
 fn end_pending_join(account_file: &Path, signer: &AccountSigner) {
     let Some(pending) = PendingJoinFile::load(account_file) else {
         return;
@@ -2343,6 +2611,79 @@ fn end_pending_join(account_file: &Path, signer: &AccountSigner) {
         let _ = cancel_join(&client, signer, &pending.account_id, &pending.link_hash);
     }
     PendingJoinFile::remove(account_file);
+}
+
+/// Remove this device from the account of the earlier join `earlier`, which a device of
+/// that account confirmed after this device had left it (connect-account-v1 section 7.2):
+/// a sign-in with the key of `signer`, the device list verified from the root that the
+/// join pinned, and the `remove` entry of this device's own key signed by itself, as
+/// "Forget" does. `None` when it is done, or when the key is no device of that account;
+/// else the name of the device that confirmed the join and the name of this device there,
+/// for the owner.
+fn leave_earlier_join(
+    earlier: &PendingJoinFile,
+    signer: &AccountSigner,
+) -> Option<(String, String)> {
+    let left = || Some((earlier.confirmer_name.clone(), earlier.device_name.clone()));
+    let Ok(client) = ConnectClient::new(&earlier.origin) else {
+        return left();
+    };
+    let account_id = earlier.account_id.as_str();
+    let public_key = signer.public_key_b64u();
+    let challenge = match client.challenge(&ChallengeRequest {
+        account_id,
+        public_key: &public_key,
+    }) {
+        Ok(challenge) => challenge,
+        // Connect has no device of this key in that account: nothing to remove.
+        Err(
+            ConnectError::Unauthenticated | ConnectError::JoinPending | ConnectError::JoinRefused,
+        ) => return None,
+        Err(_) => return left(),
+    };
+    let (token, device_id) = match finish_sign_in(
+        &client,
+        signer,
+        account_id,
+        challenge,
+        None,
+        system_clock()(),
+    ) {
+        Ok(signed_in) => signed_in,
+        Err(ConnectError::Revoked) => return None,
+        Err(_) => return left(),
+    };
+    let removed = (|| {
+        let view = client.account(token.value.as_str())?;
+        let root = point(&earlier.root).ok_or(ConnectError::BadAnswer)?;
+        let own = signer.public_key().to_vec();
+        let list = trust::verify_list(client.origin(), account_id, &root, &view.device_list)
+            .filter(|list| list.live.contains(&own))
+            .ok_or(ConnectError::BadAnswer)?;
+        let (signature, _) = signer.sign_list_entry(
+            client.origin(),
+            account_id,
+            (list.version + 1, list.head()),
+            "remove",
+            &public_key,
+            None,
+            None,
+        )?;
+        let answer = client.revoke(
+            token.value.as_str(),
+            &device_id,
+            (list.version + 1, &encode_b64u(&signature)),
+        )?;
+        if answer.device_id == device_id {
+            Ok(())
+        } else {
+            Err(ConnectError::BadAnswer)
+        }
+    })();
+    match removed {
+        Ok(()) => None,
+        Err(_) => left(),
+    }
 }
 
 impl JoinRequest {
@@ -2391,6 +2732,10 @@ impl JoinRequest {
         let code = LinkCode::parse(code).ok_or(ConnectError::Invalid)?;
         let device_name = clean_name(device_name)?;
         let signer = AccountSigner::open_or_create(store)?;
+        // The join that waits on disk, if any: a device may have confirmed it after this
+        // device left it, so its account may list this key (below).
+        let earlier = PendingJoinFile::load(path)
+            .filter(|earlier| earlier.public_key == signer.public_key_b64u());
         end_pending_join(path, &signer);
         match Self::ask(&client, signer, path, &code, &device_name, platform)? {
             Asked::Waiting(request) => Ok(*request),
@@ -2398,13 +2743,20 @@ impl JoinRequest {
                 match Self::already_joined(&client, signer, path, &code)? {
                     Ok(request) => Ok(request),
                     Err(signer) => {
-                        // The key is no device of this account: a new key joins.
+                        // The key is no device of this account. Before it is forgotten, an
+                        // account of an earlier join that confirmed it late drops it, when
+                        // this device can sign that removal; else the owner is told.
+                        let left_behind = earlier
+                            .filter(|earlier| earlier.account_id != code.account_id())
+                            .and_then(|earlier| leave_earlier_join(&earlier, &signer));
+                        // A new key joins.
                         drop(signer);
                         AccountSigner::forget(store)?;
                         let signer = AccountSigner::open_or_create(store)?;
                         match Self::ask(&client, signer, path, &code, &device_name, platform)? {
                             Asked::Waiting(mut request) => {
                                 request.new_key = true;
+                                request.left_behind = left_behind;
                                 Ok(*request)
                             }
                             Asked::KeyUsed(_) => Err(ConnectError::Conflict),
@@ -2491,6 +2843,7 @@ impl JoinRequest {
             words,
             expires_at: answer.expires_at,
             new_key: false,
+            left_behind: None,
             clock: system_clock(),
         };
         // A restart, a lock, or a quit while it waits resumes it from here.
@@ -2591,6 +2944,7 @@ impl JoinRequest {
             words: String::new(),
             expires_at: 0,
             new_key: false,
+            left_behind: None,
             clock: system_clock(),
         }))
     }
@@ -2634,6 +2988,7 @@ impl JoinRequest {
             words: pending.words,
             expires_at: pending.expires_at,
             new_key: false,
+            left_behind: None,
             clock: system_clock(),
         }))
     }
@@ -2696,6 +3051,17 @@ impl JoinRequest {
         self.new_key
     }
 
+    /// The account of an earlier join of this device that a device confirmed after this
+    /// device had left the join, and that still lists this device under its earlier key:
+    /// this device could not remove itself there before it made a new key. The name of the
+    /// device that confirmed it and the name of this device in that account: the owner
+    /// removes it there.
+    pub fn left_in_other_account(&self) -> Option<(&str, &str)> {
+        self.left_behind
+            .as_ref()
+            .map(|(confirmer, device)| (confirmer.as_str(), device.as_str()))
+    }
+
     /// Whether this device's key is in the account already: the next poll finishes the
     /// join, with no words to compare.
     pub fn already_in_account(&self) -> bool {
@@ -2712,13 +3078,18 @@ impl JoinRequest {
     /// otherwise) is [`ConnectError::LinkMismatch`], and no account file is written. A token call
     /// refused with `401` or `503`, or a read of the account that fails on the way, waits
     /// for the next poll. A key that Connect does not know any more (`401` at the
-    /// challenge: the join was cancelled or pruned) ends the join as refused. The pending
-    /// join on disk goes when the join ends.
+    /// challenge: the join was cancelled or pruned) ends the join as refused, and a key that
+    /// a device confirmed and then removed (`403 device_removed`) ends it as
+    /// [`ConnectError::Revoked`]. The pending join on disk goes when the join ends: also on
+    /// [`ConnectError::LinkMismatch`].
     pub fn poll(&mut self) -> Result<JoinPoll, ConnectError> {
         let polled = self.poll_once();
+        // A device that a device confirmed and then removed again (`403 device_removed` at
+        // the token) ends the join as well: its key is no device of the account.
         if matches!(
             polled,
-            Ok(JoinPoll::Refused | JoinPoll::Confirmed(_)) | Err(ConnectError::LinkMismatch)
+            Ok(JoinPoll::Refused | JoinPoll::Confirmed(_))
+                | Err(ConnectError::LinkMismatch | ConnectError::Revoked)
         ) {
             PendingJoinFile::remove(&self.path);
         }
@@ -2807,6 +3178,13 @@ impl JoinRequest {
                 .map(|key| encode_b64u(key))
                 .collect(),
             recovery_unseen: false,
+            // The recovery key of the account as this device joined it: a later change is a
+            // new code of another device.
+            recovery_key: view
+                .recovery_key
+                .clone()
+                .filter(|key| valid_recovery_key(key)),
+            recovery_pending: None,
             peers: Vec::new(),
             stores: Vec::new(),
         };
@@ -2884,6 +3262,8 @@ mod tests {
             known: vec![KEY.to_owned()],
             left: Vec::new(),
             recovery_unseen: false,
+            recovery_key: None,
+            recovery_pending: None,
             peers: Vec::new(),
             stores: Vec::new(),
         }

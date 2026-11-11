@@ -1452,7 +1452,9 @@ fn only_a_clear_group_answer_ends_a_share() {
         let refreshed = f.account_a.refresh_shares(&[]).expect("A");
         assert!(refreshed.notes.is_empty(), "{code}: {refreshed:?}");
         assert_eq!(f.list_of(&a_id).len(), head, "{code}");
-        f.cloud.connect.clear_route_errors("GET /v1/account/group");
+        f.cloud
+            .connect
+            .clear_route_errors_of("GET /v1/account/group");
     }
     let group = |members: Value| {
         json!({"group_id": "grp_aaaaaaaaaa", "kind": "family", "role": "owner",
@@ -2074,7 +2076,7 @@ fn a_shared_store_is_decided_only_by_lists_asked_after_its_refusal() {
     // The reads work again: the lists were asked after the refusal, and X2 signs.
     f.cloud
         .connect
-        .clear_route_errors("POST /v1/account/peers/lists");
+        .clear_route_errors_of("POST /v1/account/peers/lists");
     let status = f.account_a.refresh_shares(&[]).expect("A");
     let asked = status.asked_for(&team).expect("every list read");
     assert!(asked > before);

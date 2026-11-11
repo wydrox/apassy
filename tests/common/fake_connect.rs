@@ -374,6 +374,10 @@ struct State {
     relay: Option<Arc<dyn StoreRelay>>,
     /// The recovery-key rotations: the account and the device of each.
     rotations: Vec<(String, String)>,
+    /// The last rotation of each account: its time and its device (section 9.1).
+    rotated: BTreeMap<String, (u64, String)>,
+    /// `POST /v1/account/recovery` answers 200 and keeps the stored key (a lying Connect).
+    keep_recovery_key: bool,
     /// The pending joins are answered without their `signature` field.
     pending_without_signature: bool,
     /// The share codes and the lying hooks of section 16 (`fake_connect_share.rs`).
@@ -746,8 +750,8 @@ impl FakeConnect {
     }
 
     /// No request that starts with `prefix` answers an error of [`Self::answer_route_error`]
-    /// any more.
-    pub fn clear_route_errors(&self, prefix: &str) {
+    /// any more (the other prefixes keep theirs).
+    pub fn clear_route_errors_of(&self, prefix: &str) {
         lock(&self.shared)
             .route_errors
             .retain(|(held, _, _)| held != prefix);
@@ -758,6 +762,23 @@ impl FakeConnect {
         lock(&self.shared)
             .route_errors
             .push((prefix.to_owned(), status, code.to_owned()));
+    }
+
+    /// Another device of `account` (`device`) made a new recovery code with the public key
+    /// `key` now, as `POST /v1/account/recovery` would record it.
+    pub fn rotate_recovery_by(&self, account: &str, key: &[u8], device: &str) {
+        let mut state = lock(&self.shared);
+        if let Some(entry) = state.accounts.get_mut(account) {
+            entry.recovery_key = key.to_vec();
+        }
+        state
+            .rotated
+            .insert(account.to_owned(), (now(), device.to_owned()));
+    }
+
+    /// The errors of [`Self::answer_route_error`] end.
+    pub fn clear_route_errors(&self) {
+        lock(&self.shared).route_errors.clear();
     }
 
     /// The account gets an entitled plan (Personal).
@@ -789,6 +810,12 @@ impl FakeConnect {
             .get(account)
             .map(|entry| entry.recovery_key.clone())
             .unwrap_or_default()
+    }
+
+    /// `POST /v1/account/recovery` answers 200 with the key that it still holds and keeps
+    /// it (`true`), or takes the key as Connect does (`false`).
+    pub fn keep_recovery_key(&self, keep: bool) {
+        lock(&self.shared).keep_recovery_key = keep;
     }
 
     /// The recovery-key rotations (section 9.1): the account and the device of each.
@@ -1827,6 +1854,7 @@ fn route(shared: &Arc<Mutex<State>>, request: &Incoming) -> Outgoing {
             if let Some(entry) = state.accounts.get_mut(&account) {
                 entry.recovery_key = new_recovery_key;
                 entry.recovered = Some((body.clone(), answer.clone(), now(), device.id));
+                state.rotated.remove(&account);
             }
             ok(answer)
         }
@@ -1874,7 +1902,9 @@ fn authenticated(
                       "plan": account_plan(state, account),
                       "devices": devices, "group": account_group(state, account),
                       "device_list": entry.list,
-                      "recovery_key": encode_b64u(&entry.recovery_key)}),
+                      "recovery_key": encode_b64u(&entry.recovery_key),
+                      "recovery_rotated_at": state.rotated.get(account).map(|(at, _)| *at),
+                      "recovery_rotated_by": state.rotated.get(account).map(|(_, by)| by.clone())}),
             )
         }
         ("POST", ["recovery"]) => {
@@ -1908,9 +1938,17 @@ fn authenticated(
                 return fail(400, "invalid_request");
             }
             let at = now();
+            let keep = state.keep_recovery_key;
             let entry = state.accounts.get_mut(account).expect("account");
+            if keep {
+                // Answers as if it took the key, and names the key that it still holds.
+                let held = encode_b64u(&entry.recovery_key);
+                return ok(json!({"account_id": account, "rotated_at": at, "recovery_key": held}));
+            }
+            let answer = json!({"account_id": account, "rotated_at": at,
+                                "recovery_key": text(body, "recovery_key")});
             if entry.recovery_key == recovery_key {
-                return ok(json!({"account_id": account, "rotated_at": at}));
+                return ok(answer);
             }
             if entry.recovery_key != previous {
                 return fail(409, "conflict");
@@ -1919,7 +1957,10 @@ fn authenticated(
             state
                 .rotations
                 .push((account.to_owned(), device.to_owned()));
-            ok(json!({"account_id": account, "rotated_at": at}))
+            state
+                .rotated
+                .insert(account.to_owned(), (at, device.to_owned()));
+            ok(answer)
         }
         ("DELETE", []) => {
             if body.as_object().is_none_or(|map| !map.is_empty()) {

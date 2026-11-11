@@ -1790,11 +1790,29 @@ fn view(hub: &Hub, caller: &AccountCaller, now: u64) -> RelayResult<Value> {
         .groups()
         .group_of(&hub.directory.store, &caller.account, now)?;
     let view = hub.directory.store.with(|conn| {
-        let (name, email, created_at, recovery_key): (String, Option<String>, i64, Vec<u8>) = conn
+        #[allow(clippy::type_complexity)]
+        let (name, email, created_at, recovery_key, rotated_at, rotated_by): (
+            String,
+            Option<String>,
+            i64,
+            Vec<u8>,
+            Option<i64>,
+            Option<String>,
+        ) = conn
             .query_row(
-                "SELECT name, email, created_at, recovery_key FROM account WHERE id = ?1",
+                "SELECT name, email, created_at, recovery_key, recovery_rotated_at, recovery_rotated_by \
+                 FROM account WHERE id = ?1",
                 params![caller.account],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
             )
             .map_err(db)?;
         let mut statement = conn
@@ -1821,6 +1839,8 @@ fn view(hub: &Hub, caller: &AccountCaller, now: u64) -> RelayResult<Value> {
             group,
             device_list: list_entries(conn, &caller.account)?,
             recovery_key: encode_b64(&recovery_key),
+            recovery_rotated_at: rotated_at.map(to_u),
+            recovery_rotated_by: rotated_by,
         })
     })?;
     to_value(&view)
@@ -2920,7 +2940,8 @@ fn recover(hub: &Hub, request: &AccountRecover, prefix: &str, now: u64) -> Relay
         start_list(tx, &hub.config.public_url, &request.account_id, &root, now)?;
         tx.execute(
             "UPDATE account SET recovery_key = ?2, recover_hash = ?3, recovered_at = ?4, \
-             recover_device = ?5, recover_deleted = ?6, recovery_rotated_at = NULL WHERE id = ?1",
+             recover_device = ?5, recover_deleted = ?6, recovery_rotated_at = NULL, \
+             recovery_rotated_by = NULL WHERE id = ?1",
             params![
                 request.account_id,
                 next_recovery.as_slice(),
@@ -2995,10 +3016,13 @@ fn recovery_rotate(
             .ok_or_else(RelayError::unauthenticated)?;
         Ok((key, to_u(at)))
     };
+    // The answer names the key that Connect holds now: the client takes the rotation only
+    // when it is the key that it sent.
     let answer = |rotated_at: u64| {
         to_value(&AccountRecoveryRotated {
             account_id: caller.account.clone(),
             rotated_at,
+            recovery_key: request.recovery_key.clone(),
         })
     };
     let (key, at) = hub.directory.store.with(stored)?;
@@ -3020,8 +3044,9 @@ fn recovery_rotate(
             .filter(|live| live.account == caller.account)
             .ok_or_else(RelayError::unauthenticated)?;
         tx.execute(
-            "UPDATE account SET recovery_key = ?2, recovery_rotated_at = ?3 WHERE id = ?1",
-            params![caller.account, next.as_slice(), to_i(now)],
+            "UPDATE account SET recovery_key = ?2, recovery_rotated_at = ?3, recovery_rotated_by = ?4 \
+             WHERE id = ?1",
+            params![caller.account, next.as_slice(), to_i(now), caller.device],
         )
         .map_err(db)?;
         hub.directory.audit.write_on(

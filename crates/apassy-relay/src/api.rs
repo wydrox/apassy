@@ -1722,6 +1722,12 @@ pub struct AccountView {
     /// The account's stored public recovery key (b64u of 32 bytes): the `previous` of a
     /// new recovery code (`POST /v1/account/recovery`).
     pub recovery_key: String,
+    /// When a device of the account last made a new recovery code (`POST
+    /// /v1/account/recovery`); `None` while the key is the one of the creation or of the
+    /// last recovery.
+    pub recovery_rotated_at: Option<u64>,
+    /// The device id of the device that made it, while it is set.
+    pub recovery_rotated_by: Option<String>,
 }
 
 /// An empty JSON object: `DELETE /v1/account`, a refusal of a join.
@@ -1944,6 +1950,9 @@ pub struct AccountRecoveryRotate {
 pub struct AccountRecoveryRotated {
     pub account_id: String,
     pub rotated_at: u64,
+    /// The recovery key that Connect holds after the call (b64u of 32 bytes): the key of
+    /// the request when it was taken.
+    pub recovery_key: String,
 }
 
 /// `GET /v1/account/entitlement` answer.

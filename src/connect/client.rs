@@ -386,11 +386,39 @@ pub struct AccountView {
     /// of a new recovery code.
     #[serde(default)]
     pub recovery_key: Option<String>,
+    /// When a device of the account last made a new recovery code; `None` while the key
+    /// is the one of the creation or of the last recovery.
+    #[serde(default)]
+    pub recovery_rotated_at: Option<u64>,
+    /// The device id of the device that made it.
+    #[serde(default)]
+    pub recovery_rotated_by: Option<String>,
     /// Set by this device, never by Connect: `device_list` verified from the pinned root and
     /// went on from the pinned version. When it is false, no device of the view is
     /// verified, and the trust store keeps what it had.
     #[serde(skip)]
     pub list_verified: bool,
+    /// Set by this device, never by Connect: the recovery key of the account is not the
+    /// one that this device saw last (another device made a new recovery code). Settings ›
+    /// Connect says so until the owner takes note of it
+    /// (`ConnectAccount::recovery_change_seen`).
+    #[serde(skip)]
+    pub recovery_changed: Option<RecoveryChange>,
+}
+
+/// The recovery key of an account changed since this device saw it last (section 9.1):
+/// another device of the account made a new recovery code, so the code that this device
+/// knew of no longer works.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryChange {
+    /// b64u of the recovery key that Connect holds now: "OK" pins it.
+    pub recovery_key: String,
+    /// When the device made it, by the clock of Connect.
+    pub at: Option<u64>,
+    /// The device that made it, when Connect names one.
+    pub device_id: Option<String>,
+    /// The name that the verified device list signed for that device, when it holds it.
+    pub device_name: Option<String>,
 }
 
 /// `DELETE /v1/account`.
@@ -485,7 +513,7 @@ pub(super) struct VaultDeleted {
 }
 
 /// `POST /v1/account/recovery` (section 9.1).
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub(super) struct RecoveryRotate<'a> {
     /// b64u of the recovery key that Connect stores now.
     pub previous: &'a str,
@@ -500,6 +528,10 @@ pub(super) struct RecoveryRotate<'a> {
 pub struct RecoveryRotated {
     pub account_id: String,
     pub rotated_at: u64,
+    /// b64u of the recovery key that Connect holds after the call: the client takes the
+    /// rotation only when it is the key that it sent.
+    #[serde(default)]
+    pub recovery_key: Option<String>,
 }
 
 /// `POST /v1/account/recover`.

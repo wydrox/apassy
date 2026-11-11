@@ -834,6 +834,17 @@ pub enum OwnerRequest {
         /// the vault on this device.
         start: bool,
     },
+    /// "Use the relay copy…" of the vault store `team_id` of the vault `vault_name`: take
+    /// the current head `head` of version `version`, which "`device_name`" signed at `time`
+    /// (by its own clock), and replace what this device had merged (section 7.5).
+    UseRelayCopy {
+        team_id: String,
+        version: u64,
+        head: String,
+        device_name: String,
+        time: u64,
+        vault_name: String,
+    },
     /// Add the device `device_id` ("`device_name`") of the account `account_id` to the
     /// vault store `team_id` of the vault `vault_name` (section 8).
     AddStoreDevice {
@@ -1517,6 +1528,16 @@ impl OwnerRequest {
                 head: head.clone(),
                 replace: *replace,
             },
+            Self::UseRelayCopy {
+                team_id,
+                version,
+                head,
+                ..
+            } => OwnerAction::UseRelayCopy {
+                team_id: team_id.clone(),
+                version: *version,
+                head: head.clone(),
+            },
             Self::AddStoreDevice {
                 team_id,
                 device_id,
@@ -2054,6 +2075,25 @@ impl OwnerRequest {
                 ),
                 page_text(vault_name),
                 page_text(device_name)
+            ),
+            Self::UseRelayCopy {
+                version,
+                device_name,
+                time,
+                vault_name,
+                ..
+            } => format!(
+                concat!(
+                    "Use the copy of \"{vault}\" on the relay as it is now? Apassy takes version {version}, which {device} saved on {day}, and merges it with the vault on this ",
+                    crate::computer!(),
+                    ". This ",
+                    crate::computer!(),
+                    "'s record of the copies it had merged is replaced by that version."
+                ),
+                vault = page_text(vault_name),
+                version = version,
+                device = page_text(device_name),
+                day = crate::desktop::ui::kit::day_month_year(*time),
             ),
             Self::AddStoreDevice {
                 device_name,
@@ -3340,6 +3380,7 @@ impl DesktopApp {
             | OwnerRequest::ForgetOldConnectAccount
             | OwnerRequest::DeleteVaultStore { .. }
             | OwnerRequest::TakeDepartedCopy { .. }
+            | OwnerRequest::UseRelayCopy { .. }
             | OwnerRequest::AddStoreDevice { .. }
             | OwnerRequest::ChangeConnectGroup { .. }
             | OwnerRequest::ShareConnectVault { .. }

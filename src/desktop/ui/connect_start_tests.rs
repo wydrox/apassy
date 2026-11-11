@@ -1043,3 +1043,123 @@ fn a_join_left_on_the_start_screen_ends_in_the_account_after_a_late_confirmation
 fn a_join_cut_by_a_quit_resumes_at_the_next_start() {
     a_join_outlives_its_step(true);
 }
+
+// ---- Round 6: a vault unlock ends the step; "Use the relay copy…" of a store. ----
+
+/// A vault of this computer is unlocked while a copy of a store waits on the start screen:
+/// the step ends, and the join that held the account key goes with it.
+#[test]
+fn an_unlock_drops_the_copy_that_waits_on_the_start_screen() {
+    let mut s = ready_on_start();
+    let other = TempDir::new().expect("dir");
+    s.b.owner_ui
+        .session
+        .create_file(&other.path().join("other.db"), PASS)
+        .expect("create");
+    s.b.owner_ui.session.unlock(PASS).expect("unlock");
+    assert!(s.b.owner_ui.session.epoch().is_some());
+    let ctx = s.ctx.clone();
+    frame(&ctx, &mut s.b);
+    frame(&ctx, &mut s.b);
+    assert!(
+        s.b.sync.relay.join_with_account().is_none(),
+        "the join of the store went"
+    );
+    assert!(s.b.sync.relay.join_view(None).is_none());
+    assert!(
+        s.b.connect_session().start_epoch().is_none(),
+        "the step ended"
+    );
+    drop(other);
+}
+
+/// "Use the relay copy…" of a vault store of the account: the sheet names the copy (its
+/// version, and that the record of what this computer merged is replaced), the plain step
+/// takes nothing, and the copy is taken only after an owner check that names exactly that
+/// head.
+#[test]
+fn the_relay_copy_of_a_store_is_taken_only_after_an_owner_check() {
+    let dir = TempDir::new().expect("temp dir");
+    let relay = Arc::new(FakeRelay::start());
+    let connect = FakeConnect::with_relay(Arc::clone(&relay) as _);
+    let (mut a, ctx, team) = device_a(&dir, &connect, &relay);
+    let id = a.current_vault().expect("the open vault").id.clone();
+    let mut secrets = crate::desktop::owner_store::SecretForm::default();
+    secrets.token = "SYNTH-second".to_owned();
+    a.owner_ui
+        .session
+        .add(
+            &crate::desktop::ItemDraft {
+                name: "Second token".to_owned(),
+                kind: crate::contracts::CredentialKind::ApiKey,
+                ..crate::desktop::ItemDraft::default()
+            },
+            &secrets,
+        )
+        .expect("add");
+    a.sync_now();
+    a.relay_settle_for_test();
+    assert_eq!(relay.version_of(&team), 2);
+    // The relay comes back from a backup: this computer refuses the older copy.
+    relay.roll_back_store(&team, 1);
+    a.sync_now();
+    a.relay_settle_for_test();
+    let status = a.sync.statuses.get(&id).cloned().expect("status");
+    assert!(super::sync::relay::refused_copy(&status), "{status:?}");
+    let (served, _) = a.relay_served_copy(&id).expect("the copy on the relay");
+    assert_eq!(served.version, 1);
+    // The plain step takes nothing for a store of the account.
+    a.relay_use_copy(&id);
+    a.relay_settle_for_test();
+    assert_eq!(relay.version_of(&team), 1, "nothing taken");
+    assert!(
+        a.status_text.contains("Confirm which copy to use first"),
+        "{}",
+        a.status_text
+    );
+    super::open_settings(&mut a, super::SettingsSection::Vault);
+    a.sync_open_sheet(
+        super::sync::SyncSheet::UseRelayCopy { id: id.clone() },
+        None,
+    );
+    frame(&ctx, &mut a);
+    let text = frame(&ctx, &mut a);
+    assert!(text.contains("The relay holds version 1"), "{text}");
+    assert!(
+        text.contains("record of the copies it had merged is replaced"),
+        "{text}"
+    );
+    a.relay_ask_use_copy(&id, Some(&ctx));
+    let action = a
+        .owner
+        .check
+        .as_ref()
+        .map(|check| check.request.action())
+        .expect("an owner check");
+    assert_eq!(
+        action,
+        crate::broker::approvals::OwnerAction::UseRelayCopy {
+            team_id: team.clone(),
+            version: 1,
+            head: served.head_hash.clone(),
+        }
+    );
+    assert_eq!(relay.version_of(&team), 1, "nothing before the check");
+    confirm_with(&mut a, &ctx, PASS);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while relay.version_of(&team) < 2 {
+        assert!(
+            Instant::now() < deadline,
+            "the copy was taken: {}",
+            a.status_text
+        );
+        frame(&ctx, &mut a);
+        a.relay_settle_for_test();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        a.status_text.starts_with("Apassy merged the relay copy"),
+        "{}",
+        a.status_text
+    );
+}

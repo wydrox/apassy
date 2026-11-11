@@ -1145,6 +1145,10 @@ pub struct DepartedHead {
 #[derive(Debug, Default)]
 pub(crate) struct HeadNotes {
     waiting: Mutex<Option<DepartedHead>>,
+    /// The current head that the relay served at the last check, after the checks of the
+    /// team, the vault, and the signer: the copy that "Use the relay copy…" would take
+    /// ([`RelaySync::served_head`]).
+    served: Mutex<Option<DepartedHead>>,
     unlisted: Mutex<Option<UnlistedEntry>>,
     /// When the newest device list that verified on this Mac was asked of Connect
     /// ([`RelaySync::note_device_list`]); `None` before one.
@@ -1297,6 +1301,10 @@ pub struct RelayTransport {
     /// The download of a new device ([`JoinedDevice::download`]): with no anchor, the chain
     /// below the head of a vault store is checked too ([`Self::check_first_chain`]).
     first_chain: bool,
+    /// The one current head that the owner chose to take with "Use the relay copy…" (its
+    /// version and hash, [`RelaySync::use_relay_copy_approved`]): with no anchor, any other
+    /// head is [`SyncError::StaleCopy`], and nothing changes.
+    approved: Option<(u64, String)>,
 }
 
 impl RelayTransport {
@@ -1323,6 +1331,7 @@ impl RelayTransport {
             notes: Arc::default(),
             departed: None,
             first_chain: false,
+            approved: None,
         }
     }
 
@@ -1331,6 +1340,13 @@ impl RelayTransport {
     /// has the vault keeps its trust in the current head alone.
     pub(crate) fn with_first_chain_check(mut self) -> Self {
         self.first_chain = true;
+        self
+    }
+
+    /// Take only the current head of version `version` with the hash `hash` when there is no
+    /// anchor ("Use the relay copy…" after the owner check that named it).
+    pub(crate) fn with_approved_head(mut self, version: u64, hash: &str) -> Self {
+        self.approved = Some((version, hash.to_owned()));
         self
     }
 
@@ -1527,8 +1543,10 @@ impl RelayTransport {
     /// The chain below `head` at the first download of a new device of a vault store of an
     /// account (no anchor), from the answer `view` of `since=0` on: the entries link to each other and
     /// end at `head`, each is of this team and vault, and each is signed by a device of the
-    /// list or a key that left it, as at any later check. A chain that starts later than
-    /// version 1 (the relay keeps the newest heads only) is checked from its first entry.
+    /// list or a key that left it, as at any later check. Only the entries that the relay
+    /// serves can be checked: a chain that does not start at version 1 is `Damaged`, except
+    /// a chain of the head alone when it is the head of a device that left that the owner
+    /// took ([`Self::with_departed`]).
     /// A signer that this device does not know yet waits for the device list
     /// ([`Self::unlisted`]); any other break is `Damaged`.
     fn check_first_chain(&self, head: &SignedHead, mut view: HeadView) -> Result<(), SyncError> {
@@ -1546,10 +1564,20 @@ impl RelayTransport {
             let (from, anchor) = match &link {
                 Some(hash) => (since, hash.clone()),
                 None if view.chain_from == Some(1) => (0, NO_PREVIOUS.to_owned()),
-                None => (
-                    first.fields.version.saturating_sub(1),
-                    first.fields.previous.clone(),
-                ),
+                // A cut history: the entries below the head are not there to check. Only the
+                // head of a device that left, which the owner took by its owner check, goes.
+                None if entries.len() == 1
+                    && first.text == head.text
+                    && self.departed.as_ref().is_some_and(|departed| {
+                        departed.version == head.fields.version && departed.head_hash == head.hash()
+                    }) =>
+                {
+                    (
+                        first.fields.version.saturating_sub(1),
+                        first.fields.previous.clone(),
+                    )
+                }
+                None => return Err(SyncError::Damaged),
             };
             let linked = link_chain(from, &anchor, view.chain_from, &entries, |entry| {
                 let same_vault = self
@@ -1653,6 +1681,21 @@ impl SyncTransport for RelayTransport {
                 .filter(|head| head.fields.version == view.version)
                 .ok_or(SyncError::Damaged)?;
             let signing = self.check_identity(&head, &view.signers, anchor.version)?;
+            *lock(&self.notes.served) =
+                signer_key(&view.signers, head.fields.device_id).map(|key| DepartedHead {
+                    key,
+                    device_id: head.fields.device_id,
+                    version: head.fields.version,
+                    head_hash: head.hash(),
+                    time: head.fields.time,
+                });
+            if anchor.version == 0
+                && let Some((version, hash)) = &self.approved
+                && (head.fields.version != *version || head.hash() != *hash)
+            {
+                // Not the copy that the owner chose: nothing is taken.
+                return Err(SyncError::StaleCopy);
+            }
             if anchor.version == 0 {
                 // No anchor: trust on first use, behind the owner's action. The download of
                 // a new device of an account checks the chain below the head first.
@@ -2957,7 +3000,7 @@ impl RelaySync {
     /// the copy and pushes what the copy lacks. The device stays on the relay.
     pub fn use_relay_copy(&self, vault: &mut Vault) -> Result<SyncOutcome, SyncError> {
         let _run = self.try_run()?;
-        self.use_relay_copy_in(vault)
+        self.use_relay_copy_in(vault, None)
     }
 
     /// [`Self::use_relay_copy`] with the shared vault slot of the app, as
@@ -2968,7 +3011,28 @@ impl RelaySync {
         accept: impl Fn(&Vault) -> bool,
     ) -> Result<SyncOutcome, SyncError> {
         let _run = self.run_shared()?;
-        self.use_relay_copy_in(&mut SharedSlot { slot, accept })
+        self.use_relay_copy_in(&mut SharedSlot { slot, accept }, None)
+    }
+
+    /// "Use the relay copy…" of a vault store of a Connect account, after the owner check
+    /// that named `approved`, the current head that the relay served
+    /// ([`Self::served_head`]): as [`Self::use_relay_copy_shared`], and only that head is
+    /// taken. Another current head is [`SyncError::StaleCopy`], and the anchor stays.
+    pub fn use_relay_copy_approved(
+        &self,
+        slot: &Mutex<Option<Vault>>,
+        accept: impl Fn(&Vault) -> bool,
+        approved: &DepartedHead,
+    ) -> Result<SyncOutcome, SyncError> {
+        let _run = self.run_shared()?;
+        self.use_relay_copy_in(&mut SharedSlot { slot, accept }, Some(approved))
+    }
+
+    /// The current head that the relay served at the last check of this vault, after the
+    /// checks of the team, the vault, and the signer: its signer, version, hash, and time.
+    /// The sheet of "Use the relay copy…" names it.
+    pub fn served_head(&self) -> Option<DepartedHead> {
+        lock(&self.notes.served).clone()
     }
 
     /// A copy that then fails the same way again ([`sticks`]: it needs another
@@ -2979,13 +3043,17 @@ impl RelaySync {
     fn use_relay_copy_in<A: VaultAccess + ?Sized>(
         &self,
         vault: &mut A,
+        approved: Option<&DepartedHead>,
     ) -> Result<SyncOutcome, SyncError> {
         let mut state = self.require_state()?;
         let session = vault.with(|vault| self.checked_session(vault, &state))?;
         *lock(&self.refused) = None;
         state.last_remote_version = 0;
         state.last_head_sha256 = None;
-        let transport = self.transport(Arc::clone(&session), &state);
+        let mut transport = self.transport(Arc::clone(&session), &state);
+        if let Some(approved) = approved {
+            transport = transport.with_approved_head(approved.version, &approved.head_hash);
+        }
         let mut result = ended_by_lock(
             &session,
             self.rounds(vault, &mut state, &transport, true, None),

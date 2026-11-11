@@ -996,7 +996,13 @@ svg{display:block}
         <div class="fr"><div class="tn warn" style="flex:1;color:var(--t-warn)"><svg><use href="#i-warn"/></svg><span>This account has no recovery code that you have seen. Make a new one now.</span></div></div>
         <div class="fr pl"><div class="k">Recovery Code</div><div class="v"><span class="btn">New Recovery Code…</span></div><div class="pst">Make a new code if you cannot find the one you saved. The old code stops working.</div></div>
       </div>
-      <div class="note">The warning line stays through every refresh and restart until a new code is made. Without it, the group shows only the Recovery Code row.</div>
+      <div class="note">The warning line stays through every refresh and restart until a new code is made and its sheet is closed with “I Saved It”. Without it, the group shows only the Recovery Code row.</div>
+      <div class="plabel" style="margin-top:14px">13d · A new code of another device</div>
+      <div class="grp" style="margin-top:6px">
+        <div class="fr"><div class="tn warn" style="flex:1;color:var(--t-warn)"><svg><use href="#i-warn"/></svg><span>The recovery code was changed on MacBook Air on 11 Nov 2026. The old code no longer works.</span></div></div>
+        <div class="fr pl"><div class="k">Changed on another device</div><div class="v"><span class="btn">OK</span></div></div>
+        <div class="fr pl"><div class="k">Recovery Code</div><div class="v"><span class="btn">New Recovery Code…</span></div><div class="pst">Make a new code if you cannot find the one you saved. The old code stops working.</div></div>
+      </div>
     </div>
     <div class="shc">
       <div class="plabel">13b · The owner check</div>
@@ -1013,9 +1019,10 @@ svg{display:block}
       <div class="rcode"><span data-n="1">amber</span><span data-n="2">lotus</span><span data-n="3">quiet</span><span data-n="4">prism</span><span data-n="5">walnut</span><span data-n="6">ember</span><span data-n="7">falcon</span><span data-n="8">meadow</span><span data-n="9">pilot</span><span data-n="10">cobalt</span><span data-n="11">summit</span><span data-n="12">river</span><span data-n="13">nickel</span><span data-n="14">violet</span><span data-n="15">canyon</span><span data-n="16">tulip</span></div>
       <div class="note">If every device of the account is lost, this code gives the account to a new Mac. The vault copies at Connect are deleted then; your vaults stay on your devices.</div>
       <div class="sbar"><span class="btn left"><svg><use href="#i-copy"/></svg>Copy</span><span class="btn pri">I Saved It</span></div>
+      <div class="note" style="color:var(--t-warn)">13e, the same sheet when the account file could not be written: “This Mac could not record the new code in its account file. The code works: save it now. Apassy records it when it next reads the account.” under the lead.</div>
     </div>
   </div>
-  <ul class="fnotes"><li><b>New Recovery Code…</b> runs the owner check <code>OwnerAction::NewRecoveryCode</code> (Touch ID or the passphrase), then <code>ConnectAccount::new_recovery_code</code>: a new code on this Mac, and <code>POST /v1/account/recovery</code> with its public key, signed by the device key over the key that Connect holds now. The button is off while the vault is locked and while the device list did not verify.</li><li><b>13c</b> is the sheet of 2b: the 16 words once; Apassy never stores them. After it the old code recovers nothing.</li><li>The warning of 12a comes from the account file (<code>recovery_unseen</code>), written when a creation finished after a restart without showing its code; a new code clears it.</li></ul>
+  <ul class="fnotes"><li><b>New Recovery Code…</b> runs the owner check <code>OwnerAction::NewRecoveryCode</code> (Touch ID or the passphrase), then <code>ConnectAccount::new_recovery_code</code>: a new code on this Mac, and <code>POST /v1/account/recovery</code> with its public key, signed by the device key over the key that Connect holds now. The button is off while the vault is locked and while the device list did not verify.</li><li><b>13c</b> is the sheet of 2b: the 16 words once; Apassy never stores them. After it the old code recovers nothing.</li><li>The warning of 13a comes from the account file (<code>recovery_unseen</code>), written when a creation finished after a restart without showing its code, and before each new code is sent; only “I Saved It” of 13c clears it, so a lock or a quit before it keeps the line.</li><li>The account file holds the pending rotation (public keys and the signed statement, never the code) until Connect names the new key; a lost answer sends the same body again. A Connect that names another key gives no code: “Apassy Connect did not take the new recovery code. Your current recovery code still works; nothing changed.”</li><li><b>13d</b>: another device made a new code (<code>recovery_rotated_by</code> and <code>recovery_rotated_at</code> of the account view, against the key that this device pinned). “OK” pins the new key and ends the line.</li></ul>
 </section>
 <section class="notes">
   <h2>Rules for every view</h2>

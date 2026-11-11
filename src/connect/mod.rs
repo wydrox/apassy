@@ -47,15 +47,17 @@ use std::fmt;
 
 pub use account::{
     AccountState, Clock, ConnectAccount, DeviceLink, Forgotten, JoinPoll, JoinRequest,
-    ListedSigners, PendingJoin, RevokeOutcome, Sleeper, account_file, drop_account_rows,
+    ListedSigners, PendingJoin, PendingRotation, RevokeOutcome, RotatedCode, Sleeper,
+    account_file, drop_account_rows,
     drop_stale_account_rows, forget_old_account_file, forget_this_device, group_invite_code,
     has_pending_join, is_old_account_file, signer_policy,
 };
 pub use client::{
     AccountCreated, AccountDeleted, AccountView, CheckoutAnswer, CheckoutRequest, ConnectClient,
     DeviceView, GroupDetail, GroupJoined, GroupMember, GroupView, InviteAnswer, MemberRemoved,
-    PlanOffer, PlanPrice, PlanView, PlansView, PortalAnswer, RecoverAnswer, RevokeAnswer,
-    SeatsAnswer, StoreDevice, VaultStoreView, WellKnown, configured_origin, set_configured_origin,
+    PlanOffer, PlanPrice, PlanView, PlansView, PortalAnswer, RecoverAnswer, RecoveryChange,
+    RevokeAnswer, SeatsAnswer, StoreDevice, VaultStoreView, WellKnown, configured_origin,
+    set_configured_origin,
 };
 pub use device_key::{
     AccountSigner, DeviceKeyError, DeviceKeyStore, KeychainDeviceKeyStore, MemoryKeyStore,
@@ -140,6 +142,13 @@ pub enum ConnectError {
     /// memory (Apassy was closed while the creation waited for Connect): it was never
     /// shown. The account works; a second device of the account keeps it reachable.
     RecoveryCodeNotShown,
+    /// Connect answered a new recovery code, and the recovery key that it holds is not the
+    /// key of that code (section 9.1): the code that the account had stays the one that
+    /// works.
+    RecoveryNotTaken,
+    /// Connect did not answer a new recovery code after its repeats: whether it took the
+    /// code is checked at the next read of the account (section 9.1).
+    RecoveryUnanswered,
     /// `409 seat_limit`: people or seats below the confirmed members, or above the
     /// maximum of the plan (connect-billing-v1 section 6).
     SeatLimit,
@@ -233,6 +242,12 @@ impl fmt::Display for ConnectError {
                 crate::computer!(),
                 " is lost."
             ),
+            Self::RecoveryNotTaken => {
+                "Apassy Connect did not take the new recovery code. Your current recovery code still works; nothing changed."
+            }
+            Self::RecoveryUnanswered => {
+                "Apassy Connect did not answer, so Apassy cannot tell yet whether it took the new recovery code. Apassy checks again when it next reads the account. Keep your current code until then."
+            }
             Self::SeatLimit => {
                 "That number is below the members of your family or team, or above the most the plan allows. Remove members first, or choose another number."
             }

@@ -504,6 +504,15 @@ pub enum OwnerAction {
         head: String,
         replace: bool,
     },
+    /// "Use the relay copy…" of a vault store of the Apassy Connect account that this device
+    /// refuses (an older copy, or a history without its last change; connect-account-v1
+    /// section 7.5): take exactly the current head `head` (version `version`), forget what
+    /// this device had merged, and merge that copy. The proof names the store and the head.
+    UseRelayCopy {
+        team_id: String,
+        version: u64,
+        head: String,
+    },
     /// Add a device of the Apassy Connect account, or of its group, to a vault store
     /// (section 8): the device can then read and write the relay copy of that vault. The
     /// proof names the store, the device, and the account of the device.
@@ -857,6 +866,7 @@ impl OwnerAction {
             Self::TakeDepartedCopy { replace: true, .. } => {
                 "Replace the copy of a device that left"
             }
+            Self::UseRelayCopy { .. } => "Use the relay copy of a vault",
             Self::AddStoreDevice { .. } => "Add a device to a relay copy",
             Self::ChangeConnectGroup { .. } => "Change your family or team",
             Self::ShareConnectVault { .. } => "Share a vault",
@@ -1107,6 +1117,9 @@ impl OwnerAction {
             Self::TakeDepartedCopy { replace: true, .. } => {
                 "replace the relay copy that a device that left your Apassy Connect account saved last".to_owned()
             }
+            Self::UseRelayCopy { .. } => {
+                "take the relay copy of this vault at Apassy Connect as it is now, and merge it".to_owned()
+            }
             Self::AddStoreDevice { .. } => {
                 "let another device sync the relay copy of this vault at Apassy Connect".to_owned()
             }
@@ -1281,6 +1294,7 @@ impl OwnerAction {
                 | Self::ForgetOldConnectAccount
                 | Self::DeleteVaultStore { .. }
                 | Self::TakeDepartedCopy { .. }
+                | Self::UseRelayCopy { .. }
                 | Self::AddStoreDevice { .. }
                 | Self::ChangeConnectGroup { .. }
                 | Self::ShareConnectVault { .. }
@@ -2681,6 +2695,11 @@ mod evaluation_tests {
                 version: 7,
                 head: "a".repeat(64),
                 replace: true,
+            },
+            OwnerAction::UseRelayCopy {
+                team_id: "t".repeat(32),
+                version: 7,
+                head: "a".repeat(64),
             },
             OwnerAction::AddStoreDevice {
                 team_id: "t".repeat(32),
