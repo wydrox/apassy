@@ -110,7 +110,7 @@ pub fn check_browser_parent() -> Result<(), WireError> {
 pub fn check_peer(stream: &UnixStream) -> Result<(), WireError> {
     #[cfg(target_os = "linux")]
     {
-        linux::check_peer(stream)
+        linux::check_peer(stream).map(drop)
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -123,17 +123,55 @@ pub fn check_peer(stream: &UnixStream) -> Result<(), WireError> {
 pub fn peer_identity(
     stream: &UnixStream,
 ) -> Result<Option<super::trust::InstanceIdentity>, WireError> {
+    peer_identity_seen(stream).map(|(identity, _)| identity)
+}
+
+/// What the app's check saw of the socket peer, for [`check_same_peer`] after the owner
+/// answered. On Linux: the kernel's identity of the peer and of its browser parent. On
+/// macOS it holds nothing: the signed guard checked the peer, and the app does not ask
+/// it again.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PeerSeen {
+    #[cfg(target_os = "linux")]
+    linux: Option<linux::Seen>,
+}
+
+/// [`peer_identity`] and what the check saw of the peer.
+pub fn peer_identity_seen(
+    stream: &UnixStream,
+) -> Result<(Option<super::trust::InstanceIdentity>, PeerSeen), WireError> {
     #[cfg(target_os = "linux")]
     {
-        linux::check_peer(stream).map(|()| None)
+        linux::check_peer(stream).map(|seen| (None, PeerSeen { linux: Some(seen) }))
     }
     #[cfg(not(target_os = "linux"))]
     {
         let copy = stream.try_clone().map_err(|_| refused())?;
         match run_guard(Check::SocketPeer, Stdio::from(OwnedFd::from(copy))) {
-            Ok(()) => Ok(None),
-            Err(e) => unsafe_identity(&e).map(Some).ok_or(e),
+            Ok(()) => Ok((None, PeerSeen::default())),
+            Err(e) => unsafe_identity(&e)
+                .map(|identity| (Some(identity), PeerSeen::default()))
+                .ok_or(e),
         }
+    }
+}
+
+/// After the owner answered a checked request, before its answer is written: on Linux
+/// the peer check runs again and must see the same peer process and the same browser
+/// parent ([`linux::check_same_peer`]); a request that the check did not see passes.
+/// On macOS nothing is checked again.
+pub fn check_same_peer(stream: &UnixStream, seen: &PeerSeen) -> Result<(), WireError> {
+    #[cfg(target_os = "linux")]
+    {
+        match &seen.linux {
+            Some(seen) => linux::check_same_peer(stream, seen),
+            None => Ok(()),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (stream, seen);
+        Ok(())
     }
 }
 
@@ -168,6 +206,19 @@ fn refused() -> WireError {
 #[cfg(any(target_os = "linux", test))]
 fn sandboxed() -> WireError {
     WireError::new("unsupported", super::install::sandboxed_browser())
+}
+
+/// Linux: the browser was started with `switch`, which turns off its sandbox or its
+/// site isolation (`caller_linux.rs`, `WEAKENING_SWITCHES`). The message names the
+/// switch, never its value, and what to do.
+#[cfg(any(target_os = "linux", test))]
+fn weakened(switch: &str) -> WireError {
+    WireError::new(
+        "unsupported",
+        format!(
+            "This browser was started with {switch}, which turns off how it keeps websites apart, so the browser handles this request itself. Start the browser again without {switch}."
+        ),
+    )
 }
 
 #[cfg(not(target_os = "linux"))]

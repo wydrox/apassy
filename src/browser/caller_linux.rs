@@ -40,7 +40,7 @@ pub(in crate::browser) const BROWSERS: &[&str] = &[
 const MAX_PROC_BYTES: u64 = 128 * 1024;
 
 #[cfg(target_os = "linux")]
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Process {
     parent: u32,
     start: u64,
@@ -273,6 +273,9 @@ fn system_extensions(value: &[u8], trust: Trust<'_>) -> bool {
 /// - Host and resolver rules: `services/network/public/cpp/network_switches.cc`
 ///   (`host-resolver-rules`, `host-rules`).
 ///
+/// The switches that turn off the browser's sandbox or its site isolation are in
+/// [`WEAKENING_SWITCHES`]; they refuse too, with a message that names them.
+///
 /// Switches for the display, the GPU, the language, the profile folder, the password
 /// store or a proxy stay accepted (see the test
 /// `ordinary_linux_switches_are_accepted`): refusing them would break real users.
@@ -322,6 +325,78 @@ const REFUSED_SWITCHES: &[&str] = &[
 /// `-pipe`, `-address`, `-socket-name`, `-io-pipes`, `-targets` and any later one.
 const REFUSED_PREFIXES: &[&str] = &["remote-debugging"];
 
+/// Switches that turn off the browser's sandbox or its site isolation, or hand flags to
+/// its JavaScript engine: a page could then reach the memory of another site's page,
+/// whose origin the extension reports. They refuse every browser, whatever their
+/// value, and the refusal names the switch ([`super::weakened`]). From the switch
+/// definitions of Chromium (main branch, read 2026-11-11): `sandbox/policy/switches.cc`
+/// (`no-sandbox`, `disable-setuid-sandbox`), `content/public/common/content_switches.cc`
+/// (`disable-site-isolation-trials`, `disable-site-isolation-for-policy`) and
+/// `third_party/blink/common/switches.cc` (`js-flags`). `--disable-features` follows
+/// [`weakening_features`].
+const WEAKENING_SWITCHES: &[&str] = &[
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-site-isolation-trials",
+    "--disable-site-isolation-for-policy",
+    "--js-flags",
+];
+
+/// Words in the names of features that keep sites apart or sandbox a process, in lower
+/// case. Disabling such a feature refuses the browser. From the feature definitions of
+/// Chromium (main branch, read 2026-11-11): `content/public/common/content_features.cc`
+/// (`IsolateOrigins`, `OriginIsolationHeader`, `StrictOriginIsolation`,
+/// `OriginKeyedProcessesByDefault`, `SiteIsolationForCrossOriginOpenerPolicy`,
+/// `IsolateSubframeErrorPages`, `IsolateFencedFrames`, `SpareRendererForSitePerProcess`,
+/// `AudioServiceSandbox`), `components/site_isolation/features.cc`
+/// (`site-isolation-for-password-sites`, `SiteIsolationForOAuthSites`,
+/// `IsolateOriginsShortlistPolicyUpdate`, `OriginIsolationForJitlessExceptions`) and
+/// `sandbox/policy/features.cc` (`NetworkServiceSandbox`,
+/// `OnDeviceModelExecutionMultiThreadedSandbox`). A word, not the exact names, so that
+/// a later feature of the same kind refuses too. The Privacy Sandbox (ads APIs) is no
+/// process sandbox: [`PRIVACY_SANDBOX`] stays accepted.
+const WEAKENING_FEATURE_WORDS: &[&str] = &[
+    "isolat",
+    "siteperprocess",
+    "originkeyedprocesses",
+    "sandbox",
+];
+
+/// The start of the names of the Privacy Sandbox features (`PrivacySandboxAdsAPIs…`),
+/// in lower case: ads APIs, which owners turn off for privacy.
+const PRIVACY_SANDBOX: &str = "privacysandbox";
+
+/// True when the value of `--disable-features` names a feature of
+/// [`WEAKENING_FEATURE_WORDS`]. Each comma-separated name is compared without the
+/// `*` of a default state and without a field trial (`<…`) or parameters (`:…`), in
+/// lower case.
+fn weakening_features(value: &[u8]) -> bool {
+    value.split(|b| *b == b',').any(|entry| {
+        let entry = entry.strip_prefix(b"*").unwrap_or(entry);
+        let name = entry
+            .iter()
+            .take_while(|b| !matches!(b, b'<' | b':'))
+            .map(u8::to_ascii_lowercase)
+            .collect::<Vec<_>>();
+        !name.starts_with(PRIVACY_SANDBOX.as_bytes())
+            && WEAKENING_FEATURE_WORDS
+                .iter()
+                .any(|word| name.windows(word.len()).any(|w| w == word.as_bytes()))
+    })
+}
+
+/// The switch of one title word that turns off the sandbox or site isolation, as the
+/// refusal names it (`--no-sandbox`), or `None`.
+fn weakening(word: &[u8], name: &[u8]) -> Option<&'static str> {
+    if name == b"disable-features" && weakening_features(switch_value(word)) {
+        return Some("--disable-features");
+    }
+    WEAKENING_SWITCHES
+        .iter()
+        .copied()
+        .find(|s| name == s.trim_start_matches('-').as_bytes())
+}
+
 /// What Debian's `/usr/bin/chromium` and its `/etc/chromium.d/*` (`default-flags`,
 /// `dev-shm`, `extensions`; Debian 13, chromium 156.0.8078.79-1~deb13u1) add to every
 /// start, besides `--load-extension`. `disable-background-networking` comes only
@@ -364,6 +439,21 @@ const DISPLAY_SWITCHES: &[&str] = &[
     "accept-lang",
 ];
 
+/// The profile, password-store and proxy switches, accepted for every browser, that
+/// may also accompany Debian's system extensions: Chromium's own per-profile desktop
+/// shortcuts start it with `--profile-directory`. What a profile holds is outside what
+/// the check can see in every case (ADR 0045, "What the switch check sees").
+const PROFILE_SWITCHES: &[&str] = &[
+    "profile-directory",
+    "user-data-dir",
+    "password-store",
+    "proxy-server",
+];
+
+/// Chromium names a second profile folder `Profile 1`: the title shows
+/// `--profile-directory=Profile` and then the number as a word of its own.
+const PROFILE_FOLDER: &[u8] = b"--profile-directory=Profile";
+
 /// Words in the names of display and GPU features (`--enable-features=…`).
 const DISPLAY_FEATURES: &[&str] = &["Wayland", "Ozone", "Vaapi", "Vulkan", "AcceleratedVideo"];
 
@@ -404,28 +494,48 @@ fn switch_value(word: &[u8]) -> &[u8] {
 
 fn refused_switch(name: &[u8]) -> bool {
     REFUSED_SWITCHES.iter().any(|s| name == s.as_bytes())
+        || WEAKENING_SWITCHES
+            .iter()
+            .any(|s| name == s.trim_start_matches('-').as_bytes())
         || REFUSED_PREFIXES
             .iter()
             .any(|p| name.starts_with(p.as_bytes()))
 }
 
-/// True when the word at `index` (0 for the first word) may stand next to Debian's
-/// system extensions: the browser executable as the first word, a switch of
-/// [`DEBIAN_WRAPPER_SWITCHES`] or [`DISPLAY_SWITCHES`], display features, or a plain
-/// page address (`http://` or `https://`, which the desktop's `%U` passes).
-fn beside_system_extensions(index: usize, word: &[u8], name: &[u8]) -> bool {
+/// True when the word at `index` (0 for the first word), after the word `previous`,
+/// may stand next to Debian's system extensions: the browser executable as the first
+/// word, a switch of [`DEBIAN_WRAPPER_SWITCHES`], [`DISPLAY_SWITCHES`] or
+/// [`PROFILE_SWITCHES`], display features, the number of a `Profile N` folder
+/// ([`PROFILE_FOLDER`]), or a plain page address (`http://` or `https://`, which the
+/// desktop's `%U` passes).
+fn beside_system_extensions(index: usize, previous: &[u8], word: &[u8], name: &[u8]) -> bool {
     if word.first() == Some(&b'-') {
         let listed = |list: &[&str]| list.iter().any(|s| name == s.as_bytes());
         return listed(DEBIAN_WRAPPER_SWITCHES)
             || listed(DISPLAY_SWITCHES)
+            || listed(PROFILE_SWITCHES)
             || (matches!(name, b"enable-features" | b"disable-features")
                 && display_features(switch_value(word)));
     }
     if index == 0 {
         return BROWSERS.iter().any(|path| word == path.as_bytes());
     }
+    if previous == PROFILE_FOLDER && word.iter().all(u8::is_ascii_digit) {
+        return true;
+    }
     let lower = word.to_ascii_lowercase();
     lower.starts_with(b"http://") || lower.starts_with(b"https://")
+}
+
+/// True when [`title_refusal`] accepts the title `bytes` of a browser.
+#[cfg(test)]
+fn safe_arguments(bytes: &[u8]) -> bool {
+    safe_arguments_in(bytes, Trust::system())
+}
+
+#[cfg(test)]
+fn safe_arguments_in(bytes: &[u8], trust: Trust<'_>) -> bool {
+    title_refusal(bytes, trust).is_none()
 }
 
 /// Match conservatively, including switches after `--`, single dashes and unusual
@@ -445,43 +555,53 @@ fn beside_system_extensions(index: usize, word: &[u8], name: &[u8]) -> bool {
 /// in any other word refuses the browser. And with it, the title may hold nothing but
 /// what [`beside_system_extensions`] allows: an allow list, not a block list, because
 /// this is the one case where a loading switch is accepted.
-fn safe_arguments(bytes: &[u8]) -> bool {
-    safe_arguments_in(bytes, Trust::system())
-}
-
-fn safe_arguments_in(bytes: &[u8], trust: Trust<'_>) -> bool {
+///
+/// Returns why the title refuses the browser, or `None` when it is accepted. A switch
+/// of [`WEAKENING_SWITCHES`] or a weakening `--disable-features` gives
+/// [`Refusal::Weakened`], wherever it is; everything else the generic refusal.
+fn title_refusal(bytes: &[u8], trust: Trust<'_>) -> Option<Refusal> {
     if bytes.is_empty() || bytes.last() != Some(&0) {
-        return false;
+        return Some(Refusal::Unverifiable);
+    }
+    let words = || {
+        bytes
+            .split(|b| *b == 0 || b.is_ascii_whitespace())
+            .filter(|word| !word.is_empty())
+    };
+    if let Some(switch) = words().find_map(|word| weakening(word, &switch_name(word))) {
+        return Some(Refusal::Weakened(switch));
     }
     let mut extensions: Option<&[u8]> = None;
     let mut comma_elsewhere = false;
     let mut outside_allow_list = false;
-    let words = bytes
-        .split(|b| *b == 0 || b.is_ascii_whitespace())
-        .filter(|word| !word.is_empty());
-    for (index, word) in words.enumerate() {
+    let mut previous: &[u8] = &[];
+    for (index, word) in words().enumerate() {
         let name = switch_name(word);
         if refused_switch(&name) {
-            return false;
+            return Some(Refusal::Unverifiable);
         }
         if name == b"load-extension" {
             let value = switch_value(word);
             match extensions {
-                Some(seen) if seen != value => return false,
+                Some(seen) if seen != value => return Some(Refusal::Unverifiable),
                 Some(_) => {}
                 None if system_extensions(value, trust) => extensions = Some(value),
-                None => return false,
+                None => return Some(Refusal::Unverifiable),
             }
+            previous = word;
             continue;
         }
         comma_elsewhere |= word.contains(&b',');
-        outside_allow_list |= !beside_system_extensions(index, word, &name);
+        outside_allow_list |= !beside_system_extensions(index, previous, word, &name);
+        previous = word;
     }
-    extensions.is_none() || !(comma_elsewhere || outside_allow_list)
+    (extensions.is_some() && (comma_elsewhere || outside_allow_list))
+        .then_some(Refusal::Unverifiable)
 }
 
-/// Why the check refuses a browser. Only the namespace case has its own message: it
-/// names a setup that the owner can change, and it reveals nothing about the vault.
+/// Why the check refuses a browser. The namespace case and a switch that turns off the
+/// sandbox or site isolation have their own messages: each names a setup that the
+/// owner can change, and reveals nothing about the vault.
 #[derive(Debug, PartialEq, Eq)]
 enum Refusal {
     /// Anything that cannot be verified: the generic [`super::refused`].
@@ -489,6 +609,10 @@ enum Refusal {
     /// The browser runs in another mount or user namespace than Apassy: a snap, a
     /// Flatpak, or another container or sandbox ([`super::sandboxed`]).
     OtherNamespace,
+    /// The browser was started with this switch of [`WEAKENING_SWITCHES`], or with
+    /// `--disable-features` naming a feature of [`WEAKENING_FEATURE_WORDS`]
+    /// ([`super::weakened`]).
+    Weakened(&'static str),
 }
 
 impl From<io::Error> for Refusal {
@@ -503,6 +627,7 @@ impl Refusal {
         match self {
             Self::Unverifiable => super::refused(),
             Self::OtherNamespace => super::sandboxed(),
+            Self::Weakened(switch) => super::weakened(switch),
         }
     }
 }
@@ -573,20 +698,23 @@ fn proc_namespace(of: Of, kind: Namespace) -> io::Result<NamespaceId> {
 
 /// The browser parent: its user and start time, its namespaces, its executable and
 /// its title, then all but the title again, so that a PID that changed hands in
-/// between is refused.
+/// between is refused. Returns what it saw of the browser, for [`check_same_peer`].
 #[cfg(target_os = "linux")]
-fn browser(pid: u32, uid: u32) -> Result<(), Refusal> {
+fn browser(pid: u32, uid: u32) -> Result<(Process, PathBuf), Refusal> {
     let before = process(pid, uid)?;
     same_namespaces(pid, proc_namespace)?;
     let path = image(pid, BROWSERS)?;
-    if !safe_arguments(&bounded(Path::new(&format!("/proc/{pid}/cmdline")))?) {
-        return Err(Refusal::Unverifiable);
+    if let Some(refusal) = title_refusal(
+        &bounded(Path::new(&format!("/proc/{pid}/cmdline")))?,
+        Trust::system(),
+    ) {
+        return Err(refusal);
     }
     same_namespaces(pid, proc_namespace)?;
     if before != process(pid, uid)? || path != image(pid, BROWSERS)? {
         return Err(Refusal::Unverifiable);
     }
-    Ok(())
+    Ok((before, path))
 }
 
 #[cfg(target_os = "linux")]
@@ -614,6 +742,17 @@ pub(super) fn check_browser_parent() -> Result<(), WireError> {
     .map_err(Refusal::wire)
 }
 
+/// What [`check_peer`] saw of the peer, all of it the kernel's data: the PID and user of
+/// the socket peer (`SO_PEERCRED`), its start time, user IDs and parent (procfs), and of
+/// that browser parent its start time, user IDs and executable. The app compares it
+/// after the owner answered ([`check_same_peer`]).
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Seen {
+    peer: (u32, Process),
+    browser: (Process, PathBuf),
+}
+
 /// True when procfs hides `pid`'s executable because the task is not dumpable:
 /// the kernel then gives the `exe` link (and the other per-process files) to root.
 /// The `/proc/PID` directory itself keeps the task's effective user even then
@@ -624,9 +763,16 @@ fn exe_hidden_by_kernel(pid: u32) -> io::Result<bool> {
     Ok(fs::symlink_metadata(format!("/proc/{pid}/exe"))?.uid() == 0)
 }
 
+/// The app's check of the socket peer, after the request line was read and before any
+/// dialog. Every property comes from the kernel: the peer's user and PID from
+/// `SO_PEERCRED`; its start time, user IDs and parent from `/proc/PID/stat` and
+/// `status`; its executable from `/proc/PID/exe`, or, when the kernel hides that link
+/// of a non-dumpable task, only that kernel refusal; and the browser parent as in
+/// [`browser`]. The peer's own process is read again after the browser, and
+/// [`check_same_peer`] repeats the whole check before the answer leaves.
 #[cfg(target_os = "linux")]
-pub(super) fn check_peer(stream: &UnixStream) -> Result<(), WireError> {
-    (|| -> Result<(), Refusal> {
+pub(super) fn check_peer(stream: &UnixStream) -> Result<Seen, WireError> {
+    (|| -> Result<Seen, Refusal> {
         let uid = owner_uid()?;
         let credentials = rustix::net::sockopt::socket_peercred(stream).map_err(io::Error::from)?;
         if credentials.uid.as_raw() != uid {
@@ -648,13 +794,35 @@ pub(super) fn check_peer(stream: &UnixStream) -> Result<(), WireError> {
                     && exe_hidden_by_kernel(pid)? => {}
             Err(error) => return Err(error.into()),
         }
-        browser(before.parent, uid)?;
+        let browser = browser(before.parent, uid)?;
         if before != process(pid, uid)? {
             return Err(Refusal::Unverifiable);
         }
-        Ok(())
+        Ok(Seen {
+            peer: (pid, before),
+            browser,
+        })
     })()
     .map_err(Refusal::wire)
+}
+
+/// After the owner answered and before the answer is written: the same check again, and
+/// the same peer process with the same browser parent, by PID and start time. A peer or
+/// browser that ended, or a PID that changed hands while the owner looked at the dialog,
+/// gets the generic refusal instead of the answer.
+#[cfg(target_os = "linux")]
+pub(super) fn check_same_peer(stream: &UnixStream, seen: &Seen) -> Result<(), WireError> {
+    same_peer(check_peer(stream), seen)
+}
+
+/// The second check's result `now` against what the first check saw.
+#[cfg(target_os = "linux")]
+fn same_peer(now: Result<Seen, WireError>, seen: &Seen) -> Result<(), WireError> {
+    if now? == *seen {
+        Ok(())
+    } else {
+        Err(super::refused())
+    }
 }
 
 #[cfg(test)]
@@ -754,6 +922,11 @@ mod tests {
     #[test]
     fn every_refused_switch_refuses_the_browser() {
         let mut refused: Vec<String> = REFUSED_SWITCHES.iter().map(|s| s.to_string()).collect();
+        refused.extend(
+            WEAKENING_SWITCHES
+                .iter()
+                .map(|s| s.trim_start_matches('-').to_owned()),
+        );
         for name in [
             "remote-debugging-port",
             "remote-debugging-pipe",
@@ -805,6 +978,7 @@ mod tests {
         "--enable-features=WaylandWindowDecorations",
         "--enable-features=VaapiVideoDecoder,VaapiVideoEncoder",
         "--disable-features=WaylandFractionalScaleV1",
+        "--disable-features=PrivacySandboxAdsAPIsOverride,Translate",
         "--enable-wayland-ime",
         "--wayland-text-input-version=3",
         "--gtk-version=4",
@@ -852,6 +1026,85 @@ mod tests {
         for name in DEBIAN_WRAPPER_SWITCHES.iter().chain(DISPLAY_SWITCHES) {
             assert!(!refused_switch(name.as_bytes()), "{name}");
         }
+    }
+
+    /// The switches that turn off the sandbox or site isolation refuse every browser,
+    /// next to a system extension too, and the refusal names the switch, never its
+    /// value.
+    #[test]
+    fn switches_that_weaken_the_sandbox_or_site_isolation_name_themselves() {
+        let root = FakeRoot::new();
+        for switch in WEAKENING_SWITCHES {
+            for word in [
+                switch.to_string(),
+                format!("{switch}=--expose-gc"),
+                format!("-{}", switch.trim_start_matches('-').to_ascii_uppercase()),
+            ] {
+                let want = Some(Refusal::Weakened(switch));
+                let Some(Refusal::Weakened(named)) = title_refusal(&chrome(&word), Trust::system())
+                else {
+                    panic!("{word} is not a weakening");
+                };
+                assert_eq!(named, *switch);
+                assert_eq!(
+                    title_refusal(&chrome(&word), Trust::system()),
+                    want,
+                    "{word}"
+                );
+                assert_eq!(
+                    title_refusal(
+                        format!("{DEBIAN} --load-extension={A} {word}\0").as_bytes(),
+                        root.trust()
+                    ),
+                    want,
+                    "{word}"
+                );
+            }
+        }
+        for value in [
+            "IsolateOrigins",
+            "OriginIsolationHeader",
+            "StrictOriginIsolation",
+            "OriginKeyedProcessesByDefault",
+            "SiteIsolationForCrossOriginOpenerPolicy",
+            "site-isolation-for-password-sites",
+            "SiteIsolationForOAuthSites<Trial",
+            "IsolateOriginsShortlistPolicyUpdate:a/b",
+            "*NetworkServiceSandbox",
+            "AudioServiceSandbox",
+            "SpareRendererForSitePerProcess",
+            "WaylandWindowDecorations,IsolateOrigins",
+            "isolateorigins",
+        ] {
+            let word = format!("--disable-features={value}");
+            assert_eq!(
+                title_refusal(&chrome(&word), Trust::system()),
+                Some(Refusal::Weakened("--disable-features")),
+                "{word}"
+            );
+        }
+        for value in [
+            "WaylandFractionalScaleV1",
+            "PrivacySandboxAdsAPIsOverride",
+            "Translate,MediaRouter",
+            "",
+        ] {
+            assert!(!weakening_features(value.as_bytes()), "{value}");
+        }
+        // `--enable-features` with the same names is not a weakening.
+        assert!(safe_arguments(&chrome("--enable-features=IsolateOrigins")));
+        // The message names the switch and what to do, and differs from the
+        // generic refusal.
+        let error = super::super::weakened("--no-sandbox");
+        assert_eq!(error.code, "unsupported");
+        assert_ne!(error.message, super::super::refused().message);
+        assert_eq!(error.message.matches("--no-sandbox").count(), 2);
+        assert!(
+            error
+                .message
+                .ends_with("Start the browser again without --no-sandbox.")
+        );
+        assert!(!error.message.contains("expose"));
     }
 
     /// Chrome 157 on Ubuntu 24.04, started with `--remote-debugging-port=9333`, showed
@@ -1089,19 +1342,34 @@ mod tests {
             "--disable-gpu",
             "--lang=pl",
             "--enable-wayland-ime --gtk-version=4 https://example.org/",
+            // The profile, password store and proxy (decided 2026-11-11): Chromium's
+            // per-profile desktop shortcuts start it with `--profile-directory`.
+            "--profile-directory=Default",
+            "--profile-directory=Profile 1",
+            "--profile-directory=Profile 12 http://localhost:4174/",
+            "--user-data-dir=/home/owner/x",
+            "--password-store=basic",
+            "--password-store=gnome-libsecret",
+            "--proxy-server=socks5://127.0.0.1:1080",
+            "--proxy-server=http://proxy.example:3128 --profile-directory=Default",
         ] {
             assert!(with(allowed), "{allowed}");
         }
         for refused in [
             // Kept everywhere else, but not in the allow list.
-            "--password-store=basic",
-            "--user-data-dir=/home/owner/x",
-            "--profile-directory=Default",
-            "--proxy-server=socks5://127.0.0.1:1080",
             "--incognito",
+            "--proxy-pac-url=http://proxy.example/proxy.pac",
             "--no-sandbox",
             "--single-process",
             "--js-flags=--expose-gc",
+            // A number only after `--profile-directory=Profile`, and only one.
+            "1",
+            "--profile-directory=Profile x",
+            "--profile-directory=Profile 1 2",
+            "--profile-directory=Work 1",
+            "--user-data-dir=/home/owner/x 1",
+            // A comma in a profile value: Chrome would split the extension value.
+            "--user-data-dir=/home/owner/a,/home/owner/evil",
             "--some-future-switch",
             "--",
             "-",
@@ -1132,7 +1400,11 @@ mod tests {
         assert!(!root.accepts(&format!("http://localhost:4174/ --load-extension={A}")));
         // Order does not matter: a switch before the extension refuses too.
         assert!(!root.accepts(&format!(
-            "/usr/lib/chromium/chromium --password-store=basic --load-extension={A}"
+            "/usr/lib/chromium/chromium --incognito --load-extension={A}"
+        )));
+        // The profile switch of a Chromium desktop shortcut, before the extension.
+        assert!(root.accepts(&format!(
+            "{DEBIAN} --profile-directory=Default --load-extension={A} http://localhost:4174/"
         )));
         // The same title without the system extension is accepted: the allow list
         // applies only with an accepted `--load-extension`.
@@ -1362,6 +1634,46 @@ mod tests {
         assert!(!exe_hidden_by_kernel(plain.id()).unwrap());
         plain.kill().unwrap();
         plain.wait().unwrap();
+    }
+
+    /// The check after the owner answered passes only for the same peer process and
+    /// the same browser parent, by PID and start time; a failed second check refuses.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_answer_needs_the_same_peer_and_browser_after_the_owner_answered() {
+        let process = |parent, start| Process {
+            parent,
+            start,
+            uids: [1000; 4],
+        };
+        let seen = Seen {
+            peer: (42, process(7, 100)),
+            browser: (process(1, 50), PathBuf::from("/opt/google/chrome/chrome")),
+        };
+        assert!(same_peer(Ok(seen.clone()), &seen).is_ok());
+        let mut changed = Vec::new();
+        // The PID changed hands: another process with the same number.
+        let mut other = seen.clone();
+        other.peer.1.start = 101;
+        changed.push(other);
+        // Another peer PID.
+        let mut other = seen.clone();
+        other.peer.0 = 43;
+        changed.push(other);
+        // The browser parent was replaced.
+        let mut other = seen.clone();
+        other.browser.0.start = 51;
+        changed.push(other);
+        let mut other = seen.clone();
+        other.browser.1 = PathBuf::from("/usr/lib/chromium/chromium");
+        changed.push(other);
+        for now in changed {
+            let error = same_peer(Ok(now), &seen).unwrap_err();
+            assert_eq!(error, super::super::refused());
+        }
+        // The second check itself refuses: its refusal is the answer.
+        let error = same_peer(Err(super::super::sandboxed()), &seen).unwrap_err();
+        assert_eq!(error, super::super::sandboxed());
     }
 
     #[cfg(target_os = "linux")]

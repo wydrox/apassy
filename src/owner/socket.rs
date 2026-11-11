@@ -27,6 +27,7 @@ use serde::Serialize;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::broker::server::{prepare_directory, remove_stale_socket};
+pub(crate) use crate::browser::caller::PeerSeen;
 #[cfg(feature = "desktop")]
 use crate::owner::wire::MAX_REQUEST_BYTES;
 use crate::owner::wire::{Request, Response};
@@ -53,7 +54,18 @@ pub(crate) trait LineWire: 'static {
 
     /// Check the program at the other end of the connection before the UI thread sees
     /// the request. An error is the response to send. The default accepts every peer.
-    fn check_peer(_stream: &UnixStream, _request: &Self::Request) -> Result<(), Self::Response> {
+    /// What the check saw goes to [`Self::check_peer_again`].
+    fn check_peer(
+        _stream: &UnixStream,
+        _request: &Self::Request,
+    ) -> Result<PeerSeen, Self::Response> {
+        Ok(PeerSeen::default())
+    }
+
+    /// Check the peer again after the UI thread answered, before the answer is written,
+    /// with what [`Self::check_peer`] saw. An error is the response to send instead, and
+    /// the answer is dropped. The default checks nothing.
+    fn check_peer_again(_stream: &UnixStream, _seen: &PeerSeen) -> Result<(), Self::Response> {
         Ok(())
     }
 
@@ -266,9 +278,10 @@ fn serve<W: LineWire>(
         Ok(request) => request,
         Err(response) => return write_response(&mut writer, &response),
     };
-    if let Err(response) = W::check_peer(&writer, &request) {
-        return write_response(&mut writer, &response);
-    }
+    let seen = match W::check_peer(&writer, &request) {
+        Ok(seen) => seen,
+        Err(response) => return write_response(&mut writer, &response),
+    };
     let response = match W::watch(&request) {
         None => ask_ui::<W>(sender, wake, request),
         Some(gone) => match ask_ui_watching::<W>(sender, wake, request, &reader, &gone) {
@@ -277,6 +290,10 @@ fn serve<W: LineWire>(
             None => return Ok(()),
         },
     };
+    if let Err(refusal) = W::check_peer_again(&writer, &seen) {
+        drop(response);
+        return write_response(&mut writer, &refusal);
+    }
     write_response(&mut writer, &response)
 }
 
