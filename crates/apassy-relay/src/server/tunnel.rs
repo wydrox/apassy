@@ -475,7 +475,7 @@ const INGRESS_SUFFIX: &str = "/ingress";
 const ACME_SUFFIX: &str = "/acme";
 /// The stored key of the counters of another account's dials to an account's nodes:
 /// `<account>/dial/<other account>`.
-const GRANTEE_INFIX: &str = "/dial/";
+pub const GRANTEE_INFIX: &str = "/dial/";
 
 /// Who opened a stream, for the slots and the counts of the node's account.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1082,6 +1082,10 @@ struct Inner {
     stuck: Mutex<Vec<(Arc<Stream>, u64)>>,
     /// The most bytes that one stream held toward its client since the start.
     peak_buffer: AtomicUsize,
+    /// Deleted accounts whose counters a snapshot taken before the deletion may still
+    /// hold: the usage writer writes none of their rows, and lets each go after its next
+    /// snapshot ([`Broker::forgotten`]). A leaf lock, taken inside `accounts`.
+    forgotten: Mutex<HashSet<String>>,
 }
 
 /// The tunnel broker. Cheap to clone; all clones share one registry.
@@ -1167,6 +1171,7 @@ impl Broker {
             rechecked: AtomicU64::new(0),
             stuck: Mutex::new(Vec::new()),
             peak_buffer: AtomicUsize::new(0),
+            forgotten: Mutex::new(HashSet::new()),
         });
         let weak = Arc::downgrade(&inner);
         let tick = inner.limits.tick;
@@ -1240,13 +1245,28 @@ impl Broker {
     }
 
     /// A deleted account: its counters, and the counters of its dials to other accounts'
-    /// nodes, leave memory (its streams ended with [`Broker::end_account`]).
+    /// nodes, leave memory (its streams ended with [`Broker::end_account`]). The account
+    /// stays in [`Broker::forgotten`] until the usage writer's next snapshot, so a snapshot
+    /// taken before the deletion writes none of its rows again.
     pub fn forget_account(&self, account_id: &str) {
         let mut accounts = lock(&self.inner.accounts);
         accounts.by_id.remove(account_id);
         for account in accounts.by_id.values_mut() {
             account.grantees.remove(account_id);
         }
+        lock(&self.inner.forgotten).insert(account_id.to_string());
+    }
+
+    /// The accounts deleted since the usage writer last let them go
+    /// ([`Broker::let_go`]).
+    pub fn forgotten(&self) -> HashSet<String> {
+        lock(&self.inner.forgotten).clone()
+    }
+
+    /// The usage writer took a snapshot after these deletions: no later snapshot holds
+    /// their counters.
+    pub fn let_go(&self, accounts: &HashSet<String>) {
+        lock(&self.inner.forgotten).retain(|account| !accounts.contains(account));
     }
 
     /// The dials of `grantee`'s devices to the nodes of `account_id` this month;

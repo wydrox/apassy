@@ -21,7 +21,7 @@
 //! The audit names accounts, devices, nodes, and grants by id, never a token, a pin, or an
 //! address.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{SocketAddr, TcpListener};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
@@ -962,8 +962,22 @@ pub fn flush_usage(
     broker: &Broker,
     written: &mut HashMap<String, Usage>,
 ) -> RelayResult<usize> {
+    // The deletions before this snapshot cannot be in it, nor in any later one.
+    let deleted = broker.forgotten();
     let changed = usage_snapshot(broker, written);
-    write_usage(hub, broker, changed, written)
+    let count = write_usage(hub, broker, changed, written)?;
+    broker.let_go(&deleted);
+    Ok(count)
+}
+
+/// Whether a stored key of [`Broker::usage_all`] names one of `accounts`: as the account
+/// (`<account>`, `<account>/…`) or as the other account of a dial (`…/dial/<account>`).
+fn names_any(key: &str, accounts: &HashSet<String>) -> bool {
+    let own = key.split('/').next().unwrap_or(key);
+    let grantee = key
+        .split_once(tunnel::GRANTEE_INFIX)
+        .map(|(_, grantee)| grantee);
+    accounts.contains(own) || grantee.is_some_and(|grantee| accounts.contains(grantee))
 }
 
 /// The counters of the broker that changed since `written`: the first half of
@@ -990,17 +1004,24 @@ pub fn usage_snapshot(broker: &Broker, written: &HashMap<String, Usage>) -> Vec<
 }
 
 /// Writes a snapshot of [`usage_snapshot`] to `tunnel_usage`: the second half of
-/// [`flush_usage`].
+/// [`flush_usage`]. The rows of an account deleted since the snapshot are not written:
+/// the deletion is asked inside the write, and a deletion after it waits for the write and
+/// deletes the rows itself (`forget_usage`), so the deletion always wins.
 pub fn write_usage(
     hub: &Hub,
-    _broker: &Broker,
+    broker: &Broker,
     changed: Vec<(String, Usage)>,
     written: &mut HashMap<String, Usage>,
 ) -> RelayResult<usize> {
     if changed.is_empty() {
         return Ok(0);
     }
-    hub.directory.store.tx(|tx| {
+    let changed = hub.directory.store.tx(|tx| {
+        let deleted = broker.forgotten();
+        let changed: Vec<(String, Usage)> = changed
+            .into_iter()
+            .filter(|(key, _)| !names_any(key, &deleted))
+            .collect();
         for (account, usage) in &changed {
             tx.execute(
                 "INSERT INTO tunnel_usage (account_id, month, dials, streams, bytes) \
@@ -1017,7 +1038,8 @@ pub fn write_usage(
             )
             .map_err(db)?;
         }
-        Ok(())
+        written.retain(|key, _| !names_any(key, &deleted));
+        Ok(changed)
     })?;
     prune_usage(hub, crate::now_unix())?;
     let count = changed.len();
