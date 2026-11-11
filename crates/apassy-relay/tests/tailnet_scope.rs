@@ -557,7 +557,10 @@ fn a_device_stream_of_the_tunnel_has_its_own_count_and_a_new_dial_another() {
     // Another stream (a new dial) has its own count: its good token works, and its bad
     // tokens are answered.
     assert_eq!(
-        me_on_one_stream(tailnet, &[mac.token.as_str(), "apr_bad", mac.token.as_str()]),
+        me_on_one_stream(
+            tailnet,
+            &[mac.token.as_str(), "apr_bad", mac.token.as_str()]
+        ),
         [200, 401, 200]
     );
     // The tailnet peers keep their own count.
@@ -576,7 +579,9 @@ fn a_device_stream_of_the_tunnel_has_its_own_count_and_a_new_dial_another() {
         "{limited:?}"
     );
     assert!(
-        limited.iter().all(|(_, detail)| !detail.contains("\"peer\"")),
+        limited
+            .iter()
+            .all(|(_, detail)| !detail.contains("\"peer\"")),
         "{limited:?}"
     );
 }
