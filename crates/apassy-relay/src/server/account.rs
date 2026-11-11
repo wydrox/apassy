@@ -483,7 +483,7 @@ const CAPS: Caps = Caps {
 /// table until this clock passes it, so a wall clock that is set back never makes a used
 /// nonce valid again.
 #[derive(Default)]
-struct NonceClock {
+pub(crate) struct NonceClock {
     /// The last wall time seen, and this clock at that moment.
     last_wall: u64,
     now: u64,
@@ -492,7 +492,7 @@ struct NonceClock {
 impl NonceClock {
     /// This clock at the wall time `wall`: the steps forward of the wall clock count,
     /// its steps back do not.
-    fn tick(&mut self, wall: u64) -> u64 {
+    pub(crate) fn tick(&mut self, wall: u64) -> u64 {
         if self.now == 0 {
             self.now = wall;
         } else if wall > self.last_wall {
@@ -634,14 +634,25 @@ impl RecoveryState {
             .retain(|_, (start, _)| now < start.saturating_add(3600));
     }
 
-    /// Counts one failed recovery signature of an existing account. Only a failure is
-    /// ever counted or limited: a valid recovery signature never comes here. 429
+    /// Counts one failed recovery: a wrong recovery signature of an existing account
+    /// (`Some(account)`), or a recovery of an unknown account (`None`: it counts for the
+    /// client prefix only, so unknown ids never fill the table of accounts). Only a failure
+    /// is ever counted or limited: a valid recovery signature never comes here. 429
     /// `rate_limited` when the account or the source already failed too often this hour
     /// (nothing more is counted); a new entry in a full table is 503 `busy`, and nothing is
-    /// counted. Else the failure counts, and the answer stays the caller's 403.
-    fn fail(&mut self, account: &str, prefix: &[u8; 32], now: u64, cap: usize) -> RelayResult<()> {
+    /// counted. Else the failure counts, and the answer stays the caller's 403. Both kinds
+    /// get the same checks of the prefix and the same answers.
+    fn fail(
+        &mut self,
+        account: Option<&str>,
+        prefix: &[u8; 32],
+        now: u64,
+        cap: usize,
+    ) -> RelayResult<()> {
         self.purge(now);
-        let account_tries = self.accounts.get(account).map_or(0, |(_, count)| *count);
+        let account_tries = account
+            .and_then(|account| self.accounts.get(account))
+            .map_or(0, |(_, count)| *count);
         let prefix_tries = self.prefixes.get(prefix).map_or(0, |(_, count)| *count);
         if account_tries >= RECOVERY_TRIES_PER_HOUR
             || prefix_tries >= RECOVERY_PREFIX_TRIES_PER_HOUR
@@ -651,17 +662,20 @@ impl RecoveryState {
                 "Too many recovery tries for this account. Try again in an hour.",
             ));
         }
-        if (!self.accounts.contains_key(account) && self.accounts.len() >= cap)
-            || (!self.prefixes.contains_key(prefix) && self.prefixes.len() >= cap)
+        if account.is_some_and(|account| {
+            !self.accounts.contains_key(account) && self.accounts.len() >= cap
+        }) || (!self.prefixes.contains_key(prefix) && self.prefixes.len() >= cap)
         {
             return Err(busy(
                 "Connect holds too many recovery tries. Try again later.",
             ));
         }
-        self.accounts
-            .entry(account.to_string())
-            .or_insert((now, 0))
-            .1 += 1;
+        if let Some(account) = account {
+            self.accounts
+                .entry(account.to_string())
+                .or_insert((now, 0))
+                .1 += 1;
+        }
         self.prefixes.entry(*prefix).or_insert((now, 0)).1 += 1;
         Ok(())
     }
@@ -1177,6 +1191,11 @@ fn append_signed(
             "This account changed its devices too often. Recover the account to start a new device list.",
         ));
     }
+    if change.op == ListOp::Add && version > LAST_ADD_VERSION {
+        return Err(account_limit(
+            "The device list of this account is nearly full, so no device can be added. Removing a device still works, and a recovery starts a new device list.",
+        ));
+    }
     // The list stays a list that every device verifies: the signer is a device of it, an
     // `add` names a key that was never in it, and a `remove` a key that is in it now.
     let last_op = |key: &[u8]| -> RelayResult<Option<String>> {
@@ -1644,8 +1663,10 @@ fn view(hub: &Hub, caller: &AccountCaller, now: u64) -> RelayResult<Value> {
 }
 
 /// `DELETE /v1/account`: the subscription is canceled (billing), every vault store of the
-/// account is deleted, its devices leave every other store, and its devices, links, joins,
-/// nodes, and grants go. The keys stay used (`account_key`). The brain gets `forget`.
+/// account is deleted, and then in one transaction its devices leave every other store
+/// (their map rows go with a waiting removal for each store file, applied after the
+/// commit) and its devices, links, joins, nodes, and grants go. The keys stay used
+/// (`account_key`). The brain gets `forget`.
 fn delete_account(hub: &Hub, caller: &AccountCaller, now: u64) -> RelayResult<Value> {
     if hub
         .accounts
@@ -1661,8 +1682,10 @@ fn delete_account(hub: &Hub, caller: &AccountCaller, now: u64) -> RelayResult<Va
             .plans()
             .cancel_for_deletion(&hub.directory.store, &caller.account, now)?;
     let deleted_stores = delete_stores_of(hub, &caller.account, now)?;
-    let devices = leave_other_stores(hub, &caller.account, now)?;
-    hub.directory.store.tx(|tx| {
+    let removals = hub.directory.store.tx(|tx| {
+        // Its devices leave the stores of other accounts in this transaction.
+        let removals = leave_other_stores(tx, &caller.account, now)?;
+        let devices = removals.len() as u64;
         tx.execute(
             "DELETE FROM tunnel_grant WHERE account_id = ?1 OR node_id IN (SELECT id FROM tunnel_node WHERE account_id = ?1)",
             params![caller.account],
@@ -1690,9 +1713,11 @@ fn delete_account(hub: &Hub, caller: &AccountCaller, now: u64) -> RelayResult<Va
             None,
             &json!({"account_id": caller.account, "deleted_stores": deleted_stores,
                     "devices": devices, "subscription_canceled": canceled}),
-        )
+        )?;
+        Ok(removals)
     })?;
     hub.accounts.state().drop_account(&caller.account);
+    hub.apply_removals(&removals, now);
     crate::server::tunnel_routes::account_deleted(hub, &caller.account);
     to_value(&AccountDeleted {
         account_id: caller.account.clone(),
@@ -1702,7 +1727,7 @@ fn delete_account(hub: &Hub, caller: &AccountCaller, now: u64) -> RelayResult<Va
 }
 
 /// An I-4 event for the bouncer brain (connect-account-v1 section 11), kept until a later
-/// unit delivers it.
+/// unit delivers it (`done_at`) and for 90 days after that.
 fn enqueue_brain(conn: &Connection, kind: &str, subject: &str, now: u64) -> RelayResult<()> {
     conn.execute(
         "INSERT INTO brain_event (kind, subject, created_at, next_at) VALUES (?1, ?2, ?3, ?3)",
@@ -2103,19 +2128,6 @@ pub(crate) fn queue_device_removals(
     Ok(removals)
 }
 
-/// Removes `device` from every vault store that holds it: the map rows and the waiting
-/// removals in one transaction (`queue_device_removals`), then each store file now when it
-/// is open (its relay-sync tokens end there), else at its next open or a maintenance pass.
-/// Returns the stores it left.
-fn leave_stores(hub: &Hub, device: &str, now: u64) -> RelayResult<u64> {
-    let removals = hub
-        .directory
-        .store
-        .tx(|tx| queue_device_removals(tx, device, now))?;
-    hub.apply_removals(&removals, now);
-    Ok(removals.len() as u64)
-}
-
 /// `DELETE /v1/account/devices/{device_id}` from any live device of the account (also
 /// itself), with the `remove` entry of the device list that the calling device signed for
 /// the device's key (409 when the version is not the next one, 400 when it does not
@@ -2349,6 +2361,8 @@ fn store_of(
 /// device of the caller's account, or of an account that shares a group with it
 /// ([`Groups::share_group`]), when its key is the key the caller verified (else 409); an
 /// unknown or revoked device, and a device of any other account, is 403 `not_in_group`.
+/// `Hub::add_store_device` checks the device and the group again in the transaction that
+/// maps it (`may_join_store`).
 fn store_device_add(
     hub: &Hub,
     caller: &AccountCaller,
@@ -2468,23 +2482,28 @@ pub(crate) fn delete_stores_of(hub: &Hub, account: &str, now: u64) -> RelayResul
     Ok(stores.len() as u64)
 }
 
-/// Removes every device of `account` from the stores of other accounts. Returns how many
-/// device rows left.
-fn leave_other_stores(hub: &Hub, account: &str, now: u64) -> RelayResult<u64> {
-    let devices: Vec<String> = hub.directory.store.with(|conn| {
-        let mut statement = conn
+/// Removes every device of `account` from the stores of other accounts, inside the
+/// transaction `tx` of the account's deletion (`queue_device_removals`). Answers the
+/// removals; the caller applies them after the commit.
+fn leave_other_stores(
+    tx: &Connection,
+    account: &str,
+    now: u64,
+) -> RelayResult<Vec<crate::server::hub::StoreRemoval>> {
+    let devices: Vec<String> = {
+        let mut statement = tx
             .prepare("SELECT DISTINCT device_id FROM account_store_device WHERE account_id = ?1")
             .map_err(db)?;
         let rows = statement
             .query_map(params![account], |row| row.get(0))
             .map_err(db)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(db)
-    })?;
-    let mut left = 0;
+        rows.collect::<Result<Vec<_>, _>>().map_err(db)?
+    };
+    let mut removals = Vec::new();
     for device in devices {
-        left += leave_stores(hub, &device, now)?;
+        removals.extend(queue_device_removals(tx, &device, now)?);
     }
-    Ok(left)
+    Ok(removals)
 }
 
 // ---- Recovery (section 9). ----
@@ -2519,10 +2538,12 @@ fn earlier_recovery(
 /// device key signs it too, and signs the root entry of the new device list with its
 /// device name (`statement`; 400 otherwise for either, not counted). A wrong recovery signature, an
 /// unknown account, and an account with a live device are the same 403. The recovery
-/// signature is checked first, and a valid one is never limited: only failed recovery
-/// signatures of existing accounts count and are limited, `RECOVERY_TRIES_PER_HOUR` for
-/// each account and `RECOVERY_PREFIX_TRIES_PER_HOUR` for each client prefix (429), in a
-/// table of `MAX_RECOVERY_ENTRIES` (503 when full). The new device is the account's new
+/// signature is checked first, and a valid one is never limited: only failures count and
+/// are limited, a wrong recovery signature of an existing account for that account
+/// (`RECOVERY_TRIES_PER_HOUR`) and for the client prefix
+/// (`RECOVERY_PREFIX_TRIES_PER_HOUR`), a recovery of an unknown account for the prefix only,
+/// with the same checks and answers (429), in tables of `MAX_RECOVERY_ENTRIES` (503 when
+/// full). The new device is the account's new
 /// root and starts a new device list, every vault store of the account is deleted (a new
 /// device list cannot verify the old heads), the recovery key is replaced, the
 /// subscription stays. The same body again within `RECOVER_RETRY_SECS` answers the same
@@ -2577,8 +2598,14 @@ fn recover(hub: &Hub, request: &AccountRecover, prefix: &str, now: u64) -> Relay
         key.map(|key| Ok((key, live_devices(conn, &request.account_id)?)))
             .transpose()
     })?;
-    // An unknown account is not counted: nothing there to guess.
-    let (recovery_key, live) = stored.ok_or_else(wrong)?;
+    // An unknown account: the checks and the answer of a wrong recovery signature, counted
+    // for the client prefix only.
+    let Some((recovery_key, live)) = stored else {
+        hub.accounts
+            .recovery()
+            .fail(None, &tag, now, MAX_RECOVERY_ENTRIES)?;
+        return Err(wrong());
+    };
     let recovery_signature = decode_b64(
         &request.recovery_signature,
         device::RECOVERY_SIGNATURE_BYTES,
@@ -2587,7 +2614,7 @@ fn recover(hub: &Hub, request: &AccountRecover, prefix: &str, now: u64) -> Relay
     if !device::verify_recovery(&recovery_key, &message, &recovery_signature) {
         hub.accounts
             .recovery()
-            .fail(&request.account_id, &tag, now, MAX_RECOVERY_ENTRIES)?;
+            .fail(Some(&request.account_id), &tag, now, MAX_RECOVERY_ENTRIES)?;
         return Err(wrong());
     }
     if live != 0 {
@@ -2804,7 +2831,8 @@ pub fn maintain(hub: &Hub, now: u64) {
 /// link hash of each `add`), old relay audit rows of accounts, the rows of devices revoked
 /// longer ago than the audit (their keys stay in `account_key`, so a removed device still
 /// learns that it was removed, and the device list keeps their entries), and I-4 events
-/// older than the audit. Answers how many links and audit rows went.
+/// delivered longer ago than the audit (`done_at`): an event that was never delivered
+/// stays until it is. Answers how many links and audit rows went.
 pub fn prune(hub: &Hub, now: u64) -> RelayResult<(usize, usize)> {
     let before = to_i(now.saturating_sub(ACCOUNT_AUDIT_RETENTION_SECS));
     hub.directory.store.tx(|tx| {
@@ -2826,12 +2854,36 @@ pub fn prune(hub: &Hub, now: u64) -> RelayResult<(usize, usize)> {
         )
         .map_err(db)?;
         tx.execute(
-            "DELETE FROM brain_event WHERE created_at < ?1",
+            "DELETE FROM brain_event WHERE done_at IS NOT NULL AND done_at < ?1",
             params![before],
         )
         .map_err(db)?;
         Ok((links, audit))
     })
+}
+
+/// Whether the account device `device` of `account`, with the key `public_key`, may be in
+/// the vault store `team` now: it is live, and its account made the store or is an
+/// active member of one group with the account that made it. `Hub::add_store_device`
+/// checks it in the directory transaction that maps the device.
+pub(crate) fn may_join_store(
+    conn: &Connection,
+    team: &TeamId,
+    account: &str,
+    device: &str,
+    public_key: &[u8],
+) -> RelayResult<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM account_device d JOIN account a ON a.id = d.account_id \
+         JOIN team t ON t.id = ?1 \
+         WHERE d.id = ?2 AND d.account_id = ?3 AND d.public_key = ?4 AND d.revoked_at IS NULL \
+         AND t.kind = 'account' AND (t.account_id = ?3 OR EXISTS(SELECT 1 FROM group_member x \
+           JOIN group_member y ON y.group_id = x.group_id WHERE x.account_id = ?3 \
+           AND y.account_id = t.account_id AND x.state = 'active' AND y.state = 'active')))",
+        params![team.as_str(), device, account, public_key],
+        |row| row.get(0),
+    )
+    .map_err(db)
 }
 
 /// Whether the store device `store_device` of the vault store `team` is a live account
@@ -3214,16 +3266,16 @@ mod tests {
         let mut state = RecoveryState::default();
         let prefix = [1u8; 32];
         for _ in 0..RECOVERY_TRIES_PER_HOUR {
-            state.fail("acc_a", &prefix, NOW, 100).unwrap();
+            state.fail(Some("acc_a"), &prefix, NOW, 100).unwrap();
         }
         assert_eq!(
-            state.fail("acc_a", &prefix, NOW, 100).unwrap_err().code,
+            state.fail(Some("acc_a"), &prefix, NOW, 100).unwrap_err().code,
             codes::RATE_LIMITED
         );
         // Another account from the same prefix goes on until the prefix's limit.
         let mut account = 0;
         while state
-            .fail(&format!("acc_{account}"), &prefix, NOW, 100)
+            .fail(Some(&format!("acc_{account}")), &prefix, NOW, 100)
             .is_ok()
         {
             account += 1;
@@ -3233,20 +3285,43 @@ mod tests {
             RECOVERY_PREFIX_TRIES_PER_HOUR
         );
         // Another prefix is free for another account; the hour ends both.
-        state.fail("acc_new", &[2u8; 32], NOW, 100).unwrap();
-        state.fail("acc_a", &prefix, NOW + 3600, 100).unwrap();
+        state.fail(Some("acc_new"), &[2u8; 32], NOW, 100).unwrap();
+        state.fail(Some("acc_a"), &prefix, NOW + 3600, 100).unwrap();
         // A full table: a new account is 503 and is not counted.
         let mut state = RecoveryState::default();
-        state.fail("acc_a", &prefix, NOW, 1).unwrap();
+        state.fail(Some("acc_a"), &prefix, NOW, 1).unwrap();
         assert_eq!(
-            state.fail("acc_b", &prefix, NOW, 1).unwrap_err().code,
+            state.fail(Some("acc_b"), &prefix, NOW, 1).unwrap_err().code,
             codes::BUSY
         );
         assert!(!state.accounts.contains_key("acc_b"));
         assert_eq!(
-            state.fail("acc_a", &[3u8; 32], NOW, 1).unwrap_err().code,
+            state.fail(Some("acc_a"), &[3u8; 32], NOW, 1).unwrap_err().code,
             codes::BUSY
         );
-        state.fail("acc_a", &prefix, NOW, 1).unwrap();
+        state.fail(Some("acc_a"), &prefix, NOW, 1).unwrap();
+    }
+
+    #[test]
+    fn a_recovery_of_an_unknown_account_counts_for_the_prefix_only() {
+        let mut state = RecoveryState::default();
+        let prefix = [1u8; 32];
+        for _ in 0..RECOVERY_PREFIX_TRIES_PER_HOUR {
+            state.fail(None, &prefix, NOW, 100).unwrap();
+        }
+        assert!(state.accounts.is_empty());
+        // The prefix is used up for an unknown and an existing account alike.
+        assert_eq!(
+            state.fail(None, &prefix, NOW, 100).unwrap_err(),
+            state.fail(Some("acc_a"), &prefix, NOW, 100).unwrap_err()
+        );
+        assert!(state.accounts.is_empty());
+        // A full table of prefixes: a new one is 503 for both kinds.
+        let mut state = RecoveryState::default();
+        state.fail(None, &prefix, NOW, 1).unwrap();
+        assert_eq!(
+            state.fail(None, &[2u8; 32], NOW, 1).unwrap_err(),
+            state.fail(Some("acc_a"), &[2u8; 32], NOW, 1).unwrap_err()
+        );
     }
 }
