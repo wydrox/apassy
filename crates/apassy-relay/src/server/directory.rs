@@ -237,9 +237,31 @@ CREATE TABLE account_peer_join (
 CREATE INDEX account_peer_join_account ON account_peer_join(account_id);
 ";
 
-/// The SQL of a new directory: `SCHEMA_1005`, then `MIGRATE_ACCOUNTS`, then the version.
+/// The marks of the share condition of section 16 (docs/SPEC.md section 33.13), part of
+/// the accounts step: `account_share_void` (the version of an owner's list at the last
+/// group removal of a member: a share of that owner naming that member counts only from a
+/// later version), `account_join_share` (the version of the owner's `share` that the
+/// member's last `join` of a store followed: the member's devices sign in to the store
+/// only while that share is the active one), and an index of the entries by the account
+/// they name. A file of 1006 from a build before them gets them at open (additive).
+const SHARE_MARKS: &str = "
+CREATE TABLE account_share_void (
+  account_id TEXT NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+  peer_account TEXT NOT NULL, version INTEGER NOT NULL, created_at INTEGER NOT NULL,
+  PRIMARY KEY (account_id, peer_account));
+CREATE TABLE account_join_share (
+  account_id TEXT NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+  team_id TEXT NOT NULL, share_version INTEGER NOT NULL, created_at INTEGER NOT NULL,
+  PRIMARY KEY (account_id, team_id));
+CREATE INDEX account_list_named ON account_list(peer_account) WHERE peer_account IS NOT NULL;
+";
+
+/// The SQL of a new directory: `SCHEMA_1005`, then `MIGRATE_ACCOUNTS` and `SHARE_MARKS`,
+/// then the version.
 fn schema() -> String {
-    format!("{SCHEMA_1005}{MIGRATE_ACCOUNTS}PRAGMA user_version = {DIRECTORY_VERSION};")
+    format!(
+        "{SCHEMA_1005}{MIGRATE_ACCOUNTS}{SHARE_MARKS}PRAGMA user_version = {DIRECTORY_VERSION};"
+    )
 }
 
 /// `DIRECTORY_VERSION` back to 1005 (`downgrade_to_1005`, docs/OPERATIONS.md section 26.3):
@@ -367,11 +389,22 @@ fn migrate_1005(conn: &Connection) -> RelayResult<()> {
 fn migrate_accounts(conn: &Connection) -> RelayResult<()> {
     if crate::server::store::has_column(conn, "team", "account_id")? {
         refuse_earlier_accounts_step(conn)?;
+        add_share_marks(conn)?;
     } else {
         conn.execute_batch(MIGRATE_ACCOUNTS).map_err(db)?;
+        conn.execute_batch(SHARE_MARKS).map_err(db)?;
     }
     conn.pragma_update(None, "user_version", DIRECTORY_VERSION)
         .map_err(db)
+}
+
+/// `SHARE_MARKS` on a transaction, when the file has no `account_share_void` yet (a file
+/// of 1006 from a build before them).
+fn add_share_marks(conn: &Connection) -> RelayResult<()> {
+    if !crate::server::store::has_column(conn, "account_share_void", "version")? {
+        conn.execute_batch(SHARE_MARKS).map_err(db)?;
+    }
+    Ok(())
 }
 
 /// The tables of the accounts step from an earlier, unreleased build of it (no
@@ -979,7 +1012,10 @@ impl Directory {
     pub fn open(config: &RelayConfig) -> RelayResult<Self> {
         let store = open_directory_file(config)?;
         match store.user_version()? {
-            DIRECTORY_VERSION => store.with(refuse_earlier_accounts_step)?,
+            DIRECTORY_VERSION => store.tx(|tx| {
+                refuse_earlier_accounts_step(tx)?;
+                add_share_marks(tx)
+            })?,
             version @ (1001..=BEFORE_ACCOUNTS_VERSION) => store.tx(|tx| {
                 if version == 1001 {
                     tx.execute_batch("ALTER TABLE team ADD COLUMN limits TEXT;")
@@ -2350,6 +2386,9 @@ PRAGMA user_version = 1002;
             "account_link",
             "account_join",
             "account_store_device",
+            "account_share_void",
+            "account_join_share",
+            "account_list_named",
             "brain_event",
             "group",
             "group_member",

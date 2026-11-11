@@ -536,6 +536,100 @@ impl Connect {
         assert_eq!(status, 200, "{answer}");
     }
 
+    /// The entries of a member before its devices sign in to a store of `owner` (section
+    /// 16): its `peer` of `owner`'s root (`owner`'s first device), unless it has one, and
+    /// its `join` of `team`, after the owner's `share`.
+    pub fn join_store(&self, member: &Dev, owner: &Dev, team: &str) {
+        let peered = !self
+            .rows(&format!(
+                "SELECT op FROM account_list WHERE account_id = '{}' AND op = 'peer' \
+                 AND peer_account = '{}'",
+                member.account, owner.account
+            ))
+            .is_empty();
+        if !peered {
+            let root = owner.key.public_key_b64();
+            let (status, answer) =
+                self.list_entry(member, "peer", &owner.account, Some(&root), None);
+            assert_eq!(status, 200, "{answer}");
+        }
+        let (status, answer) = self.list_entry(member, "join", &owner.account, None, Some(team));
+        assert_eq!(status, 200, "{answer}");
+    }
+
+    /// `by` revokes the device `id` with the key `key` of its account (also itself) with a
+    /// signed `remove` entry: the status and the answer.
+    pub fn revoke(&self, by: &Dev, id: &str, key: &str) -> (u16, Value) {
+        let (version, previous) = self.list_head(&by.account);
+        let message = device::account_list_message(
+            self.origin(),
+            &by.account,
+            version + 1,
+            &previous,
+            "remove",
+            key,
+            device::LIST_NONE,
+            device::LIST_NONE,
+            &by.key.public_key_b64(),
+        );
+        let statement = encode_b64(&by.key.sign(&message).unwrap());
+        self.call(
+            "DELETE",
+            &format!("/v1/account/devices/{id}"),
+            Some(&by.token),
+            Some(&json!({"version": version + 1, "statement": statement})),
+        )
+    }
+
+    /// The recovery of the account of `dev` (its only device, revoked first) with the
+    /// recovery code of `account`: a new root device, signed in.
+    pub fn recover(&self, dev: &Dev) -> Dev {
+        let (status, answer) = self.revoke(dev, &dev.id, &dev.key.public_key_b64());
+        assert_eq!(status, 200, "{answer}");
+        let key = DeviceKey::generate().unwrap();
+        let public_key = key.public_key_b64();
+        let next = device::RecoveryKey::from_code(&[10u8; 16])
+            .unwrap()
+            .public_key_b64();
+        let message =
+            device::account_recover_message(self.origin(), &dev.account, &public_key, &next);
+        let name = "Recovered Mac";
+        let statement = key
+            .sign(&device::account_list_message(
+                self.origin(),
+                &dev.account,
+                1,
+                device::LIST_NONE,
+                "root",
+                &public_key,
+                device::LIST_NONE,
+                name,
+                &public_key,
+            ))
+            .unwrap();
+        let recovered = self.ok(
+            "POST",
+            "/v1/account/recover",
+            None,
+            Some(
+                &json!({"account_id": dev.account, "device_name": name, "platform": "mac",
+                         "public_key": public_key, "recovery_key": next,
+                         "signature": encode_b64(&key.sign(&message).unwrap()),
+                         "recovery_signature": encode_b64(
+                             &device::RecoveryKey::from_code(&[9u8; 16]).unwrap().sign(&message)),
+                         "statement": encode_b64(&statement)}),
+            ),
+        );
+        let mut new = Dev {
+            key,
+            account: dev.account.clone(),
+            id: recovered["device_id"].as_str().unwrap().to_string(),
+            token: String::new(),
+        };
+        new.token = self.sign_in(&new);
+        new
+    }
+
     /// A raw request with extra headers.
     pub fn raw(
         &self,
