@@ -334,9 +334,13 @@ fn settings_show_how_the_bouncer_model_starts() {
     let mut app = app_in(&dir);
     create(&mut app, "Personal", PASS_A);
     let settings_path = dir.path().join("bouncer.json");
-    // Keep a synthetic port reserved. The external-mode probe times out against this
-    // listener instead of finding an installed bouncer and warming it for 60 seconds.
+    // Keep a synthetic port reserved. The check of "Managed outside Apassy" connects to
+    // this listener instead of finding an installed bouncer and warming it for 60
+    // seconds. The test holds that check and ends it after the next change of the mode.
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("synthetic listener");
+    listener
+        .set_nonblocking(true)
+        .expect("nonblocking listener");
     let fixture_url = format!(
         "http://{}",
         listener.local_addr().expect("synthetic address")
@@ -380,12 +384,31 @@ fn settings_show_how_the_bouncer_model_starts() {
             .expect("save");
     };
     set(StartMode::External);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut check = loop {
+        if let Ok((stream, _)) = listener.accept() {
+            break stream;
+        }
+        assert!(std::time::Instant::now() < deadline, "the check connects");
+        std::thread::sleep(Duration::from_millis(20));
+    };
     let text = frames(&mut app);
     assert!(text.contains("Managed outside Apassy"), "{text}");
     for hidden in ["Stop after", "Start now", "Install…"] {
         assert!(!text.contains(hidden), "{hidden}: {text}");
     }
     set(StartMode::WhenNeeded);
+    // The check of "Managed outside Apassy" ends after the change, without an answer.
+    // Its failure must not replace the state of "When a run needs it". The read ends
+    // when the check has closed its side (at once if it already timed out).
+    check.set_nonblocking(false).expect("blocking check");
+    check
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("read timeout");
+    check
+        .shutdown(std::net::Shutdown::Write)
+        .expect("end the check");
+    std::io::Read::read_to_end(&mut check, &mut Vec::new()).expect("the check ends");
     let text = frames(&mut app);
     for expected in [
         "When a run needs it",
