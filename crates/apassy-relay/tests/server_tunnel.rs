@@ -2099,24 +2099,37 @@ fn an_agent_that_half_closes_gives_the_node_the_close_grace_of_silence() {
     assert!(rest.is_empty());
 }
 
+/// A client of the ingress whose socket has a 32 KiB receive buffer.
+fn small_buffer_agent(addr: SocketAddr) -> TcpStream {
+    let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
+    socket.set_recv_buffer_size(32 * 1024).unwrap();
+    socket.connect(&addr.into()).unwrap();
+    let stream: TcpStream = socket.into();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    stream
+}
+
 #[test]
 fn a_half_closed_agent_that_reads_slowly_gets_a_large_answer_whole() {
-    // A window of 4 MiB: Connect grants the node 1 MiB more each time the agent read a
-    // quarter of it. The agent reads 64 KiB each 100 ms, so between two grants the node
+    // A window of 2 MiB: Connect grants the node 512 KiB more each time the agent read a
+    // quarter of it. The agent reads 32 KiB each 100 ms through a 32 KiB receive buffer
+    // (so the kernel's buffers do not absorb the answer), so between two grants the node
     // waits for window for about 1.6 s, longer than the grace of silence (1 s), while the
     // bytes that reach the agent move every 100 ms.
     let h = Harness::with(
         Limits {
             close_grace: Duration::from_secs(1),
-            stream_buffer: 4 * 1024 * 1024,
+            stream_buffer: 2 * 1024 * 1024,
             ..test_limits()
         },
         Duration::from_secs(30),
     );
-    let total = 8 * 1024 * 1024;
+    let total = 4 * 1024 * 1024;
     let mut node = h.node("tok-a1").unwrap();
     let sni = sni_listener(&h, IngressConfig::default());
-    let mut agent = agent(sni.addr);
+    let mut agent = small_buffer_agent(sni.addr);
     agent
         .set_read_timeout(Some(Duration::from_secs(20)))
         .unwrap();
@@ -2157,7 +2170,7 @@ fn a_half_closed_agent_that_reads_slowly_gets_a_large_answer_whole() {
         Ok(node)
     });
     let mut answer = Vec::with_capacity(total);
-    let mut buffer = vec![0u8; 64 * 1024];
+    let mut buffer = vec![0u8; 32 * 1024];
     'reading: loop {
         let mut got = 0;
         while got < buffer.len() {
