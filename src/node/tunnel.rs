@@ -79,10 +79,7 @@ use self::ws::{Message, client, close};
 use super::acme::{self, AcmeOptions, Challenges};
 use super::public_cert::{self, CertPicker};
 use crate::broker::http::{DestinationUrl, TlsClient, parse_destination};
-use crate::connect::{
-    AccountState, ConnectAccount, ConnectClient, ConnectError, DeviceKeyStore, Feature,
-    KeychainDeviceKeyStore, account_file,
-};
+use crate::connect::{AccountSession, ConnectClient, ConnectError, Feature};
 use crate::net::certificate::NodeCertificate;
 use crate::net::sealed_key::SealKey;
 use crate::net::tls_front::{self, Conn, FrontLimits};
@@ -285,8 +282,16 @@ impl std::fmt::Display for Failure {
         match self {
             Self::Unauthenticated => f.write_str("Apassy Connect did not accept the sign-in"),
             Self::NotEntitled => f.write_str("the account has no plan with Apassy Connect"),
-            Self::NoAccount => f.write_str("this Mac has no Apassy Connect account"),
-            Self::NodeUnknown => f.write_str("Apassy Connect does not know this Mac's node"),
+            Self::NoAccount => f.write_str(concat!(
+                "this ",
+                crate::computer!(),
+                " has no Apassy Connect account"
+            )),
+            Self::NodeUnknown => f.write_str(concat!(
+                "Apassy Connect does not know this ",
+                crate::computer!(),
+                "'s node"
+            )),
             Self::Refused { status, code } => {
                 write!(f, "Apassy Connect refused the tunnel ({status} {code})")
             }
@@ -330,136 +335,86 @@ pub trait TunnelAuth: Send + Sync {
     fn sign_out(&self);
 }
 
-/// The account of this Mac through `crate::connect`: the account file and the account
-/// device key in the Keychain. The key is read at the first call (Touch ID) and dropped
-/// with [`TunnelAuth::sign_out`].
+/// The account of this device through the one account session of the app
+/// (`crate::connect::AccountSession`, plan s7 unit M5b): the tunnel never reads the key
+/// store itself. The session opens with the vault unlock and closes at a lock and a
+/// quit; while it is closed or opening, a sign-in of the tunnel waits for the next try
+/// ([`Failure::Offline`]), and a removal of this device is [`Failure::NoAccount`] here
+/// as in Settings › Connect and the sync.
 pub struct AccountAuth {
-    store: Arc<dyn DeviceKeyStore>,
-    path: PathBuf,
-    account: Mutex<Option<ConnectAccount>>,
-    /// A sign-out came while a call held the account: the call drops it when it ends.
-    signed_out: AtomicBool,
+    session: Arc<AccountSession>,
 }
 
 impl std::fmt::Debug for AccountAuth {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AccountAuth")
-            .field("path", &self.path)
-            .finish_non_exhaustive()
+            .field("session", &self.session)
+            .finish()
     }
 }
 
 impl AccountAuth {
-    /// The account of the account file at `path` (read at each use: an account made
-    /// later in Settings > Connect counts at the next start of the node).
-    pub fn new(store: Arc<dyn DeviceKeyStore>, path: PathBuf) -> Self {
-        Self {
-            store,
-            path,
-            account: Mutex::new(None),
-            signed_out: AtomicBool::new(false),
-        }
-    }
-
-    fn state(&self) -> Option<AccountState> {
-        AccountState::load(&self.path).ok().flatten()
-    }
-
-    /// The product: the Keychain through the signed helper and
-    /// `<app data>/connect/account.json`. `None` without the helper (a build outside
-    /// Apassy.app).
-    pub fn platform() -> Option<Self> {
-        let helper = crate::native::NativeHelper::locate().ok()?;
-        let store: Arc<dyn DeviceKeyStore> = Arc::new(KeychainDeviceKeyStore::new(helper));
-        Some(Self::new(store, account_file(&crate::paths::data_dir())))
-    }
-
-    fn with_account<T>(
-        &self,
-        work: impl FnOnce(&mut ConnectAccount) -> Result<T, Failure>,
-    ) -> Result<T, Failure> {
-        let mut guard = lock(&self.account);
-        if guard
-            .as_ref()
-            .is_some_and(|account| self.state().as_ref() != Some(account.state()))
-        {
-            // The account file changed (forgotten, joined another account).
-            guard.take();
-        }
-        if guard.is_none() {
-            let opened = ConnectAccount::open(self.store.as_ref(), &self.path)
-                .map_err(from_connect)?
-                .ok_or(Failure::NoAccount)?;
-            *guard = Some(opened);
-        }
-        self.signed_out.store(false, Ordering::SeqCst);
-        let account = guard.as_mut().ok_or(Failure::NoAccount)?;
-        let result = work(account);
-        if self.signed_out.load(Ordering::SeqCst)
-            && let Some(mut account) = guard.take()
-        {
-            account.sign_out();
-        }
-        result
+    /// The tunnel's view of `session`. The account file is read at each use: an account
+    /// made later in Settings › Connect counts at the next start of the node.
+    pub fn new(session: Arc<AccountSession>) -> Self {
+        Self { session }
     }
 }
 
 impl TunnelAuth for AccountAuth {
     fn origin(&self) -> String {
-        self.state()
+        self.session
+            .account_state()
             .map_or_else(crate::connect::configured_origin, |state| state.origin)
     }
 
     fn with_token(&self, call: &mut dyn FnMut(&str) -> Result<(), Failure>) -> Result<(), Failure> {
-        self.with_account(|account| {
-            let mut kept: Option<Failure> = None;
-            let result = account.with_token(|_, token| match call(token) {
+        let mut kept: Option<Failure> = None;
+        let result = self.session.with_account(|account| {
+            account.with_token(|_, token| match call(token) {
                 Ok(()) => Ok(()),
                 Err(Failure::Unauthenticated) => Err(ConnectError::Unauthenticated),
                 Err(other) => {
                     kept = Some(other);
                     Err(ConnectError::Local)
                 }
-            });
-            match (result, kept) {
-                (Ok(()), _) => Ok(()),
-                (Err(_), Some(failure)) => Err(failure),
-                (Err(error), None) => Err(from_connect(error)),
-            }
-        })
+            })
+        });
+        match (result, kept) {
+            (Ok(()), _) => Ok(()),
+            (Err(_), Some(failure)) => Err(failure),
+            (Err(error), None) => Err(from_connect(error)),
+        }
     }
 
     fn entitled(&self) -> Result<(), Failure> {
-        self.with_account(|account| match account.entitlement() {
-            Ok(Some(entitlement)) if entitlement.has(Feature::Tunnel) => Ok(()),
-            Ok(_) => Err(Failure::NotEntitled),
-            Err(error) => Err(from_connect(error)),
-        })
+        self.session
+            .with_account(|account| {
+                account
+                    .entitlement()
+                    .map(|entitlement| entitlement.is_some_and(|e| e.has(Feature::Tunnel)))
+            })
+            .map_err(from_connect)
+            .and_then(|tunnel| {
+                if tunnel {
+                    Ok(())
+                } else {
+                    Err(Failure::NotEntitled)
+                }
+            })
     }
 
     fn has_account(&self) -> bool {
-        self.state().is_some()
+        self.session.has_account()
     }
 
     fn device_id(&self) -> Option<String> {
-        self.state().map(|state| state.device_id)
+        self.session.account_state().map(|state| state.device_id)
     }
 
-    /// It never waits for a call on its way (a lock runs it on the UI thread): that call
-    /// drops the account when it ends.
-    fn sign_out(&self) {
-        self.signed_out.store(true, Ordering::SeqCst);
-        let guard = match self.account.try_lock() {
-            Ok(guard) => Some(guard),
-            Err(std::sync::TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
-            Err(std::sync::TryLockError::WouldBlock) => None,
-        };
-        if let Some(mut guard) = guard
-            && let Some(mut account) = guard.take()
-        {
-            account.sign_out();
-        }
-    }
+    /// Nothing: the account session closes with the vault (a lock, a quit), not with the
+    /// tunnel. A route that goes off leaves the session to Settings and the sync.
+    fn sign_out(&self) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -1482,9 +1437,9 @@ impl ConnectSetup {
         }
     }
 
-    /// The product: the account of this Mac, when it has one.
-    pub fn platform() -> Option<Self> {
-        AccountAuth::platform().map(|auth| Self::new(Arc::new(auth)))
+    /// The product: the one account session of the app.
+    pub fn for_session(session: Arc<AccountSession>) -> Self {
+        Self::new(Arc::new(AccountAuth::new(session)))
     }
 }
 

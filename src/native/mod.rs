@@ -968,6 +968,46 @@ impl NativeHelper {
         reason: &str,
         title: Option<&str>,
     ) -> Result<KeychainSecret, NativeError> {
+        let mut response = self.keychain_read_response(account, reason, title, None)?;
+        take_secret(&mut response, "secret_b64")
+    }
+
+    /// [`Self::keychain_read_titled`] that reads the item `also` too, under the same
+    /// Touch ID: the helper reads it with the context that the first read authenticated
+    /// and never shows a second prompt (both items have the access control of
+    /// [`Self::keychain_store`]). The vault unlock reads the Apassy Connect key of this
+    /// Mac with it. The second item never fails the first: [`AlsoItem`] says what it gave.
+    pub fn keychain_read_with_also(
+        &self,
+        account: &str,
+        reason: &str,
+        title: &'static str,
+        also: &str,
+    ) -> Result<(KeychainSecret, AlsoItem), NativeError> {
+        check_identifier(also, ACCOUNT_RULE)?;
+        let mut response = self.keychain_read_response(account, reason, Some(title), Some(also))?;
+        let secret = take_secret(&mut response, "secret_b64")?;
+        let item = match response.get("also_status").and_then(Value::as_str) {
+            Some("read") => take_secret(&mut response, "also_secret_b64")
+                .map_or(AlsoItem::NotRead, AlsoItem::Read),
+            Some("not_found") => AlsoItem::NotFound,
+            Some("biometry_changed") => AlsoItem::BiometryChanged,
+            // `not_read`, or a helper without the field.
+            _ => AlsoItem::NotRead,
+        };
+        if let Some(Value::String(left)) = response.remove("also_secret_b64") {
+            wipe_string(left);
+        }
+        Ok((secret, item))
+    }
+
+    fn keychain_read_response(
+        &self,
+        account: &str,
+        reason: &str,
+        title: Option<&str>,
+        also: Option<&str>,
+    ) -> Result<Map<String, Value>, NativeError> {
         check_identifier(account, ACCOUNT_RULE)?;
         check_reason(reason)?;
         let mut req = request("keychain_read");
@@ -977,21 +1017,10 @@ impl NativeHelper {
             check_title(title)?;
             req.insert("title".into(), Value::String(title.to_owned()));
         }
-        let mut response = self.call(&self.keychain_helper, req, self.timeouts.interactive)?;
-        let Some(Value::String(encoded)) = response.remove("secret_b64") else {
-            return Err(NativeError::Protocol(
-                "keychain_read has no secret_b64".into(),
-            ));
-        };
-        let decoded = base64::decode(&encoded);
-        wipe_string(encoded);
-        match decoded {
-            Some(bytes) => KeychainSecret::new(bytes)
-                .map_err(|_| NativeError::Protocol("keychain_read returned a bad length".into())),
-            None => Err(NativeError::Protocol(
-                "keychain_read returned invalid base64".into(),
-            )),
+        if let Some(also) = also {
+            req.insert("also_account".into(), Value::String(also.to_owned()));
         }
+        self.call(&self.keychain_helper, req, self.timeouts.interactive)
     }
 
     /// Delete the item. Returns true when an item was deleted.
@@ -1346,6 +1375,41 @@ fn check_route_token(token: &str) -> Result<(), NativeError> {
             "a notification route must be 64 lowercase hex digits",
         ))
     }
+}
+
+/// The base64 secret `field` of a `keychain_read` response, decoded; the text is wiped.
+fn take_secret(
+    response: &mut Map<String, Value>,
+    field: &str,
+) -> Result<KeychainSecret, NativeError> {
+    let Some(Value::String(encoded)) = response.remove(field) else {
+        return Err(NativeError::Protocol(format!(
+            "keychain_read has no {field}"
+        )));
+    };
+    let decoded = base64::decode(&encoded);
+    wipe_string(encoded);
+    match decoded {
+        Some(bytes) => KeychainSecret::new(bytes)
+            .map_err(|_| NativeError::Protocol("keychain_read returned a bad length".into())),
+        None => Err(NativeError::Protocol(
+            "keychain_read returned invalid base64".into(),
+        )),
+    }
+}
+
+/// The second item of [`NativeHelper::keychain_read_with_also`].
+#[derive(Debug)]
+pub enum AlsoItem {
+    /// Read under the same Touch ID.
+    Read(KeychainSecret),
+    /// No such item.
+    NotFound,
+    /// The fingerprints changed after the item was stored: it cannot be read any more.
+    BiometryChanged,
+    /// The keychain wanted another authentication for it, or the read failed: read it
+    /// on its own.
+    NotRead,
 }
 
 /// Keychain account of the Touch ID unlock item for the vault file at `vault_path`

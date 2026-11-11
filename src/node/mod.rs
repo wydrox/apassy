@@ -1198,8 +1198,8 @@ impl Node {
         }
     }
 
-    /// Give the node the Connect account of this build (the app: [`ConnectSetup::platform`]
-    /// when this Mac has an account). `None` turns the Connect route off for this
+    /// Give the node the Connect account of this build (the app: [`ConnectSetup::for_session`]
+    /// with the one account session of the app, plan s7 unit M5b). `None` turns the Connect route off for this
     /// process. It takes effect at the next start.
     pub fn set_connect(&self, setup: Option<ConnectSetup>) {
         *lock(&self.connect) = setup;
