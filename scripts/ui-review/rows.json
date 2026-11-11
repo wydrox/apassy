@@ -177,9 +177,7 @@
      "mockups": [],
      "shots": [
       "connect-demo-T6.png",
-      "connect-demo-T6-2.png",
-      "connect-live-past-due.png",
-      "connect-live-past-due-2.png"
+      "connect-demo-T6-2.png"
      ],
      "note": ""
     },
@@ -785,17 +783,13 @@
     {
      "title": "Connect plan past due",
      "mockups": [],
-     "shots": [
-      "sync-connect-past-due.png"
-     ],
+     "shots": [],
      "note": ""
     },
     {
      "title": "Connect read-only until a date",
      "mockups": [],
-     "shots": [
-      "sync-connect-read-only.png"
-     ],
+     "shots": [],
      "note": ""
     },
     {

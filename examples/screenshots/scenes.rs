@@ -587,23 +587,9 @@ pub(crate) fn steps(name: &str) -> Vec<super::Step> {
                 // "I Saved It": the sheet of the code does not close with Escape.
                 Click(730.0, 512.0),
                 Wait(1.0),
-                // Another plan, and a device row that the signed list does not hold.
-                Hook("plan-past-due"),
-                Hook("unlisted-device"),
-                Click(SETTINGS_X, DEVICES_ROW),
-                Wait(1.0),
-                Click(SETTINGS_X, CONNECT_ROW),
-                Wait(5.0),
-                Pages("connect-live-past-due"),
-                Click(SETTINGS_X, VAULT_ROW),
-                Wait(3.0),
-                Shot("sync-connect-past-due"),
-                Hook("plan-read-only"),
-                Click(SETTINGS_X, CONNECT_ROW),
-                Wait(5.0),
-                Click(SETTINGS_X, VAULT_ROW),
-                Wait(3.0),
-                Shot("sync-connect-read-only"),
+                // The hooks plan-past-due, plan-read-only and unlisted-device change the
+                // fake, but the window reads the account again only on its own schedule:
+                // within a scene the plan rows and the Sync tags keep their first state.
             ]);
         }
         "connect-member" => {
