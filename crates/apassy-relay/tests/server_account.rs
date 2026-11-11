@@ -2793,7 +2793,7 @@ fn app_device() -> AppDevice {
     }
 }
 
-/// The real `src/connect` client of the Mac (unit M1), unchanged, against a relay with
+/// The real `src/connect` client of the Mac (unit M1) against a relay with
 /// the account routes on (no edge: the client talks to Connect as to the Worker): create,
 /// sign-in, the view, "Add a device…" with the words and a fresh owner check, the join on
 /// the new device, a vault store with a second device, the entitlement token checked with
@@ -2826,7 +2826,7 @@ fn the_app_client_works_against_the_relay() {
         ConnectAccount::create(client(), &a.store, &a.path, "Rafal", "MacBook Pro")
             .expect("create");
     let account_id = account.state().account_id.clone();
-    assert_eq!(recovery.hash().len(), 64);
+    assert_eq!(recovery.key().unwrap().public_key_b64u().len(), 43);
     let view = account.view().expect("view");
     assert_eq!(
         (

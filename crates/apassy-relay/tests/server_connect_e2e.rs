@@ -1,5 +1,5 @@
 //! Apassy Connect end to end on one relay (ADR 0037 stage 7, unit CW): the real Mac
-//! client of `src/connect` (unit M1, unchanged) against a relay with the account routes,
+//! client of `src/connect` (unit M1) against a relay with the account routes,
 //! billing against the fake Stripe server, groups, and the tunnel. The account's own
 //! requests go through the client; the routes it has no call for yet (checkout, the group,
 //! the tunnel: units M2 to M4) are made with the client's own token (`with_token`), and
@@ -228,12 +228,13 @@ fn connect_works_end_to_end_with_the_app_client() {
     assert!(anna_view.plan.entitled);
     // The member's Mac joins the shared store.
     let anna_device = anna.state().device_id.clone();
+    let anna_key = anna.state().public_key.clone();
     let added = with_account(
         &mut owner,
         &base,
         "POST",
         &format!("/v1/account/vaults/{team}/devices"),
-        Some(&json!({"device_id": anna_device})),
+        Some(&json!({"device_id": anna_device, "public_key": anna_key})),
     )
     .expect("add Anna's Mac");
     assert_eq!(added["store_device_id"], 2);
