@@ -8,7 +8,8 @@
 // Stripe sends from its own addresses, and the relay checks the signature.
 // A WebSocket upgrade goes to the relay only on `GET /v1/tunnel/*` (connect-tunnel-v1),
 // unchanged, and the relay's `101` comes back as it is; an upgrade anywhere else is
-// refused here. Dials (`GET /v1/tunnel/dial/*`) have their own per-address limiter.
+// refused here. Dials (`GET /v1/tunnel/dial/*`) and the node's WebSocket (`GET
+// /v1/tunnel/node`) share their own per-address limiter.
 // One build serves both phases of the hosted relay (docs/operations/connect.md): the var
 // RELAY_MODE is `relay` (unset: today's hosted relay) or `connect` (after the cutover,
 // ADR 0037 stage 7). In `connect` mode the APNs sender `/internal/push` is off (404), the
@@ -59,7 +60,7 @@ export interface Env extends PushEnv {
   CONNECT_PREFIX_LIMITER?: CreateLimiter;
   /** Connect accounts (`POST /v1/account` and `/v1/account/recover`, connect-account-v1), per IPv4 address or IPv6 /64. */
   ACCOUNT_LIMITER?: CreateLimiter;
-  /** Tunnel dials (`GET /v1/tunnel/dial/*`, connect-tunnel-v1), per IPv4 address or IPv6 /64. */
+  /** Tunnel dials (`GET /v1/tunnel/dial/*`) and node WebSockets (`GET /v1/tunnel/node`, connect-tunnel-v1), per IPv4 address or IPv6 /64. */
   TUNNEL_LIMITER?: CreateLimiter;
   /** Static files served without the relay or its edge secret. */
   ASSETS?: AssetService;
@@ -104,6 +105,8 @@ const RECOVER_PATH = "/v1/account/recover";
 const TUNNEL_PREFIX = "/v1/tunnel/";
 /** The dial of a node (connect-tunnel-v1 section 3.3), limited per client. */
 const DIAL_PREFIX = "/v1/tunnel/dial/";
+/** The WebSocket of a node (connect-tunnel-v1 section 3.2), limited as a dial. */
+const NODE_PATH = "/v1/tunnel/node";
 
 // A request that asks to upgrade its connection: an `Upgrade` header, or a `Connection`
 // header with the token `upgrade`.
@@ -384,8 +387,11 @@ export default {
     // holds a whole /64.
     const isAccount =
       request.method === "POST" && (url.pathname === ACCOUNT_PATH || url.pathname === RECOVER_PATH);
-    // A dial is keyed the same way.
-    const isDial = request.method === "GET" && url.pathname.startsWith(DIAL_PREFIX);
+    // A dial and the WebSocket of a node are keyed the same way, in one budget of tunnel
+    // upgrades per client: a node connects once and reconnects with a backoff, so its share
+    // is small, and the attempts of one client on both routes stay at the one limit.
+    const isDial =
+      request.method === "GET" && (url.pathname.startsWith(DIAL_PREFIX) || url.pathname === NODE_PATH);
     const limiter = limiterFor(request.method, url.pathname, env);
     if (limiter || isConnect || isAccount || isDial) {
       // Fail open if a binding is missing or fails: the relay itself checks codes, keys, and

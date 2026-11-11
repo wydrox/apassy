@@ -1550,31 +1550,35 @@ describe("tunnel", () => {
     assert.deepEqual(values(seen[0]!, "x-apassy-edge"), [SECRET]);
   });
 
-  it("uses TUNNEL_LIMITER, and no other, for GET /v1/tunnel/dial/*, keyed by the address or the /64", async () => {
-    for (const [address, key] of [
-      ["198.51.100.7", "198.51.100.7"],
-      ["2001:db8:1:2:3:4:5:6", "2001:db8:1:2::/64"],
-    ]) {
-      const refused = everyLimiter(false);
-      const { forwarded, relay } = upgradingRelay();
-      const response = await call("/v1/tunnel/dial/node_k7m2q4x3ca", { headers: { ...UPGRADE, "cf-connecting-ip": address! } }, { ...refused.env, RELAY: relay });
-      assert.equal(response.status, 429, address);
-      assert.equal(response.headers.get("retry-after"), "60");
-      assert.equal((await envelope(response)).error.code, "rate_limited");
-      assert.deepEqual(refused.used, [`tunnel:${key}`], address);
-      assert.deepEqual(forwarded, []);
+  it("uses TUNNEL_LIMITER, and no other, for GET /v1/tunnel/dial/* and GET /v1/tunnel/node, keyed by the address or the /64", async () => {
+    for (const path of ["/v1/tunnel/dial/node_k7m2q4x3ca", "/v1/tunnel/node"]) {
+      for (const [address, key] of [
+        ["198.51.100.7", "198.51.100.7"],
+        ["2001:db8:1:2:3:4:5:6", "2001:db8:1:2::/64"],
+      ]) {
+        const label = `${path} ${address}`;
+        const refused = everyLimiter(false);
+        const { forwarded, relay } = upgradingRelay();
+        const response = await call(path, { headers: { ...UPGRADE, "cf-connecting-ip": address! } }, { ...refused.env, RELAY: relay });
+        assert.equal(response.status, 429, label);
+        assert.equal(response.headers.get("retry-after"), "60", label);
+        assert.equal((await envelope(response)).error.code, "rate_limited", label);
+        assert.deepEqual(refused.used, [`tunnel:${key}`], label);
+        assert.deepEqual(forwarded, [], label);
+      }
+      const allowed = everyLimiter(true);
+      const passed = await call(path, {}, allowed.env);
+      assert.equal(passed.status, 201, path);
+      assert.deepEqual(allowed.used, ["tunnel:unknown"], path);
     }
-    const allowed = everyLimiter(true);
-    const passed = await call("/v1/tunnel/dial/node_k7m2q4x3ca", {}, allowed.env);
-    assert.equal(passed.status, 201);
-    assert.deepEqual(allowed.used, ["tunnel:unknown"]);
   });
 
-  it("does not limit the other tunnel routes, and passes a dial when the limiter is missing or fails", async () => {
+  it("does not limit the other tunnel routes, and passes a dial or a node when the limiter is missing or fails", async () => {
     const refused = everyLimiter(false);
     for (const [method, path] of [
-      ["GET", "/v1/tunnel/node"],
       ["GET", "/v1/tunnel/nodes"],
+      ["GET", "/v1/tunnel/node/extra"],
+      ["POST", "/v1/tunnel/node"],
       ["POST", "/v1/tunnel/nodes"],
       ["POST", "/v1/tunnel/grants"],
       ["GET", "/v1/tunnel/grants"],
@@ -1585,9 +1589,11 @@ describe("tunnel", () => {
       assert.equal(response.status, 201, `${method} ${path}`);
     }
     assert.deepEqual(refused.used, []);
-    for (const TUNNEL_LIMITER of [undefined, { async limit() { throw new Error("limiter unavailable"); } }]) {
-      const response = await call("/v1/tunnel/dial/node_k7m2q4x3ca", {}, { TUNNEL_LIMITER });
-      assert.equal(response.status, 201);
+    for (const path of ["/v1/tunnel/dial/node_k7m2q4x3ca", "/v1/tunnel/node"]) {
+      for (const TUNNEL_LIMITER of [undefined, { async limit() { throw new Error("limiter unavailable"); } }]) {
+        const response = await call(path, {}, { TUNNEL_LIMITER });
+        assert.equal(response.status, 201, path);
+      }
     }
   });
 });
