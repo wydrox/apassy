@@ -221,6 +221,7 @@ fn account(plan: Plan, group: Option<Group>) -> Account {
         list_verified: true,
         list_nearly_full: false,
         recovery_unseen: false,
+        recovery_changed: None,
     }
 }
 
@@ -262,6 +263,7 @@ fn frame(code: &str) -> (Shown, Option<Sheet>) {
                     "blaze cable flute board seal tiger maple orbit cedar lemon quartz otter harbor mango piano river"
                         .to_owned(),
                 ),
+                unrecorded: false,
             }),
         ),
         "S" => (

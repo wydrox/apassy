@@ -828,6 +828,7 @@ fn only_the_app_with_a_key_store_uses_connect() {
             "connect_join_poll",
             "connect_join_cancel",
             "connect_forget",
+            "connect_recovery_change_seen",
         ] {
             assert_eq!(
                 fail(&device.core, json!({"op": op})),
@@ -988,4 +989,43 @@ fn the_status_without_connect_keeps_the_last_plan_and_marks_it() {
     // The account stays on this iPhone.
     assert!(phone.state_file().exists());
     assert!(phone.keys.has_key());
+}
+
+/// The Mac makes a new recovery code: `connect_status` of the iPhone names the change, the
+/// device that made it, and its time, until `connect_recovery_change_seen` takes note of
+/// the key that it named (connect-account-v1 section 9.1).
+#[test]
+fn a_new_recovery_code_of_the_mac_shows_on_the_iphone_until_it_is_seen() {
+    let connect = FakeConnect::start();
+    let owner = owner();
+    let mut mac = mac(&connect, "Rafal");
+    let phone = phone(&connect);
+    join(&mut mac, &owner, &phone);
+    let status = call(&phone.core, json!({"op": "connect_status"}));
+    assert!(status.get("recovery_changed").is_none(), "{status}");
+    let (proof, epoch) = owner.proof(mac.account.new_recovery_code_action());
+    let rotated = mac
+        .account
+        .new_recovery_code(proof, &epoch)
+        .expect("new code");
+    let key = rotated.code.key().expect("key").public_key_b64u();
+    let status = call(&phone.core, json!({"op": "connect_status"}));
+    let changed = &status["recovery_changed"];
+    assert_eq!(changed["recovery_key"], key.as_str(), "{status}");
+    assert_eq!(changed["device_name"], "MacBook Pro", "{status}");
+    assert!(changed["at"].as_u64().is_some(), "{status}");
+    // A key that the line did not name is refused, and the line stays.
+    assert_eq!(
+        fail(
+            &phone.core,
+            json!({"op": "connect_recovery_change_seen", "recovery_key": "AAAA"})
+        ),
+        "invalid_input"
+    );
+    call(
+        &phone.core,
+        json!({"op": "connect_recovery_change_seen", "recovery_key": key}),
+    );
+    let status = call(&phone.core, json!({"op": "connect_status"}));
+    assert!(status.get("recovery_changed").is_none(), "{status}");
 }

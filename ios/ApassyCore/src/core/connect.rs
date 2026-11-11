@@ -195,11 +195,34 @@ pub struct StatusOut {
     /// Connect did not answer, and without an account.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub list_verified: Option<bool>,
+    /// When Connect answered: another device of the account made a new recovery code
+    /// since this iPhone saw the key (connect-account-v1 section 9.1). Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_changed: Option<RecoveryChangedOut>,
+}
+
+/// A new recovery code of another device: the app shows "The recovery code was changed on
+/// <device_name> on <at>. The old code no longer works." with "OK", which calls
+/// `connect_recovery_change_seen` with `recovery_key`.
+#[derive(Debug, Serialize)]
+pub(crate) struct RecoveryChangedOut {
+    pub recovery_key: String,
+    /// Unix seconds of the change at Connect, or null.
+    pub at: Option<u64>,
+    /// The name that the verified device list signed for that device, or null.
+    pub device_name: Option<String>,
 }
 
 #[derive(Serialize)]
 struct Forgot {
     forgotten: bool,
+}
+
+/// `connect_recovery_change_seen`: the recovery key that the line named.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChangeSeen {
+    recovery_key: String,
 }
 
 #[derive(Deserialize)]
@@ -452,6 +475,23 @@ impl Core {
             "connect_forget" => Ok(ok(&Forgot {
                 forgotten: self.connect_forget()?,
             })),
+            "connect_recovery_change_seen" => {
+                let ChangeSeen { recovery_key } = params(request)?;
+                let seen = self
+                    .connect
+                    .with_account(|account| account.recovery_change_seen(&recovery_key));
+                match seen {
+                    Ok(Some(())) => {}
+                    Ok(None) => return Err(core_error(ConnectError::NoAccount)),
+                    Err(ConnectError::Invalid) => {
+                        return Err(CoreError::invalid(
+                            "This is not the recovery key of the line.",
+                        ));
+                    }
+                    Err(error) => return Err(core_error(error)),
+                }
+                Ok(ok(&super::wire::Empty {}))
+            }
             _ => Err(CoreError::invalid("This call is not known.")),
         }
     }
@@ -571,6 +611,7 @@ impl Core {
             join,
             devices: Vec::new(),
             list_verified: None,
+            recovery_changed: None,
         };
         let answer = self.connect.with_account(|account| {
             let view = account.view()?;
@@ -610,12 +651,17 @@ impl Core {
                     verified: device.verified,
                 })
                 .collect();
+            let recovery_changed = view.recovery_changed.map(|changed| RecoveryChangedOut {
+                recovery_key: changed.recovery_key,
+                at: changed.at,
+                device_name: changed.device_name,
+            });
             Ok((
                 state.account_id.clone(),
                 state.device_name.clone(),
                 status_plan(&view.plan, group, people),
                 devices,
-                view.list_verified,
+                (view.list_verified, recovery_changed),
             ))
         });
         let answer = match answer {
@@ -630,58 +676,61 @@ impl Core {
             }
             other => other.map_err(core_error),
         };
-        let (account_id, device_name, plan, devices, list_verified) = match answer {
-            Ok(Some(found)) => found,
-            Ok(None) => return Ok(none(join)),
-            Err(error) if error.code == "removed" => {
-                // Removed at Connect, or the key is gone: the state file stays.
-                let Ok(Some(state)) = AccountState::load(&self.account_path()) else {
-                    return Ok(none(join));
-                };
-                return Ok(StatusOut {
-                    state: "account",
-                    removed: true,
-                    join_again: false,
-                    account_id: Some(state.account_id),
-                    device_name: Some(state.device_name),
-                    plan: None,
-                    stale: false,
-                    dial_route: false,
-                    dial_state: dial_state.text(),
-                    join,
-                    devices: Vec::new(),
-                    list_verified: None,
-                });
-            }
-            Err(error) if matches!(error.code, "relay_unreachable" | "rate_limited") => {
-                // Connect did not answer: the last plan of this process, marked stale.
-                let Ok(Some(state)) = AccountState::load(&self.account_path()) else {
-                    return Err(error);
-                };
-                // A dial that Connect refused with `plan_required` is newer than the last
-                // plan of this process: "Not on Connect".
-                let last = if dial_state == super::DialState::NotOnConnect {
-                    Some(StatusPlan::not_on_connect())
-                } else {
-                    guard(&self.connect.state).last.clone()
-                };
-                return Ok(StatusOut {
-                    state: "account",
-                    removed: false,
-                    join_again: false,
-                    account_id: Some(state.account_id),
-                    device_name: Some(state.device_name),
-                    plan: last,
-                    stale: true,
-                    dial_route: self.transport.dial_route(),
-                    dial_state: dial_state.text(),
-                    join,
-                    devices: Vec::new(),
-                    list_verified: None,
-                });
-            }
-            Err(error) => return Err(error),
-        };
+        let (account_id, device_name, plan, devices, (list_verified, recovery_changed)) =
+            match answer {
+                Ok(Some(found)) => found,
+                Ok(None) => return Ok(none(join)),
+                Err(error) if error.code == "removed" => {
+                    // Removed at Connect, or the key is gone: the state file stays.
+                    let Ok(Some(state)) = AccountState::load(&self.account_path()) else {
+                        return Ok(none(join));
+                    };
+                    return Ok(StatusOut {
+                        state: "account",
+                        removed: true,
+                        join_again: false,
+                        account_id: Some(state.account_id),
+                        device_name: Some(state.device_name),
+                        plan: None,
+                        stale: false,
+                        dial_route: false,
+                        dial_state: dial_state.text(),
+                        join,
+                        devices: Vec::new(),
+                        list_verified: None,
+                        recovery_changed: None,
+                    });
+                }
+                Err(error) if matches!(error.code, "relay_unreachable" | "rate_limited") => {
+                    // Connect did not answer: the last plan of this process, marked stale.
+                    let Ok(Some(state)) = AccountState::load(&self.account_path()) else {
+                        return Err(error);
+                    };
+                    // A dial that Connect refused with `plan_required` is newer than the last
+                    // plan of this process: "Not on Connect".
+                    let last = if dial_state == super::DialState::NotOnConnect {
+                        Some(StatusPlan::not_on_connect())
+                    } else {
+                        guard(&self.connect.state).last.clone()
+                    };
+                    return Ok(StatusOut {
+                        state: "account",
+                        removed: false,
+                        join_again: false,
+                        account_id: Some(state.account_id),
+                        device_name: Some(state.device_name),
+                        plan: last,
+                        stale: true,
+                        dial_route: self.transport.dial_route(),
+                        dial_state: dial_state.text(),
+                        join,
+                        devices: Vec::new(),
+                        list_verified: None,
+                        recovery_changed: None,
+                    });
+                }
+                Err(error) => return Err(error),
+            };
         guard(&self.connect.state).last = Some(plan.clone());
         Ok(StatusOut {
             state: "account",
@@ -696,6 +745,7 @@ impl Core {
             join,
             devices,
             list_verified: Some(list_verified),
+            recovery_changed,
         })
     }
 

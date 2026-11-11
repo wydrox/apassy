@@ -447,6 +447,7 @@ fn connect_screens(screens: &mut Vec<Screen>) {
         "recovery code",
         ConnectSheet::Recovery {
             words: Zeroizing::new("blaze cable flute board seal tiger maple orbit".to_owned()),
+            unrecorded: false,
         },
     );
     create_account(&ctx, &mut app, "Synthetic");

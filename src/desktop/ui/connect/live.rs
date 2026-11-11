@@ -120,14 +120,20 @@ enum Outcome {
     /// A revoke: `Some` when this device revoked itself.
     Revoked(Result<Option<Forgotten>, ConnectError>),
     Deleted(Result<Forgotten, ConnectError>),
-    /// "New Recovery Code…": the words of the new code, shown once.
-    NewRecovery(Result<Zeroizing<String>, ConnectError>),
+    /// "New Recovery Code…": the words of the new code, shown once, and whether the account
+    /// file recorded it.
+    NewRecovery(Result<(Zeroizing<String>, bool), ConnectError>),
+    /// "I Saved It" of the sheet of a recovery code: the mark of a code that nobody saw
+    /// went.
+    RecoverySeen(Result<(), ConnectError>),
+    /// "OK" of the line of a new recovery code that another device made.
+    RecoveryChangeSeen(Result<(), ConnectError>),
     Invited(Result<(String, u64), ConnectError>),
     JoinedGroup(Result<String, ConnectError>),
     GroupChanged(Result<String, ConnectError>),
     /// A join started (or resumed): the confirmer's name, the words (empty for a key in the
-    /// account already), and whether this device made a new key for it.
-    JoinStarted(Result<(String, String, bool), ConnectError>),
+    /// account already), and the note of the sheet (this device made a new key for it).
+    JoinStarted(Result<(String, String, Option<String>), ConnectError>),
     /// A join of this device that waited on disk resumed: `None` when there was none.
     JoinResumed(Option<(String, String)>),
     /// A poll of this device's join: `None` waits, `Some(state)` is confirmed.
@@ -157,6 +163,8 @@ impl Outcome {
             | Self::Revoked(Err(error))
             | Self::Deleted(Err(error))
             | Self::NewRecovery(Err(error))
+            | Self::RecoverySeen(Err(error))
+            | Self::RecoveryChangeSeen(Err(error))
             | Self::Invited(Err(error))
             | Self::JoinedGroup(Err(error))
             | Self::GroupChanged(Err(error))
@@ -672,6 +680,13 @@ fn account_of(snapshot: &Snapshot, this_device: &str) -> Account {
         list_nearly_full: view.list_verified
             && adds_left <= crate::connect::trust::ADDS_LEFT_WARNING,
         recovery_unseen: false,
+        recovery_changed: view
+            .recovery_changed
+            .as_ref()
+            .map(|changed| super::RecoveryLine {
+                text: super::recovery_changed(changed.device_name.as_deref(), changed.at),
+                recovery_key: changed.recovery_key.clone(),
+            }),
     }
 }
 
@@ -1174,12 +1189,23 @@ fn apply(app: &mut DesktopApp, ctx: &egui::Context, outcome: Outcome) {
         Outcome::Created(Ok((_, words))) => {
             live.file = OnceCell::new();
             live.refreshed_at = Some(Instant::now());
-            app.ui.connect.sheet = Some(Sheet::Recovery { words });
+            app.ui.connect.sheet = Some(Sheet::Recovery {
+                words,
+                unrecorded: false,
+            });
         }
-        Outcome::NewRecovery(Ok(words)) => {
-            // The mark of a code that was never shown went from the account file.
+        Outcome::NewRecovery(Ok((words, recorded))) => {
+            // The account file keeps the mark of a code that nobody saw until "I Saved It"
+            // closes this sheet: a lock or a quit before it leaves the lasting line.
             live.file = OnceCell::new();
-            app.ui.connect.sheet = Some(Sheet::Recovery { words });
+            app.ui.connect.sheet = Some(Sheet::Recovery {
+                words,
+                unrecorded: !recorded,
+            });
+        }
+        Outcome::RecoverySeen(Ok(())) | Outcome::RecoveryChangeSeen(Ok(())) => {
+            live.file = OnceCell::new();
+            refresh(app, ctx);
         }
         Outcome::Created(Err(ConnectError::RecoveryCodeNotShown)) => {
             // An earlier run left the creation pending: the account is made and its file
@@ -1336,13 +1362,13 @@ fn apply(app: &mut DesktopApp, ctx: &egui::Context, outcome: Outcome) {
             app.set_ok(text);
             refresh(app, ctx);
         }
-        Outcome::JoinStarted(Ok((confirmer, words, new_key))) => {
+        Outcome::JoinStarted(Ok((confirmer, words, note))) => {
             // A key in the account already finishes at the next poll.
             live.join_at = (!words.is_empty()).then(Instant::now);
             app.ui.connect.sheet = Some(Sheet::JoinWaiting {
                 confirmer,
                 words,
-                note: new_key.then(|| super::JOIN_NEW_KEY.to_owned()),
+                note,
             });
         }
         Outcome::JoinResumed(Some((confirmer, words))) => {
@@ -1401,6 +1427,8 @@ fn apply(app: &mut DesktopApp, ctx: &egui::Context, outcome: Outcome) {
         | Outcome::Refused(Err(error))
         | Outcome::Revoked(Err(error))
         | Outcome::NewRecovery(Err(error))
+        | Outcome::RecoverySeen(Err(error))
+        | Outcome::RecoveryChangeSeen(Err(error))
         | Outcome::Invited(Err(error))
         | Outcome::JoinedGroup(Err(error))
         | Outcome::GroupChanged(Err(error))
@@ -1534,7 +1562,7 @@ fn run_guarded(
                 Outcome::NewRecovery(
                     account
                         .new_recovery_code(proof, &epoch)
-                        .map(|code| code.words()),
+                        .map(|rotated| (rotated.code.words(), rotated.recorded)),
                 )
             });
         }
@@ -1792,6 +1820,15 @@ pub(crate) fn act(app: &mut DesktopApp, ctx: &egui::Context, action: Action) {
                 Some(ctx),
             );
         }
+        Action::RecoveryChangeSeen => {
+            let Some(changed) = account.and_then(|account| account.recovery_changed) else {
+                return;
+            };
+            app.ui.connect.live.error = None;
+            app.ui.connect.live.with_account(ctx, move |account| {
+                Outcome::RecoveryChangeSeen(account.recovery_change_seen(&changed.recovery_key))
+            });
+        }
         Action::ForgetOld => {
             app.ui.connect.live.error = None;
             app.ui.connect.live.guarded = Some(Guarded::ForgetOld);
@@ -1890,7 +1927,15 @@ pub(crate) fn choose(app: &mut DesktopApp, ctx: &egui::Context, choice: SheetCho
         return;
     }
     match (sheet, choice) {
-        (Sheet::Recovery { .. }, SheetChoice::Done) => refresh(app, ctx),
+        (Sheet::Recovery { .. }, SheetChoice::Done) => {
+            // The owner saw the code: the mark of a code that nobody saw goes (a new code;
+            // nothing changes after a creation).
+            if app.ui.connect.live.session.is_open() {
+                app.ui.connect.live.with_account(ctx, |account| {
+                    Outcome::RecoverySeen(account.recovery_code_seen())
+                });
+            }
+        }
         (sheet @ Sheet::Recovery { .. }, _) => app.ui.connect.sheet = Some(sheet),
         (Sheet::Create { name, device_name }, SheetChoice::Go) => {
             let live = &app.ui.connect.live;
@@ -2058,10 +2103,20 @@ pub(crate) fn choose(app: &mut DesktopApp, ctx: &egui::Context, choice: SheetCho
                         pasted.trim(),
                         &crate::sync::device_name(),
                     )?;
+                    // The note of the sheet: an account of an earlier join that still lists
+                    // this device, else a new key.
+                    let note = match request.left_in_other_account() {
+                        Some((confirmer, device)) => {
+                            Some(super::join_left_behind(confirmer, device))
+                        }
+                        None => request
+                            .made_new_key()
+                            .then(|| super::JOIN_NEW_KEY.to_owned()),
+                    };
                     let shown = (
                         request.confirmer_name().to_owned(),
                         request.words().to_owned(),
-                        request.made_new_key(),
+                        note,
                     );
                     *join
                         .lock()
