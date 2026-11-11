@@ -212,6 +212,12 @@ impl From<RelayRefusal> for CoreError {
                 Self::new("busy", "The relay is busy with another device. Try again.")
             }
             RelayRefusal::NotFound => Self::new("removed", "The relay does not know this vault."),
+            // `410 free_connect_ended` and `410 hosted_retired` (plan s7 unit M5): existing
+            // codes, so the iPhone contract gets no new one; the iPhone unit words them.
+            RelayRefusal::FreeEnded | RelayRefusal::HostedRetired => Self::new(
+                "not_allowed",
+                "The free path of apassy-relay.wyderka.cc ended.",
+            ),
             RelayRefusal::InvalidRequest | RelayRefusal::Error => {
                 Self::internal("The relay refused the request.")
             }

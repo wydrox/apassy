@@ -2510,6 +2510,7 @@ pub(super) fn open_screen(app: &mut DesktopApp, ui: &mut egui::Ui) {
         &[
             (OpenSource::Folder, "Synced folder"),
             (OpenSource::Relay, relay::LABEL),
+            (OpenSource::Connect, "Apassy Connect"),
         ],
     );
     if app.sync.relay.source != before {
@@ -2518,6 +2519,11 @@ pub(super) fn open_screen(app: &mut DesktopApp, ui: &mut egui::Ui) {
     ui.add_space(8.0);
     if app.sync.relay.source == OpenSource::Relay {
         relay::open_screen(app, ui);
+        return;
+    }
+    // Plan s7 unit M5: a vault of the Connect account that this Mac does not have yet.
+    if app.sync.relay.source == OpenSource::Connect {
+        relay::connect_open_screen(app, ui);
         return;
     }
     kit::paragraph(

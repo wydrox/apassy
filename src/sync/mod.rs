@@ -363,6 +363,14 @@ pub enum RelayRefusal {
     RateLimited,
     /// `503 busy` after the retries.
     Busy,
+    /// `410 free_connect_ended`: the free path of the hosted relay (the questions-only
+    /// Connect of ADR 0032, its questions, feed, and push) ended (ADR 0037 D14,
+    /// connect-account-v1 section 4). It never passes by itself: the app stops calling
+    /// that path and offers the choices of the notice (plan s7 unit M5).
+    FreeEnded,
+    /// `410 hosted_retired`: the hosted relay serves Apassy Connect only and retired this
+    /// route (connect-account-v1 section 14). It never passes by itself either.
+    HostedRetired,
     /// Another error of the relay.
     Error,
 }
@@ -388,6 +396,8 @@ impl fmt::Display for RelayRefusal {
             }
             Self::RateLimited => "the relay asks to wait a minute",
             Self::Busy => "the relay is busy. Apassy tries again",
+            Self::FreeEnded => "the free path of apassy-relay.wyderka.cc ended",
+            Self::HostedRetired => "apassy-relay.wyderka.cc no longer serves this. It serves Apassy Connect only",
             Self::Error => "the relay had an error",
         })
     }

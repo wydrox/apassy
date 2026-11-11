@@ -451,6 +451,8 @@ fn frame_one() -> DevicesView {
         problem: None,
         locked: false,
         can_move: false,
+        can_move_connect: false,
+        connect_pending: false,
         devices: vec![
             entry(
                 "Mac mini (office)",
@@ -950,6 +952,9 @@ fn devices_relay_group_restores_the_relay_and_the_other_macs() {
             feed_shown: true,
             other_macs,
             free_end: free.then(|| "0.5.20".to_owned()),
+            ended: None,
+            can_move: false,
+            can_move_connect: false,
         }),
         ..frame_one()
     };
@@ -2430,4 +2435,162 @@ fn a_remote_brain_state_waits_for_the_owner_and_names_no_address() {
     );
     let (words, _, _) = super::remote_server_words(None, None);
     assert_eq!(words, "Checking");
+}
+
+/// Plan s7 unit M5, mockup frames 9a to 9e (`docs/design/devices-settings-mockup.html`):
+/// the move to Apassy Connect beside the move to this Mac, the move that waits for its
+/// first approval through Connect with "Undo", the approvals that the hosted relay ended
+/// (`410`) with the two choices of the notice, and the route word of a device that
+/// reaches a node with only the Connect route.
+#[test]
+fn devices_connect_frames_draw_the_mockup() {
+    use super::super::devices::{
+        CONNECT_PENDING, CONNECT_PENDING_NOTE, CONNECT_UNDO, Ended, MOVE_APPROVALS,
+        MOVE_TO_CONNECT, RELAY_QUESTIONS_ENDED, ended_line,
+    };
+    // 9a: both moves, the move to this Mac is the blue button.
+    let both = DevicesView {
+        can_move: true,
+        can_move_connect: true,
+        ..frame_one()
+    };
+    let text = view_texts(&both);
+    for wanted in [
+        MOVE_APPROVALS,
+        MOVE_TO_CONNECT,
+        "Move them here: over your tailnet, or through Apassy Connect.",
+    ] {
+        assert!(text.contains(wanted), "9a has {wanted}: {text}");
+    }
+    // 9b: without Tailscale, the move to Connect alone.
+    let connect_only = DevicesView {
+        node: NodeState::Off,
+        can_move: false,
+        can_move_connect: true,
+        ..frame_one()
+    };
+    let text = view_texts(&connect_only);
+    assert!(text.contains(MOVE_TO_CONNECT), "{text}");
+    assert!(!text.contains(MOVE_APPROVALS), "{text}");
+    assert!(text.contains("without Tailscale"), "{text}");
+    // Neither: no move row.
+    let text = view_texts(&frame_one());
+    assert!(!text.contains(MOVE_TO_CONNECT), "{text}");
+    // 9c: the move waits for its first approval through Connect.
+    let text = view_texts(&DevicesView {
+        connect_pending: true,
+        ..frame_one()
+    });
+    for wanted in [CONNECT_PENDING, CONNECT_PENDING_NOTE, CONNECT_UNDO] {
+        assert!(text.contains(wanted), "9c has {wanted}: {text}");
+    }
+    // 9d: the hosted relay ended the approvals; the line replaces the notice and offers
+    // the moves this Mac can make; the switch says that questions wait here.
+    let ended = |can_move, can_move_connect| DevicesView {
+        relay: Some(RelayView {
+            questions: Questions::Ended,
+            feed_shown: true,
+            other_macs: None,
+            free_end: Some("0.5.20".to_owned()),
+            ended: Some((Ended::Free, "0.5.20".to_owned())),
+            can_move,
+            can_move_connect,
+        }),
+        ..frame_one()
+    };
+    let text = view_texts(&ended(true, true));
+    assert!(text.contains(&ended_line(Ended::Free, "0.5.20")), "{text}");
+    assert!(text.contains(RELAY_QUESTIONS_ENDED), "{text}");
+    assert!(text.contains(MOVE_TO_CONNECT), "{text}");
+    assert!(text.contains(MOVE_APPROVALS), "{text}");
+    assert!(
+        !text.contains(&devices::free_end_line("0.5.20")),
+        "one state, not the notice too: {text}"
+    );
+    assert!(
+        !text.contains(super::super::devices::SHOW_AGENTS),
+        "no feed switch while ended: {text}"
+    );
+    let text = view_texts(&ended(false, false));
+    assert!(
+        text.contains("Turn on “Reachable on Your Tailnet” above, or Apassy Connect"),
+        "{text}"
+    );
+    assert!(!text.contains(MOVE_TO_CONNECT), "{text}");
+    let retired = ended_line(Ended::Retired, "0.5.20");
+    assert!(retired.contains("no longer carries"), "{retired}");
+    // 9e: the route word of a device through Connect, with its last contact.
+    let mut view = frame_one();
+    view.devices[1].route = Some(Route::Connect);
+    let text = view_texts(&view);
+    assert!(text.contains("via Apassy Connect"), "{text}");
+    assert!(text.contains("10 s ago") || text.contains("Now"), "{text}");
+}
+
+/// The new texts of plan s7 unit M5 follow plans section 5: relay sync and shared vaults
+/// are never the paid feature, the paid part is Apassy Connect, the hosted relay is not
+/// for teams, and "free" without a limit is only what is free when self-hosted.
+#[test]
+fn connect_move_texts_follow_the_rules_of_plans_section_5() {
+    use super::super::devices::{
+        CONNECT_PENDING, CONNECT_PENDING_NOTE, Ended, MOVE_TO_CONNECT, RELAY_QUESTIONS_ENDED,
+        ended_line,
+    };
+    use super::super::sync::questions::CONNECT_MOVE_WAITS;
+    use super::super::sync::relay::{CONNECT_OPEN_EMPTY, CONNECT_OPEN_LEAD, CONNECT_SIGN_IN};
+    use crate::desktop::sync_worker::ended_copy_words;
+    use crate::questions::worker::ended_text;
+    use crate::relay::membership::PathEnded;
+    let mut texts: Vec<String> = [
+        CONNECT_PENDING,
+        CONNECT_PENDING_NOTE,
+        MOVE_TO_CONNECT,
+        RELAY_QUESTIONS_ENDED,
+        CONNECT_MOVE_WAITS,
+        CONNECT_OPEN_EMPTY,
+        CONNECT_OPEN_LEAD,
+        CONNECT_SIGN_IN,
+    ]
+    .iter()
+    .map(|text| (*text).to_owned())
+    .collect();
+    for why in [PathEnded::FreeEnded, PathEnded::Retired] {
+        texts.push(ended_text(why));
+        texts.push(ended_copy_words(why));
+    }
+    for ended in [Ended::Free, Ended::Retired] {
+        texts.push(ended_line(ended, "0.5.20"));
+    }
+    for text in &texts {
+        let lower = text.to_lowercase();
+        for banned in [
+            "paid relay sync",
+            "relay sync (paid)",
+            "shared vaults (paid)",
+            "for teams",
+            "stays free",
+        ] {
+            assert!(!lower.contains(banned), "{banned} in {text}");
+        }
+        if lower.contains("paid") {
+            assert!(text.contains("Apassy Connect (paid)"), "{text}");
+        }
+        // "free" names the self-hosted path only: this Mac or your own node.
+        if lower.contains("free") && !lower.contains("free approvals") {
+            assert!(
+                lower.contains("node") || lower.contains("free path"),
+                "free without the self-hosted path: {text}"
+            );
+        }
+    }
+    // The ended state of a relay copy names both choices.
+    for why in [PathEnded::FreeEnded, PathEnded::Retired] {
+        let words = ended_copy_words(why);
+        assert!(words.contains("Linux node the sync home (free)"), "{words}");
+        assert!(words.contains("Apassy Connect"), "{words}");
+        assert!(words.contains("is safe"), "{words}");
+        let text = ended_text(why);
+        assert!(text.contains("Questions wait on this"), "{text}");
+        assert!(text.contains("Apassy Connect"), "{text}");
+    }
 }

@@ -341,6 +341,42 @@ impl PairingChannel {
     }
 }
 
+/// The node id of a public name of connect-tunnel-v1 section 2: `node_` and the first
+/// label of `<10 characters>.<zone>`. `None` for a name of another form.
+pub fn node_id_of_public_name(public_name: &str) -> Option<String> {
+    let (label, zone) = public_name.split_once('.')?;
+    let id = format!("node_{label}");
+    (!zone.is_empty() && crate::sync::valid_node_id(&id)).then_some(id)
+}
+
+/// The Connect route that a pairing code of this Mac's node carries beside its tailnet
+/// address (node-pairing-v1 section 7a, plan s7 unit M5): `Some` only while the node
+/// runs with the owner's "Apassy Connect" route on, on an account that Connect named
+/// (a public name, so the account has a plan with the tunnel), and the tunnel does not
+/// say that the account is off Connect. `connect_origin` is the Connect origin that the
+/// reader of the code checks the route against (`crate::connect::configured_origin`).
+/// Otherwise the code is exactly the code of today: an older iPhone app refuses a code
+/// with `node=` ("Update Apassy to use this code"), so the fields are never added
+/// needlessly.
+pub fn pairing_route(
+    status: &crate::node::ConnectRouteStatus,
+    connect_origin: &str,
+) -> Option<crate::sync::TunnelRoute> {
+    if !(status.available && status.on && status.running) {
+        return None;
+    }
+    if status.tunnel.as_ref().is_some_and(|tunnel| {
+        matches!(
+            tunnel.state,
+            crate::node::tunnel::TunnelState::NotOnConnect | crate::node::tunnel::TunnelState::Off
+        )
+    }) {
+        return None;
+    }
+    let node = node_id_of_public_name(status.public_name.as_deref()?)?;
+    crate::sync::TunnelRoute::new(connect_origin, &node).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -647,6 +683,77 @@ mod tests {
         let plain_link = PairingChannel::generate(&plain).unwrap().link(&plain);
         let (read, _) = PairingChannel::parse(&plain_link).unwrap();
         assert_eq!(read, plain.as_str());
+    }
+
+    /// Plan s7 unit M5: the code carries the route only for a running node with the
+    /// Connect route on and a public name; any other state keeps the code of today.
+    #[test]
+    fn the_code_carries_the_connect_route_only_while_the_node_is_on_connect() {
+        use crate::node::ConnectRouteStatus;
+        use crate::node::tunnel::{CertState, TunnelState, TunnelStatus};
+        let origin = "https://apassy-relay.wyderka.cc";
+        let tunnel = |state| TunnelStatus {
+            state,
+            public_name: Some("k7m2q4x3ca.node.apassy.wyderka.cc".to_owned()),
+            url: None,
+            certificate: CertState::Missing("synthetic".to_owned()),
+            open_streams: 0,
+            attempts: 1,
+            connects: 1,
+            connected_at: None,
+        };
+        let on = ConnectRouteStatus {
+            available: true,
+            on: true,
+            running: true,
+            public_name: Some("k7m2q4x3ca.node.apassy.wyderka.cc".to_owned()),
+            tunnel: Some(tunnel(TunnelState::On)),
+        };
+        let route = pairing_route(&on, origin).expect("a route");
+        assert_eq!(
+            route.text(),
+            "wss://apassy-relay.wyderka.cc/v1/tunnel/dial/node_k7m2q4x3ca"
+        );
+        // A tunnel that reconnects keeps the route: the iPhone tries the tailnet first.
+        let mut reconnecting = on.clone();
+        reconnecting.tunnel = Some(tunnel(TunnelState::Reconnecting {
+            why: "synthetic".to_owned(),
+        }));
+        assert!(pairing_route(&reconnecting, origin).is_some());
+        for off in [
+            ConnectRouteStatus {
+                available: false,
+                ..on.clone()
+            },
+            ConnectRouteStatus {
+                on: false,
+                ..on.clone()
+            },
+            ConnectRouteStatus {
+                running: false,
+                ..on.clone()
+            },
+            ConnectRouteStatus {
+                public_name: None,
+                ..on.clone()
+            },
+            ConnectRouteStatus {
+                tunnel: Some(tunnel(TunnelState::NotOnConnect)),
+                ..on.clone()
+            },
+            ConnectRouteStatus {
+                public_name: Some("not-a-node-name".to_owned()),
+                ..on.clone()
+            },
+        ] {
+            assert!(pairing_route(&off, origin).is_none(), "{off:?}");
+        }
+        assert_eq!(
+            node_id_of_public_name("k7m2q4x3ca.node.apassy.wyderka.cc").as_deref(),
+            Some("node_k7m2q4x3ca")
+        );
+        assert!(node_id_of_public_name("K7M2Q4X3CA.node.apassy.wyderka.cc").is_none());
+        assert!(node_id_of_public_name("k7m2q4x3ca").is_none());
     }
 
     #[test]

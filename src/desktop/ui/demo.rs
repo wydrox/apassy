@@ -1826,12 +1826,17 @@ pub(crate) fn devices_view(frame: DevicesFrame) -> super::devices::DevicesView {
             relay: true,
         }),
         free_end: Some("0.5.20".to_owned()),
+        ended: None,
+        can_move: false,
+        can_move_connect: false,
     });
     DevicesView {
         node,
         problem,
         locked: frame == DevicesFrame::Locked,
         can_move: moving,
+        can_move_connect: false,
+        connect_pending: false,
         devices,
         notes: Vec::new(),
         wifi,
