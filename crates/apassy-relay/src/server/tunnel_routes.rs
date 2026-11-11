@@ -919,7 +919,14 @@ pub fn flush_usage(
     broker: &Broker,
     written: &mut HashMap<String, Usage>,
 ) -> RelayResult<usize> {
-    let changed: Vec<(String, Usage)> = broker
+    let changed = usage_snapshot(broker, written);
+    write_usage(hub, broker, changed, written)
+}
+
+/// The counters of the broker that changed since `written`: the first half of
+/// [`flush_usage`].
+pub fn usage_snapshot(broker: &Broker, written: &HashMap<String, Usage>) -> Vec<(String, Usage)> {
+    broker
         .usage_all()
         .into_iter()
         .map(|(account, usage)| {
@@ -936,7 +943,17 @@ pub fn flush_usage(
             (usage.bytes > 0 || usage.dials > 0 || usage.streams > 0)
                 && written.get(account) != Some(usage)
         })
-        .collect();
+        .collect()
+}
+
+/// Writes a snapshot of [`usage_snapshot`] to `tunnel_usage`: the second half of
+/// [`flush_usage`].
+pub fn write_usage(
+    hub: &Hub,
+    _broker: &Broker,
+    changed: Vec<(String, Usage)>,
+    written: &mut HashMap<String, Usage>,
+) -> RelayResult<usize> {
     if changed.is_empty() {
         return Ok(0);
     }

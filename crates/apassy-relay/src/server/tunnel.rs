@@ -1152,6 +1152,12 @@ impl Broker {
         }
     }
 
+    /// One round of the recheck of plans and grants now, as the maintenance thread runs
+    /// every [`Limits::recheck`] (tests, and an operator after a store outage).
+    pub fn recheck_now(&self) {
+        self.inner.recheck();
+    }
+
     /// Whether the node has an open WebSocket (`NodeView.online`).
     pub fn online(&self, node_id: &str) -> bool {
         lock(&self.inner.nodes).contains_key(node_id)
