@@ -194,7 +194,10 @@ account), but it gains no vault content: the vault stores hold ciphertext under 
 when the vault locks and at a sign-out. **One account session for the app** (plan s7 unit M5b): the
 vault unlock opens it, and Settings › Connect, the sync of the vault stores, and the node's tunnel use
 its one key and token; no part reads the key store on its own. It closes at a lock, at a quit, at another
-vault session, and when the auto-lock rule locks the vault at a screen lock or sleep. On the Mac the Touch ID
+vault session, and when the auto-lock rule locks the vault at a screen lock or sleep. One step opens
+it without a vault: "Use a vault from another Mac › Apassy Connect" on the start screen of a computer
+without a vault, which the owner starts (the key is read once, with Touch ID on the Mac, to join the
+account or list its vault stores); leaving that step, a lock, or the first vault session closes it. On the Mac the Touch ID
 unlock reads the key with the vault's unlock key under one Touch ID (both items have the same access
 control); a passphrase unlock reads it with a Touch ID of its own. A Connect that cannot be reached never
 blocks the unlock: the session needs only the account file and the key, and each part shows its own
@@ -236,11 +239,11 @@ learned of the removal (a key that the verified list removed, also one that left
 it). A live device whose own last head is one of a device that left signs a head of its own over it
 at its next sync, so a device that is behind takes the copy again; until then that device waits and
 says so. When no live device will sign over that head (the device that left pushed last), the owner
-ends the wait on the waiting device behind an owner check, with the device that left named by its
+ends the wait on the waiting device behind a fresh owner check that names that head, with the device that left named by its
 signed name and the time of its head: take exactly that head once ("Use the Copy That … Left…",
 only for a key that the verified list removed), or replace it with the device's own copy. A head or
 a chain entry of a signer that the client does not know yet makes it read the device list again
-before it calls the copy refused. A key that was never a device of the verified list signs nothing; the decision never comes from
+before it calls the copy refused or damaged. A key that was never a device of the verified list signs nothing; the decision never comes from
 Connect's answers (a group, a store marked shared, a device it lists). What a client cannot detect: a
 newer list that Connect withholds (the client keeps the last list it verified, so a removal it has
 not seen yet does not reach it); entries after its own `add` that Connect withholds at a join (the
