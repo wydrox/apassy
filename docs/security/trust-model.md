@@ -195,9 +195,17 @@ when the vault locks and at a sign-out. **One account session for the app** (pla
 vault unlock opens it, and Settings › Connect, the sync of the vault stores, and the node's tunnel use
 its one key and token; no part reads the key store on its own. It closes at a lock, at a quit, at another
 vault session, and when the auto-lock rule locks the vault at a screen lock or sleep. One step opens
-it without a vault: "Use a vault from another Mac › Apassy Connect" on the start screen of a computer
-without a vault, which the owner starts (the key is read once, with Touch ID on the Mac, to join the
-account or list its vault stores); leaving that step, a lock, or the first vault session closes it. On the Mac the Touch ID
+it without a vault: "Use a vault from another Mac › Apassy Connect" on the start screen, which the owner
+starts, and only while no vault is unlocked. The key is read once for that step, to join the account or
+list its vault stores: with Touch ID on the Mac; on Linux from the private file, with no prompt (ADR 0045:
+the mode of the file protects it, not a check of Apassy, so another program of the same user can read it
+whether or not this step runs). Every way out of the step (another source of that screen, the start
+screen's home, a lock, a quit, or the first vault session) closes the session and drops what holds the
+key, also a download from a vault store that is under way. The one owner check of that step, taking the
+copy that a removed device left on a vault store, is Touch ID, or system authentication on Linux, bound
+to the session of the step: no unlocked vault holds a passphrase to check. A join of this device that
+waits keeps public values on disk (`connect/pending-join.json`, mode 0600: ids, names, keys, the link
+hash, the safety words; never the link code), so a restart can finish it after a late confirmation. On the Mac the Touch ID
 unlock reads the key with the vault's unlock key under one Touch ID (both items have the same access
 control); a passphrase unlock reads it with a Touch ID of its own. A Connect that cannot be reached never
 blocks the unlock: the session needs only the account file and the key, and each part shows its own

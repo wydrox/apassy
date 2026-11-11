@@ -170,7 +170,7 @@ Error codes:
 | `damaged` | The copy on the relay fails a check. |
 | `stale_copy` | The relay serves an older copy than this iPhone saw. |
 | `forked_copy` | The relay serves a copy whose chain does not have this iPhone's last change. |
-| `waits_for_device` | A vault store of Apassy Connect: the current copy was saved by a device that left the account after this iPhone's last sync; the iPhone waits until another device of the account syncs (connect-account-v1 section 7.5). Nothing was changed. `sync` answers the status with the state `waits_for_device` and this message (section 5.5): a plain state, not an error; the next sync after the relay changes goes on. |
+| `waits_for_device` | Reserved for a vault store of Apassy Connect: the current copy was saved by a device that left the account after the last sync, and the device waits until another device of the account syncs (connect-account-v1 section 7.5). No call of this version answers it: the iPhone syncs relay teams with a device key of its own and does not sync the vault stores of an account (a vault store has no device link, and the core opens no relay session with the account key). If a later version syncs vault stores on the iPhone, `sync` answers the status with the state `waits_for_device` and this message (section 5.5): a plain state, not an error. |
 | `busy` | Another sync of this vault runs. The next sync tries again. |
 | `too_large` | The copy is larger than the relay takes. |
 | `io` | A file operation failed. |
@@ -382,7 +382,7 @@ Errors (nothing changes):
 ```
 
 - `state`: `off` (a local vault), `never` (no sync since the app started), `ok`, `offline`, `needs_passphrase`, `removed`, `damaged`, `stale_copy`, `forked_copy`, `busy`, `pending` (local edits or publication still need sync), `waits_for_device` (a vault store of Apassy Connect waits until another device of the account syncs, section 4; added 2026-11-11), or `error`.
-- The app shows `waits_for_device` as a plain status line with its `message` ("Waiting for another device of this account to sync. Nothing was changed."): no error style, no warning tint, and no step for the owner. Its sync loop goes on (a long poll), and an app of an earlier version reads it as `error`.
+- `waits_for_device` is reserved (section 4): no sync of this version reaches it, because the iPhone does not sync the vault stores of Apassy Connect. An app that gets it shows a plain status line with its `message` ("Waiting for another device of this account to sync. Nothing was changed."): no error style, no warning tint, and no step for the owner; an app of an earlier version reads it as `error`.
 - `merged`: the last merge that changed something, or null.
 
 ### 5.6 Removing a vault from this iPhone
