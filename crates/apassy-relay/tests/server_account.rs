@@ -2938,7 +2938,7 @@ fn new_accounts_have_the_relay_caps_and_a_cap_for_each_proven_prefix() {
     assert_eq!(create_from(&c, prefix, &first).0, 200);
     assert_eq!(
         c.directory_rows("SELECT id FROM account"),
-        [first_id.clone()]
+        std::slice::from_ref(&first_id)
     );
     // The day's cap of the relay: 503 busy for an hour.
     let c = connect_with(|cfg| {
@@ -3940,7 +3940,7 @@ fn names_have_one_canonical_form_from_the_app_to_the_device_list() {
     assert_eq!(account.state().device_name, mac_name);
     assert_eq!(
         c.directory_rows("SELECT name FROM account_device"),
-        [mac_name.clone()]
+        std::slice::from_ref(&mac_name)
     );
 
     let link = account.start_link().expect("link");

@@ -680,7 +680,9 @@ mod tests {
         for signature in [
             signer.sign_account(origin, recovery).unwrap(),
             signer.sign_sign_in(origin, account, nonce).unwrap(),
-            signer.sign_join(origin, account, "K6tgKp", "Synthetic").unwrap(),
+            signer
+                .sign_join(origin, account, "K6tgKp", "Synthetic")
+                .unwrap(),
             signer.sign_join_cancel(origin, account, "K6tgKp").unwrap(),
             signer
                 .sign_list_entry(

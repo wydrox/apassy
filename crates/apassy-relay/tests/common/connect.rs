@@ -230,7 +230,7 @@ impl Connect {
         let statement = key
             .sign(&device::account_list_message(
                 self.origin(),
-                &account,
+                account,
                 1,
                 device::LIST_NONE,
                 "root",

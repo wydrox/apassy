@@ -578,7 +578,7 @@ fn a_deleted_account_id_is_never_made_again_and_its_customer_stays_unreachable()
         c.rows(&format!(
             "SELECT account_id FROM stripe_subscription WHERE subscription_id = '{subscription}'"
         )),
-        [a.account.clone()]
+        std::slice::from_ref(&a.account)
     );
 }
 
