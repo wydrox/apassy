@@ -216,8 +216,14 @@ pub struct Limits {
     pub stream_buffer: usize,
     /// Bytes queued toward one node; a client sending more waits.
     pub node_queue: usize,
-    /// After a client left, the node has this long to close its side, then a reset.
+    /// After a client left (a dial's WebSocket close), the node has this long to close its
+    /// side, then a reset. After an ingress client's half-close (or an ACME request), the
+    /// node has this long of silence: bytes either way, also bytes that the client reads,
+    /// start it again.
     pub close_grace: Duration,
+    /// The longest life of a stream after its client closed its direction, however its
+    /// bytes still move: then a reset.
+    pub half_closed_life: Duration,
     /// All node WebSockets of this broker.
     pub max_nodes: usize,
     /// All open streams of this broker.
@@ -255,6 +261,7 @@ impl Default for Limits {
             stream_buffer: 256 * 1024,
             node_queue: 1024 * 1024,
             close_grace: Duration::from_secs(10),
+            half_closed_life: Duration::from_secs(10 * 60),
             max_nodes: 4096,
             max_streams: 4096,
             ingress_share_percent: 50,
@@ -2102,6 +2109,7 @@ impl Inner {
         let now = self.millis();
         let idle = self.limits.stream_idle.as_millis() as u64;
         let grace = self.limits.close_grace.as_millis() as u64;
+        let half_life = self.limits.half_closed_life.as_millis() as u64;
         let first = self.limits.ingress_first_byte.as_millis() as u64;
         self.reset_where(
             |_, stream| {
@@ -2111,6 +2119,7 @@ impl Inner {
                 now.saturating_sub(activity) >= idle
                     || (gone != 0 && now.saturating_sub(gone) >= grace)
                     || (shut != 0 && now.saturating_sub(shut.max(activity)) >= grace)
+                    || (shut != 0 && now.saturating_sub(shut) >= half_life)
                     || (stream.class.ingress()
                         && !stream.node_seen.load(Ordering::Relaxed)
                         && now.saturating_sub(stream.opened) >= first)
@@ -2394,6 +2403,11 @@ impl Inner {
     /// The client read `bytes` of the node's data: once a quarter of the window is read,
     /// Connect grants the node that much more (a `window` frame ahead of the data).
     fn drained(&self, conn: &NodeConn, stream: &Stream, bytes: usize) {
+        // Bytes that reach the client are activity: a node that waits for window because
+        // its client reads slowly is not silent.
+        if bytes > 0 {
+            stream.touch(self);
+        }
         let step = (self.limits.window() / 4).max(frame::MAX_PAYLOAD as u64);
         let total = stream.drained.fetch_add(bytes as u64, Ordering::SeqCst) + bytes as u64;
         if total < step {
