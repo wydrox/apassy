@@ -6665,9 +6665,11 @@ fn use_store_copy_sheet(
         );
     });
     if use_copy {
+        // The owner check takes the place of the sheet; the answer of the step shows in
+        // the status of the vault.
+        super::cancel_sheet(app, ctx);
         app.relay_ask_use_copy(&entry.id, Some(ctx));
-    }
-    if cancel {
+    } else if cancel {
         super::cancel_sheet(app, ctx);
     }
     response.escape
