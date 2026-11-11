@@ -2702,6 +2702,64 @@ fn the_maintenance_pass_prunes_old_links_joins_and_account_audit_rows() {
     );
 }
 
+/// The maintenance pass deletes the rows of devices revoked more than 90 days ago and the
+/// I-4 events of that age; a removed device still learns that it was removed (its key
+/// stays in `account_key`), and the device list keeps its entries.
+#[test]
+fn the_maintenance_pass_prunes_old_revoked_devices_and_brain_events() {
+    let c = start();
+    let a = create(&c);
+    let token = sign_in(&c, &a);
+    let b = add_device(&c, &a, &token);
+    let fresh = add_device(&c, &a, &token);
+    revoke(&c, &a, &token, &b);
+    revoke(&c, &a, &token, &fresh);
+    let at = now();
+    c.edit_directory(&format!(
+        "UPDATE account_device SET revoked_at = {old} WHERE id = '{}';
+         UPDATE brain_event SET created_at = {old} WHERE subject = '{}';",
+        b.id,
+        b.id,
+        old = at - 91 * 86_400,
+    ));
+    apassy_relay::server::account::prune(&c.relay.hub(), at).unwrap();
+    assert!(
+        c.directory_rows(&format!(
+            "SELECT id FROM account_device WHERE id = '{}'",
+            b.id
+        ))
+        .is_empty()
+    );
+    assert_eq!(
+        c.directory_rows(&format!(
+            "SELECT id FROM account_device WHERE id = '{}'",
+            fresh.id
+        )),
+        std::slice::from_ref(&fresh.id)
+    );
+    assert!(
+        c.directory_rows(&format!(
+            "SELECT kind FROM brain_event WHERE subject = '{}'",
+            b.id
+        ))
+        .is_empty()
+    );
+    assert_eq!(
+        c.directory_rows(&format!(
+            "SELECT kind FROM brain_event WHERE subject = '{}'",
+            fresh.id
+        )),
+        ["revoke"]
+    );
+    // The pruned device: still `device_removed` for its own signed sign-in.
+    assert_eq!(
+        token_call(&c, &a.account, &b.key),
+        (403, Some("device_removed".to_string()))
+    );
+    // The list keeps the entries of both: it still verifies.
+    assert_eq!(list_head(&c, &a.account, &token).0, 5);
+}
+
 /// The published keys come from the configuration only: the signing key and the keys of
 /// `APASSY_CONNECT_PUBLISHED_KEYS_FILE`. A new signing key signs one hour after this relay
 /// first published it; the first key a relay has signs at once, also after a restart.
