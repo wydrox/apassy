@@ -529,6 +529,7 @@ mod tests {
             tailnet_listen: None,
             tailnet_agents: false,
             public_url: "https://relay.example.test".into(),
+            public_origins: Vec::new(),
             sign_in_origins: Vec::new(),
             edge: crate::config::EdgeMode::Required(SecretString::new("e".repeat(40))),
             master_key: SecretString::new("synthetic unit test vault key".into()),

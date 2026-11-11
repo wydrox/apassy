@@ -612,10 +612,19 @@ fn the_settings_need_both_stripe_files_and_take_the_api_base_from_code_only() {
         !shown.contains("rk_test_FAKE") && !shown.contains(WEBHOOK_SECRET),
         "{shown}"
     );
+    assert!(!billing.config.auto_raise_seats);
+    let raising = with(&[
+        ("STRIPE_SECRET_KEY_FILE", &key),
+        ("STRIPE_WEBHOOK_SECRET_FILE", &webhook),
+        ("APASSY_CONNECT_AUTO_RAISE_SEATS", "1"),
+    ])
+    .unwrap();
+    assert!(raising.connect.billing.unwrap().config.auto_raise_seats);
     for bad in [
         ("APASSY_CONNECT_GRACE_DAYS", "0"),
         ("APASSY_CONNECT_DELETE_DAYS", "20"),
         ("APASSY_CONNECT_FAMILY_EXTRA_CENTS", "x"),
+        ("APASSY_CONNECT_AUTO_RAISE_SEATS", "true"),
     ] {
         assert!(with(&[bad]).is_err(), "{bad:?}");
     }

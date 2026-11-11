@@ -23,6 +23,9 @@ pub const MASTER_KEY: &str = "a synthetic node master key for the tailnet tests"
 pub const PUBLIC_URL: &str = "https://node.example.ts.net:8443";
 /// The node origin of node-pairing-v1 section 12.
 pub const NODE_ORIGIN: &str = "https://100.64.0.7:8444";
+/// The public name of the node at Connect: the server name of its `public` tunnel
+/// streams, and its second public origin after `PUBLIC_URL`. Nothing listens there.
+pub const CONNECT_NAME: &str = "k7m2q4x3ca.node.example.test";
 
 pub fn loopback() -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], 0))
@@ -51,6 +54,7 @@ pub fn node_config(dir: &std::path::Path, options: &NodeOptions) -> RelayConfig 
         tailnet_agents: options.agents,
         push_gateway: options.gateway.clone(),
     })
+    .and_then(|config| config.with_public_origins(&[format!("https://{CONNECT_NAME}")]))
     .expect("node config")
 }
 

@@ -1886,7 +1886,10 @@ and the sandbox prices of 27.4. Record each run in the pull request as "run on <
 
 `APASSY_CONNECT_SITE_URL`, `APASSY_CONNECT_FAMILY_EXTRA_CENTS`,
 `APASSY_CONNECT_FAMILY_EXTRA_YEAR_CENTS`, `APASSY_CONNECT_GRACE_DAYS` (14),
-`APASSY_CONNECT_READ_ONLY_DAYS` (30), `APASSY_CONNECT_DELETE_DAYS` (90): SPEC 34.7. A
+`APASSY_CONNECT_READ_ONLY_DAYS` (30), `APASSY_CONNECT_DELETE_DAYS` (90),
+`APASSY_CONNECT_AUTO_RAISE_SEATS` (`0`; `1` lets the hourly pass raise a group's quantity at
+Stripe to its active members, with a proration; turn it on only with the owner, since it
+charges without an action of the group's owner): SPEC 34.7. A
 change takes effect at the next start; durations apply to every plan at once, including
 plans already lapsed. A bad value, or only one of the two Stripe files, stops the start
 with a message that names the setting. No setting points the relay at another Stripe API
@@ -1899,9 +1902,12 @@ than `https://api.stripe.com`.
   asks again); the start never waits for Stripe.
 - **Each hour** (the maintenance pass): event ids older than 30 days go. A live
   subscription whose period ended more than two days ago without an event is read from
-  Stripe (once a day at most) and Stripe's state applies. A group with more active members
-  than its quantity at Stripe gets the quantity raised to them, with prorations (members
-  beyond the paid people or seats are read-only until then). Each ended plan at its
+  Stripe (once a day at most) and Stripe's state applies. Only with
+  `APASSY_CONNECT_AUTO_RAISE_SEATS=1`: a group with more active members than its quantity at
+  Stripe gets the quantity raised to them, with prorations. By default (`0`) the pass changes
+  no quantity: members beyond the paid people or seats stay read-only until the owner raises
+  the seats in the app (`POST /v1/account/group/seats`), so no charge happens without an
+  action of the owner. Each ended plan at its
   deletion day (end + `APASSY_CONNECT_DELETE_DAYS`) is read from Stripe first: only when
   Stripe shows it ended, and the relay's clock is within a day of Stripe's, it loses its
   vault stores and tunnel nodes, with those of its group's active members whose plan is
@@ -1953,7 +1959,7 @@ The broker and the ingress (docs/SPEC.md section 35) run on a relay with the acc
 
 - `APASSY_CONNECT_INGRESS_LISTEN` (hosted `0.0.0.0:443`) and `APASSY_CONNECT_ACME_LISTEN` (hosted `0.0.0.0:80`): raw TCP listeners on the Connect host, not through the Cloudflare Worker (it carries HTTP only). Open both in the host firewall and publish both ports of the container. Unset, that listener is off. A port that cannot be bound stops the start ("The tunnel ingress cannot listen on …").
 - `APASSY_CONNECT_NODE_ZONE` (default and hosted `node.apassy.wyderka.cc`): a DNS-only (grey cloud) wildcard record `*.node.apassy.wyderka.cc` to the Connect host's address. A proxied record would end TLS at Cloudflare and break the ingress.
-- The limits of the contract (section 8) are keys with the contract's defaults: `APASSY_CONNECT_TUNNEL_STREAMS` (64), `_NODES` (8), `_DIALS_PER_MINUTE` (60), `_GIB_PER_MONTH` (20 for each person or member), `_PING_SECS` (30), `_IDLE_SECS` (90), `_STREAM_IDLE_SECS` (900), `_STREAM_BUFFER_KIB` (256). docs/SPEC.md section 6 has their bounds; a value out of bounds stops the start. The limits of the ingress (16 open streams of an account, 60 new streams of a node a minute, a first frame of the node within 10 s, 5 GiB a month for each person or member) and of other accounts' dials (16 open for each, 32 together, half of the dial budget) have no key yet: docs/SPEC.md section 35.4.
+- The limits of the contract (section 8) are keys with the contract's defaults: `APASSY_CONNECT_TUNNEL_STREAMS` (64), `_NODES` (8), `_DIALS_PER_MINUTE` (60), `_GIB_PER_MONTH` (20 for each person or member), `_PING_SECS` (30), `_IDLE_SECS` (90), `_STREAM_IDLE_SECS` (900), `_STREAM_BUFFER_KIB` (256). The limits of the ingress and of other accounts' dials have keys too: `APASSY_CONNECT_TUNNEL_INGRESS_STREAMS` (16 open `public` and `acme` streams of an account), `_INGRESS_PER_MINUTE` (60 new streams of a node a minute), `_INGRESS_FIRST_BYTE_SECS` (10), `_INGRESS_GIB_PER_MONTH` (5 for each person or member), `_GRANTEE_STREAMS` (16 open dials of one other account), `_GRANTEE_STREAMS_TOTAL` (32 of all other accounts together; unset, at most half of `_STREAMS`), `_GRANTEE_BYTES_PERCENT` (50). The whole broker: `APASSY_CONNECT_TUNNEL_MAX_STREAMS` (4096 open streams of every account) and `_INGRESS_SHARE_PERCENT` (50: the `public` and `acme` streams of all nodes together hold at most this share of them, so the dials always keep the rest). docs/SPEC.md sections 35.4 and 35.11 have their bounds; a value out of bounds, or a grantee limit above the one it is part of, stops the start with a message that names the key. A change takes effect at the next start.
 - The tunnel routes stay behind the Worker. It forwards a WebSocket upgrade only on `GET /v1/tunnel/*`, unchanged, returns the relay's `101` as it is, refuses an upgrade anywhere else, and limits dials with `TUNNEL_LIMITER` (namespace 1007, 60 a minute for each address or IPv6 /64; `wrangler.jsonc`). **Not verified**: whether the Workers VPC binding (`RELAY`) carries WebSocket upgrades. Check it on a staging deploy with one dial before nodes use Connect; if it does not, the fallback is a Cloudflare Tunnel public hostname for `/v1/tunnel/*`, or the routes directly on the Connect host behind its own TLS.
 - Let's Encrypt allows 50 new certificates a week for one registered domain; every node is one. A dedicated registered domain for node names keeps the site's and the relay's certificates out of that count.
 
@@ -1962,7 +1968,7 @@ The broker and the ingress (docs/SPEC.md section 35) run on a relay with the acc
 - `IngressHandle::stats` of both listeners (once exported): `rate_limited` and `busy` rising together is one or few addresses flooding; `timeouts` and `malformed` rising is scanning; `unrecognized` is names of no online node; `limited` is accounts at their ingress slots, a node at its open rate, or an ingress budget; `accept_errors` is the host out of descriptors (the loop waits up to 1 s between tries).
 - `tunnel_usage` in `relay.db` (`account_id`, `month`, `dials`, `streams`, `bytes`): the counters of each account and month, written every 60 seconds and at stop. A row whose `account_id` is an account id counts all of it; `<account>/ingress` counts its public and ACME streams, and `<account>/dial/<other account>` the dials of another account to its nodes. Accounts whose dial bytes (all bytes without the ingress row) near 20 GiB for each person or member are near their budget; compare the sum of the account rows with the host's own traffic allowance. Rows older than 13 months are deleted at the start and with each write.
 - The relay audit: `tunnel_node_registered`, `tunnel_node_updated`, `tunnel_node_removed`, `tunnel_grant_created`, `tunnel_grant_removed`, `tunnel_grants_ended` (ids only).
-- The thread count of the relay process: each open stream uses two threads and each node WebSocket two, bounded by `max_streams` (4096) and `max_nodes` (4096).
+- The thread count of the relay process: each open stream uses two threads and each node WebSocket two, bounded by `APASSY_CONNECT_TUNNEL_MAX_STREAMS` (4096) and `max_nodes` (4096). Raise `_MAX_STREAMS` only with the host's thread and memory room measured on the devbox. When ingress connections are refused while dials still open, the ingress share of the broker is full: many nodes have their `public` streams open at once (or strangers hold them, each bounded by its node's open rate and the first-frame deadline); dials keep their own part of the broker.
 - Nothing in the logs names a client address or carries stream bytes. If a line ever does, it is a bug: stop and report it. The one tunnel line is "the tunnel usage cannot be written" (a `relay.db` write failed).
 
 ### 28.3 Rollback

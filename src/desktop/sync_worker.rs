@@ -163,7 +163,7 @@ pub(crate) const REGISTER_EVERY: Duration = Duration::from_secs(5 * 60);
 
 /// The Connect account of this Mac as the window hands it to the worker: the account in
 /// memory, which the worker locks only for its Connect calls.
-pub(crate) type AccountSlot = Arc<Mutex<Option<crate::connect::ConnectAccount>>>;
+pub(crate) type AccountSlot = crate::connect::AccountSlot;
 
 /// The lock around each sync operation that changes files. Take it before the vault
 /// mutex.
@@ -380,6 +380,9 @@ struct Shared {
     /// The account devices that the worker added to vault stores, for the tests.
     #[cfg(test)]
     registered: std::sync::atomic::AtomicUsize,
+    /// The one Apassy Connect account session of the app (plan s7 unit M5b): a vault
+    /// store signs with its key, and with none while it is closed or removed.
+    connect: Mutex<Option<Arc<crate::connect::AccountSession>>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -712,6 +715,13 @@ impl Shared {
         sync: &VaultSync,
         vault: &SharedVault,
     ) {
+        // A vault store takes the account key of the session now (plan s7 unit M5b).
+        if let (Some(relay), Some(session)) = (sync.as_relay(), lock(&self.connect).clone())
+            && relay.uses_account_key()
+            && session.store().is_some()
+        {
+            relay.set_account_signer(session.signer());
+        }
         let result = match sync {
             VaultSync::Relay(_) => sync.sync_shared(vault, |open| same_vault(sync, open)),
             VaultSync::Folder(_) => {
@@ -1372,6 +1382,11 @@ impl SyncWorker {
     /// no log.
     pub(crate) fn set_log(&self, log: Option<PathBuf>) {
         lock(&self.shared.health).set_log(log);
+    }
+
+    /// The account session whose key the vault stores of Apassy Connect sign with.
+    pub(crate) fn set_connect(&self, session: Arc<crate::connect::AccountSession>) {
+        *lock(&self.shared.connect) = Some(session);
     }
 
     /// The name of each vault of the list, by list ID, for a notification.

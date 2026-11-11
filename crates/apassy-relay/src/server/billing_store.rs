@@ -820,8 +820,9 @@ pub fn defer_background_pass(hub: &Hub, now: u64) {
 /// The billing part of the maintenance pass (connect-billing-v1 section 8), in this order:
 ///
 /// 1. event ids older than 30 days go, and the plans due for deletion are listed;
-/// 2. `Billing::reconcile`: stale live subscriptions are read from Stripe, and groups with
-///    more active members than their quantity get it raised;
+/// 2. `Billing::reconcile`: stale live subscriptions are read from Stripe, and, only with
+///    `APASSY_CONNECT_AUTO_RAISE_SEATS=1`, groups with more active members than their
+///    quantity get it raised;
 /// 3. `Billing::deletion_gate`: after a gap of more than two days since the last pass no
 ///    store is deleted until the operator resumes deletions;
 /// 4. for each due plan, under the lock of its account: Stripe must show it ended, with

@@ -110,6 +110,12 @@ pub struct NodeConfig {
     /// The origin that agents use, without a path: the Funnel origin
     /// `https://<DNSName>:8443`. Base URLs of sessions start with it.
     pub public_url: String,
+    /// Further origins of the public listener after `public_url`: the public name at
+    /// Connect (`https://<label>.node.<zone>`) while Funnel is up too. The node answers
+    /// each request with the origin that it arrived on, and a connection of the MCP
+    /// authorization flow works on its own origin only (relay docs/SPEC.md section 31).
+    /// Empty: `public_url` alone.
+    pub public_origins: Vec<String>,
     /// The loopback address of the public listener, the target of Funnel, such as
     /// `127.0.0.1:49200`; `None` for no public route. An address that is not on the
     /// loopback is refused.

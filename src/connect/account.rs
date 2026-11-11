@@ -140,7 +140,11 @@ pub struct AccountState {
 impl AccountState {
     /// The trust store of a new account file: `root`, with this Mac's key and `others`
     /// known.
-    fn new_trust(public_key: &str, root: &[u8], others: &[&[u8]]) -> (String, Vec<String>) {
+    pub(super) fn new_trust(
+        public_key: &str,
+        root: &[u8],
+        others: &[&[u8]],
+    ) -> (String, Vec<String>) {
         let mut known = vec![public_key.to_owned()];
         for key in others {
             let text = encode_b64u(key);
@@ -204,7 +208,7 @@ impl AccountState {
 
     /// Write the file at `path` with mode 0600, in a 0700 directory, through a temporary
     /// file and a rename.
-    fn save(&self, path: &Path) -> Result<(), ConnectError> {
+    pub(super) fn save(&self, path: &Path) -> Result<(), ConnectError> {
         if !self.is_valid() {
             return Err(ConnectError::Invalid);
         }

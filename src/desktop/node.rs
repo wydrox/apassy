@@ -147,12 +147,18 @@ pub(crate) struct NodeFlows {
 }
 
 impl NodeFlows {
-    /// The node of the product, for `backend` (the embedded relay of the app crate).
-    pub(crate) fn platform(backend: Option<Arc<dyn NodeBackend>>) -> Self {
+    /// The node of the product, for `backend` (the embedded relay of the app crate). Its
+    /// "Apassy Connect" route signs in with `connect`, the one account session of the
+    /// app (plan s7 units M4 and M5b).
+    pub(crate) fn platform(
+        backend: Option<Arc<dyn NodeBackend>>,
+        connect: Arc<crate::connect::AccountSession>,
+    ) -> Self {
         let node = backend.map(|backend| Arc::new(Node::new(NodeOptions::platform(backend))));
         if let Some(node) = &node {
-            // The "Apassy Connect" route uses the Connect account of this Mac (plan s7 M4).
-            node.set_connect(crate::node::tunnel::ConnectSetup::platform());
+            node.set_connect(Some(crate::node::tunnel::ConnectSetup::for_session(
+                connect,
+            )));
             // Before any vault opens: a start waits for it (the start lock).
             let node = Arc::clone(node);
             let _ = std::thread::Builder::new()

@@ -24,6 +24,12 @@
 //! - **The iPhone** is the core with its Connect origin set to the loopback Connect, its
 //!   own account device key in a memory key store, and shorter dial times where a test
 //!   needs them (`Core::set_dial_timing`).
+//! - **A kept dial** needs a node that keeps its connections, as the relay's tailnet
+//!   listener keeps the device streams of the tunnel (docs/SPEC.md section 35.6; its own
+//!   tests are `crates/apassy-relay/tests/tunnel_keep_alive.rs`). The fake relays answer
+//!   `Connection: close`, so the tests of kept dials put a keeping node ([`Keeping`])
+//!   between the recorders and the fake relay: it serves sequential requests on one
+//!   connection and forwards each to the fake relay.
 //!
 //! Each test runs in its own process (nextest, `.config/nextest.toml`): the core sets the
 //! Connect origin of its process.
@@ -42,6 +48,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -187,6 +194,7 @@ fn connect(tune: impl FnOnce(&mut TunnelSettings)) -> Connect {
             tailnet_agents: false,
             public_url: format!("http://127.0.0.1:{port}"),
             sign_in_origins: Vec::new(),
+            public_origins: Vec::new(),
             edge: EdgeMode::Off,
             master_key: SecretString::new("a synthetic vault passphrase for tests".to_owned()),
             session_ttl_secs: 60,
@@ -407,6 +415,128 @@ impl Recorder {
 
     fn count(&self) -> usize {
         self.seen.lock().unwrap().len()
+    }
+}
+
+/// Read one request (its head and its `Content-Length` body) from `stream` after the
+/// bytes in `pending`. `None` at the end of the stream.
+fn read_request(stream: &mut TcpStream, pending: &mut Vec<u8>) -> Option<Vec<u8>> {
+    let mut buffer = [0u8; 8192];
+    let end = loop {
+        if let Some(end) = pending.windows(4).position(|w| w == b"\r\n\r\n") {
+            break end + 4;
+        }
+        match stream.read(&mut buffer) {
+            Ok(0) | Err(_) => return None,
+            Ok(read) => pending.extend_from_slice(&buffer[..read]),
+        }
+    };
+    let head = String::from_utf8_lossy(&pending[..end]).to_ascii_lowercase();
+    let length: usize = head
+        .lines()
+        .find_map(|line| line.strip_prefix("content-length:"))
+        .map_or(0, |value| value.trim().parse().unwrap());
+    while pending.len() < end + length {
+        match stream.read(&mut buffer) {
+            Ok(0) | Err(_) => return None,
+            Ok(read) => pending.extend_from_slice(&buffer[..read]),
+        }
+    }
+    Some(pending.drain(..end + length).collect())
+}
+
+/// A node that keeps its connections, as the relay's tailnet listener keeps a device
+/// stream of the tunnel: it serves sequential requests on one connection and forwards
+/// each to the fake relay at `target` on a connection of its own, and gives back the
+/// answer without the fake's `Connection: close` unless the request asked to close.
+struct Keeping {
+    addr: SocketAddr,
+    /// The connections that reached it.
+    connections: Arc<AtomicUsize>,
+    /// Each request: the number of its connection (from 1), its place on that connection
+    /// (from 1), and its bytes.
+    requests: Arc<Mutex<Vec<(usize, usize, String)>>>,
+    /// The next request of this method that is not the first of its connection meets a
+    /// dead connection: it is read, and the connection closes without an answer.
+    drop_next: Arc<Mutex<Option<&'static str>>>,
+}
+
+impl Keeping {
+    fn start(target: SocketAddr) -> Self {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let connections = Arc::new(AtomicUsize::new(0));
+        let requests: Arc<Mutex<Vec<(usize, usize, String)>>> = Arc::default();
+        let drop_next: Arc<Mutex<Option<&'static str>>> = Arc::default();
+        let (count, log, dropping) = (
+            Arc::clone(&connections),
+            Arc::clone(&requests),
+            Arc::clone(&drop_next),
+        );
+        thread::spawn(move || {
+            for client in listener.incoming() {
+                let Ok(mut client) = client else { continue };
+                let number = count.fetch_add(1, Ordering::SeqCst) + 1;
+                let (log, dropping) = (Arc::clone(&log), Arc::clone(&dropping));
+                thread::spawn(move || {
+                    let mut pending = Vec::new();
+                    for place in 1.. {
+                        let Some(request) = read_request(&mut client, &mut pending) else {
+                            return;
+                        };
+                        let text = String::from_utf8_lossy(&request).to_string();
+                        log.lock().unwrap().push((number, place, text.clone()));
+                        {
+                            let mut dropping = dropping.lock().unwrap();
+                            if place > 1 && dropping.is_some_and(|method| text.starts_with(method))
+                            {
+                                *dropping = None;
+                                let _ = client.shutdown(Shutdown::Both);
+                                return;
+                            }
+                        }
+                        let close = text.contains("Connection: close\r\n");
+                        let Ok(mut relay) = TcpStream::connect(target) else {
+                            return;
+                        };
+                        if relay.write_all(&request).is_err() {
+                            return;
+                        }
+                        let mut answer = Vec::new();
+                        let _ = relay.read_to_end(&mut answer);
+                        let answer = if close {
+                            answer
+                        } else {
+                            String::from_utf8_lossy(&answer)
+                                .replacen("Connection: close\r\n", "", 1)
+                                .into_bytes()
+                        };
+                        if client.write_all(&answer).is_err() || close {
+                            let _ = client.shutdown(Shutdown::Both);
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        Self {
+            addr,
+            connections,
+            requests,
+            drop_next,
+        }
+    }
+
+    fn url(&self) -> String {
+        format!("http://{}", self.addr)
+    }
+
+    fn requests(&self) -> Vec<(usize, usize, String)> {
+        self.requests.lock().unwrap().clone()
+    }
+
+    fn connections(&self) -> usize {
+        self.connections.load(Ordering::SeqCst)
     }
 }
 
@@ -741,6 +871,43 @@ fn world_with(
     }
 }
 
+/// [`world`] with a node that keeps its connections ([`Keeping`]) in front of the fake
+/// relay, on both routes; the tailnet is down and the iPhone is attached through the
+/// dial.
+fn keeping_world() -> (World, Keeping) {
+    let connect = connect(|_| {});
+    let mut mac = mac(&connect);
+    connect.plans.set(&mac.id(), true);
+    let phone = phone(&connect, quick());
+    mac.add(&phone);
+    let auth = mac.auth(&connect.url);
+    let target: SocketAddr = phone
+        .relay
+        .url
+        .strip_prefix("http://")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let keeping = Keeping::start(target);
+    let mut node = Node::start_for(
+        &connect,
+        auth,
+        &keeping.url(),
+        |origin| phone.relay.set_origin(origin),
+        (Duration::from_secs(30), Duration::from_secs(90)),
+    );
+    node.tailnet_down();
+    let pin = node.certificate.pin.text();
+    let w = World {
+        connect,
+        mac,
+        phone,
+        node,
+    };
+    attach(&w.phone, &link_of(&w.phone, &w.node, &w.connect, &pin));
+    (w, keeping)
+}
+
 /// Short waits, so that the states and the probe fit a test.
 fn quick() -> DialTiming {
     DialTiming {
@@ -811,6 +978,29 @@ fn publish_feed(phone: &Phone, seq: u64) {
     ]);
     let (nonce, ciphertext) = seal(&QUESTION_KEY, &aad, feed.as_bytes());
     phone.relay.put_feed(1, seq, KEY_ID, &nonce, &ciphertext);
+}
+
+/// The requests of the two routes are the same bytes, but for one line: a request through
+/// the dial does not ask for `Connection: close` (the iPhone keeps its dials), and one
+/// through the tailnet does.
+fn assert_same_but_close(through_tailnet: &[Vec<u8>], through_dial: &[Vec<u8>]) {
+    const CLOSE: &str = "Connection: close\r\n";
+    let text = |bytes: &Vec<u8>| String::from_utf8(bytes.clone()).unwrap();
+    for request in through_tailnet {
+        assert_eq!(text(request).matches(CLOSE).count(), 1, "{}", text(request));
+    }
+    for request in through_dial {
+        assert!(!text(request).contains(CLOSE), "{}", text(request));
+    }
+    let without: Vec<String> = through_tailnet
+        .iter()
+        .map(|request| text(request).replacen(CLOSE, "", 1))
+        .collect();
+    let dial: Vec<String> = through_dial.iter().map(text).collect();
+    assert_eq!(
+        without, dial,
+        "the requests are the same bytes on both routes but for Connection: close"
+    );
 }
 
 /// The requests that `run` made through `recorder`.
@@ -894,10 +1084,7 @@ fn questions_the_feed_and_access_requests_reach_the_mac_through_the_dial_with_th
         w.node.tailnet.count() > before
     });
     let through_tailnet = recorded(&w.node.tailnet, calls);
-    assert_eq!(
-        through_tailnet, through_dial,
-        "the requests are the same bytes on both routes"
-    );
+    assert_same_but_close(&through_tailnet, &through_dial);
     let head = String::from_utf8_lossy(&through_dial[0]).to_string();
     assert!(
         head.contains(&format!("Host: 127.0.0.1:{}\r\n", w.node.port)),
@@ -1389,9 +1576,196 @@ fn a_sync_pull_works_through_the_dial_with_the_same_bytes() {
         node.tailnet.count() > before
     });
     let through_tailnet = recorded(&node.tailnet, pull);
-    assert_eq!(
-        through_tailnet, through_dial,
-        "the same bytes on both routes"
-    );
+    assert_same_but_close(&through_tailnet, &through_dial);
     drop(own);
+}
+
+// ---------------------------------------------------------------------------
+// One dial for requests that follow each other.
+
+/// The dials of the iPhone and the connections that reached the node through the dial
+/// recorder, now.
+fn dial_counts(w: &World) -> (u64, usize) {
+    (w.phone.core.dials_for_test(), w.node.dial.count())
+}
+
+/// Requests that follow each other share one dial: each kept request goes out without
+/// `Connection: close` on the dial's connection, and a burst of far more requests than
+/// Connect's 60 dials a minute stays on that dial and never reaches `limit`.
+#[test]
+fn requests_that_follow_each_other_share_one_dial_and_a_burst_stays_under_the_limit() {
+    let (w, keeping) = keeping_world();
+    let (dials, streams) = dial_counts(&w);
+    let before = keeping.requests().len();
+    let started = Instant::now();
+    for _ in 0..120 {
+        call(&w.phone.core, json!({"op": "access_requests_list"}));
+    }
+    let burst = started.elapsed();
+    let requests = keeping.requests()[before..].to_vec();
+    assert!(requests.len() >= 120, "{}", requests.len());
+    let (dials_after, streams_after) = dial_counts(&w);
+    assert!(
+        dials_after - dials <= 1,
+        "{} dials for {} requests in {burst:?}",
+        dials_after - dials,
+        requests.len()
+    );
+    assert!(streams_after - streams <= 1);
+    // One connection carried them, each without `Connection: close`.
+    let connection = requests[0].0;
+    assert!(requests.iter().all(|(number, _, _)| *number == connection));
+    assert!(requests.last().unwrap().1 >= 120);
+    for (_, _, request) in &requests {
+        assert!(!request.contains("Connection: close"), "{request}");
+        assert!(
+            request.contains("User-Agent: apassy-sync/1\r\n"),
+            "{request}"
+        );
+    }
+    let status = w.phone.status();
+    assert_eq!(status["dial_state"], "connected", "{status}");
+    assert_eq!(status["dial_route"], true);
+    assert_eq!(keeping.connections(), streams_after);
+}
+
+/// A kept dial that turns out dead: a read (`GET`) that went out on it goes once more on
+/// a fresh dial, and the call works; an answer (`POST`) is never sent twice and fails as
+/// an unreachable relay does, with no answer stored on the relay.
+#[test]
+fn a_dead_kept_dial_takes_a_fresh_dial_for_a_read_and_never_for_an_answer() {
+    let (w, keeping) = keeping_world();
+    let (vault, _card, digest) = publish_card(&w.phone);
+    call(&w.phone.core, json!({"op": "access_requests_list"}));
+    let (dials, _) = dial_counts(&w);
+
+    *keeping.drop_next.lock().unwrap() = Some("GET ");
+    let before = keeping.requests().len();
+    let listed = call(&w.phone.core, json!({"op": "access_requests_list"}));
+    assert_eq!(listed["requests"].as_array().unwrap().len(), 1, "{listed}");
+    assert!(
+        keeping.drop_next.lock().unwrap().is_none(),
+        "a read met the dead dial"
+    );
+    assert_eq!(dial_counts(&w).0, dials + 1, "one fresh dial for the read");
+    let requests = keeping.requests()[before..].to_vec();
+    let dropped = &requests[0];
+    assert!(dropped.1 > 1, "the dead dial was a kept one");
+    assert!(
+        requests[1..]
+            .iter()
+            .any(|(number, place, request)| *number != dropped.0
+                && *place == 1
+                && *request == dropped.2),
+        "the same read again, first on a new connection: {requests:?}"
+    );
+
+    let prepared = call(
+        &w.phone.core,
+        json!({"op": "access_request_prepare", "vault_id": vault, "qid": QID,
+               "digest": digest, "kind": "deny"}),
+    );
+    let (dials, _) = dial_counts(&w);
+    *keeping.drop_next.lock().unwrap() = Some("POST ");
+    let before = keeping.requests().len();
+    let code = fails(
+        &w.phone.core,
+        json!({"op": "access_request_answer", "vault_id": vault, "qid": QID,
+               "digest": digest, "kind": "deny", "time": prepared["time"]}),
+    );
+    assert_eq!(code, "relay_unreachable");
+    assert!(
+        keeping.drop_next.lock().unwrap().is_none(),
+        "the answer met the dead dial"
+    );
+    let posts: Vec<_> = keeping.requests()[before..]
+        .iter()
+        .filter(|(_, _, request)| request.starts_with("POST "))
+        .cloned()
+        .collect();
+    assert_eq!(posts.len(), 1, "the answer went out once: {posts:?}");
+    assert!(
+        w.phone.relay.answers().is_empty(),
+        "no answer reached the relay"
+    );
+    assert_eq!(dial_counts(&w).0, dials, "no dial to send the answer again");
+}
+
+/// `lock` and `suspend` close the kept dial: no stream stays open at the node, and the
+/// next request after the unlock dials again.
+#[test]
+fn lock_and_suspend_close_the_kept_dial() {
+    let (w, _keeping) = keeping_world();
+    for op in ["lock", "suspend"] {
+        call(&w.phone.core, json!({"op": "access_requests_list"}));
+        wait_until("the kept dial holds one stream at the node", || {
+            w.node.open_streams() == 1
+        });
+        let (dials, _) = dial_counts(&w);
+        call(&w.phone.core, json!({"op": "access_requests_list"}));
+        assert_eq!(dial_counts(&w).0, dials, "the kept dial took the request");
+        call(&w.phone.core, json!({"op": op}));
+        wait_until("no stream stays open at the node", || {
+            w.node.open_streams() == 0
+        });
+        assert_eq!(w.phone.status()["dial_route"], false, "after {op}");
+        call(&w.phone.core, json!({"op": "unlock", "passphrase": PASS}));
+        call(&w.phone.core, json!({"op": "access_requests_list"}));
+        assert!(dial_counts(&w).0 > dials, "a new dial after {op}");
+    }
+}
+
+/// The long poll has a dial of its own: it never takes the kept dial, asks the node to
+/// close after its answer, and the requests beside it keep using the kept dial.
+#[test]
+fn the_long_poll_has_its_own_dial_beside_the_kept_one() {
+    let (w, keeping) = keeping_world();
+    call(&w.phone.core, json!({"op": "questions_list"}));
+    wait_until("the kept dial holds one stream at the node", || {
+        w.node.open_streams() == 1
+    });
+    let (dials, _) = dial_counts(&w);
+    let before = keeping.requests().len();
+    thread::scope(|scope| {
+        let core = &w.phone.core;
+        let waiting = scope
+            .spawn(move || core.call(&json!({"op": "questions_wait", "timeout": 3}).to_string()));
+        wait_until("the long poll holds a stream of its own", || {
+            w.node.open_streams() == 2
+        });
+        assert_eq!(dial_counts(&w).0, dials + 1, "the long poll dialed");
+        // Beside it, a request takes the kept dial.
+        call(core, json!({"op": "access_requests_list"}));
+        assert_eq!(dial_counts(&w).0, dials + 1, "no dial beside the long poll");
+        assert_eq!(w.node.open_streams(), 2);
+        let _ = waiting.join().unwrap();
+    });
+    // The long poll's dial closed after its answer; the kept one is still there.
+    wait_until("the long poll's stream closed", || {
+        w.node.open_streams() == 1
+    });
+    let requests = keeping.requests()[before..].to_vec();
+    let polls: Vec<_> = requests
+        .iter()
+        .filter(|(_, _, request)| request.contains("wait="))
+        .collect();
+    assert!(!polls.is_empty(), "{requests:?}");
+    for (number, place, request) in &polls {
+        assert_eq!(
+            *place, 1,
+            "the long poll is the first request of its own dial"
+        );
+        assert!(request.contains("Connection: close\r\n"), "{request}");
+        assert!(
+            requests
+                .iter()
+                .filter(|(other, _, _)| other == number)
+                .count()
+                == 1,
+            "nothing else on the long poll's dial"
+        );
+    }
+    for (_, _, request) in requests.iter().filter(|(_, _, r)| !r.contains("wait=")) {
+        assert!(!request.contains("Connection: close"), "{request}");
+    }
 }

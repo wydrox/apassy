@@ -185,12 +185,23 @@ codes, invites, and joins (`404`), which no device needs through Connect.
 The iPhone shows the plan only; it has no purchase, link, or price (connect-billing-v1 section 10).
 
 **The account device key** (connect-account-v1 section 5) is a software P-256 key in the Keychain of
-each device (this device only, not synchronizable, behind Touch ID), not a Secure Enclave key yet.
-Apassy reads it into memory only to sign the nine messages of section 5, and drops it from memory
-when the vault locks and at a sign-out. A change of the Touch ID fingerprints deletes it: the device
+each Mac and iPhone (this device only, not synchronizable, behind Touch ID), not a Secure Enclave key yet.
+On Linux it is a private file of the user (`connect/device-key` in the data directory, 0600, never a
+symlink, outside every vault; ADR 0045, "The Apassy Connect key on Linux"): another program of the
+same user can read it there and act at Connect as that computer without the app's owner checks, which
+run in Apassy (for example confirm a device of its own, change the vault stores, or delete the
+account), but it gains no vault content: the vault stores hold ciphertext under the passphrase. Apassy reads it into memory only to sign the nine messages of section 5, and drops it from memory
+when the vault locks and at a sign-out. **One account session for the app** (plan s7 unit M5b): the
+vault unlock opens it, and Settings › Connect, the sync of the vault stores, and the node's tunnel use
+its one key and token; no part reads the key store on its own. It closes at a lock, at a quit, at another
+vault session, and when the auto-lock rule locks the vault at a screen lock or sleep. On the Mac the Touch ID
+unlock reads the key with the vault's unlock key under one Touch ID (both items have the same access
+control); a passphrase unlock reads it with a Touch ID of its own. A Connect that cannot be reached never
+blocks the unlock: the session needs only the account file and the key, and each part shows its own
+"Connect unreachable". `apassy owner serve` opens no account session. A change of the Touch ID fingerprints deletes it: the device
 is then no longer a device of its account, and the owner adds it again from another device or
 recovers the account with the recovery code. The key and the vault rows that sign with it go only
-when the owner confirms "Forget This Mac" (or iPhone) on that device, after a revoke of it, a
+when the owner confirms "Forget This Mac" (or iPhone, or Computer on Linux) on that device, after a revoke of it, a
 deletion, or Connect's signed-in answer that the device was removed. A refused sign-in, a missing
 answer, or a missing or unreadable account file removes nothing. Adding a device to a vault store
 and deleting a vault store need a fresh owner check on this Mac, as adding or revoking an account

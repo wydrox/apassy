@@ -675,8 +675,10 @@ struct Inner {
     /// A run already waited [`Timing::first_start_wait`] for the start in progress,
     /// which downloads the base weights. Later runs do not wait for it.
     first_start_waited: bool,
-    /// Grows with each stop and each change of the mode. A start in progress for an
-    /// older generation stops.
+    /// Grows with each stop and each change of the mode, except a change between the
+    /// two modes that Apassy manages: there a start in progress continues. A start in
+    /// progress for an older generation stops, and the answer of a check for an older
+    /// generation does not count.
     generation: u64,
     quit: bool,
     /// The LaunchAgents that run `start.sh`, from the last scan.
@@ -1029,7 +1031,9 @@ impl ModelServer {
     }
 
     /// Save and apply new settings. A change to "Managed outside Apassy" or "Off" stops a
-    /// server that Apassy started. The stop runs on its own thread.
+    /// server that Apassy started. The stop runs on its own thread. A change from one of
+    /// them to a mode that Apassy manages ends a check in progress: its answer does not
+    /// count.
     pub fn set_settings(&self, settings: BouncerSettings) -> io::Result<()> {
         if let Some(path) = &self.settings_path {
             settings.save(path)?;
@@ -1056,6 +1060,13 @@ impl ModelServer {
                 return Ok(());
             }
             let child = if mode.managed() {
+                if !old.managed() {
+                    // A check of "Managed outside Apassy" in progress stops counting.
+                    // Its late answer must not replace the state of the new mode: in
+                    // "When a run needs it" a failed check would hide "Cannot start".
+                    inner.generation += 1;
+                    inner.last_probe = None;
+                }
                 None
             } else {
                 let child = Self::take_for_stop(&mut inner);
@@ -4077,6 +4088,66 @@ mod tests {
             stop.store(true, Ordering::SeqCst);
             owned.join().expect("owned endpoint");
         }
+    }
+
+    /// A check of "Managed outside Apassy" that ends after the change to "When a run
+    /// needs it" does not count. The state stays "Stopped", so Settings can say "Cannot
+    /// start" while the preflight fails, and not "Not running" from the failed check of
+    /// the old mode.
+    #[test]
+    fn a_check_of_the_external_mode_does_not_count_after_the_change_to_when_needed() {
+        let dir = TempDir::new().expect("temp dir");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let url = format!("http://{}", listener.local_addr().expect("addr"));
+        let settings = |start| BouncerSettings {
+            start,
+            idle_minutes: 10,
+            url: Some(url.clone()),
+        };
+        let server = ModelServer::start_timed(
+            None,
+            settings(StartMode::External),
+            layout_without_script(dir.path()),
+            Host::none(),
+            fast_timing(None),
+        );
+        // The endpoint keeps the check of "Managed outside Apassy" waiting for an answer.
+        listener.set_nonblocking(true).expect("nonblocking");
+        let mut held = None;
+        wait_until(Duration::from_secs(5), "the check connects", || {
+            held = listener.accept().ok().map(|(stream, _)| stream);
+            held.is_some()
+        });
+        let mut check = held.expect("the check");
+        check.set_nonblocking(false).expect("blocking");
+        check
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+
+        server
+            .set_settings(settings(StartMode::WhenNeeded))
+            .expect("settings");
+        assert_eq!(server.state(), ServerState::Stopped);
+        // Now the check ends: the endpoint closes without an answer, so it is no
+        // bouncer brain. The read ends when the check has closed its side.
+        check
+            .shutdown(std::net::Shutdown::Write)
+            .expect("end the check");
+        check
+            .read_to_end(&mut Vec::new())
+            .expect("the check closes the connection");
+        // The monitor refreshes the preflight at its next turn, after the check.
+        let marker = || Err(Problem::Spawn("marker".to_owned()));
+        server.lock().preflight = marker();
+        server.wake.notify_all();
+        wait_until(
+            Duration::from_secs(5),
+            "the next turn of the monitor",
+            || server.lock().preflight != marker(),
+        );
+        assert_eq!(server.state(), ServerState::Stopped);
+        assert_eq!(server.status().preflight, Err(Problem::NoScript));
+        server.shutdown();
     }
 
     #[test]

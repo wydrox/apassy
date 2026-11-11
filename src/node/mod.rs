@@ -966,8 +966,10 @@ impl Node {
                     .as_ref()
                     .map(|connect_origin| format!("{connect_origin}:{}", state.tailnet_port))
             });
-        // Agents get one public origin (OAuth names it): Funnel's when Funnel is up, else
-        // the public name at Connect while remote access is on.
+        // The first public origin: Funnel's when Funnel is up, else the public name at
+        // Connect while remote access is on. With both, the public name at Connect is a
+        // further origin: the node answers each request with the origin it arrived on
+        // (relay docs/SPEC.md section 31.1).
         let public_url = match (&dns_name, &connect_origin, &device_origin) {
             (Some(name), _, _) => self.funnel.origin(name),
             (None, Some(connect_origin), _) if state.route_on => connect_origin.clone(),
@@ -986,6 +988,11 @@ impl Node {
                 ));
             }
         };
+        let public_origins: Vec<String> = connect_origin
+            .iter()
+            .filter(|origin| dns_name.is_some() && state.route_on && **origin != public_url)
+            .cloned()
+            .collect();
         let funnel_wanted = dns_name.is_some();
         // The public listener serves Funnel, and the public streams of Connect while
         // remote access is on.
@@ -1001,6 +1008,7 @@ impl Node {
                 data_dir: self.data_dir.clone(),
                 master_key: key,
                 public_url: public_url.clone(),
+                public_origins,
                 public_listen: public_wanted
                     .then(|| SocketAddr::from((Ipv4Addr::LOCALHOST, state.port))),
             },
@@ -1247,8 +1255,8 @@ impl Node {
         }
     }
 
-    /// Give the node the Connect account of this build (the app: [`ConnectSetup::platform`]
-    /// when this Mac has an account). `None` turns the Connect route off for this
+    /// Give the node the Connect account of this build (the app: [`ConnectSetup::for_session`]
+    /// with the one account session of the app, plan s7 unit M5b). `None` turns the Connect route off for this
     /// process. It takes effect at the next start.
     pub fn set_connect(&self, setup: Option<ConnectSetup>) {
         *lock(&self.connect) = setup;

@@ -45,13 +45,37 @@ pub(crate) const NOT_ON_CONNECT: &str = "Not on Connect";
 pub(crate) const INTRO: &str = "Apassy Connect is the hosted service of the Apassy project: it reaches your devices without Tailscale, keeps the encrypted copy of your vaults always online, and hosts the bouncer brain.";
 pub(crate) const SELF_HOST: &str = "Everything Connect does also runs on your own hardware, free.";
 pub(crate) const CREATE: &str = "Create a Connect Account…";
-pub(crate) const ADD_THIS_MAC: &str = "Add This Mac to an Account…";
-pub(crate) const KEY_NOTE: &str =
-    "No password and no email: the key of this Mac, in the Keychain, signs in.";
+pub(crate) const ADD_THIS_MAC: &str =
+    concat!("Add This ", crate::computer_cap!(), " to an Account…");
+pub(crate) const KEY_NOTE: &str = concat!(
+    "No password and no email: the key of this ",
+    crate::computer!(),
+    ", ",
+    crate::connect_key_place!(),
+    ", signs in."
+);
 pub(crate) const GROUP_LABEL: &str = "Apassy Connect";
 pub(crate) const SIGNED_OUT: &str = "Signed out";
-pub(crate) const SIGNED_OUT_NOTE: &str = "Touch ID reads the Connect key of this Mac.";
+pub(crate) const SIGNED_OUT_NOTE: &str = crate::connect_key_read!();
 pub(crate) const SIGN_IN: &str = "Sign In…";
+/// The row and the tag of this device.
+pub(crate) const THIS_DEVICE: &str = concat!("This ", crate::computer_cap!());
+/// Settings › Connect could not reach Connect after the account opened.
+pub(crate) const UNREACHABLE: &str = "Connect unreachable";
+/// "Try Again" of the unreachable state.
+pub(crate) const ASK_AGAIN: &str = "Try Again";
+/// This device revoked itself.
+pub(crate) const LEFT: &str = concat!(
+    "This ",
+    crate::computer_cap!(),
+    " left the Connect account."
+);
+/// This device forgot its account after a removal.
+pub(crate) const FORGOT: &str = concat!(
+    "This ",
+    crate::computer_cap!(),
+    " forgot the Connect account."
+);
 pub(crate) const NO_PLAN: &str = "No plan";
 pub(crate) const CHOOSE_PLAN: &str = "Choose a Plan…";
 pub(crate) const MANAGE_BILLING: &str = "Manage Billing…";
@@ -65,11 +89,21 @@ pub(crate) const DELETE: &str = "Delete Account…";
 pub(crate) const DELETED: &str = "The Connect account is deleted.";
 
 pub(crate) const CREATE_TITLE: &str = "Create a Connect Account";
-pub(crate) const CREATE_LEAD: &str = "No password and no email: the key of this Mac, in the Keychain, signs in. You choose a plan later.";
+pub(crate) const CREATE_LEAD: &str = concat!(
+    "No password and no email: the key of this ",
+    crate::computer!(),
+    ", ",
+    crate::connect_key_place!(),
+    ", signs in. You choose a plan later."
+);
 pub(crate) const CREATE_NOTE: &str = "The name shows to the members of a family or team.";
 pub(crate) const RECOVERY_TITLE: &str = "Save Your Recovery Code";
 pub(crate) const RECOVERY_LEAD: &str = "Shown once. Save it in another password manager.";
-pub(crate) const RECOVERY_NOTE: &str = "If every device of the account is lost, this code gives the account to a new Mac. The vault copies at Connect are deleted then; your vaults stay on your devices.";
+pub(crate) const RECOVERY_NOTE: &str = concat!(
+    "If every device of the account is lost, this code gives the account to a new ",
+    crate::computer!(),
+    ". The vault copies at Connect are deleted then; your vaults stay on your devices."
+);
 pub(crate) const SAVED_IT: &str = "I Saved It";
 
 pub(crate) const PICKER_TITLE: &str = "Choose a Plan";
@@ -92,23 +126,50 @@ pub(crate) const WAIT_STOPPED: &str =
 pub(crate) const CHECK_AGAIN: &str = "Check Again";
 
 pub(crate) const ADD_TITLE: &str = "Add a Device";
-pub(crate) const ADD_LEAD: &str = "On the new device, choose Add This Mac to an Account (on a Mac) or scan this code (on the iPhone).";
+pub(crate) const ADD_LEAD: &str = concat!(
+    "On the new device, choose Add This ",
+    crate::computer_cap!(),
+    " to an Account (on a ",
+    crate::computer!(),
+    ") or scan this code (on the iPhone)."
+);
 pub(crate) const ADD_WAITING: &str = "Waiting for the other device…";
 pub(crate) const WORDS_TAIL: &str = "Confirm only if the other device shows the same words.";
 pub(crate) const ADDED_LEAD: &str = "It is a device of your Connect account now.";
 pub(crate) const REVOKE_LEAD: &str =
     "It leaves your Connect account and every vault copy at Connect. Its vaults stay on it.";
-pub(crate) const FORGET_TITLE: &str = "Forget This Mac?";
+pub(crate) const FORGET_TITLE: &str = concat!("Forget This ", crate::computer_cap!(), "?");
 pub(crate) const NOT_VERIFIED: &str = "Not verified";
 pub(crate) const REMOVED: &str = "Removed from the account";
-pub(crate) const REMOVED_NOTE: &str = "Apassy Connect says this Mac was removed from its account. Its Connect key and its account file stay on this Mac until you forget the account here.";
-pub(crate) const FORGET_THIS_MAC: &str = "Forget This Mac…";
-pub(crate) const FORGET_REMOVED_LEAD: &str = "The Connect key and the account file of this Mac are deleted, and the vault copies of the account stop syncing on this Mac. To use the account here again, add this Mac from another device of the account.";
-pub(crate) const FORGET_LEAD: &str = "This Mac leaves your Connect account, and its Connect key is deleted. To use the account here again, add this Mac from another device of the account.";
-pub(crate) const JOIN_ACCOUNT_TITLE: &str = "Add This Mac to an Account";
+pub(crate) const REMOVED_NOTE: &str = concat!(
+    "Apassy Connect says this ",
+    crate::computer!(),
+    " was removed from its account. Its Connect key and its account file stay on this ",
+    crate::computer!(),
+    " until you forget the account here."
+);
+pub(crate) const FORGET_THIS_MAC: &str = concat!("Forget This ", crate::computer_cap!(), "…");
+pub(crate) const FORGET_REMOVED_LEAD: &str = concat!(
+    "The Connect key and the account file of this ",
+    crate::computer!(),
+    " are deleted, and the vault copies of the account stop syncing on this ",
+    crate::computer!(),
+    ". To use the account here again, add this ",
+    crate::computer!(),
+    " from another device of the account."
+);
+pub(crate) const FORGET_LEAD: &str = concat!(
+    "This ",
+    crate::computer_cap!(),
+    " leaves your Connect account, and its Connect key is deleted. To use the account here again, add this ",
+    crate::computer!(),
+    " from another device of the account."
+);
+pub(crate) const JOIN_ACCOUNT_TITLE: &str =
+    concat!("Add This ", crate::computer_cap!(), " to an Account");
 pub(crate) const JOIN_ACCOUNT_LEAD: &str =
     "On a device of the account, choose Add a Device…, then paste its code here.";
-pub(crate) const JOINED_TITLE: &str = "This Mac Is Added";
+pub(crate) const JOINED_TITLE: &str = concat!("This ", crate::computer_cap!(), " Is Added");
 pub(crate) const JOINED_LEAD: &str = "It is a device of the Connect account now.";
 
 pub(crate) const INVITE_LEAD: &str = "Send this link to the person. It works once, for 7 days.";
@@ -139,6 +200,11 @@ pub(crate) const TEXTS: &[&str] = &[
     SIGNED_OUT,
     SIGNED_OUT_NOTE,
     SIGN_IN,
+    THIS_DEVICE,
+    UNREACHABLE,
+    ASK_AGAIN,
+    LEFT,
+    FORGOT,
     NO_PLAN,
     CHOOSE_PLAN,
     MANAGE_BILLING,
@@ -478,9 +544,16 @@ pub(crate) enum Shown {
         name: Option<String>,
         device_name: String,
     },
-    /// The account is open but Connect has not answered yet.
+    /// The account is open but Connect has not answered yet ("Asking Apassy Connect…").
     Loading {
         name: Option<String>,
+    },
+    /// The account is open, and Connect could not be reached for its first answer. The
+    /// vault and its local work go on; the section asks again by itself.
+    Unreachable {
+        name: Option<String>,
+        device_name: String,
+        note: String,
     },
     /// Connect says this Mac was removed from its account, or the key of this Mac cannot
     /// be read any more. The account file and the key stay until the owner chooses
@@ -523,6 +596,7 @@ impl ConnectView {
             return match &self.shown {
                 Shown::None => NOT_ON_CONNECT.to_owned(),
                 Shown::Removed { .. } => REMOVED.to_owned(),
+                Shown::Unreachable { .. } => UNREACHABLE.to_owned(),
                 _ => SIGNED_OUT.to_owned(),
             };
         };
@@ -667,7 +741,7 @@ pub(crate) fn draw(ui: &mut Ui, view: &ConnectView) -> Option<Action> {
                 if let Some(name) = name {
                     g.labeled("Name", rows::value(name.as_str()));
                 }
-                g.labeled("This Mac", rows::value(device_name.as_str()));
+                g.labeled(THIS_DEVICE, rows::value(device_name.as_str()));
                 g.line_note(SIGNED_OUT, None, Some(rows::note(SIGNED_OUT_NOTE)), |ui| {
                     if kit::small_button(ui, SIGN_IN, Style::Prominent).clicked() {
                         action = Some(Action::SignIn);
@@ -688,6 +762,23 @@ pub(crate) fn draw(ui: &mut Ui, view: &ConnectView) -> Option<Action> {
                 });
             });
         }
+        Shown::Unreachable {
+            name,
+            device_name,
+            note,
+        } => {
+            rows::group(ui, Some(GROUP_LABEL), |g| {
+                if let Some(name) = name {
+                    g.labeled("Name", rows::value(name.as_str()));
+                }
+                g.labeled(THIS_DEVICE, rows::value(device_name.as_str()));
+                g.line_note(UNREACHABLE, None, Some(rows::note(note)), |ui| {
+                    if kit::small_button(ui, ASK_AGAIN, Style::Bordered).clicked() {
+                        action = Some(Action::SignIn);
+                    }
+                });
+            });
+        }
         Shown::Removed {
             name,
             device_name,
@@ -697,7 +788,7 @@ pub(crate) fn draw(ui: &mut Ui, view: &ConnectView) -> Option<Action> {
                 if let Some(name) = name {
                     g.labeled("Name", rows::value(name.as_str()));
                 }
-                g.labeled("This Mac", rows::value(device_name.as_str()));
+                g.labeled(THIS_DEVICE, rows::value(device_name.as_str()));
                 g.line_note(REMOVED, None, Some(rows::note(note)), |ui| {
                     if ui
                         .add_enabled_ui(!view.locked, |ui| {
@@ -939,7 +1030,7 @@ fn devices_group(ui: &mut Ui, view: &ConnectView, account: &Account, action: &mu
         for (index, device) in account.devices.iter().enumerate() {
             let subline = format!("{} · Added {}", device.kind(), day(device.created_at));
             let cap = if device.this {
-                Some(("This Mac", Tone::Neutral))
+                Some((THIS_DEVICE, Tone::Neutral))
             } else if !device.verified {
                 Some((NOT_VERIFIED, Tone::Warning))
             } else {
@@ -1517,8 +1608,8 @@ fn sheet_body(
                 g.field("Your Name", |ui| {
                     kit::text_input(ui, name, "connect-name", "Your name")
                 });
-                g.field("This Mac", |ui| {
-                    kit::text_input(ui, device_name, "connect-device", "Mac")
+                g.field(THIS_DEVICE, |ui| {
+                    kit::text_input(ui, device_name, "connect-device", crate::computer_cap!())
                 });
             });
             ui.add_space(6.0);
@@ -1889,7 +1980,12 @@ fn sheet_body(
             ui,
             &format!("Request Sent to {owner_name}"),
             &[&format!(
-                "{owner_name} confirms you on their Mac. Then the plan of the group covers you."
+                concat!(
+                    "{} confirms you on their ",
+                    crate::computer!(),
+                    ". Then the plan of the group covers you."
+                ),
+                owner_name
             )],
         ),
         Sheet::Delete => destructive(ui, DELETE_TITLE, DELETE_LEAD, "Delete…"),

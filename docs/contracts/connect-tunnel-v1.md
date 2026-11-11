@@ -139,6 +139,7 @@ Each stream of an account's nodes is in one of three classes with their own coun
 | --- | --- | --- |
 | Open dials of one account (its nodes) | 64; of them, at most 16 for each other account and 32 for all other accounts together | `429 tunnel_limit` on the dial |
 | Open `public` and `acme` streams of one account | 16, apart from the dials | the ingress closes the connection (port 80: `404`) |
+| Open streams of the whole Connect host | 4096; the `public` and `acme` streams of all accounts together at most half of them, so the dials always keep the other half | `429 tunnel_limit` on a dial only when all are open; the ingress closes the connection |
 | Nodes of one account | 8 | `403 account_limit` |
 | Dials a minute | 60 of the account's own devices; 60 of each other account to the account's nodes, counted apart; the Worker's `TUNNEL_LIMITER` (namespace 1007) 60 a minute for each address | `429 tunnel_limit`; `429 rate_limited` |
 | New `public` and `acme` streams of one node a minute | 60 (refused ones count) | the ingress closes the connection |
