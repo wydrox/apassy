@@ -83,7 +83,8 @@ ALTER TABLE team_code ADD COLUMN kind TEXT NOT NULL DEFAULT 'operator' CHECK (ki
 /// - `account` (with the public recovery key and the last recovery, for its retry),
 ///   `account_device` (with the device that added it, `added_by`; none for a root),
 ///   `account_list` (the signed device list of each account: one row for each entry,
-///   from the root at version 1; a recovery starts it again), `account_key` (the SHA-256
+///   from the root at version 1, with the device name it signs and its signature; a
+///   recovery starts it again), `account_key` (the SHA-256
 ///   of every key that was ever
 ///   a device of an account, and that account: one key makes at most one account, also
 ///   after a deletion), `account_link`, `account_join`, `account_store_device` (which
@@ -127,7 +128,7 @@ CREATE INDEX account_device_account ON account_device(account_id);
 CREATE TABLE account_list (
   account_id TEXT NOT NULL REFERENCES account(id) ON DELETE CASCADE,
   version INTEGER NOT NULL, op TEXT NOT NULL CHECK (op IN ('root','add','remove')),
-  key BLOB NOT NULL, link_hash TEXT, by_key BLOB NOT NULL, signature BLOB,
+  key BLOB NOT NULL, link_hash TEXT, name TEXT, by_key BLOB NOT NULL, signature BLOB NOT NULL,
   hash TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (account_id, version));
 CREATE TABLE account_key (
   key_hash BLOB PRIMARY KEY, created_at INTEGER NOT NULL, account_id TEXT);
@@ -352,14 +353,14 @@ fn migrate_accounts(conn: &Connection) -> RelayResult<()> {
 }
 
 /// The tables of the accounts step from an earlier, unreleased build of it (no
-/// `account_list`, the signed device lists): this build does not read them, and does not
-/// change them.
+/// `account_list.name`: the device lists whose entries sign no device name): this build
+/// does not read them, and does not change them.
 fn refuse_earlier_accounts_step(conn: &Connection) -> RelayResult<()> {
-    if crate::server::store::has_column(conn, "account_list", "hash")? {
+    if crate::server::store::has_column(conn, "account_list", "name")? {
         return Ok(());
     }
     Err(RelayError::internal(
-        "relay.db holds the accounts tables of an earlier, unreleased build of directory 1006 (no account_list). This build cannot open it: restore relay.db from the backup taken before that build, or start that build's image again.",
+        "relay.db holds the accounts tables of an earlier, unreleased build of directory 1006 (no account_list.name). This build cannot open it: restore relay.db from the backup taken before that build, or start that build's image again.",
     ))
 }
 

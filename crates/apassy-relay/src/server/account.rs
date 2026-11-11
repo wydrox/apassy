@@ -115,6 +115,13 @@ pub const RECOVER_RETRY_SECS: u64 = 600;
 /// The longest signed device list of an account: a change past it is 403 `account_limit`
 /// (a recovery starts a new list).
 pub const MAX_LIST_ENTRIES: u64 = 256;
+/// The versions kept for removals at the end of a list: the live-device limit, at least
+/// 10. An `add` past `LAST_ADD_VERSION` is 403 `account_limit`, so every live device of a
+/// list can still be removed (also the last one by itself) before `MAX_LIST_ENTRIES`, and
+/// the account can then be recovered.
+pub const LIST_REMOVAL_RESERVE: u64 = if MAX_DEVICES > 10 { MAX_DEVICES } else { 10 };
+/// The last version of a device list that may be an `add` (246).
+pub const LAST_ADD_VERSION: u64 = MAX_LIST_ENTRIES - LIST_REMOVAL_RESERVE;
 /// Links (with their joins) are kept this long after they expire.
 pub const LINK_KEEP_SECS: u64 = 86_400;
 /// The relay audit rows of accounts are kept this long.
@@ -1010,7 +1017,7 @@ fn list_head(conn: &Connection, account: &str) -> RelayResult<(u64, String)> {
 fn list_entries(conn: &Connection, account: &str) -> RelayResult<Vec<ListEntry>> {
     let mut statement = conn
         .prepare(
-            "SELECT version, op, key, link_hash, by_key, signature FROM account_list \
+            "SELECT version, op, key, link_hash, name, by_key, signature FROM account_list \
              WHERE account_id = ?1 ORDER BY version",
         )
         .map_err(db)?;
@@ -1018,28 +1025,80 @@ fn list_entries(conn: &Connection, account: &str) -> RelayResult<Vec<ListEntry>>
         .query_map(params![account], |row| {
             let op: String = row.get(1)?;
             let key: Vec<u8> = row.get(2)?;
-            let by: Vec<u8> = row.get(4)?;
-            let signature: Option<Vec<u8>> = row.get(5)?;
+            let by: Vec<u8> = row.get(5)?;
+            let signature: Vec<u8> = row.get(6)?;
             Ok(ListEntry {
                 version: to_u(row.get(0)?),
                 op: ListOp::parse(&op).ok_or(rusqlite::Error::InvalidQuery)?,
                 key: encode_b64(&key),
                 link_hash: row.get(3)?,
+                name: row.get(4)?,
                 by: encode_b64(&by),
-                signature: signature.map(|signature| encode_b64(&signature)),
+                signature: Some(encode_b64(&signature)),
             })
         })
         .map_err(db)?;
     rows.collect::<Result<Vec<_>, _>>().map_err(db)
 }
 
-/// One new entry of a device list, before it is written.
+/// One new entry of a device list, before it is written: `name` is the device name of a
+/// `root` or an `add` (`None` for a `remove`), `signature` the signature of `by` over its
+/// message.
 struct ListChange<'a> {
     op: ListOp,
     key: &'a [u8],
     link_hash: Option<&'a str>,
+    name: Option<&'a str>,
     by: &'a [u8],
-    signature: Option<&'a [u8]>,
+    signature: &'a [u8],
+}
+
+/// The `apassy-connect device-list v1` message of `change` as version `version` of the
+/// list of `account`, after the entry whose hash is `previous` (`None` for version 1).
+fn list_message(
+    origin: &str,
+    account: &str,
+    version: u64,
+    previous: Option<&str>,
+    change: &ListChange<'_>,
+) -> Vec<u8> {
+    device::account_list_message(
+        origin,
+        account,
+        version,
+        previous.unwrap_or(device::LIST_NONE),
+        change.op.as_str(),
+        &encode_b64(change.key),
+        change.link_hash.unwrap_or(device::LIST_NONE),
+        change.name.unwrap_or(device::LIST_NONE),
+        &encode_b64(change.by),
+    )
+}
+
+/// The root entry (version 1) of a new list of `account` for the key `root` and its
+/// device name, signed by that key (`statement`): 400 when the statement is not its
+/// signature over the root message of this origin.
+fn root_change<'a>(
+    origin: &str,
+    account: &str,
+    root: &'a [u8],
+    name: &'a str,
+    statement: &'a [u8],
+) -> RelayResult<ListChange<'a>> {
+    let change = ListChange {
+        op: ListOp::Root,
+        key: root,
+        link_hash: None,
+        name: Some(name),
+        by: root,
+        signature: statement,
+    };
+    if !device::verify(root, &list_message(origin, account, 1, None, &change), statement) {
+        return Err(RelayError::invalid(
+            "The statement is not the signature of the key over the root entry of the device list. Nothing was made.",
+        ));
+    }
+    Ok(change)
 }
 
 /// Writes `change` as version `version` of the list of `account`, after the entry whose
@@ -1053,26 +1112,18 @@ fn write_list_entry(
     change: &ListChange<'_>,
     now: u64,
 ) -> RelayResult<String> {
-    let message = device::account_list_message(
-        origin,
-        account,
-        version,
-        previous.unwrap_or(device::LIST_NONE),
-        change.op.as_str(),
-        &encode_b64(change.key),
-        change.link_hash.unwrap_or(device::LIST_NONE),
-        &encode_b64(change.by),
-    );
+    let message = list_message(origin, account, version, previous, change);
     let hash = device::account_list_hash(&message);
     conn.execute(
-        "INSERT INTO account_list (account_id, version, op, key, link_hash, by_key, signature, hash, created_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        "INSERT INTO account_list (account_id, version, op, key, link_hash, name, by_key, signature, hash, created_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             account,
             to_i(version),
             change.op.as_str(),
             change.key,
             change.link_hash,
+            change.name,
             change.by,
             change.signature,
             hash,
@@ -1083,13 +1134,14 @@ fn write_list_entry(
     Ok(hash)
 }
 
-/// A new device list of `account` with `root` as its version 1: at the account's creation
-/// and at a recovery, which drops the list before.
+/// A new device list of `account` with the checked root entry `root` (`root_change`) as
+/// its version 1: at the account's creation and at a recovery, which drops the list
+/// before.
 fn start_list(
     conn: &Connection,
     origin: &str,
     account: &str,
-    root: &[u8],
+    root: &ListChange<'_>,
     now: u64,
 ) -> RelayResult<()> {
     conn.execute(
@@ -1097,22 +1149,15 @@ fn start_list(
         params![account],
     )
     .map_err(db)?;
-    let change = ListChange {
-        op: ListOp::Root,
-        key: root,
-        link_hash: None,
-        by: root,
-        signature: None,
-    };
-    write_list_entry(conn, origin, account, 1, None, &change, now).map(drop)
+    write_list_entry(conn, origin, account, 1, None, root, now).map(drop)
 }
 
 /// Appends a signed change of `caller` to the device list of its account, inside the
 /// transaction of the change: `version` must be the head's version and 1 (409 `conflict`
 /// otherwise: the list moved, and the device signs again from the new head), the list must
-/// have room (`MAX_LIST_ENTRIES`, 403 `account_limit`), and `statement` must be the
-/// caller's signature over the entry's message with the head's hash (400 otherwise).
-/// Nothing is written on a refusal.
+/// have room (`MAX_LIST_ENTRIES` for any change, `LAST_ADD_VERSION` for an `add`: 403
+/// `account_limit`), and the change's signature must be the caller's over the entry's
+/// message with the head's hash (400 otherwise). Nothing is written on a refusal.
 fn append_signed(
     conn: &Connection,
     origin: &str,
@@ -1156,21 +1201,9 @@ fn append_signed(
         (ListOp::Remove, Some(op)) if op != ListOp::Remove.as_str() => {}
         _ => return Err(RelayError::not_found("device")),
     }
-    let statement = change
-        .signature
-        .ok_or_else(|| RelayError::invalid("The statement is not valid."))?;
-    let message = device::account_list_message(
-        origin,
-        &caller.account,
-        version,
-        &previous,
-        change.op.as_str(),
-        &encode_b64(change.key),
-        change.link_hash.unwrap_or(device::LIST_NONE),
-        &encode_b64(change.by),
-    );
+    let message = list_message(origin, &caller.account, version, Some(&previous), change);
     if change.by != caller.public_key.as_slice()
-        || !device::verify(&caller.public_key, &message, statement)
+        || !device::verify(&caller.public_key, &message, change.signature)
     {
         return Err(RelayError::invalid(
             "The statement is not the signature of this device over the next entry of the device list. Nothing changed.",
@@ -1317,22 +1350,31 @@ fn earlier_create(
 }
 
 /// `POST /v1/account`: a new account with its first device, the account's root. The
+/// account id is the device's (`account_id`; an id that exists is 409 `conflict`). The
 /// signature over the `apassy-connect account v1` message of this origin proves the key
-/// and binds the recovery key. A key is a device of at most one account, ever; the same
-/// body again within `CREATE_RETRY_SECS` answers the same result. New accounts have the
-/// caps of the relay (503 `busy`) and of the proven client prefix (429 `rate_limited`).
+/// and binds the recovery key; the statement is the key's signature over the root entry
+/// of the device list, with that id and the device name (400 otherwise, nothing made). A
+/// key is a device of at most one account, ever; the same body again within
+/// `CREATE_RETRY_SECS` answers the same result. New accounts have the caps of the relay
+/// (503 `busy`) and of the proven client prefix (429 `rate_limited`).
 fn create(
     hub: &Hub,
     request: &AccountCreate,
     prefix: Option<&str>,
     now: u64,
 ) -> RelayResult<Value> {
+    if !is_connect_id(&request.account_id, "acc_") {
+        return Err(RelayError::invalid(
+            "The account id is acc_ and 10 characters of a-z2-7.",
+        ));
+    }
     let name = checked_name(&request.name, "name")?;
     let device_name = checked_name(&request.device_name, "device name")?;
     let public_key = public_key_of(&request.public_key)?;
     let recovery_key = device::decode_recovery_key(&request.recovery_key)
         .map_err(|_| RelayError::invalid("The recovery key is b64u of 32 bytes."))?;
     let signature = signature_of(&request.signature)?;
+    let statement = signature_of(&request.statement)?;
     let message = device::account_message(
         &hub.config.public_url,
         &request.public_key,
@@ -1343,6 +1385,14 @@ fn create(
             "The signature is not one of the key over the account message of this Connect.",
         ));
     }
+    let account = request.account_id.as_str();
+    let root = root_change(
+        &hub.config.public_url,
+        account,
+        &public_key,
+        &device_name,
+        &statement,
+    )?;
     let hash = body_hash(request)?;
     // A retry of the same body: the same answer, before any count.
     if let Some(earlier) = hub
@@ -1377,9 +1427,7 @@ fn create(
         if let Some(earlier) = earlier_create(tx, &public_key, &hash, now)? {
             return Ok((earlier, false));
         }
-        check_account_room(tx, hub, now)?;
-        let mut account = new_id("acc_")?;
-        while tx
+        if tx
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM account WHERE id = ?1)",
                 params![account],
@@ -1387,26 +1435,29 @@ fn create(
             )
             .map_err(db)?
         {
-            account = new_id("acc_")?;
+            return Err(conflict(
+                "This account id is taken. Make a new id and sign again.",
+            ));
         }
+        check_account_room(tx, hub, now)?;
         tx.execute(
             "INSERT INTO account (id, name, created_at, recovery_key, create_hash) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![account, name, to_i(now), recovery_key.as_slice(), hash.as_slice()],
         )
         .map_err(db)?;
-        let device = insert_device(tx, &account, &device_name, request.platform, &public_key, None, now)?;
-        start_list(tx, &hub.config.public_url, &account, &public_key, now)?;
+        let device = insert_device(tx, account, &device_name, request.platform, &public_key, None, now)?;
+        start_list(tx, &hub.config.public_url, account, &root, now)?;
         hub.directory.audit.write_on(
             tx,
             now,
-            &actor(&account),
+            &actor(account),
             "account_created",
             None,
             &json!({"account_id": account, "device_id": device}),
         )?;
         Ok((
             AccountCreated {
-                account_id: account,
+                account_id: account.to_string(),
                 device_id: device,
                 created_at: now,
             },
@@ -1966,12 +2017,14 @@ fn confirm(
         if live_devices(tx, &caller.account)? >= MAX_DEVICES {
             return Err(account_limit("This account has 10 devices."));
         }
+        // The entry signs the name of the join exactly as Connect keeps it.
         let change = ListChange {
             op: ListOp::Add,
             key: &key,
             link_hash: Some(&link_hash),
+            name: Some(&name),
             by: &caller.public_key,
-            signature: Some(&statement),
+            signature: &statement,
         };
         append_signed(tx, &hub.config.public_url, caller, request.version, &change, now)?;
         let device = insert_device(tx, &caller.account, &name, platform, &key, Some(&caller.device), now)?;
@@ -2089,8 +2142,9 @@ fn revoke(
             op: ListOp::Remove,
             key: &target.public_key,
             link_hash: None,
+            name: None,
             by: &caller.public_key,
-            signature: Some(&statement),
+            signature: &statement,
         };
         append_signed(tx, &hub.config.public_url, caller, request.version, &change, now)?;
         tx.execute(
@@ -2462,7 +2516,8 @@ fn earlier_recovery(
 
 /// `POST /v1/account/recover` (edge): only an account with no live device, signed by its
 /// recovery key. The message names the new device key and the next recovery key; the new
-/// device key signs it too (400 otherwise, not counted). A wrong recovery signature, an
+/// device key signs it too, and signs the root entry of the new device list with its
+/// device name (`statement`; 400 otherwise for either, not counted). A wrong recovery signature, an
 /// unknown account, and an account with a live device are the same 403. The recovery
 /// signature is checked first, and a valid one is never limited: only failed recovery
 /// signatures of existing accounts count and are limited, `RECOVERY_TRIES_PER_HOUR` for
@@ -2482,6 +2537,7 @@ fn recover(hub: &Hub, request: &AccountRecover, prefix: &str, now: u64) -> Relay
     let next_recovery = device::decode_recovery_key(&request.recovery_key)
         .map_err(|_| RelayError::invalid("The recovery key is b64u of 32 bytes."))?;
     let signature = signature_of(&request.signature)?;
+    let statement = signature_of(&request.statement)?;
     let message = device::account_recover_message(
         &hub.config.public_url,
         &request.account_id,
@@ -2493,6 +2549,13 @@ fn recover(hub: &Hub, request: &AccountRecover, prefix: &str, now: u64) -> Relay
             "The signature is not one of the key over the recover message of this Connect.",
         ));
     }
+    let root = root_change(
+        &hub.config.public_url,
+        &request.account_id,
+        &public_key,
+        &name,
+        &statement,
+    )?;
     let hash = body_hash(request)?;
     if let Some(earlier) = hub
         .directory
@@ -2557,7 +2620,7 @@ fn recover(hub: &Hub, request: &AccountRecover, prefix: &str, now: u64) -> Relay
             return Err(wrong());
         }
         let device = insert_device(tx, &request.account_id, &name, request.platform, &public_key, None, now)?;
-        start_list(tx, &hub.config.public_url, &request.account_id, &public_key, now)?;
+        start_list(tx, &hub.config.public_url, &request.account_id, &root, now)?;
         tx.execute(
             "UPDATE account SET recovery_key = ?2, recover_hash = ?3, recovered_at = ?4, \
              recover_device = ?5, recover_deleted = ?6 WHERE id = ?1",

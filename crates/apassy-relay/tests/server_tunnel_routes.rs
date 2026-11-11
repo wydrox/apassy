@@ -337,14 +337,38 @@ fn create(c: &Connect) -> Dev {
             &recovery_key,
         ))
         .unwrap();
+    // The device makes the account id and signs the root entry of the device list.
+    let account = {
+        let mut bytes = [0u8; 10];
+        getrandom::fill(&mut bytes).unwrap();
+        let id: String = bytes
+            .iter()
+            .map(|byte| char::from(b"abcdefghijklmnopqrstuvwxyz234567"[usize::from(byte & 31)]))
+            .collect();
+        format!("acc_{id}")
+    };
+    let statement = key
+        .sign(&device::account_list_message(
+            c.origin(),
+            &account,
+            1,
+            device::LIST_NONE,
+            "root",
+            &public_key,
+            device::LIST_NONE,
+            "MacBook Pro",
+            &public_key,
+        ))
+        .unwrap();
     let made = c.ok(
         "POST",
         "/v1/account",
         None,
         Some(
-            &json!({"name": "Rafal", "device_name": "MacBook Pro", "platform": "mac",
-                     "public_key": public_key, "recovery_key": recovery_key,
-                     "signature": encode_b64(&signature)}),
+            &json!({"account_id": account, "name": "Rafal", "device_name": "MacBook Pro",
+                     "platform": "mac", "public_key": public_key,
+                     "recovery_key": recovery_key, "signature": encode_b64(&signature),
+                     "statement": encode_b64(&statement)}),
         ),
     );
     Dev {
@@ -394,6 +418,7 @@ fn list_head(c: &Connect, account: &str, list: &Value) -> (u64, String) {
             entry["op"].as_str().unwrap(),
             entry["key"].as_str().unwrap(),
             entry["link_hash"].as_str().unwrap_or(device::LIST_NONE),
+            entry["name"].as_str().unwrap_or(device::LIST_NONE),
             entry["by"].as_str().unwrap(),
         ));
     }
@@ -414,6 +439,7 @@ fn revoke(c: &Connect, by: &Dev, token: &str, target: &Dev) {
             &previous,
             "remove",
             &target.key.public_key_b64(),
+            device::LIST_NONE,
             device::LIST_NONE,
             &by.key.public_key_b64(),
         ))
@@ -476,6 +502,7 @@ fn add_device(c: &Connect, a: &Dev, token: &str, name: &str) -> Dev {
             "add",
             &public_key,
             &hash,
+            name,
             &a.key.public_key_b64(),
         ))
         .unwrap();

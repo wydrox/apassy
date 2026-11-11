@@ -99,6 +99,18 @@ pub fn start_with_config(edit: impl FnOnce(&mut RelayConfig)) -> Connect {
     }
 }
 
+/// A new account id as a device makes it: `acc_` and 10 random characters of `a-z2-7`.
+pub fn new_account_id() -> String {
+    const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+    let mut bytes = [0u8; 10];
+    getrandom::fill(&mut bytes).unwrap();
+    let id: String = bytes
+        .iter()
+        .map(|byte| char::from(ALPHABET[usize::from(byte & 31)]))
+        .collect();
+    format!("acc_{id}")
+}
+
 pub fn now() -> u64 {
     apassy_relay::now_unix()
 }
@@ -202,14 +214,31 @@ impl Connect {
                 &recovery_key,
             ))
             .unwrap();
+        // The device makes the account id and signs the root entry of the device list.
+        let account = new_account_id();
+        let device_name = format!("{name}'s Mac");
+        let statement = key
+            .sign(&device::account_list_message(
+                self.origin(),
+                &account,
+                1,
+                device::LIST_NONE,
+                "root",
+                &public_key,
+                device::LIST_NONE,
+                &device_name,
+                &public_key,
+            ))
+            .unwrap();
         let made = self.ok(
             "POST",
             "/v1/account",
             None,
             Some(
-                &json!({"name": name, "device_name": format!("{name}'s Mac"), "platform": "mac",
-                         "public_key": public_key, "recovery_key": recovery_key,
-                         "signature": encode_b64(&signature)}),
+                &json!({"account_id": account, "name": name, "device_name": device_name,
+                         "platform": "mac", "public_key": public_key,
+                         "recovery_key": recovery_key, "signature": encode_b64(&signature),
+                         "statement": encode_b64(&statement)}),
             ),
         );
         let mut dev = Dev {

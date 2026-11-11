@@ -137,10 +137,11 @@ pub fn account_join_cancel_message(
 
 /// One entry of the signed device list of an account (connect-account-v1 section 7.5):
 /// `"apassy-connect device-list v1" 0x00 origin 0x00 account 0x00 version 0x00 previous
-/// 0x00 op 0x00 key_b64 0x00 link_hash 0x00 by_b64`. `version` is decimal; `previous` is
-/// the list hash of the entry before ([`account_list_hash`]), or `-` for version 1; `op`
-/// is `root`, `add`, or `remove`; `link_hash` is the link of an `add`, else `-`; `by` is
-/// the key of the device that signs the entry (for the `root`, the root key itself).
+/// 0x00 op 0x00 key_b64 0x00 link_hash 0x00 name 0x00 by_b64`. `version` is decimal;
+/// `previous` is the list hash of the entry before ([`account_list_hash`]), or `-` for
+/// version 1; `op` is `root`, `add`, or `remove`; `link_hash` is the link of an `add`,
+/// else `-`; `name` is the device name of a `root` or an `add`, else `-`; `by` is the key
+/// of the device that signs the entry (for the `root`, the root key itself).
 #[allow(clippy::too_many_arguments)]
 pub fn account_list_message(
     origin: &str,
@@ -150,6 +151,7 @@ pub fn account_list_message(
     op: &str,
     key_b64: &str,
     link_hash: &str,
+    name: &str,
     by_b64: &str,
 ) -> Vec<u8> {
     joined(&[
@@ -161,6 +163,7 @@ pub fn account_list_message(
         op,
         key_b64,
         link_hash,
+        name,
         by_b64,
     ])
 }
@@ -660,8 +663,23 @@ mod tests {
             b"apassy-connect join-cancel v1\0https://c.test\0acc_a\0LH\0PK".to_vec()
         );
         assert_eq!(
-            account_list_message("https://c.test/", "acc_a", 2, "PH", "add", "PK", "LH", "BY"),
-            b"apassy-connect device-list v1\0https://c.test\0acc_a\x002\0PH\0add\0PK\0LH\0BY"
+            account_list_message(
+                "https://c.test/",
+                "acc_a",
+                2,
+                "PH",
+                "add",
+                "PK",
+                "LH",
+                "iPhone",
+                "BY"
+            ),
+            b"apassy-connect device-list v1\0https://c.test\0acc_a\x002\0PH\0add\0PK\0LH\0iPhone\0BY"
+                .to_vec()
+        );
+        assert_eq!(
+            account_list_message("https://c.test", "acc_a", 3, "PH", "remove", "PK", "-", "-", "BY"),
+            b"apassy-connect device-list v1\0https://c.test\0acc_a\x003\0PH\0remove\0PK\0-\0-\0BY"
                 .to_vec()
         );
         assert_eq!(account_list_hash(b"").len(), 43);

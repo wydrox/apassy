@@ -1301,6 +1301,9 @@ impl Platform {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccountCreate {
+    /// The id of the new account, made by the device (`acc_` and 10 of `a-z2-7`): the
+    /// root statement names it. An id that exists is 409 `conflict`.
+    pub account_id: String,
     pub name: String,
     pub device_name: String,
     pub platform: Platform,
@@ -1309,6 +1312,9 @@ pub struct AccountCreate {
     /// Connect (`device::RecoveryKey`).
     pub recovery_key: String,
     pub signature: String,
+    /// The root entry of the device list (version 1), signed by the new device key over
+    /// `device::account_list_message` with `device_name` (DER, b64u).
+    pub statement: String,
 }
 
 /// `POST /v1/account` answer.
@@ -1393,8 +1399,8 @@ impl ListOp {
 
 /// One entry of the signed device list of an account (connect-account-v1 section 7.5):
 /// `by` signed the `apassy-connect device-list v1` message of `version`, the hash of the
-/// entry before, `op`, `key`, and `link_hash`. The root entry (version 1) has no
-/// signature: its key is the root that each device pinned itself.
+/// entry before, `op`, `key`, `link_hash`, and `name`. The root entry (version 1) is
+/// signed by its own key; its authority is still the root that each device pinned itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListEntry {
     pub version: u64,
@@ -1403,9 +1409,11 @@ pub struct ListEntry {
     pub key: String,
     /// The link of an `add`, else `None`.
     pub link_hash: Option<String>,
+    /// The device name of a `root` or an `add` that the entry signs, `None` for `remove`.
+    pub name: Option<String>,
     /// b64u of the key that signed the entry (the root key for `root`).
     pub by: String,
-    /// b64u of the DER signature, `None` for `root`.
+    /// b64u of the DER signature of `by`: every entry has one, the root too.
     pub signature: Option<String>,
 }
 
@@ -1656,6 +1664,9 @@ pub struct AccountRecover {
     pub signature: String,
     /// The current recovery key's Ed25519 signature (64 bytes, b64u) over the same message.
     pub recovery_signature: String,
+    /// The root entry of the new device list (version 1), signed by the new device key
+    /// over `device::account_list_message` with `device_name` (DER, b64u).
+    pub statement: String,
 }
 
 /// `POST /v1/account/recover` answer.
