@@ -23,7 +23,13 @@
 //!
 //! When the helper says `keychain_unavailable` (a development build without a
 //! provisioning profile) there is no account key: unlike the node key, it has no file
-//! fallback, because it is the identity of this Mac at Connect.
+//! fallback, because it is the identity of this Mac at Connect. Linux keeps the key in a
+//! private file of the user instead ([`super::key_file::FileKeyStore`]).
+//!
+//! The vault unlock opens the one account session of the app (`super::session`): the
+//! Touch ID unlock reads this key together with the vault's unlock key, under one Touch
+//! ID ([`DeviceKeyStore::keychain_account`]); a passphrase unlock reads it with a Touch
+//! ID of its own.
 
 use std::fmt;
 use std::sync::Mutex;
@@ -207,6 +213,12 @@ pub trait DeviceKeyStore: Send + Sync {
     fn store(&self, pkcs8: &[u8]) -> Result<(), DeviceKeyError>;
     /// Delete the key. True when there was one.
     fn delete(&self) -> Result<bool, DeviceKeyError>;
+    /// The Keychain account of the key when this store is the Keychain of the Mac: the
+    /// Touch ID unlock then reads the key with the vault's unlock key, under one Touch ID
+    /// (`NativeHelper::keychain_read_with_also`). `None` for every other store.
+    fn keychain_account(&self) -> Option<&'static str> {
+        None
+    }
 }
 
 /// The Keychain through the signed helper of the app.
@@ -264,6 +276,10 @@ impl DeviceKeyStore for KeychainDeviceKeyStore {
         self.helper
             .keychain_delete(KEYCHAIN_ACCOUNT)
             .map_err(|error| keychain_error(&error))
+    }
+
+    fn keychain_account(&self) -> Option<&'static str> {
+        Some(KEYCHAIN_ACCOUNT)
     }
 }
 

@@ -1629,7 +1629,7 @@ impl OwnerRequest {
                 this_device: true,
                 ..
             } => format!(
-                concat!("Forget this Mac (\"{}\") in your Apassy Connect account? It leaves every vault store of the account and signs out. Your vaults stay on this ", crate::computer!(), "."),
+                concat!("Forget this ", crate::computer!(), " (\"{}\") in your Apassy Connect account? It leaves every vault store of the account and signs out. Your vaults stay on this ", crate::computer!(), "."),
                 page_text(device_name)
             ),
             Self::RevokeConnectDevice { device_name, .. } => format!(
@@ -3280,8 +3280,17 @@ impl DesktopApp {
             return;
         };
         self.owner.unlock.check_generation = Some(self.owner_ui.session.owner_window.generation());
+        // The Apassy Connect key of this Mac comes with the same Touch ID: the account
+        // session opens with this unlock and asks for nothing more (plan s7 unit M5b).
+        let connect = self.connect_session();
+        let also = self.connect_key_with_unlock();
+        connect.drop_offered();
         self.owner.unlock.unlocking = Some(Task::spawn(Some(ctx.clone()), move || {
-            unlock::read_unlock_key(&helper, &path)
+            let (key, account_key) = unlock::read_unlock_key_with(&helper, &path, also)?;
+            if let Some(account_key) = account_key {
+                connect.offer_key(account_key);
+            }
+            Ok(key)
         }));
     }
 
@@ -3403,11 +3412,13 @@ impl DesktopApp {
         if !self.owner_ui.session.is_locked() {
             self.owner.unlock.check_generation = None;
             drop(result); // Zeroizing erases a late key; errors are stale too.
+            self.connect_session().drop_offered();
             return;
         }
         let key = match result {
             Ok(key) => key,
             Err(err) => {
+                self.connect_session().drop_offered();
                 self.owner_ui.session.owner_window.invalidate();
                 if matches!(
                     err,
@@ -3422,6 +3433,7 @@ impl DesktopApp {
             }
         };
         let Some(generation) = self.owner.unlock.check_generation.take() else {
+            self.connect_session().drop_offered();
             self.owner_ui.session.owner_window.invalidate();
             self.set_err("The unlock check ended. Confirm again.");
             return;
@@ -3432,6 +3444,11 @@ impl DesktopApp {
             crate::broker::approvals::CheckMethod::TouchId,
         );
         drop(key);
+        // The account session opens with the key of the same Touch ID, or never.
+        if result.is_ok() {
+            self.connect_after_unlock();
+        }
+        self.connect_session().drop_offered();
         // Sync before the owner sees the list (ADR 0020).
         let loaded = if result.is_ok() {
             self.sync_after_unlock()
@@ -3494,6 +3511,8 @@ impl DesktopApp {
         self.forget_remote_feeds();
         // A Connect proof of this session is worthless after the lock.
         self.owner.connect_proof = None;
+        // The Connect account session closes with the vault: its key and token go.
+        self.connect_lock();
         self.erase_typed_secrets(ctx);
     }
 
@@ -3541,6 +3560,7 @@ impl DesktopApp {
             .session
             .lock_ending_runs(approvals.as_deref(), ENDED_BY_QUIT);
         self.stop_companion();
+        self.connect_lock();
         self.erase_typed_secrets(None);
         if let Some(mut center) = self.owner.notifications.take() {
             center.stop();

@@ -19,6 +19,11 @@
 //!   (`connect/account.json` in the data directory) holds ids, names, the origin, the
 //!   public key, and the trust store: no private key, no token, no email, no code.
 //! - [`entitlement`]: the check of an entitlement token (section 10).
+//! - [`session`]: the one account session of the app (plan s7 unit M5b): opened with the
+//!   vault unlock, closed at a lock and a quit; Settings › Connect, the sync of the vault
+//!   stores, and the node's tunnel share its account, key, and token.
+//! - [`key_file`]: where the key is kept on each platform: the Keychain on the Mac, a
+//!   private file of the user on Linux (and, opt-in, the Secret Service).
 //!
 //! **No account sign-in adds a device** (section 1): a new device joins only through
 //! [`account::JoinRequest`], which ends only when a live device confirms it with the
@@ -28,6 +33,8 @@ pub mod account;
 pub mod client;
 pub mod device_key;
 pub mod entitlement;
+pub mod key_file;
+pub mod session;
 pub mod trust;
 pub mod words;
 
@@ -49,6 +56,8 @@ pub use device_key::{
     SIGNING_TAGS,
 };
 pub use entitlement::{Entitlement, EntitlementClaims, EntitlementError, EntitlementKey, Feature};
+pub use key_file::{FileKeyStore, KEYRING_WARNING, key_file, platform_store};
+pub use session::{AccountSession, AccountSlot, Follow, OpenTicket, SessionState};
 pub use trust::ChainEntry;
 pub use words::{
     LinkCode, RecoveryCode, RecoveryKey, link_fingerprint, link_hash, safety_words,
@@ -166,7 +175,11 @@ impl fmt::Display for ConnectError {
             Self::Broken => {
                 "The connection to Apassy Connect broke. The step may have happened; check before you try again."
             }
-            Self::Unauthenticated => "Apassy Connect did not accept this Mac's sign-in.",
+            Self::Unauthenticated => concat!(
+                "Apassy Connect did not accept this ",
+                crate::computer!(),
+                "'s sign-in."
+            ),
             Self::Revoked => {
                 "Apassy Connect says this device was removed from its account. To use the account here again, forget it on this device, then add the device from another device of the account."
             }
@@ -198,18 +211,30 @@ impl fmt::Display for ConnectError {
                 "Apassy Connect answered for another address. Apassy did not sign in."
             }
             Self::BadAnswer => "Apassy Connect gave an answer that Apassy does not accept.",
-            Self::TagRefused => "The account key of this Mac does not sign this.",
-            Self::NoDeviceKey => "This Mac has no Apassy Connect key.",
+            Self::TagRefused => concat!(
+                "The account key of this ",
+                crate::computer!(),
+                " does not sign this."
+            ),
+            Self::NoDeviceKey => concat!(
+                "This ",
+                crate::computer_cap!(),
+                " has no Apassy Connect key."
+            ),
             Self::SignedOut => {
-                "Apassy Connect is signed out on this Mac. Unlock Apassy and try again."
+                concat!(
+                    "Apassy Connect is signed out on this ",
+                    crate::computer!(),
+                    ". Unlock Apassy and try again."
+                )
             }
             Self::KeyLost => {
-                "This Mac's Apassy Connect key is gone (the Touch ID fingerprints changed). Add this Mac again from another device, or recover the account."
+                crate::connect_key_lost!()
             }
             Self::KeychainUnavailable => {
-                "The Keychain is not available to this build. Apassy Connect works only in Apassy.app."
+                crate::connect_key_unavailable!()
             }
-            Self::Cancelled => "Touch ID was cancelled. Nothing changed.",
+            Self::Cancelled => crate::connect_key_cancelled!(),
             Self::OwnerCheck(refusal) => refusal.message(),
             Self::WordsMismatch => "The safety words do not match. Nothing was confirmed.",
             Self::LinkMismatch => {
@@ -218,10 +243,22 @@ impl fmt::Display for ConnectError {
             Self::NotVerified => {
                 "Apassy could not verify that device as a device of your account. Nothing was changed."
             }
-            Self::AccountExists => "This Mac already has an Apassy Connect account.",
-            Self::NoAccount => "This Mac has no Apassy Connect account.",
+            Self::AccountExists => concat!(
+                "This ",
+                crate::computer_cap!(),
+                " already has an Apassy Connect account."
+            ),
+            Self::NoAccount => concat!(
+                "This ",
+                crate::computer_cap!(),
+                " has no Apassy Connect account."
+            ),
             Self::Invalid => "That value is not valid.",
-            Self::Local => "Apassy could not complete this step on this Mac.",
+            Self::Local => concat!(
+                "Apassy could not complete this step on this ",
+                crate::computer!(),
+                "."
+            ),
         };
         f.write_str(text)
     }

@@ -369,8 +369,11 @@ impl DesktopApp {
         let _ = options;
         #[cfg(feature = "vault")]
         {
+            // The one Apassy Connect account session: it opens with each unlock (plan s7
+            // unit M5b); Settings › Connect, the sync, and the node's tunnel share it.
+            app.connect_use_platform(&crate::paths::data_dir());
             // The node starts later, for an unlocked vault with cloud agents.
-            app.node = node::NodeFlows::platform(options.node);
+            app.node = node::NodeFlows::platform(options.node, app.connect_session());
             // `bouncer.json`: the broker uses its address, and in "With Apassy" the
             // model server starts now.
             app.model_server = Some(crate::broker::model_server::ModelServer::start_default());
@@ -604,6 +607,9 @@ impl eframe::App for DesktopApp {
             self.poll_platform(ctx);
             ui::poll_notifications(self);
             self.poll_update_restart(ctx);
+            // The Connect account session follows the vault here too, before the node,
+            // so that the tunnel finds it open.
+            self.poll_connect(ctx);
             // Here and not in `ui`: the node follows the vault also while the window is
             // minimized, and a close of the window keeps the app open while it runs.
             self.sync_node(ctx);

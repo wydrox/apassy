@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, OutputCommand};
 use serde_json::Value;
 use tempfile::TempDir;
+use zeroize::Zeroizing;
 
 use super::connect::live::{self, Guarded};
 use super::connect::{
@@ -25,14 +26,16 @@ use super::connect::{
 };
 use super::owner_tests::{PASS, collect, confirm_with, input, unlocked_app_with_item};
 use crate::connect::{
-    ConnectAccount, ConnectClient, JoinPoll, JoinRequest, MemoryKeyStore, PlansView,
+    ConnectAccount, ConnectClient, ConnectError, DeviceKeyStore, JoinPoll, JoinRequest,
+    MemoryKeyStore, PlansView, SessionState,
 };
 use crate::desktop::DesktopApp;
+use crate::node::tunnel::{AccountAuth, Failure, TunnelAuth};
 
 /// The fake Connect reads the app's sync module under this name.
 use crate::sync as relay_api;
 #[path = "../../../tests/common/fake_connect.rs"]
-mod fake_connect;
+pub(super) mod fake_connect;
 
 use fake_connect::FakeConnect;
 
@@ -56,13 +59,21 @@ fn fixture_plans() -> Plans {
 
 /// An unlocked app whose Connect section uses `connect`, a key store in memory, and a
 /// temporary data directory, with short polls.
-fn connect_app(dir: &TempDir, connect: &FakeConnect) -> DesktopApp {
+pub(super) fn connect_app(dir: &TempDir, connect: &FakeConnect) -> DesktopApp {
+    connect_app_with(dir, connect, Arc::new(MemoryKeyStore::new()))
+}
+
+/// [`connect_app`] with the key store `store` (a counting fake).
+fn connect_app_with(
+    dir: &TempDir,
+    connect: &FakeConnect,
+    store: Arc<dyn DeviceKeyStore>,
+) -> DesktopApp {
     let (mut app, _) = unlocked_app_with_item(dir);
     let data = dir.path().join("data");
     std::fs::create_dir_all(&data).expect("data dir");
+    app.connect_configure(Some(store), Some(data));
     let live = &mut app.ui.connect.live;
-    live.store = Some(Arc::new(MemoryKeyStore::new()));
-    live.dir = Some(data);
     live.origin = Some(connect.url.clone());
     live.poll_every = Some(Duration::from_millis(40));
     live.join_poll_every = Some(Duration::from_millis(40));
@@ -88,7 +99,7 @@ fn pass(
 }
 
 /// Run the steps of the section until `done` holds; the output commands on the way.
-fn until(
+pub(super) fn until(
     ctx: &egui::Context,
     app: &mut DesktopApp,
     what: &str,
@@ -151,7 +162,7 @@ fn opened_urls(commands: &[OutputCommand]) -> Vec<String> {
 
 /// Create the account of this Mac through the sheet, save the recovery code, and wait
 /// for the first refresh.
-fn create_account(ctx: &egui::Context, app: &mut DesktopApp, name: &str) -> String {
+pub(super) fn create_account(ctx: &egui::Context, app: &mut DesktopApp, name: &str) -> String {
     act(ctx, app, Action::Create);
     if let Some(Sheet::Create { name: typed, .. }) = &mut app.ui.connect.sheet {
         typed.push_str(name);
@@ -668,11 +679,8 @@ fn add_a_device_with_the_words_and_forget_this_mac() {
 
 /// Whether the key store of the section holds a key.
 fn has_key(app: &DesktopApp) -> bool {
-    app.ui
-        .connect
-        .live
-        .store
-        .as_ref()
+    app.connect_session()
+        .store()
         .is_some_and(|store| matches!(store.read(), Ok(Some(_))))
 }
 
@@ -1153,4 +1161,428 @@ fn the_texts_follow_plans_section_5() {
             "no amount per month in a text: {text}"
         );
     }
+}
+
+// ---- One account session for the app (plan s7 unit M5b). ----
+
+/// A key store whose every read the owner cancels (Touch ID cancelled on the Mac).
+pub(super) struct CancelledStore;
+
+impl DeviceKeyStore for CancelledStore {
+    fn read(&self) -> Result<Option<Zeroizing<Vec<u8>>>, crate::connect::DeviceKeyError> {
+        Err(crate::connect::DeviceKeyError::Cancelled)
+    }
+    fn store(&self, _pkcs8: &[u8]) -> Result<(), crate::connect::DeviceKeyError> {
+        Err(crate::connect::DeviceKeyError::Cancelled)
+    }
+    fn delete(&self) -> Result<bool, crate::connect::DeviceKeyError> {
+        Ok(false)
+    }
+}
+
+/// A cancelled read at the unlock is the signed-out state, the vault stays open, and
+/// "Sign In…" reads again.
+#[test]
+fn a_cancelled_read_at_the_unlock_is_signed_out_and_the_vault_stays_open() {
+    let dir = TempDir::new().expect("temp dir");
+    let connect = FakeConnect::start();
+    let mut app = connect_app(&dir, &connect);
+    let ctx = egui::Context::default();
+    create_account(&ctx, &mut app, "Rafal");
+    app.connect_configure(
+        Some(Arc::new(CancelledStore)),
+        Some(dir.path().join("data")),
+    );
+    until(&ctx, &mut app, "the signed-out state", |app| {
+        matches!(app.connect_session().state(), SessionState::SignedOut(_))
+    });
+    assert!(matches!(live::view(&app).shown, Shown::SignedOut { .. }));
+    assert!(!app.owner_ui.session.is_locked());
+    assert_eq!(
+        app.connect_session().state(),
+        SessionState::SignedOut(ConnectError::Cancelled)
+    );
+    let painted = text(&ctx, &mut app);
+    assert!(
+        painted.contains(super::connect::SIGNED_OUT_NOTE),
+        "{painted}"
+    );
+    assert!(painted.contains(super::connect::SIGN_IN), "{painted}");
+}
+
+/// Unlock the vault of `app` with the passphrase, as the unlock screen does, and run the
+/// frames until the read of the key ended.
+fn unlock(ctx: &egui::Context, app: &mut DesktopApp) {
+    app.owner_ui
+        .session
+        .unlock(super::owner_tests::PASS)
+        .expect("unlock");
+    pass(ctx, app, live::step);
+    until(ctx, app, "the read of the key", |app| {
+        app.connect_session().state() != SessionState::Opening
+    });
+}
+
+/// The session opens with the unlock with one read of the key store, and Settings, the
+/// sync, and the tunnel use it without another read; a lock, the sleep that locks the
+/// vault, and a quit close it; the next unlock reads once more.
+#[test]
+fn one_session_for_each_unlock_shared_by_settings_the_sync_and_the_tunnel() {
+    let dir = TempDir::new().expect("temp dir");
+    let connect = FakeConnect::start();
+    let store = Arc::new(MemoryKeyStore::new());
+    let mut app = connect_app_with(&dir, &connect, store.clone());
+    let ctx = egui::Context::default();
+    let account_id = create_account(&ctx, &mut app, "Rafal");
+    connect.entitle(&account_id);
+
+    // Lock, then unlock: one read of the store opens the session for all three.
+    app.lock_vault(Some(&ctx));
+    let session = app.connect_session();
+    assert_eq!(session.state(), SessionState::Closed);
+    assert!(session.signer().is_none());
+    assert!(app.ui.connect.live.sync_account().is_none());
+    let before = store.reads();
+    unlock(&ctx, &mut app);
+    until(&ctx, &mut app, "the account", |app| shown(app).is_some());
+    assert_eq!(store.reads(), before + 1, "one read for the unlock");
+
+    // The sync gets the key of the session, and the tunnel signs in with it.
+    let sync = app
+        .ui
+        .connect
+        .live
+        .sync_account()
+        .expect("the sync account");
+    let signer = sync.signer.expect("the key goes to the sync");
+    assert!(Arc::ptr_eq(&signer, &session.signer().expect("open")));
+    assert!(Arc::ptr_eq(&sync.account, &session.slot()));
+    let tunnel = AccountAuth::new(app.connect_session());
+    assert!(tunnel.has_account());
+    assert_eq!(tunnel.origin(), connect.url);
+    let mut seen = None;
+    tunnel
+        .with_token(&mut |token| {
+            seen = Some(token.to_owned());
+            Ok(())
+        })
+        .expect("the tunnel signs in");
+    assert!(seen.is_some_and(|token| token.starts_with("apassy_act_")));
+    tunnel.entitled().expect("the tunnel is entitled");
+    // Settings asks again: still no read.
+    act(&ctx, &mut app, Action::SignIn);
+    settle(&ctx, &mut app);
+    tunnel.sign_out();
+    assert!(session.is_open(), "the tunnel never closes the session");
+    assert_eq!(store.reads(), before + 1, "no part reads the store again");
+
+    // A lock closes it for every part.
+    app.lock_vault(Some(&ctx));
+    assert_eq!(session.state(), SessionState::Closed);
+    assert!(session.signer().is_none());
+    assert!(session.slot().lock().unwrap().is_none());
+    assert!(matches!(
+        tunnel.with_token(&mut |_| Ok(())),
+        Err(Failure::Offline(_))
+    ));
+    assert!(matches!(live::view(&app).shown, Shown::SignedOut { .. }));
+
+    // The sleep that locks the vault ("When the screen locks or the computer sleeps").
+    unlock(&ctx, &mut app);
+    assert!(session.is_open());
+    assert_eq!(store.reads(), before + 2);
+    app.auto_lock.policy = crate::desktop::auto_lock::LockPolicy::Session;
+    app.auto_lock.source.record(Some(0.0), true);
+    pass(&ctx, &mut app, |app, ctx| app.poll_auto_lock(ctx));
+    assert!(
+        app.owner_ui.session.is_locked(),
+        "the sleep locked the vault"
+    );
+    assert_eq!(session.state(), SessionState::Closed);
+    assert!(session.signer().is_none());
+
+    // A lock that no `lock_vault` saw: the next frame closes the session.
+    app.auto_lock.policy = crate::desktop::auto_lock::LockPolicy::Never;
+    unlock(&ctx, &mut app);
+    assert!(session.is_open());
+    app.owner_ui.session.lock().expect("lock");
+    pass(&ctx, &mut app, live::step);
+    assert_eq!(session.state(), SessionState::Closed);
+
+    // The quit.
+    unlock(&ctx, &mut app);
+    assert!(session.is_open());
+    app.shut_down();
+    assert_eq!(session.state(), SessionState::Closed);
+    assert!(session.signer().is_none());
+    assert_eq!(
+        store.reads(),
+        before + 4,
+        "one read for each of the four unlocks"
+    );
+}
+
+/// When Connect says this device was removed, the part that meets it (here the tunnel)
+/// makes it the state of all three: Settings shows it with no call of its own, the sync
+/// gets no key, and the tunnel and Settings get the removal. Nothing is deleted.
+#[test]
+fn a_removal_that_the_tunnel_meets_reaches_settings_and_the_sync() {
+    let dir = TempDir::new().expect("temp dir");
+    let connect = FakeConnect::start();
+    let mut app = connect_app(&dir, &connect);
+    let ctx = egui::Context::default();
+    create_account(&ctx, &mut app, "Rafal");
+    let this = shown(&app).expect("account").devices[0].clone();
+    let session = app.connect_session();
+    let tunnel = AccountAuth::new(app.connect_session());
+    // A fresh sign-in is needed for Connect to say it.
+    app.lock_vault(Some(&ctx));
+    unlock(&ctx, &mut app);
+    until(&ctx, &mut app, "the account", |app| shown(app).is_some());
+    connect.revoke(&this.id);
+    // The cached token of the refresh is refused at the next call, then the sign-in.
+    let result = tunnel.with_token(&mut |_| Err(Failure::Unauthenticated));
+    assert_eq!(result.unwrap_err(), Failure::NoAccount);
+    assert_eq!(
+        session.state(),
+        SessionState::Removed(ConnectError::Revoked)
+    );
+    pass(&ctx, &mut app, live::step);
+    assert!(matches!(live::view(&app).shown, Shown::Removed { .. }));
+    assert!(app.ui.connect.live.sync_account().is_none());
+    assert!(session.signer().is_none());
+    assert_eq!(tunnel.entitled().unwrap_err(), Failure::NoAccount);
+    assert!(has_key(&app), "nothing is deleted");
+    assert!(dir.path().join("data/connect/account.json").exists());
+}
+
+/// A device that this Mac cannot verify is refused by the sync's signer policy of the
+/// shared session, as the section shows it "Not verified".
+#[test]
+fn an_unverified_device_is_refused_by_the_sync_of_the_session() {
+    let dir = TempDir::new().expect("temp dir");
+    let connect = FakeConnect::start();
+    let mut app = connect_app(&dir, &connect);
+    let ctx = egui::Context::default();
+    let account_id = create_account(&ctx, &mut app, "Rafal");
+    let stranger = crate::sync::DeviceKey::generate().expect("key");
+    connect.insert_device(&account_id, "Mac Studio", stranger.public_key());
+    act(&ctx, &mut app, Action::SignIn);
+    until(&ctx, &mut app, "two devices", |app| {
+        shown(app).is_some_and(|account| account.devices.len() == 2)
+    });
+    let sync = app.ui.connect.live.sync_account().expect("sync account");
+    assert!(
+        sync.signers
+            .refused
+            .iter()
+            .any(|key| key == stranger.public_key())
+    );
+    assert!(
+        !sync
+            .signers
+            .accepted
+            .iter()
+            .any(|key| key == stranger.public_key())
+    );
+}
+
+/// A Connect that cannot be reached never blocks the unlock: the vault is open, the
+/// session is open, and the section says "Connect unreachable" and asks again.
+#[test]
+fn an_unreachable_connect_never_blocks_the_unlock() {
+    let dir = TempDir::new().expect("temp dir");
+    let connect = FakeConnect::start();
+    let store = Arc::new(MemoryKeyStore::new());
+    let mut app = connect_app_with(&dir, &connect, store.clone());
+    let ctx = egui::Context::default();
+    create_account(&ctx, &mut app, "Rafal");
+    app.lock_vault(Some(&ctx));
+    // The account file names a Connect that answers nothing now.
+    let file = dir.path().join("data/connect/account.json");
+    let saved = std::fs::read_to_string(&file).expect("account file");
+    let dead = format!("http://127.0.0.1:{}", unused_port());
+    std::fs::write(&file, saved.replace(&connect.url, &dead)).expect("account file");
+    unlock(&ctx, &mut app);
+    assert!(
+        !app.owner_ui.session.is_locked(),
+        "the vault is open at once"
+    );
+    until(&ctx, &mut app, "the unreachable state", |app| {
+        matches!(live::view(app).shown, Shown::Unreachable { .. })
+    });
+    assert!(app.connect_session().is_open());
+    assert_eq!(live::view(&app).status_line(), super::connect::UNREACHABLE);
+    let painted = text(&ctx, &mut app);
+    assert!(painted.contains(super::connect::UNREACHABLE), "{painted}");
+}
+
+/// A port that nothing listens on.
+fn unused_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    listener.local_addr().expect("addr").port()
+}
+
+/// "Sign In…" never reads the key while Apassy is locked.
+#[test]
+fn sign_in_reads_nothing_while_locked() {
+    let dir = TempDir::new().expect("temp dir");
+    let connect = FakeConnect::start();
+    let store = Arc::new(MemoryKeyStore::new());
+    let mut app = connect_app_with(&dir, &connect, store.clone());
+    let ctx = egui::Context::default();
+    create_account(&ctx, &mut app, "Rafal");
+    app.lock_vault(Some(&ctx));
+    let reads = store.reads();
+    act(&ctx, &mut app, Action::SignIn);
+    for _ in 0..5 {
+        pass(&ctx, &mut app, live::step);
+    }
+    assert_eq!(store.reads(), reads);
+    assert!(!app.connect_session().is_open());
+}
+
+/// macOS keeps the Connect texts that it had before the wording macros, byte for byte.
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn mac_connect_texts_are_unchanged() {
+    use super::connect::*;
+    for (text, before) in [
+        (ADD_THIS_MAC, "Add This Mac to an Account…"),
+        (
+            KEY_NOTE,
+            "No password and no email: the key of this Mac, in the Keychain, signs in.",
+        ),
+        (
+            SIGNED_OUT_NOTE,
+            "Touch ID reads the Connect key of this Mac.",
+        ),
+        (
+            CREATE_LEAD,
+            "No password and no email: the key of this Mac, in the Keychain, signs in. You choose a plan later.",
+        ),
+        (
+            RECOVERY_NOTE,
+            "If every device of the account is lost, this code gives the account to a new Mac. The vault copies at Connect are deleted then; your vaults stay on your devices.",
+        ),
+        (
+            ADD_LEAD,
+            "On the new device, choose Add This Mac to an Account (on a Mac) or scan this code (on the iPhone).",
+        ),
+        (FORGET_TITLE, "Forget This Mac?"),
+        (
+            REMOVED_NOTE,
+            "Apassy Connect says this Mac was removed from its account. Its Connect key and its account file stay on this Mac until you forget the account here.",
+        ),
+        (FORGET_THIS_MAC, "Forget This Mac…"),
+        (
+            FORGET_REMOVED_LEAD,
+            "The Connect key and the account file of this Mac are deleted, and the vault copies of the account stop syncing on this Mac. To use the account here again, add this Mac from another device of the account.",
+        ),
+        (
+            FORGET_LEAD,
+            "This Mac leaves your Connect account, and its Connect key is deleted. To use the account here again, add this Mac from another device of the account.",
+        ),
+        (JOIN_ACCOUNT_TITLE, "Add This Mac to an Account"),
+        (JOINED_TITLE, "This Mac Is Added"),
+        (THIS_DEVICE, "This Mac"),
+        (LEFT, "This Mac left the Connect account."),
+        (FORGOT, "This Mac forgot the Connect account."),
+    ] {
+        assert_eq!(text, before);
+    }
+    for (error, before) in [
+        (
+            ConnectError::Unauthenticated,
+            "Apassy Connect did not accept this Mac's sign-in.",
+        ),
+        (
+            ConnectError::TagRefused,
+            "The account key of this Mac does not sign this.",
+        ),
+        (
+            ConnectError::NoDeviceKey,
+            "This Mac has no Apassy Connect key.",
+        ),
+        (
+            ConnectError::SignedOut,
+            "Apassy Connect is signed out on this Mac. Unlock Apassy and try again.",
+        ),
+        (
+            ConnectError::KeyLost,
+            "This Mac's Apassy Connect key is gone (the Touch ID fingerprints changed). Add this Mac again from another device, or recover the account.",
+        ),
+        (
+            ConnectError::KeychainUnavailable,
+            "The Keychain is not available to this build. Apassy Connect works only in Apassy.app.",
+        ),
+        (
+            ConnectError::Cancelled,
+            "Touch ID was cancelled. Nothing changed.",
+        ),
+        (
+            ConnectError::AccountExists,
+            "This Mac already has an Apassy Connect account.",
+        ),
+        (
+            ConnectError::NoAccount,
+            "This Mac has no Apassy Connect account.",
+        ),
+        (
+            ConnectError::Local,
+            "Apassy could not complete this step on this Mac.",
+        ),
+    ] {
+        assert_eq!(error.to_string(), before);
+    }
+    assert_eq!(
+        Failure::NoAccount.to_string(),
+        "this Mac has no Apassy Connect account"
+    );
+    assert_eq!(
+        Failure::NodeUnknown.to_string(),
+        "Apassy Connect does not know this Mac's node"
+    );
+}
+
+/// Linux names no Mac-only thing in the Connect texts and errors.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_connect_texts_name_nothing_of_the_mac() {
+    let errors: Vec<String> = [
+        ConnectError::Unauthenticated,
+        ConnectError::TagRefused,
+        ConnectError::NoDeviceKey,
+        ConnectError::SignedOut,
+        ConnectError::KeyLost,
+        ConnectError::KeychainUnavailable,
+        ConnectError::Cancelled,
+        ConnectError::AccountExists,
+        ConnectError::NoAccount,
+        ConnectError::Local,
+        ConnectError::Revoked,
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .chain([
+        Failure::NoAccount.to_string(),
+        Failure::NodeUnknown.to_string(),
+    ])
+    .collect();
+    for text in TEXTS
+        .iter()
+        .copied()
+        .chain(errors.iter().map(String::as_str))
+    {
+        for word in ["Touch ID", "Keychain", "keychain", "Apassy.app", "macOS"] {
+            assert!(!text.contains(word), "{text}");
+        }
+        assert!(
+            !text
+                .split(|c: char| !c.is_alphanumeric())
+                .any(|word| word == "Mac"),
+            "{text}"
+        );
+    }
+    assert!(super::connect::KEY_NOTE.contains("in a private file of your user"));
 }

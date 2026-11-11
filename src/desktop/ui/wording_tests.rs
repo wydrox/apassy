@@ -1,5 +1,6 @@
 //! The words of the window by platform (ADR 0041, unit L7). On Linux, every main view
-//! and every Settings section, rendered with the fixture vault, names nothing that
+//! and every Settings section, rendered with the fixture vault (Settings > Connect also
+//! in each state and sheet of its account flows, against a fake Connect), names nothing that
 //! exists only on a Mac: no Touch ID, Keychain, Finder, Dock, iCloud, Apassy.app,
 //! System Settings, macOS, no ⌘ ⌥ ⌃ shortcut signs, and no "Mac" for this computer.
 //! On macOS the same views keep their Mac words: [`mac_views_keep_their_mac_words`]
@@ -148,12 +149,6 @@ fn screens() -> Vec<Screen> {
     app.ui.sheet = None;
     app.selected_item_id = None;
     for section in SettingsSection::ALL {
-        // Apassy Connect keeps its account key in the Mac's Keychain and has no Linux
-        // key store yet (plan s7, the Linux part of unit M1); its texts say so. The
-        // guard takes the section when the Linux store and its wording land.
-        if section == SettingsSection::Connect {
-            continue;
-        }
         super::open_settings(&mut app, section);
         screens.push(render(
             &format!("Settings > {}", section.label()),
@@ -161,7 +156,157 @@ fn screens() -> Vec<Screen> {
             show_all_rows,
         ));
     }
+    connect_screens(&mut screens);
     screens
+}
+
+/// Settings > Connect in each state and with each sheet of its account flows (plan s7
+/// unit M5b): no account, the creation and the join sheets, an account with its device
+/// list, the device link and the safety words, the forget and delete sheets, a device
+/// that Connect removed, and a Connect that cannot be reached. Connect is the in-process
+/// fake of `tests/common/fake_connect.rs`; every value is synthetic.
+fn connect_screens(screens: &mut Vec<Screen>) {
+    use super::connect::Sheet as ConnectSheet;
+    use super::connect_tests::fake_connect::FakeConnect;
+    use super::connect_tests::{connect_app, create_account, until};
+    use zeroize::Zeroizing;
+
+    let dir = TempDir::new().expect("temp dir");
+    let connect = FakeConnect::start();
+    let mut app = connect_app(&dir, &connect);
+    let ctx = egui::Context::default();
+    fn sheet(screens: &mut Vec<Screen>, app: &mut DesktopApp, name: &str, sheet: ConnectSheet) {
+        app.ui.connect.sheet = Some(sheet);
+        screens.push(render(&format!("Settings > Connect, {name}"), app, |_| {}));
+        app.ui.connect.sheet = None;
+    }
+    let device_name = crate::sync::device_name();
+    sheet(
+        screens,
+        &mut app,
+        "create",
+        ConnectSheet::Create {
+            name: "Synthetic".to_owned(),
+            device_name: device_name.clone(),
+        },
+    );
+    sheet(
+        screens,
+        &mut app,
+        "join an account",
+        ConnectSheet::JoinAccount {
+            code: Zeroizing::new(String::new()),
+        },
+    );
+    sheet(
+        screens,
+        &mut app,
+        "join waiting",
+        ConnectSheet::JoinWaiting {
+            confirmer: "Synthetic Phone".to_owned(),
+            words: "blaze cable flute board seal tiger".to_owned(),
+        },
+    );
+    sheet(screens, &mut app, "joined", ConnectSheet::Joined);
+    sheet(
+        screens,
+        &mut app,
+        "recovery code",
+        ConnectSheet::Recovery {
+            words: Zeroizing::new("blaze cable flute board seal tiger maple orbit".to_owned()),
+        },
+    );
+    create_account(&ctx, &mut app, "Synthetic");
+    screens.push(render("Settings > Connect, account", &mut app, |_| {}));
+    for (name, value) in [
+        (
+            "add a device",
+            ConnectSheet::AddDevice {
+                code: Zeroizing::new("apassy_lnk_synthetic".to_owned()),
+                expires_at: crate::desktop::companion::now() + 600,
+            },
+        ),
+        (
+            "safety words",
+            ConnectSheet::Words {
+                join_id: 1,
+                device_name: "Synthetic Phone".to_owned(),
+                platform: "iphone".to_owned(),
+                words: "blaze cable flute board seal tiger".to_owned(),
+            },
+        ),
+        (
+            "forget this device",
+            ConnectSheet::Revoke {
+                index: 0,
+                name: device_name.clone(),
+                this: true,
+            },
+        ),
+        ("forget after a removal", ConnectSheet::ForgetRemoved),
+        ("delete", ConnectSheet::Delete),
+        (
+            "request sent",
+            ConnectSheet::JoinSent {
+                owner_name: "Synthetic".to_owned(),
+            },
+        ),
+    ] {
+        sheet(screens, &mut app, name, value);
+    }
+    // Connect removed this device: the removed state names this computer.
+    let this = match super::connect::live::view(&app).shown {
+        super::connect::Shown::Account(account) => account.devices[0].id.clone(),
+        other => panic!("no account: {other:?}"),
+    };
+    connect.revoke(&this);
+    super::connect::live::act(&mut app, &ctx, super::connect::Action::SignIn);
+    until(&ctx, &mut app, "the removed state", |app| {
+        matches!(
+            super::connect::live::view(app).shown,
+            super::connect::Shown::Removed { .. }
+        )
+    });
+    screens.push(render("Settings > Connect, removed", &mut app, |_| {}));
+
+    // A Connect that cannot be reached, and the signed-out state after a lock.
+    let dir = TempDir::new().expect("temp dir");
+    let mut app = connect_app(&dir, &connect);
+    create_account(&ctx, &mut app, "Synthetic");
+    app.lock_vault(None);
+    let file = dir.path().join("data/connect/account.json");
+    let text = std::fs::read_to_string(&file).expect("account file");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let dead = format!(
+        "http://127.0.0.1:{}",
+        listener.local_addr().expect("addr").port()
+    );
+    drop(listener);
+    std::fs::write(&file, text.replace(&connect.url, &dead)).expect("account file");
+    app.owner_ui
+        .session
+        .unlock(super::owner_tests::PASS)
+        .expect("unlock");
+    until(&ctx, &mut app, "the unreachable state", |app| {
+        matches!(
+            super::connect::live::view(app).shown,
+            super::connect::Shown::Unreachable { .. }
+        )
+    });
+    super::open_settings(&mut app, SettingsSection::Connect);
+    screens.push(render("Settings > Connect, unreachable", &mut app, |_| {}));
+    // Signed out: the read of the key did not work for this unlock.
+    app.connect_configure(
+        Some(std::sync::Arc::new(super::connect_tests::CancelledStore)),
+        Some(dir.path().join("data")),
+    );
+    until(&ctx, &mut app, "the signed-out state", |app| {
+        matches!(
+            app.connect_session().state(),
+            crate::connect::SessionState::SignedOut(_)
+        )
+    });
+    screens.push(render("Settings > Connect, signed out", &mut app, |_| {}));
 }
 
 /// The words of `text` that name a Mac-only thing, and each "Mac" that is not in the
@@ -247,6 +392,12 @@ fn linux_screens_use_the_linux_words() {
         "Tab, Shift+Tab",
         "Quit Apassy",
         "Apassy does not update itself on Linux",
+        "Add This Computer to an Account…",
+        "No password and no email: the key of this computer, in a private file of your user, signs in.",
+        "Forget This Computer?",
+        "This Computer",
+        "Connect unreachable",
+        "Apassy reads the Connect key of this computer from its private file.",
     ] {
         assert!(all.contains(expected), "no screen shows {expected:?}");
     }
@@ -279,6 +430,10 @@ fn mac_views_keep_their_mac_words() {
         "Tab, ⇧Tab",
         "⌘H stays the macOS shortcut for \"Hide Apassy\", so showing values uses ⌘⇧H.",
         "This Mac",
+        "Add This Mac to an Account…",
+        "No password and no email: the key of this Mac, in the Keychain, signs in.",
+        "Forget This Mac?",
+        "Touch ID reads the Connect key of this Mac.",
     ] {
         assert!(all.contains(expected), "no screen shows {expected:?}");
     }

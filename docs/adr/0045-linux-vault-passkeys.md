@@ -152,6 +152,42 @@ change that file; that is outside the Linux boundary above. A damaged, foreign o
 too open file gives "Every time" and "Never" in the desktop, and the default
 inactivity time with the session rule in `owner serve`.
 
+### The Apassy Connect key on Linux (plan s7 unit M5b, 2026-11-11)
+
+A Linux computer that is a device of an Apassy Connect account keeps its account device
+key (one P-256 key for each device, connect-account-v1 section 5) in a private file of
+the user: `connect/device-key` in the data directory, next to the account file, mode
+0600 in a 0700 folder, owned by this user, never a symlink (neither the file nor the
+`connect` folder), written atomically through a new private file and a rename. It is
+outside every vault and is not synced. A link, a file or folder of another user, a file
+that others can read, and a damaged file are never used: the key counts as lost, Settings
+› Connect shows the removed state, and only the owner's "Forget This Computer…" deletes
+it. The Secret Service is an alternative store only after an explicit opt-in that warns
+that other same-user clients can read an unlocked keyring item, as for the vault
+passphrase; nothing offers it yet.
+
+This is the Linux boundary above, stated plainly: **another program of the same user can
+read the key file.** With the key such a program can do at Connect what this computer
+can do there, because the owner checks of Apassy run in the app, not at Connect: sign in
+as this computer; see the account, its plan, its devices and its family or team; make a
+device link and confirm a device of its own, which the other devices then accept as a
+device of the account; add devices to the account's vault stores and read or replace
+their encrypted copies; revoke devices; start a checkout or open the billing portal;
+delete the account. It gains **no vault content**: every copy is SQLCipher ciphertext
+under the vault's passphrase, which the key does not open, and no account call returns a
+value. Revoking this computer from another device of the account ends what the key can
+do at Connect; a device that such a program added is revoked the same way.
+
+The vault unlock opens the one account session of the app: the key is read from the
+file once at each unlock (no prompt) and leaves memory at a lock, a quit, and when the
+auto-lock rule locks the vault at a screen lock or sleep. While Apassy is locked the key
+is not in Apassy's memory; the file stays readable to the user's programs, as above. The
+owner check of every Connect action (confirming or revoking a device, deleting the
+account, changing the family or team) is the passphrase or system authentication.
+`apassy owner serve` opens no account session and reads no Connect key: it says so at
+its start when the computer has a Connect account, and the sync through Connect runs in
+the window.
+
 ## Delivery and verification
 
 Ship desktop and headless owner commands, browser host, Chrome/Chromium manifests,

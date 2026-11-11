@@ -200,12 +200,34 @@ pub fn serve<P: PeerCheck>(
         },
         options.idle.as_secs().div_ceil(60)
     ));
+    if connect_account_here(&options.data_dir) {
+        host.console.show(CONNECT_NOT_HERE);
+    }
     let ended = host.run();
     host.end(&ended);
     Ok(ended)
 }
 
 const ENDED_HERE: &str = "The vault was locked in apassy owner serve.";
+
+/// What of Apassy Connect works in `apassy owner serve` (plan s7 unit M5b): nothing.
+/// The service opens no account session and never reads the Connect key; the sync of a
+/// vault store, the account, and the tunnel run in the Apassy window, where the unlock
+/// opens the one account session. The service says so once at its start when this
+/// computer has a Connect account.
+pub const CONNECT_NOT_HERE: &str = concat!(
+    "Apassy Connect is not available in apassy owner serve: this vault does not sync through Connect here, and the Connect key of this ",
+    crate::computer!(),
+    " is not read. Changes made here sync through Connect the next time the Apassy window runs with the vault unlocked."
+);
+
+/// This computer has a Connect account file in `data_dir` (no key is read).
+fn connect_account_here(data_dir: &std::path::Path) -> bool {
+    crate::connect::AccountState::load(&crate::connect::account_file(data_dir))
+        .ok()
+        .flatten()
+        .is_some()
+}
 
 fn socket_error(name: &str, path: &std::path::Path, err: &std::io::Error) -> String {
     if matches!(
@@ -858,4 +880,43 @@ fn access_facts(request: &AccessRequest) -> Vec<(&'static str, String)> {
             "asks you here for each run (mode ask); deny gives nothing".to_owned(),
         ),
     ]
+}
+
+#[cfg(test)]
+mod connect_note_tests {
+    use super::*;
+    use crate::connect::{AccountState, account_file};
+    use crate::sync::{DeviceKey, encode_b64u};
+
+    /// The service names Apassy Connect only when this computer has an account file, and
+    /// it reads no key for it.
+    #[test]
+    fn owner_serve_names_connect_only_with_an_account() {
+        let dir = tempfile::tempdir().expect("dir");
+        assert!(!connect_account_here(dir.path()));
+        let key = DeviceKey::generate().expect("key");
+        let public_key = encode_b64u(key.public_key());
+        let state = AccountState {
+            v: 2,
+            origin: "https://connect.example.test".to_owned(),
+            account_id: "acc_k7m2q4x3ca".to_owned(),
+            device_id: "dev_k7m2q4x3ca".to_owned(),
+            name: None,
+            device_name: "Synthetic".to_owned(),
+            public_key: public_key.clone(),
+            created_at: 1_790_000_000,
+            root: public_key.clone(),
+            known: vec![public_key],
+            revoked: Vec::new(),
+        };
+        let path = account_file(dir.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(connect_account_here(dir.path()));
+        assert!(!CONNECT_NOT_HERE.contains("Touch ID"));
+        #[cfg(target_os = "linux")]
+        assert!(!CONNECT_NOT_HERE.contains("Mac"));
+    }
 }

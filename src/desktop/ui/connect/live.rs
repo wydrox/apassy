@@ -1,25 +1,33 @@
-//! The vault build of Settings > Connect: the account of this Mac (`crate::connect`) on
-//! worker threads, the polling of the checkout and of the device links, and the owner
+//! The vault build of Settings > Connect: the account of this device (`crate::connect`)
+//! on worker threads, the polling of the checkout and of the device links, and the owner
 //! checks.
 //!
+//! - **One account session for the app** ([`AccountSession`], plan s7 unit M5b): the
+//!   section, the sync of the vault stores ([`Live::sync_account`] and the sync worker),
+//!   and the node's tunnel (`crate::node::tunnel::AccountAuth`) use the same account,
+//!   key, and token. [`step`] runs at every frame of the app (also while Settings is not
+//!   shown): it lets the session follow the vault session, so the session opens with the
+//!   unlock (one read of the key store, on a worker; none after a Touch ID unlock, which
+//!   read the key with the vault's own key) and closes at a lock, a quit, and a new vault
+//!   session. After it opened, the section asks Connect for the account once ("Asking
+//!   Apassy Connect…"), again every [`REFRESH_EVERY`], and after [`RETRY_UNREACHABLE`]
+//!   when Connect could not be reached ("Connect unreachable"). Neither blocks the unlock
+//!   or the vault.
 //! - One step at a time runs on a worker ([`Task`]); the UI thread never waits on the
 //!   network and never holds the account lock.
-//! - The account file is read on the UI thread (a small file, no secret). The account
-//!   key is read from the Keychain (Touch ID) only on "Sign In…", after the creation, or
-//!   after this Mac joined an account. A lock or a new unlock drops the account from
-//!   memory.
+//! - The account file is read on the UI thread (a small file, no secret).
 //! - A step that needs the owner check asks for it with an [`OwnerRequest`]; the owner
 //!   flows keep the proof until [`OwnerFlows::take_connect_proof`] takes it here, once,
 //!   and the account checks it again against the exact action before it calls Connect.
-//! - When Connect says this Mac was removed (`403 device_removed`), or the key of this
-//!   Mac cannot be read any more, the section shows it and deletes nothing: only "Forget
-//!   This Mac…" and its confirmation delete the key, the account file, and the account
-//!   rows of the open vault.
+//! - When Connect says this device was removed (`403 device_removed`), or its key cannot
+//!   be read any more, the session is removed for every part, the section shows it, and
+//!   nothing is deleted: only "Forget This Mac…" and its confirmation delete the key,
+//!   the account file, and the account rows of the open vault.
 //!
 //! [`OwnerFlows::take_connect_proof`]: crate::desktop::owner_check::OwnerFlows::take_connect_proof
 
 use std::cell::OnceCell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -27,14 +35,14 @@ use eframe::egui;
 use zeroize::Zeroizing;
 
 use super::{
-    Account, Action, ConnectView, DELETED, Device, Group, JOIN_POLL_EVERY, Member, Offer,
-    POLL_EVERY, Plan, Plans, Price, REMOVED_NOTE, Sheet, SheetChoice, Shown, WAIT_AT_MOST,
+    Account, Action, ConnectView, DELETED, Device, FORGOT, Group, JOIN_POLL_EVERY, LEFT, Member,
+    Offer, POLL_EVERY, Plan, Plans, Price, REMOVED_NOTE, Sheet, SheetChoice, Shown, WAIT_AT_MOST,
 };
 use crate::broker::approvals::{ConnectGroupChange, OwnerProof};
 use crate::connect::{
-    AccountSigner, AccountState, AccountView, CheckoutRequest, ConnectAccount, ConnectClient,
-    ConnectError, DeviceKeyStore, DeviceLink, Forgotten, GroupDetail, JoinPoll, JoinRequest,
-    KeychainDeviceKeyStore, PendingJoin, PlansView, account_file, drop_account_rows,
+    AccountSession, AccountSigner, AccountState, AccountView, CheckoutRequest, ConnectAccount,
+    ConnectClient, ConnectError, DeviceKeyStore, DeviceLink, Follow, Forgotten, GroupDetail,
+    JoinPoll, JoinRequest, OpenTicket, PendingJoin, PlansView, SessionState, drop_account_rows,
     forget_this_device,
 };
 use crate::desktop::DesktopApp;
@@ -46,6 +54,12 @@ type Slot<T> = Arc<Mutex<Option<T>>>;
 fn slot<T>() -> Slot<T> {
     Arc::new(Mutex::new(None))
 }
+
+/// The account is asked again this long after the last answer, so the plan state and
+/// the device list of the sync stay fresh while Settings is closed.
+pub(crate) const REFRESH_EVERY: Duration = Duration::from_secs(30 * 60);
+/// A refresh that could not reach Connect is tried again after this long.
+pub(crate) const RETRY_UNREACHABLE: Duration = Duration::from_secs(60);
 
 /// A step that waits for the proof of its owner check.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,7 +87,6 @@ struct Snapshot {
 /// The result of one worker step.
 #[allow(clippy::large_enum_variant)] // One message at a time on the channel; a box buys nothing.
 enum Outcome {
-    Opened(Result<AccountState, ConnectError>),
     Created(Result<(AccountState, Zeroizing<String>), ConnectError>),
     Refreshed(Result<(Snapshot, Option<PlansView>), ConnectError>),
     Plans(Result<PlansView, ConnectError>),
@@ -84,21 +97,49 @@ enum Outcome {
     Pending(Result<Vec<PendingJoin>, ConnectError>),
     Confirmed(Result<String, ConnectError>),
     Refused(Result<(), ConnectError>),
-    /// A revoke: `Some` when this Mac revoked itself.
+    /// A revoke: `Some` when this device revoked itself.
     Revoked(Result<Option<Forgotten>, ConnectError>),
     Deleted(Result<Forgotten, ConnectError>),
     Invited(Result<(String, u64), ConnectError>),
     JoinedGroup(Result<String, ConnectError>),
     GroupChanged(Result<String, ConnectError>),
     JoinStarted(Result<(String, String), ConnectError>),
-    /// A poll of this Mac's join: `None` waits, `Some(state)` is confirmed.
+    /// A poll of this device's join: `None` waits, `Some(state)` is confirmed.
     JoinPolled(Result<Option<AccountState>, ConnectError>),
     JoinCancelled,
-    /// Connect said this Mac was removed from its account, or its key cannot be read: the
-    /// note of the removed state. Nothing was deleted.
-    Removed(String),
+    /// A step that needed the account of the session and found none (signed out,
+    /// removed, or a lock came first).
+    Failed(ConnectError),
     /// "Forget This Mac…" after a removal, confirmed by the owner.
     Forgot(Result<Forgotten, ConnectError>),
+}
+
+impl Outcome {
+    /// The error of the step, for the session ([`AccountSession::with_account`]).
+    fn error(&self) -> Option<&ConnectError> {
+        match self {
+            Self::Created(Err(error))
+            | Self::Refreshed(Err(error))
+            | Self::Plans(Err(error))
+            | Self::Checkout(Err(error))
+            | Self::Polled(Err(error))
+            | Self::Portal(Err(error))
+            | Self::Linked(Err(error))
+            | Self::Pending(Err(error))
+            | Self::Confirmed(Err(error))
+            | Self::Refused(Err(error))
+            | Self::Revoked(Err(error))
+            | Self::Deleted(Err(error))
+            | Self::Invited(Err(error))
+            | Self::JoinedGroup(Err(error))
+            | Self::GroupChanged(Err(error))
+            | Self::JoinStarted(Err(error))
+            | Self::JoinPolled(Err(error))
+            | Self::Failed(error)
+            | Self::Forgot(Err(error)) => Some(error),
+            _ => None,
+        }
+    }
 }
 
 /// The checkout that the waiting sheet follows.
@@ -111,13 +152,13 @@ struct Waiting {
 /// What the sync of a vault store needs of the account (plan s7 unit M3).
 #[derive(Clone)]
 pub(crate) struct SyncAccount {
-    /// The account in memory; a worker of the sync locks it for its Connect calls.
+    /// The account of the session; a worker of the sync locks it for its Connect calls.
     pub(crate) account: Slot<ConnectAccount>,
     /// The Connect origin of the account.
     pub(crate) origin: String,
     /// The plan state of the last refresh.
     pub(crate) plan: StorePlan,
-    /// The account key, when the section read it.
+    /// The account key of the session.
     pub(crate) signer: Option<Arc<AccountSigner>>,
     /// Which keys may sign the heads of a vault store, from the last refresh
     /// (connect-account-v1 section 7.5, `crate::connect::signer_policy`).
@@ -127,34 +168,30 @@ pub(crate) struct SyncAccount {
 /// The vault build's part of the section state.
 #[derive(Default)]
 pub(crate) struct Live {
-    account: Slot<ConnectAccount>,
-    /// The account is in memory (in `account`).
-    open: bool,
+    /// The one account session of the app (plan s7 unit M5b).
+    session: Arc<AccountSession>,
+    /// The read of the key for this vault session, on its worker.
+    opening: Option<Task<SessionState>>,
     /// The account file, read once (again after a change).
     file: OnceCell<Option<AccountState>>,
     snapshot: Option<Snapshot>,
     plans: Option<Plans>,
     task: Option<Task<Outcome>>,
     error: Option<String>,
-    /// The vault session that the account belongs to.
+    /// The vault session that the section state belongs to.
     epoch: Option<Option<[u8; 32]>>,
     pub(crate) guarded: Option<Guarded>,
     waiting: Option<Waiting>,
     link: Slot<DeviceLink>,
     pending: Vec<PendingJoin>,
     pending_at: Option<Instant>,
-    /// The account key of this Mac while the account is signed in, for the sync of the
-    /// vault stores (plan s7 unit M3). It goes with the account at a lock.
-    signer: Option<Arc<AccountSigner>>,
     join: Slot<JoinRequest>,
     join_at: Option<Instant>,
-    /// The note of the removed state: Connect said this Mac was removed, or its key is
-    /// gone. The account file and the key stay until "Forget This Mac…".
-    removed: Option<String>,
-    /// Tests: the key store, the data directory, and the Connect origin. Without a data
-    /// directory a test never reads the real account file.
-    pub(crate) store: Option<Arc<dyn DeviceKeyStore>>,
-    pub(crate) dir: Option<PathBuf>,
+    /// When the account was last asked; `None`: ask at the next frame.
+    refreshed_at: Option<Instant>,
+    /// The last refresh could not reach Connect, and when.
+    unreachable: Option<(ConnectError, Instant)>,
+    /// Tests: the Connect origin of a creation or a join.
     pub(crate) origin: Option<String>,
     /// Tests: shorter polls than [`POLL_EVERY`] and [`JOIN_POLL_EVERY`].
     pub(crate) poll_every: Option<Duration>,
@@ -162,22 +199,35 @@ pub(crate) struct Live {
 }
 
 impl Live {
+    /// The one account session of the app.
+    pub(crate) fn session(&self) -> Arc<AccountSession> {
+        Arc::clone(&self.session)
+    }
+
+    /// Use `store` and the data directory `dir` for the account (the window: the key
+    /// store of this platform; a test: a store in memory and a temporary directory). The
+    /// session closes first; the next frame opens it for an unlocked vault.
+    pub(crate) fn configure(
+        &mut self,
+        store: Option<Arc<dyn DeviceKeyStore>>,
+        dir: Option<PathBuf>,
+    ) {
+        self.session.configure(store, dir);
+        self.reset();
+        self.epoch = None;
+    }
+
     fn path(&self) -> Option<PathBuf> {
-        match &self.dir {
-            Some(dir) => Some(account_file(dir)),
-            #[cfg(not(test))]
-            None => Some(account_file(&crate::paths::data_dir())),
-            #[cfg(test)]
-            None => None,
-        }
+        self.session.path()
+    }
+
+    fn store(&self) -> Option<Arc<dyn DeviceKeyStore>> {
+        self.session.store()
     }
 
     fn file(&self) -> Option<&AccountState> {
         self.file
-            .get_or_init(|| {
-                self.path()
-                    .and_then(|path| AccountState::load(&path).ok().flatten())
-            })
+            .get_or_init(|| self.session.account_state())
             .as_ref()
     }
 
@@ -189,13 +239,12 @@ impl Live {
     }
 
     fn busy(&self) -> bool {
-        self.task.is_some()
+        self.task.is_some() || self.opening.is_some()
     }
 
-    /// Forget the account in memory, and read the account file again.
+    /// Forget what the section showed of the account, and read the account file again.
+    /// The session itself follows the vault ([`step`]).
     fn reset(&mut self) {
-        self.account = slot();
-        self.open = false;
         self.file = OnceCell::new();
         self.snapshot = None;
         self.guarded = None;
@@ -203,23 +252,25 @@ impl Live {
         self.link = slot();
         self.pending.clear();
         self.join = slot();
-        self.removed = None;
-        self.signer = None;
+        self.refreshed_at = None;
+        self.unreachable = None;
+        self.error = None;
     }
 
-    /// The account of this Mac for the sync through Apassy Connect (plan s7 unit M3):
-    /// `Some` while it is signed in and Settings › Connect read it.
+    /// The account of this device for the sync through Apassy Connect (plan s7 unit M3):
+    /// `Some` while the session is open and Connect answered once.
     pub(crate) fn sync_account(&self) -> Option<SyncAccount> {
-        if !self.open {
+        if !self.session.is_open() {
             return None;
         }
         let snapshot = self.snapshot.as_ref()?;
+        let file = self.file()?;
         Some(SyncAccount {
-            account: Arc::clone(&self.account),
-            origin: self.file()?.origin.clone(),
+            account: self.session.slot(),
+            origin: file.origin.clone(),
             plan: StorePlan::from_view(&snapshot.view.plan),
-            signer: self.signer.clone(),
-            signers: crate::connect::signer_policy(&snapshot.view, self.file()?),
+            signer: self.session.signer(),
+            signers: crate::connect::signer_policy(&snapshot.view, file),
         })
     }
 
@@ -232,40 +283,108 @@ impl Live {
         self.join_poll_every.unwrap_or(JOIN_POLL_EVERY)
     }
 
-    /// Run `work` with the account on a worker thread.
+    /// Run `work` on a worker thread. A step that it replaces is asked again later.
     fn spawn(&mut self, ctx: &egui::Context, work: impl FnOnce() -> Outcome + Send + 'static) {
         self.error = None;
+        if self.task.is_some() {
+            self.refreshed_at = None;
+        }
         self.task = Some(Task::spawn(Some(ctx.clone()), work));
     }
 
+    /// Run `work` with the account of the session on a worker thread. A removal that it
+    /// meets is the state of the session for every part.
     fn with_account(
         &mut self,
         ctx: &egui::Context,
         work: impl FnOnce(&mut ConnectAccount) -> Outcome + Send + 'static,
     ) {
-        let account = Arc::clone(&self.account);
+        let session = Arc::clone(&self.session);
         self.spawn(ctx, move || {
-            let mut guard = account
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            match guard.as_mut() {
-                Some(account) => work(account),
-                None => Outcome::Opened(Err(ConnectError::SignedOut)),
+            let mut done = None;
+            let result = session.with_account(|account| {
+                let outcome = work(account);
+                let error = outcome.error().cloned();
+                done = Some(outcome);
+                error.map_or(Ok(()), Err)
+            });
+            match (done, result) {
+                (Some(outcome), _) => outcome,
+                (None, Err(error)) => Outcome::Failed(error),
+                (None, Ok(())) => Outcome::Failed(ConnectError::Local),
             }
         });
     }
+
+    /// Read the key for `ticket` on a worker.
+    fn open(&mut self, ctx: &egui::Context, ticket: OpenTicket) {
+        let session = Arc::clone(&self.session);
+        self.refreshed_at = None;
+        self.unreachable = None;
+        self.opening = Some(Task::spawn(Some(ctx.clone()), move || {
+            session.open_now(ticket)
+        }));
+    }
 }
 
-/// The key store of this Mac: the Keychain through the signed helper, or the store of a
-/// test.
-fn store(app: &DesktopApp) -> Option<Arc<dyn DeviceKeyStore>> {
-    if let Some(store) = &app.ui.connect.live.store {
-        return Some(Arc::clone(store));
+impl DesktopApp {
+    /// The one Apassy Connect account session of the app, for the node's tunnel and the
+    /// sync worker.
+    pub(crate) fn connect_session(&self) -> Arc<AccountSession> {
+        self.ui.connect.live.session()
     }
-    app.owner
-        .helper
-        .clone()
-        .map(|helper| Arc::new(KeychainDeviceKeyStore::new(helper)) as Arc<dyn DeviceKeyStore>)
+
+    /// The window of the app: the account file of `data_dir` and the key store of this
+    /// platform (the Keychain through the signed helper on macOS, a private file on
+    /// Linux). The sync worker signs the vault stores with the key of this session.
+    pub(crate) fn connect_use_platform(&mut self, data_dir: &Path) {
+        let store = crate::connect::platform_store(data_dir);
+        self.connect_configure(store, Some(data_dir.to_path_buf()));
+    }
+
+    /// Use `store` and the data directory `dir` for the account of the session.
+    pub(crate) fn connect_configure(
+        &mut self,
+        store: Option<Arc<dyn DeviceKeyStore>>,
+        dir: Option<PathBuf>,
+    ) {
+        self.ui.connect.live.configure(store, dir);
+        self.sync.worker.set_connect(self.ui.connect.live.session());
+    }
+
+    /// The Keychain account of the account key when the next Touch ID unlock should read
+    /// it with the vault's unlock key (the Mac, with an account file).
+    pub(crate) fn connect_key_with_unlock(&self) -> Option<&'static str> {
+        let session = &self.ui.connect.live.session;
+        session
+            .store()
+            .and_then(|store| store.keychain_account())
+            .filter(|_| session.has_account())
+    }
+
+    /// After an unlock: the session opens for the new vault session now, with the key
+    /// that the Touch ID unlock offered, without a read of the store.
+    pub(crate) fn connect_after_unlock(&mut self) {
+        if let Some(epoch) = self.owner_ui.session.epoch() {
+            self.ui.connect.live.session.open_offered(epoch);
+        }
+    }
+
+    /// The steps of Settings › Connect at each frame of the app ([`step`]).
+    pub(crate) fn poll_connect(&mut self, ctx: &egui::Context) {
+        step(self, ctx);
+    }
+
+    /// A lock or a quit: the account session closes at once, and the section forgets
+    /// what it showed.
+    pub(crate) fn connect_lock(&mut self) {
+        let live = &mut self.ui.connect.live;
+        live.session.close();
+        live.opening = None;
+        live.reset();
+        live.epoch = None;
+        self.ui.connect.sheet = None;
+    }
 }
 
 fn plans_of(view: &PlansView) -> Plans {
@@ -386,29 +505,39 @@ fn account_of(snapshot: &Snapshot, this_device: &str) -> Account {
 /// The view of the section now.
 pub(crate) fn view(app: &DesktopApp) -> ConnectView {
     let live = &app.ui.connect.live;
+    let locked = app.owner_ui.session.epoch().is_none();
     let file = live.file();
-    let shown = match (&live.snapshot, file) {
-        (_, Some(state)) if live.removed.is_some() => Shown::Removed {
-            name: state.name.clone(),
-            device_name: state.device_name.clone(),
-            note: live.removed.clone().unwrap_or_default(),
+    let state = live.session.state();
+    let shown = match (file, &state) {
+        (None, _) => Shown::None,
+        (Some(file), SessionState::Removed(error)) => Shown::Removed {
+            name: file.name.clone(),
+            device_name: file.device_name.clone(),
+            note: removed_note(error),
         },
-        (Some(snapshot), Some(state)) if live.open => {
-            Shown::Account(account_of(snapshot, &state.device_id))
-        }
-        (_, Some(state)) if live.open && live.busy() => Shown::Loading {
-            name: state.name.clone(),
+        (Some(file), SessionState::Open) => match (&live.snapshot, &live.unreachable) {
+            (Some(snapshot), _) => Shown::Account(account_of(snapshot, &file.device_id)),
+            (None, Some((error, _))) if !live.busy() => Shown::Unreachable {
+                name: file.name.clone(),
+                device_name: file.device_name.clone(),
+                note: message(error),
+            },
+            (None, _) => Shown::Loading {
+                name: file.name.clone(),
+            },
         },
-        (_, Some(state)) => Shown::SignedOut {
-            name: state.name.clone(),
-            device_name: state.device_name.clone(),
+        (Some(file), SessionState::Opening) if !locked => Shown::Loading {
+            name: file.name.clone(),
         },
-        (_, None) => Shown::None,
+        (Some(file), _) => Shown::SignedOut {
+            name: file.name.clone(),
+            device_name: file.device_name.clone(),
+        },
     };
     ConnectView {
         shown,
         plans: live.plans.clone(),
-        locked: app.owner_ui.session.epoch().is_none(),
+        locked,
         busy: live.busy(),
         error: if app.ui.connect.sheet.is_none() {
             live.error.clone()
@@ -466,28 +595,60 @@ pub(crate) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     }
 }
 
-/// The steps of one frame: the vault session, the result of the worker, the owner
-/// proof, and the polls.
+/// The steps of one frame, also while Settings is closed: the session follows the vault
+/// session, then the result of the worker, the owner proof, the polls, and the refresh
+/// of the account.
 pub(crate) fn step(app: &mut DesktopApp, ctx: &egui::Context) {
-    let epoch = app.owner_ui.session.epoch();
-    let live = &mut app.ui.connect.live;
-    match live.epoch {
-        Some(seen) if seen != epoch => {
-            // A lock or another unlock: the key and the token leave memory.
-            if let Ok(mut account) = live.account.try_lock()
-                && let Some(account) = account.as_mut()
-            {
-                account.sign_out();
-            }
-            live.reset();
-            app.ui.connect.sheet = None;
-        }
-        _ => {}
-    }
-    app.ui.connect.live.epoch = Some(epoch);
+    follow(app, ctx);
     finish(app, ctx);
     guarded(app, ctx);
     polls(app, ctx);
+    keep_fresh(app, ctx);
+}
+
+/// The session follows the vault session: it closes at a lock and at another vault
+/// session, and opens for an unlocked one with one read of the key store.
+fn follow(app: &mut DesktopApp, ctx: &egui::Context) {
+    let epoch = app.owner_ui.session.epoch();
+    let live = &mut app.ui.connect.live;
+    live.session.tidy();
+    if live.epoch.is_some_and(|seen| seen != epoch) {
+        // A lock or another unlock: what the section showed goes with the session.
+        live.opening = None;
+        live.reset();
+        app.ui.connect.sheet = None;
+    }
+    let live = &mut app.ui.connect.live;
+    live.epoch = Some(epoch);
+    if let Follow::Read(ticket) = live.session.follow(epoch) {
+        live.open(ctx, ticket);
+    }
+    if let Some(task) = &live.opening {
+        match task.poll() {
+            TaskPoll::Waiting => {}
+            TaskPoll::Done(_) | TaskPoll::Lost => {
+                live.opening = None;
+                live.file = OnceCell::new();
+            }
+        }
+    }
+}
+
+/// Ask Connect for the account after the session opened, every [`REFRESH_EVERY`], and
+/// after [`RETRY_UNREACHABLE`] when it could not be reached.
+fn keep_fresh(app: &mut DesktopApp, ctx: &egui::Context) {
+    let live = &app.ui.connect.live;
+    if !live.session.is_open() || live.busy() {
+        return;
+    }
+    let due = match (&live.unreachable, live.refreshed_at) {
+        (Some((_, at)), _) => at.elapsed() >= RETRY_UNREACHABLE,
+        (None, None) => true,
+        (None, Some(at)) => at.elapsed() >= REFRESH_EVERY,
+    };
+    if due {
+        refresh(app, ctx);
+    }
 }
 
 fn message(error: &ConnectError) -> String {
@@ -516,7 +677,7 @@ fn finish(app: &mut DesktopApp, ctx: &egui::Context) {
 /// Refresh the account, its group, and the plans.
 fn refresh(app: &mut DesktopApp, ctx: &egui::Context) {
     let live = &mut app.ui.connect.live;
-    if !live.open || live.busy() {
+    if !live.session.is_open() || live.busy() {
         return;
     }
     let want_plans = live.plans.is_none();
@@ -537,15 +698,24 @@ fn refresh(app: &mut DesktopApp, ctx: &egui::Context) {
             Err(error) => Outcome::Refreshed(Err(error)),
         }
     });
+    app.ui.connect.live.refreshed_at = Some(Instant::now());
 }
 
-/// The note of the removed state for `error`, when it is one: Connect said this Mac was
-/// removed, or the key of this Mac cannot be read any more.
-fn removed_note(error: &ConnectError) -> Option<String> {
+/// Connect could not be reached, or did not answer now: "Connect unreachable" until a
+/// refresh works. Never a removal.
+fn unreachable(error: &ConnectError) -> bool {
+    matches!(
+        error,
+        ConnectError::Offline | ConnectError::Broken | ConnectError::RateLimited(_)
+    ) || matches!(error, ConnectError::Refused { status, .. } if *status >= 500)
+}
+
+/// The note of the removed state for `error`: Connect said this device was removed, or
+/// its key cannot be read any more.
+fn removed_note(error: &ConnectError) -> String {
     match error {
-        ConnectError::Revoked => Some(REMOVED_NOTE.to_owned()),
-        ConnectError::KeyLost => Some(message(error)),
-        _ => None,
+        ConnectError::Revoked => REMOVED_NOTE.to_owned(),
+        other => message(other),
     }
 }
 
@@ -561,29 +731,26 @@ fn drop_rows(app: &DesktopApp, forgotten: &Forgotten) {
 fn apply(app: &mut DesktopApp, ctx: &egui::Context, outcome: Outcome) {
     let live = &mut app.ui.connect.live;
     match outcome {
-        Outcome::Opened(Ok(_)) => {
-            live.open = true;
-            live.file = OnceCell::new();
-            refresh(app, ctx);
-        }
         Outcome::Created(Ok((_, words))) => {
-            live.open = true;
             live.file = OnceCell::new();
+            live.refreshed_at = Some(Instant::now());
             app.ui.connect.sheet = Some(Sheet::Recovery { words });
         }
         Outcome::Refreshed(Ok((snapshot, plans))) => {
             live.snapshot = Some(snapshot);
+            live.unreachable = None;
             if let Some(plans) = plans {
                 live.plans = Some(plans_of(&plans));
             }
-            // The worker ended, so the account is free: its key goes to the sync of the
-            // vault stores, with the plan state.
-            if let Ok(account) = live.account.try_lock()
-                && let Some(account) = account.as_ref()
-            {
-                live.signer = account.signer().ok();
-            }
+            // The key of the session goes to the sync of the vault stores, with the plan
+            // state and the verified devices.
             app.relay_share_connect();
+        }
+        Outcome::Refreshed(Err(error)) if unreachable(&error) => {
+            live.unreachable = Some((error.clone(), Instant::now()));
+            if live.snapshot.is_some() {
+                live.error = Some(message(&error));
+            }
         }
         Outcome::Plans(Ok(plans)) => live.plans = Some(plans_of(&plans)),
         Outcome::Checkout(Ok((url, _session))) => {
@@ -667,8 +834,9 @@ fn apply(app: &mut DesktopApp, ctx: &egui::Context, outcome: Outcome) {
         }
         Outcome::Revoked(Ok(Some(forgotten))) => {
             drop_rows(app, &forgotten);
+            app.ui.connect.live.session.forget();
             app.ui.connect.live.reset();
-            app.set_ok("This Mac left the Connect account.");
+            app.set_ok(LEFT);
         }
         Outcome::Revoked(Ok(None)) => {
             app.set_ok("The device is revoked.");
@@ -676,12 +844,13 @@ fn apply(app: &mut DesktopApp, ctx: &egui::Context, outcome: Outcome) {
         }
         Outcome::Deleted(Ok(forgotten)) => {
             drop_rows(app, &forgotten);
+            app.ui.connect.live.session.forget();
             app.ui.connect.live.reset();
             app.ui.connect.sheet = None;
             app.set_ok(DELETED);
         }
         Outcome::Deleted(Err(error)) => {
-            // The account left memory with the call: read it again from the file.
+            // The account left memory with the call: "Sign In…" reads it again.
             live.reset();
             if error == ConnectError::Conflict {
                 app.ui.connect.sheet = Some(Sheet::MembersFirst);
@@ -714,7 +883,6 @@ fn apply(app: &mut DesktopApp, ctx: &egui::Context, outcome: Outcome) {
         }
         Outcome::JoinPolled(Ok(None)) => live.join_at = Some(Instant::now()),
         Outcome::JoinPolled(Ok(Some(_))) => {
-            live.open = true;
             live.file = OnceCell::new();
             app.ui.connect.sheet = Some(Sheet::Joined);
             refresh(app, ctx);
@@ -727,17 +895,12 @@ fn apply(app: &mut DesktopApp, ctx: &egui::Context, outcome: Outcome) {
         Outcome::JoinCancelled => {
             live.join = slot();
         }
-        Outcome::Removed(note) => {
-            live.removed = Some(note);
-            live.snapshot = None;
-            live.waiting = None;
-            app.ui.connect.sheet = None;
-        }
         Outcome::Forgot(Ok(forgotten)) => {
             drop_rows(app, &forgotten);
+            app.ui.connect.live.session.forget();
             app.ui.connect.live.reset();
             app.ui.connect.sheet = None;
-            app.set_ok("This Mac forgot the Connect account.");
+            app.set_ok(FORGOT);
         }
         Outcome::Forgot(Err(error)) => live.error = Some(message(&error)),
         Outcome::Polled(Err(error)) => {
@@ -747,7 +910,7 @@ fn apply(app: &mut DesktopApp, ctx: &egui::Context, outcome: Outcome) {
             }
             let _ = error;
         }
-        Outcome::Opened(Err(error))
+        Outcome::Failed(error)
         | Outcome::Created(Err(error))
         | Outcome::Refreshed(Err(error))
         | Outcome::Plans(Err(error))
@@ -762,10 +925,12 @@ fn apply(app: &mut DesktopApp, ctx: &egui::Context, outcome: Outcome) {
         | Outcome::JoinedGroup(Err(error))
         | Outcome::GroupChanged(Err(error))
         | Outcome::JoinStarted(Err(error)) => {
-            if let Some(note) = removed_note(&error)
-                && live.file().is_some()
-            {
-                apply(app, ctx, Outcome::Removed(note));
+            live.session.note(&error);
+            if matches!(live.session.state(), SessionState::Removed(_)) && live.file().is_some() {
+                // Removed for every part: the section shows it, and nothing is deleted.
+                live.snapshot = None;
+                live.waiting = None;
+                app.ui.connect.sheet = None;
                 return;
             }
             live.error = Some(message(&error));
@@ -803,7 +968,7 @@ fn run_guarded(
     proof: OwnerProof,
     epoch: [u8; 32],
 ) {
-    let store = store(app);
+    let store = app.ui.connect.live.store();
     let path = app.ui.connect.live.path();
     let live = &mut app.ui.connect.live;
     match step {
@@ -857,13 +1022,9 @@ fn run_guarded(
             });
         }
         Guarded::Delete => {
-            let account = Arc::clone(&live.account);
+            let session = live.session();
             live.spawn(ctx, move || {
-                let taken = account
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .take();
-                let (Some(account), Some(store)) = (taken, store) else {
+                let (Some(account), Some(store)) = (session.take(), store) else {
                     return Outcome::Deleted(Err(ConnectError::SignedOut));
                 };
                 Outcome::Deleted(
@@ -946,7 +1107,8 @@ fn polls(app: &mut DesktopApp, ctx: &egui::Context) {
     if matches!(app.ui.connect.sheet, Some(Sheet::JoinWaiting { .. })) && due(live.join_at) {
         live.join_at = Some(now);
         let join = Arc::clone(&live.join);
-        let target = Arc::clone(&live.account);
+        let session = live.session();
+        let epoch = live.epoch.flatten();
         live.spawn(ctx, move || {
             let mut guard = join
                 .lock()
@@ -963,10 +1125,11 @@ fn polls(app: &mut DesktopApp, ctx: &egui::Context) {
                 Ok(JoinPoll::Confirmed(account)) => {
                     *guard = None;
                     let state = account.state().clone();
-                    *target
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(*account);
-                    Outcome::JoinPolled(Ok(Some(state)))
+                    if session.install(*account, epoch) {
+                        Outcome::JoinPolled(Ok(Some(state)))
+                    } else {
+                        Outcome::JoinPolled(Err(ConnectError::SignedOut))
+                    }
                 }
                 Err(error) => Outcome::JoinPolled(Err(error)),
             }
@@ -1118,33 +1281,30 @@ pub(crate) fn act(app: &mut DesktopApp, ctx: &egui::Context, action: Action) {
     }
 }
 
-/// Read the account key (Touch ID) and open the account; or refresh an open account.
+/// "Sign In…" and "Try Again": refresh an open account, or read the key of the session
+/// again after a cancelled or failed read. Never while Apassy is locked.
 fn sign_in(app: &mut DesktopApp, ctx: &egui::Context) {
-    if app.ui.connect.live.open {
+    if app.owner_ui.session.epoch().is_none() {
+        app.ui.connect.live.error = Some(super::LOCKED.to_owned());
+        return;
+    }
+    let live = &mut app.ui.connect.live;
+    if live.session.is_open() {
+        live.unreachable = None;
         refresh(app, ctx);
         return;
     }
-    let Some(store) = store(app) else {
-        app.ui.connect.live.error = Some(message(&ConnectError::KeychainUnavailable));
+    if live.busy() {
         return;
-    };
-    let Some(path) = app.ui.connect.live.path() else {
+    }
+    if live.store().is_none() {
+        live.error = Some(message(&ConnectError::KeychainUnavailable));
         return;
-    };
-    let account = Arc::clone(&app.ui.connect.live.account);
-    app.ui.connect.live.spawn(ctx, move || {
-        Outcome::Opened(match ConnectAccount::open(store.as_ref(), &path) {
-            Ok(Some(opened)) => {
-                let state = opened.state().clone();
-                *account
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(opened);
-                Ok(state)
-            }
-            Ok(None) => Err(ConnectError::NoAccount),
-            Err(error) => Err(error),
-        })
-    });
+    }
+    if let Some(ticket) = live.session.retry() {
+        live.error = None;
+        live.open(ctx, ticket);
+    }
 }
 
 fn load_plans(app: &mut DesktopApp, ctx: &egui::Context) {
@@ -1210,22 +1370,25 @@ pub(crate) fn choose(app: &mut DesktopApp, ctx: &egui::Context, choice: SheetCho
         (Sheet::Recovery { .. }, SheetChoice::Done) => refresh(app, ctx),
         (sheet @ Sheet::Recovery { .. }, _) => app.ui.connect.sheet = Some(sheet),
         (Sheet::Create { name, device_name }, SheetChoice::Go) => {
-            let (Some(store), Some(path)) = (store(app), app.ui.connect.live.path()) else {
+            let live = &app.ui.connect.live;
+            let (Some(store), Some(path), Some(epoch)) =
+                (live.store(), live.path(), app.owner_ui.session.epoch())
+            else {
                 app.ui.connect.live.error = Some(message(&ConnectError::KeychainUnavailable));
                 app.ui.connect.sheet = Some(Sheet::Create { name, device_name });
                 return;
             };
-            let client = app.ui.connect.live.client();
-            let slot = Arc::clone(&app.ui.connect.live.account);
+            let client = live.client();
+            let session = live.session();
             let (typed, device) = (name.clone(), device_name.clone());
             app.ui.connect.live.spawn(ctx, move || {
                 Outcome::Created(client.and_then(|client| {
                     let (account, recovery) =
                         ConnectAccount::create(client, store.as_ref(), &path, &typed, &device)?;
                     let state = account.state().clone();
-                    *slot
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(account);
+                    // The vault locked meanwhile: the account file and the key stay, and
+                    // the next unlock opens them.
+                    session.install(account, Some(epoch));
                     Ok((state, recovery.words()))
                 }))
             });
@@ -1352,7 +1515,9 @@ pub(crate) fn choose(app: &mut DesktopApp, ctx: &egui::Context, choice: SheetCho
             );
         }
         (Sheet::JoinAccount { code }, SheetChoice::Go) => {
-            let (Some(store), Some(path)) = (store(app), app.ui.connect.live.path()) else {
+            let (Some(store), Some(path)) =
+                (app.ui.connect.live.store(), app.ui.connect.live.path())
+            else {
                 app.ui.connect.live.error = Some(message(&ConnectError::KeychainUnavailable));
                 app.ui.connect.sheet = Some(Sheet::JoinAccount { code });
                 return;
@@ -1473,18 +1638,15 @@ pub(crate) fn choose(app: &mut DesktopApp, ctx: &egui::Context, choice: SheetCho
         }
         (Sheet::ForgetRemoved, SheetChoice::Go) => {
             // Only the owner's confirmation deletes the key and the account file here.
-            let (Some(store), Some(path)) = (store(app), app.ui.connect.live.path()) else {
+            let (Some(store), Some(path)) =
+                (app.ui.connect.live.store(), app.ui.connect.live.path())
+            else {
                 app.ui.connect.live.error = Some(message(&ConnectError::KeychainUnavailable));
                 return;
             };
-            let account = Arc::clone(&app.ui.connect.live.account);
+            let session = app.ui.connect.live.session();
             app.ui.connect.live.spawn(ctx, move || {
-                drop(
-                    account
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .take(),
-                );
+                drop(session.take_any());
                 Outcome::Forgot(forget_this_device(store.as_ref(), &path))
             });
         }

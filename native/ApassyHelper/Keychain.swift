@@ -152,10 +152,17 @@ func handleKeychainStore(_ request: Request) throws -> Fields {
     return ["ok": true, "access_group": group]
 }
 
-/// `keychain_read {account, reason}`: show the Touch ID prompt and return
-/// the unlock key.
+/// `keychain_read {account, reason, also_account?}`: show the Touch ID prompt and
+/// return the unlock key. With `also_account`, the helper then reads that item too with
+/// the same authenticated context and no second prompt (both items have the same
+/// access control): the Apassy Connect key that the vault unlock opens with it. The
+/// second read never fails the first: `also_status` says what it gave.
 func handleKeychainRead(_ request: Request) throws -> Fields {
     let account = try request.identifier("account")
+    var also: String?
+    if request.fields["also_account"] != nil {
+        also = try request.identifier("also_account")
+    }
     let reason = try request.text("reason", min: 1, max: 200)
     let title = try request.authenticationTitle()
     let group = try requireAccessGroup()
@@ -208,6 +215,7 @@ func handleKeychainRead(_ request: Request) throws -> Fields {
         systemContext.localizedReason = reason
         systemContext.localizedFallbackTitle = ""
         query[kSecUseAuthenticationContext as String] = systemContext
+        readContext = systemContext
         result = nil
         status = SecItemCopyMatching(query as CFDictionary, &result)
     }
@@ -219,7 +227,45 @@ func handleKeychainRead(_ request: Request) throws -> Fields {
         throw keychainError(status == errSecSuccess ? errSecDecode : status, "read")
     }
     defer { secret.resetBytes(in: 0..<secret.count) }
-    return ["ok": true, "secret_b64": secret.base64EncodedString()]
+    var response: Fields = ["ok": true, "secret_b64": secret.base64EncodedString()]
+    if let also {
+        response.merge(readAlso(group: group, account: also, context: readContext)) { _, new in new }
+    }
+    return response
+}
+
+/// The second item of `keychain_read {also_account}`, read with the context that the
+/// first read authenticated, never with a prompt of its own. It never throws:
+/// `also_status` is `read` (with `also_secret_b64`), `not_found`, `biometry_changed`,
+/// or `not_read` (the keychain wanted another authentication, or the read failed); the
+/// app then reads the item on its own.
+func readAlso(group: String, account: String, context: LAContext) -> Fields {
+    let attributes: Fields?
+    do {
+        attributes = try findAttributes(group: group, account: account)
+    } catch {
+        return ["also_status": "not_read"]
+    }
+    guard let attributes else {
+        return ["also_status": "not_found"]
+    }
+    if biometryChanged(attributes: attributes) {
+        return ["also_status": "biometry_changed"]
+    }
+    context.interactionNotAllowed = true
+    var query = baseQuery(group: group, account: account)
+    query[kSecReturnData as String] = true
+    query[kSecMatchLimit as String] = kSecMatchLimitOne
+    query[kSecUseAuthenticationContext as String] = context
+    var result: CFTypeRef?
+    let status = SecItemCopyMatching(query as CFDictionary, &result)
+    guard status == errSecSuccess, var secret = result as? Data,
+          (1...maxSecretBytes).contains(secret.count)
+    else {
+        return ["also_status": status == errSecItemNotFound ? "not_found" : "not_read"]
+    }
+    defer { secret.resetBytes(in: 0..<secret.count) }
+    return ["also_status": "read", "also_secret_b64": secret.base64EncodedString()]
 }
 
 /// `keychain_delete {account}`.
