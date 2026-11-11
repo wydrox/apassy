@@ -101,7 +101,10 @@ def main():
 
         def share_entry(version, op, by, signature, peer, root=None, team=None):
             entry = {"version": version, "op": op, "key": None, "link_hash": None, "name": None,
-                     "by": by, "signature": signature, "account_id": peer}
+                     "by": by, "signature": signature}
+            # A `store` names no account: the field is absent, as Connect serves it.
+            if peer is not None:
+                entry["account_id"] = peer
             if root is not None:
                 entry["root"] = root
             if team is not None:

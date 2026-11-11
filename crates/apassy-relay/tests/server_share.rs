@@ -751,12 +751,27 @@ fn the_share_vectors_are_the_messages_of_this_relay() {
             &pub_a,
         ),
         (
-            "share_list_share",
+            "share_list_store",
             device::share_list_message(
                 origin,
                 a,
                 3,
                 v["lists"]["a"]["hashes"][1].as_str().unwrap(),
+                "store",
+                "-",
+                "-",
+                store,
+                &a64,
+            ),
+            &pub_a,
+        ),
+        (
+            "share_list_share",
+            device::share_list_message(
+                origin,
+                a,
+                4,
+                v["lists"]["a"]["hashes"][2].as_str().unwrap(),
                 "share",
                 x,
                 "-",
@@ -789,10 +804,8 @@ fn the_share_vectors_are_the_messages_of_this_relay() {
                 v["lists"]["x"]["hashes"][1].as_str().unwrap(),
                 "join",
                 a,
-                // The list hash of the share it answers (`-` in vectors before joins named one).
-                v["lists"]["x"]["entries"][2]["root"]
-                    .as_str()
-                    .unwrap_or("-"),
+                // The list hash of the share that it answers: A's `share` (version 4).
+                v["lists"]["a"]["hashes"][3].as_str().unwrap(),
                 store,
                 &b64,
             ),
