@@ -17,6 +17,13 @@
 //! `put_subscription` stores the object `GET /v1/subscriptions/{id}` answers;
 //! `set_session_status` changes a session; `set_checkout_origin` makes sessions on another
 //! origin; `set_date` sends a chosen `Date` header (Stripe's clock).
+//!
+//! Lists come in pages like Stripe's (`limit`, `starting_after`, `has_more`; the ids in
+//! order): `set_page_size` makes the pages smaller than `limit`. It lists a customer's
+//! Checkout Sessions (`GET /v1/checkout/sessions?customer=…&status=…`); `add_session`
+//! stores one that Connect did not make; `complete_on_expire` makes a session complete
+//! (with its subscription) just before Connect's expire, which Stripe then refuses;
+//! `appear_on_cancel` adds a subscription when Connect cancels another.
 #![allow(dead_code)]
 
 use std::collections::HashMap;
@@ -65,12 +72,20 @@ struct State {
     calls: Vec<Call>,
     prices: Vec<Value>,
     failures: Vec<u16>,
-    path_failures: Vec<(String, u16)>,
+    /// (method or any, path prefix, status).
+    path_failures: Vec<(Option<String>, String, u16)>,
     after_failures: Vec<(String, u16)>,
     delays: Vec<(String, u64)>,
     replays: HashMap<String, (u16, String)>,
-    /// Checkout Sessions by id: (status, url, expires_at).
-    sessions: HashMap<String, (String, String, u64)>,
+    /// Checkout Sessions by id.
+    sessions: HashMap<String, Session>,
+    /// Sessions that complete when Connect asks to expire them, with the subscription
+    /// they make.
+    complete_on_expire: HashMap<String, Value>,
+    /// The most entries of one list page (`None`: the `limit` asked).
+    page_size: Option<usize>,
+    /// Subscriptions that appear when Connect cancels another one (made in between).
+    appear_on_cancel: HashMap<String, Value>,
     subscriptions: HashMap<String, Value>,
     checkout_origin: Option<String>,
     date: Option<u64>,
@@ -78,6 +93,15 @@ struct State {
     bad_date: bool,
     /// `expires_at` of new sessions; `SESSION_EXPIRES_AT` without one.
     session_expires_at: Option<u64>,
+}
+
+/// A Checkout Session of the fake.
+#[derive(Debug, Clone)]
+struct Session {
+    status: String,
+    url: String,
+    expires_at: u64,
+    customer: Option<String>,
 }
 
 pub struct FakeStripe {
@@ -157,10 +181,15 @@ impl FakeStripe {
             let state = Arc::clone(&state);
             let stop = Arc::clone(&stop);
             std::thread::spawn(move || {
-                let counter = AtomicU32::new(0);
+                let counter = Arc::new(AtomicU32::new(0));
                 while !stop.load(Ordering::Relaxed) {
                     match server.recv_timeout(Duration::from_millis(100)) {
-                        Ok(Some(request)) => handle(request, &state, &counter),
+                        // Each call on its own thread, as Stripe answers calls at once: a
+                        // held call (`delay_next`) does not hold the others.
+                        Ok(Some(request)) => {
+                            let (state, counter) = (Arc::clone(&state), Arc::clone(&counter));
+                            std::thread::spawn(move || handle(request, &state, &counter));
+                        }
                         Ok(None) => {}
                         Err(_) => break,
                     }
@@ -216,7 +245,19 @@ impl FakeStripe {
             .lock()
             .unwrap()
             .path_failures
-            .extend(std::iter::repeat_n((prefix.to_owned(), status), n));
+            .extend(std::iter::repeat_n((None, prefix.to_owned(), status), n));
+    }
+
+    /// The next `n` calls of `method` whose path starts with `prefix` answer `status`.
+    pub fn fail_method(&self, method: &str, prefix: &str, status: u16, n: usize) {
+        self.state
+            .lock()
+            .unwrap()
+            .path_failures
+            .extend(std::iter::repeat_n(
+                (Some(method.to_owned()), prefix.to_owned(), status),
+                n,
+            ));
     }
 
     /// The next `n` calls whose path starts with `prefix` take effect, and then answer
@@ -252,7 +293,7 @@ impl FakeStripe {
     /// `open`, `complete`, or `expired`.
     pub fn set_session_status(&self, id: &str, status: &str) {
         if let Some(session) = self.state.lock().unwrap().sessions.get_mut(id) {
-            session.0 = status.to_owned();
+            session.status = status.to_owned();
         }
     }
 
@@ -262,7 +303,63 @@ impl FakeStripe {
             .unwrap()
             .sessions
             .get(id)
-            .map(|session| session.0.clone())
+            .map(|session| session.status.clone())
+    }
+
+    /// The sessions of `customer` that are open, in the order of their ids.
+    pub fn open_sessions(&self, customer: &str) -> Vec<String> {
+        let mut open: Vec<String> = self
+            .state
+            .lock()
+            .unwrap()
+            .sessions
+            .iter()
+            .filter(|(_, session)| {
+                session.status == "open" && session.customer.as_deref() == Some(customer)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        open.sort();
+        open
+    }
+
+    /// Stores a Checkout Session of `customer` that Connect did not make (or forgot).
+    pub fn add_session(&self, id: &str, customer: &str, status: &str) {
+        self.state.lock().unwrap().sessions.insert(
+            id.to_owned(),
+            Session {
+                status: status.to_owned(),
+                url: format!("https://checkout.stripe.com/c/pay/{id}"),
+                expires_at: SESSION_EXPIRES_AT,
+                customer: Some(customer.to_owned()),
+            },
+        );
+    }
+
+    /// When Connect asks to expire session `id`, it completes first and makes the
+    /// subscription `subscription` (Stripe's state); the expire is refused as Stripe
+    /// refuses a session that is not open.
+    pub fn complete_on_expire(&self, id: &str, subscription: Value) {
+        self.state
+            .lock()
+            .unwrap()
+            .complete_on_expire
+            .insert(id.to_owned(), subscription);
+    }
+
+    /// When Connect cancels subscription `id`, the subscription `appears` is stored too (one
+    /// that a purchase made in between).
+    pub fn appear_on_cancel(&self, id: &str, appears: Value) {
+        self.state
+            .lock()
+            .unwrap()
+            .appear_on_cancel
+            .insert(id.to_owned(), appears);
+    }
+
+    /// Lists answer at most `size` entries a page (Stripe answers at most `limit`).
+    pub fn set_page_size(&self, size: usize) {
+        self.state.lock().unwrap().page_size = Some(size.max(1));
     }
 
     /// New Checkout Sessions get URLs on this origin (with the trailing `/`).
@@ -392,12 +489,10 @@ fn answer(call: &Call, state: &Mutex<State>, counter: &AtomicU32) -> (u16, Strin
         let status = guard.failures.remove(0);
         return (status, error_body("api_error", "fake_failure"));
     }
-    if let Some(index) = guard
-        .path_failures
-        .iter()
-        .position(|(prefix, _)| call.path.starts_with(prefix.as_str()))
-    {
-        let status = guard.path_failures.remove(index).1;
+    if let Some(index) = guard.path_failures.iter().position(|(method, prefix, _)| {
+        call.path.starts_with(prefix.as_str()) && method.as_deref().is_none_or(|m| m == call.method)
+    }) {
+        let status = guard.path_failures.remove(index).2;
         return (status, error_body("api_error", "fake_failure"));
     }
     let replay_key = call
@@ -481,9 +576,15 @@ fn fresh_answer(
                 .unwrap_or_else(|| "https://checkout.stripe.com/".to_owned());
             let url = format!("{origin}c/pay/{id}");
             let expires_at = guard.session_expires_at.unwrap_or(SESSION_EXPIRES_AT);
-            guard
-                .sessions
-                .insert(id.clone(), ("open".to_owned(), url.clone(), expires_at));
+            guard.sessions.insert(
+                id.clone(),
+                Session {
+                    status: "open".to_owned(),
+                    url: url.clone(),
+                    expires_at,
+                    customer: call.field("customer").map(str::to_owned),
+                },
+            );
             (
                 200,
                 json!({
@@ -497,13 +598,20 @@ fn fresh_answer(
             if path.starts_with("/v1/checkout/sessions/") && path.ends_with("/expire") =>
         {
             let id = &path["/v1/checkout/sessions/".len()..path.len() - "/expire".len()];
+            if let Some(subscription) = guard.complete_on_expire.remove(id) {
+                if let Some(session) = guard.sessions.get_mut(id) {
+                    session.status = "complete".to_owned();
+                }
+                let sub_id = subscription["id"].as_str().unwrap_or_default().to_owned();
+                guard.subscriptions.insert(sub_id, subscription);
+            }
             match guard.sessions.get_mut(id) {
-                Some(session) if session.0 == "open" => {
-                    session.0 = "expired".to_owned();
+                Some(session) if session.status == "open" => {
+                    session.status = "expired".to_owned();
                     (
                         200,
                         json!({"id": id, "object": "checkout.session", "status": "expired",
-                               "url": null, "expires_at": session.2})
+                               "url": null, "expires_at": session.expires_at})
                         .to_string(),
                     )
                 }
@@ -514,16 +622,31 @@ fn fresh_answer(
                 None => (404, error_body("invalid_request_error", "resource_missing")),
             }
         }
+        ("GET", "/v1/checkout/sessions") => {
+            let field = |name: &str| {
+                call.query
+                    .iter()
+                    .find(|(k, _)| k == name)
+                    .map(|(_, v)| v.clone())
+            };
+            let (customer, status) = (field("customer"), field("status"));
+            let data: Vec<Value> = guard
+                .sessions
+                .iter()
+                .filter(|(_, session)| {
+                    session.customer == customer
+                        && status
+                            .as_deref()
+                            .is_none_or(|status| session.status == status)
+                })
+                .map(|(id, session)| session_json(id, session))
+                .collect();
+            page(call, guard.page_size, data)
+        }
         ("GET", path) if path.starts_with("/v1/checkout/sessions/") => {
             let id = &path["/v1/checkout/sessions/".len()..];
             match guard.sessions.get(id) {
-                Some((status, url, expires_at)) => (
-                    200,
-                    json!({"id": id, "object": "checkout.session", "status": status,
-                           "url": if status == "open" { json!(url) } else { Value::Null },
-                           "expires_at": expires_at})
-                    .to_string(),
-                ),
+                Some(session) => (200, session_json(id, session).to_string()),
                 None => (404, error_body("invalid_request_error", "resource_missing")),
             }
         }
@@ -533,17 +656,13 @@ fn fresh_answer(
                 .iter()
                 .find(|(k, _)| k == "customer")
                 .map(|(_, v)| v.clone());
-            let mut data: Vec<Value> = guard
+            let data: Vec<Value> = guard
                 .subscriptions
                 .values()
                 .filter(|object| object["customer"].as_str() == customer.as_deref())
                 .cloned()
                 .collect();
-            data.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
-            (
-                200,
-                json!({"object": "list", "data": data, "has_more": false}).to_string(),
-            )
+            page(call, guard.page_size, data)
         }
         ("GET", path) if path.starts_with("/v1/subscription_items/") => {
             let item = &path["/v1/subscription_items/".len()..];
@@ -598,6 +717,10 @@ fn fresh_answer(
             if let Some(object) = guard.subscriptions.get_mut(id) {
                 object["status"] = json!("canceled");
             }
+            if let Some(appears) = guard.appear_on_cancel.remove(id) {
+                let new_id = appears["id"].as_str().unwrap_or_default().to_owned();
+                guard.subscriptions.insert(new_id, appears);
+            }
             (
                 200,
                 json!({"id": id, "object": "subscription", "status": "canceled"}).to_string(),
@@ -609,4 +732,37 @@ fn fresh_answer(
         guard.replays.insert(key, result.clone());
     }
     result
+}
+
+/// A session as Stripe answers it.
+fn session_json(id: &str, session: &Session) -> Value {
+    json!({"id": id, "object": "checkout.session", "status": session.status,
+           "customer": session.customer,
+           "url": if session.status == "open" { json!(session.url) } else { Value::Null },
+           "expires_at": session.expires_at})
+}
+
+/// One page of a list, in the order of the ids: the entries after `starting_after`, at
+/// most `limit` (and the fake's page size), and `has_more`.
+fn page(call: &Call, page_size: Option<usize>, mut data: Vec<Value>) -> (u16, String) {
+    let field = |name: &str| {
+        call.query
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.clone())
+    };
+    data.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+    if let Some(after) = field("starting_after") {
+        data.retain(|object| object["id"].as_str().is_some_and(|id| id > after.as_str()));
+    }
+    let limit = field("limit")
+        .and_then(|limit| limit.parse::<usize>().ok())
+        .unwrap_or(10)
+        .min(page_size.unwrap_or(usize::MAX));
+    let has_more = data.len() > limit;
+    data.truncate(limit);
+    (
+        200,
+        json!({"object": "list", "data": data, "has_more": has_more}).to_string(),
+    )
 }
