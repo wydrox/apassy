@@ -3,19 +3,22 @@
 //!
 //! The account that made a vault store is the only authority for it. What it says of
 //! other accounts are entries of its own signed device list (`account_list`), in the
-//! chain of its device entries: `peer` and `unpeer` (the root of another account, pinned
-//! after six words), `share` and `unshare` (a store of this account, for another account),
-//! `join` and `leave` (a store of another account that this account syncs). Each is
-//! signed by a live device of the list over the hash of the entry before
-//! (`apassy-connect share-list v1`). Connect keeps and serves the lists; the devices
-//! verify them from the roots they pinned and take no signer from Connect's word.
+//! chain of its device entries: `store` (a vault store that this account made, appended
+//! with the store), `peer` and `unpeer` (the root of another account, pinned after six
+//! words), `share` and `unshare` (a store of this account, for another account), `join`
+//! and `leave` (a store of another account that this account syncs; a `join` names the
+//! list hash of the `share` it answers). Each is signed by a live device of the list over
+//! the hash of the entry before (`apassy-connect share-list v1`). Connect keeps and
+//! serves the lists; the devices verify them from the roots they pinned and take no
+//! signer from Connect's word.
 //!
 //! Connect checks, before it stores an entry, what the devices check (the signature, the
 //! version, the room of the list, the rules of section 16), and the conditions of the
-//! service: a `share` comes from the account that made the store and names an active
-//! member of the same group with a plan that allows sharing; a `peer` names the root of
-//! that account's list; a `join` names a store that the other account made and shares
-//! with the caller. An `unshare` removes the other account's devices from the store, and
+//! service: a `store` and a `share` come from the account that made the store, and a
+//! `share` only after the `store` entry, naming an active member of the same group with a
+//! plan that allows sharing; a `peer` names the root of that account's list; a `join`
+//! names a store that the other account made and the active `share` of it with the
+//! caller. An `unshare` removes the other account's devices from the store, and
 //! a `leave` the caller's, in the transaction of the entry. A device of another account
 //! is added to a store only while the owner's list shares it with that account (a share
 //! newer than the last removal of that account from its group, with the root of that
@@ -27,10 +30,14 @@
 //! of a share code for one member (600 s, one use), `POST /v1/account/peers/join` takes
 //! the signed answer of a device of that member, and `GET /v1/account/peers/pending`
 //! shows it to the device that made the code, with the answering account's device list.
-//! Connect never sees the code, so it cannot compute the six words. Every route here
-//! counts for the calling device (`PeerCalls`: 60 a minute).
+//! Connect never sees the code, so it cannot compute the six words. The ceremony routes
+//! and `POST /v1/account/list` count for the calling device (`PeerCalls`: 60 a minute);
+//! the reads of other accounts' lists (`GET /v1/account/peers/{account_id}`, `POST
+//! /v1/account/peers/lists`) in a budget of their own (`PeerCalls::reads`: 60 a minute).
+//! A list is read by an account of the same group, or by an account that takes part in a
+//! vault store with it (`may_read`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, PoisonError};
 
 use rusqlite::{Connection, OptionalExtension, params};
@@ -38,8 +45,8 @@ use serde_json::{Value, json};
 
 use crate::api::{
     AccountLinkCreated, AccountListAppend, AccountListAppended, EmptyRequest, ListOp, PeerDevice,
-    PeerInviter, PeerJoinRequest, PeerJoinView, PeerJoined, PeerLinkRequest, PeerPending, PeerView,
-    PlanView, Platform, TeamKind,
+    PeerInviter, PeerJoinRequest, PeerJoinView, PeerJoined, PeerLinkRequest, PeerListItem,
+    PeerLists, PeerListsRequest, PeerPending, PeerView, PlanView, Platform, TeamKind, VoidShare,
 };
 use crate::device;
 use crate::error::{RelayError, RelayResult, codes};
@@ -54,24 +61,48 @@ use crate::server::account::{
 use crate::server::hub::{Hub, StoreRemoval, queue_store_removal};
 use crate::server::store::{db, to_i, to_u};
 
-/// Pending answers to the share codes of one device at most: a newer answer ends the
-/// oldest (`expired`), and `GET /v1/account/peers/pending` gives at most this many.
-pub const PENDING_PER_DEVICE: u64 = 8;
-/// Requests of one device to the routes of this module in one minute at most (429
-/// `rate_limited` with `Retry-After`).
+/// Pending answers to the share codes of one device at most (the 3 codes of a device,
+/// `account::LINKS_PER_DEVICE`): a newer answer ends the oldest (`expired`), and `GET
+/// /v1/account/peers/pending` gives at most this many.
+pub const PENDING_PER_DEVICE: u64 = 3;
+/// Requests of one device to the ceremony routes and `POST /v1/account/list` in one
+/// minute at most (429 `rate_limited` with `Retry-After`).
 pub const PEER_CALLS_PER_MINUTE: u32 = 60;
+/// Reads of other accounts' lists by one device in one minute at most (`GET
+/// /v1/account/peers/{account_id}` and `POST /v1/account/peers/lists`; 429 `rate_limited`
+/// with `Retry-After`), apart from `PEER_CALLS_PER_MINUTE`.
+pub const PEER_READS_PER_MINUTE: u32 = 60;
+/// Accounts of one `POST /v1/account/peers/lists` at most.
+pub const LIST_READ_ACCOUNTS: usize = 64;
+/// The bytes of the `device_list`s of one `POST /v1/account/peers/lists` answer together
+/// at most (the first list that changed always comes; a list past it is `later`).
+pub const LIST_READ_BYTES: usize = 1 << 20;
 /// The window of `PEER_CALLS_PER_MINUTE`, in seconds.
 pub const PEER_CALL_WINDOW_SECS: u64 = 60;
 /// Devices counted at once at most (the live account tokens of the relay are at most
 /// `account::MAX_TOKENS`); a new device past it is 503 `busy` until a window ends.
 pub const PEER_CALL_DEVICES: usize = 100_000;
 
-/// The requests of each device to the routes of section 16 in fixed windows of
-/// `PEER_CALL_WINDOW_SECS` that start at its first request. In memory only: a restart
-/// resets them (and ends every account token).
-#[derive(Debug, Default)]
+/// The requests of each device to a group of routes of section 16 in fixed windows of
+/// `PEER_CALL_WINDOW_SECS` that start at its first request: the ceremony and the list
+/// entries (`PeerCalls::default`), or the reads of other accounts' lists
+/// (`PeerCalls::reads`). In memory only: a restart resets them (and ends every account
+/// token).
+#[derive(Debug)]
 pub struct PeerCalls {
     windows: Mutex<HashMap<String, (u64, u32)>>,
+    per_minute: u32,
+    refusal: &'static str,
+}
+
+impl Default for PeerCalls {
+    fn default() -> Self {
+        Self {
+            windows: Mutex::default(),
+            per_minute: PEER_CALLS_PER_MINUTE,
+            refusal: "This device asked too often about shared vaults. Try again in a minute.",
+        }
+    }
 }
 
 /// A request that `PeerCalls` refused: the error and the seconds of its `Retry-After`.
@@ -82,9 +113,18 @@ pub struct PeerCallRefused {
 }
 
 impl PeerCalls {
-    /// Counts one request of `device` at `now`: refused with 429 `rate_limited` over
-    /// `PEER_CALLS_PER_MINUTE` in its window (until the window ends), and with 503 `busy`
-    /// for a new device while `PEER_CALL_DEVICES` windows are open.
+    /// The budget of the reads of other accounts' lists (`PEER_READS_PER_MINUTE`).
+    pub fn reads() -> Self {
+        Self {
+            windows: Mutex::default(),
+            per_minute: PEER_READS_PER_MINUTE,
+            refusal: "This device read the lists of other accounts too often. Try again in a minute.",
+        }
+    }
+
+    /// Counts one request of `device` at `now`: refused with 429 `rate_limited` over the
+    /// requests of a minute of this budget in its window (until the window ends), and with
+    /// 503 `busy` for a new device while `PEER_CALL_DEVICES` windows are open.
     pub fn take(&self, device: &str, now: u64) -> Result<(), PeerCallRefused> {
         let mut windows = self.windows.lock().unwrap_or_else(PoisonError::into_inner);
         let ended = |start: u64| now >= start.saturating_add(PEER_CALL_WINDOW_SECS);
@@ -103,12 +143,9 @@ impl PeerCalls {
         if ended(window.0) {
             *window = (now, 0);
         }
-        if window.1 >= PEER_CALLS_PER_MINUTE {
+        if window.1 >= self.per_minute {
             return Err(PeerCallRefused {
-                error: RelayError::new(
-                    codes::RATE_LIMITED,
-                    "This device asked too often about shared vaults. Try again in a minute.",
-                ),
+                error: RelayError::new(codes::RATE_LIMITED, self.refusal),
                 retry_after: window
                     .0
                     .saturating_add(PEER_CALL_WINDOW_SECS)
@@ -138,6 +175,16 @@ pub enum PeerEndpoint {
     JoinEnd(u64),
     /// `GET /v1/account/peers/{account_id}`.
     View(String),
+    /// `POST /v1/account/peers/lists`.
+    Lists,
+}
+
+impl PeerEndpoint {
+    /// A read of other accounts' lists: it counts in `PeerCalls::reads`, the other routes
+    /// in the budget of the ceremony.
+    pub fn is_read(&self) -> bool {
+        matches!(self, Self::View(_) | Self::Lists)
+    }
 }
 
 /// The endpoint of `rest`, the segments after `/v1/account`. 404 for an unknown path, 405
@@ -159,6 +206,7 @@ pub fn route(method: &str, rest: &[&str]) -> RelayResult<PeerEndpoint> {
         ["peers", "link"] => only("POST", PeerEndpoint::Link),
         ["peers", "join"] => only("POST", PeerEndpoint::Join),
         ["peers", "pending"] => only("GET", PeerEndpoint::Pending),
+        ["peers", "lists"] => only("POST", PeerEndpoint::Lists),
         ["peers", "join", id] => {
             let id = id.parse::<u64>().map_err(|_| not_found())?;
             match method {
@@ -193,6 +241,7 @@ pub fn dispatch(
             join_end(hub, caller, *id, now)
         }
         PeerEndpoint::View(account) => view(hub, caller, account, now),
+        PeerEndpoint::Lists => lists(hub, caller, &strict(body)?, now),
     }
 }
 
@@ -207,12 +256,15 @@ pub(crate) fn prune_links(tx: &Connection, now: u64) -> RelayResult<usize> {
 
 // ---- What a list says of other accounts. ----
 
-/// The active peers, shares, and joins of a list at its head (the rules of section 16).
+/// The active peers, shares, and joins of a list at its head, and the stores it names in
+/// a `store` entry (the rules of section 16). A join keeps the list hash of the share it
+/// answers (`None` for a join stored before joins named it).
 #[derive(Debug, Default)]
 struct ListState {
     peers: Vec<(String, Vec<u8>)>,
     shares: Vec<(String, String)>,
-    joins: Vec<(String, String)>,
+    joins: Vec<(String, String, Option<Vec<u8>>)>,
+    stores: Vec<String>,
 }
 
 impl ListState {
@@ -221,45 +273,70 @@ impl ListState {
     }
 
     fn names(&self, account: &str) -> bool {
-        self.shares
-            .iter()
-            .chain(&self.joins)
-            .any(|(_, held)| held == account)
+        self.shares.iter().any(|(_, held)| held == account)
+            || self.joins.iter().any(|(_, held, _)| held == account)
     }
 
     fn holds_store(&self, team: &str) -> bool {
-        self.shares
-            .iter()
-            .chain(&self.joins)
-            .any(|(store, _)| store == team)
+        self.stores.iter().any(|held| held == team)
     }
 
-    /// Apply one stored entry (they were checked when they were written).
-    fn take(&mut self, op: ListOp, account: String, root: Option<Vec<u8>>, team: Option<String>) {
-        match (op, team) {
-            (ListOp::Peer, _) => self.peers.push((account, root.unwrap_or_default())),
-            (ListOp::Unpeer, _) => self.peers.retain(|(held, _)| *held != account),
-            (ListOp::Share, Some(team)) => self.shares.push((team, account)),
-            (ListOp::Unshare, Some(team)) => self
+    fn shared(&self, team: &str) -> bool {
+        self.shares.iter().any(|(store, _)| store == team)
+    }
+
+    /// The active join of `team`, with the account it names and the share it answers.
+    fn join_of(&self, team: &str) -> Option<&(String, String, Option<Vec<u8>>)> {
+        self.joins.iter().find(|(store, _, _)| store == team)
+    }
+
+    /// Apply one stored entry (they were checked when they were written). A `join` of a
+    /// pair with an active join replaces it: one active join for each pair.
+    fn take(
+        &mut self,
+        op: ListOp,
+        account: Option<String>,
+        root: Option<Vec<u8>>,
+        team: Option<String>,
+    ) {
+        match (op, account, team) {
+            (ListOp::Peer, Some(account), _) => {
+                self.peers.push((account, root.unwrap_or_default()));
+            }
+            (ListOp::Unpeer, Some(account), _) => self.peers.retain(|(held, _)| *held != account),
+            (ListOp::Share, Some(account), Some(team)) => self.shares.push((team, account)),
+            (ListOp::Unshare, Some(account), Some(team)) => self
                 .shares
-                .retain(|held| *held != (team.clone(), account.clone())),
-            (ListOp::Join, Some(team)) => self.joins.push((team, account)),
-            (ListOp::Leave, Some(team)) => self
+                .retain(|(store, held)| (store, held) != (&team, &account)),
+            (ListOp::Join, Some(account), Some(team)) => {
+                self.joins
+                    .retain(|(store, held, _)| (store, held) != (&team, &account));
+                self.joins.push((team, account, root));
+            }
+            (ListOp::Leave, Some(account), Some(team)) => self
                 .joins
-                .retain(|held| *held != (team.clone(), account.clone())),
+                .retain(|(store, held, _)| (store, held) != (&team, &account)),
+            (ListOp::Store, None, Some(team)) => self.stores.push(team),
             _ => {}
         }
     }
 
-    /// Whether the rules of section 16 allow `op` for `account` (and `team`) now: 409
-    /// `conflict` when the list does not allow it at its head, 403 `account_limit` over
-    /// the counts.
-    fn check(&self, op: ListOp, account: &str, team: Option<&str>) -> RelayResult<()> {
+    /// Whether the rules of section 16 allow `op` for `account` (`None` for a `store`),
+    /// `team`, and `root` (the share that a `join` answers) now: 409 `conflict` when the
+    /// list does not allow it at its head, 403 `account_limit` over the counts.
+    fn check(
+        &self,
+        op: ListOp,
+        account: Option<&str>,
+        team: Option<&str>,
+        root: Option<&[u8]>,
+    ) -> RelayResult<()> {
         let refused =
             || conflict("The device list does not allow this entry now. Read the account again.");
         let counted = self.shares.len() + self.joins.len();
-        match (op, team) {
-            (ListOp::Peer, None) => {
+        let full = || account_limit("This account has 128 shared vaults.");
+        match (op, account, team) {
+            (ListOp::Peer, Some(account), None) => {
                 if self.is_peer(account) {
                     return Err(refused());
                 }
@@ -267,38 +344,56 @@ impl ListState {
                     return Err(account_limit("This account pins 64 other accounts."));
                 }
             }
-            (ListOp::Unpeer, None) => {
+            (ListOp::Unpeer, Some(account), None) => {
                 if !self.is_peer(account) || self.names(account) {
                     return Err(refused());
                 }
             }
-            (ListOp::Share, Some(team)) => {
+            (ListOp::Share, Some(account), Some(team)) => {
                 let pair = (team.to_owned(), account.to_owned());
                 if !self.is_peer(account)
-                    || self.joins.iter().any(|(store, _)| store == team)
+                    || !self.holds_store(team)
+                    || self.join_of(team).is_some()
                     || self.shares.contains(&pair)
                 {
                     return Err(refused());
                 }
                 if counted as u64 >= MAX_SHARED {
-                    return Err(account_limit("This account has 128 shared vaults."));
+                    return Err(full());
                 }
             }
-            (ListOp::Join, Some(team)) => {
-                if !self.is_peer(account) || self.holds_store(team) {
+            (ListOp::Join, Some(account), Some(team)) => {
+                let earlier = self.join_of(team);
+                if !self.is_peer(account)
+                    || self.shared(team)
+                    || self.holds_store(team)
+                    || earlier.is_some_and(|(_, held, answered)| {
+                        held != account || answered.as_deref() == root
+                    })
+                {
                     return Err(refused());
                 }
-                if counted as u64 >= MAX_SHARED {
-                    return Err(account_limit("This account has 128 shared vaults."));
+                // A join that replaces the active join of the pair adds none.
+                if earlier.is_none() && counted as u64 >= MAX_SHARED {
+                    return Err(full());
                 }
             }
-            (ListOp::Unshare, Some(team)) => {
+            (ListOp::Unshare, Some(account), Some(team)) => {
                 if !self.shares.contains(&(team.to_owned(), account.to_owned())) {
                     return Err(refused());
                 }
             }
-            (ListOp::Leave, Some(team)) => {
-                if !self.joins.contains(&(team.to_owned(), account.to_owned())) {
+            (ListOp::Leave, Some(account), Some(team)) => {
+                if !self
+                    .joins
+                    .iter()
+                    .any(|(store, held, _)| store == team && held == account)
+                {
+                    return Err(refused());
+                }
+            }
+            (ListOp::Store, None, Some(team)) => {
+                if self.holds_store(team) || self.join_of(team).is_some() {
                     return Err(refused());
                 }
             }
@@ -317,7 +412,7 @@ fn list_state(conn: &Connection, account: &str) -> RelayResult<ListState> {
     let mut statement = conn
         .prepare(
             "SELECT op, peer_account, peer_root, team_id FROM account_list \
-             WHERE account_id = ?1 AND peer_account IS NOT NULL ORDER BY version",
+             WHERE account_id = ?1 AND (peer_account IS NOT NULL OR op = 'store') ORDER BY version",
         )
         .map_err(db)?;
     let rows = statement
@@ -325,7 +420,7 @@ fn list_state(conn: &Connection, account: &str) -> RelayResult<ListState> {
             let op: String = row.get(0)?;
             Ok((
                 ListOp::parse(&op).ok_or(rusqlite::Error::InvalidQuery)?,
-                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(1)?,
                 row.get::<_, Option<Vec<u8>>>(2)?,
                 row.get::<_, Option<String>>(3)?,
             ))
@@ -408,20 +503,70 @@ fn shares_plan_on(hub: &Hub, tx: &Connection, accounts: [&str; 2], now: u64) -> 
     Ok(())
 }
 
-/// A removal of `member` from its group (in its transaction `tx`): every `share` that
-/// names `member` is void at Connect from the head of its owner's list on
-/// (`account_share_void`), so after a new admission only a newer `share` gives `member`'s
-/// devices a store (`account::share_active`). The lists stay as they are: a client sees
-/// the share, and Connect counts it for nothing.
+/// A removal of `member` from its group, or the rollback of its confirmation (in its
+/// transaction `tx`): every `share` that names `member`, and every `share` that `member`
+/// made, is void at Connect from the head of its owner's list on (`account_share_void`),
+/// so after a new admission only a newer `share` gives the other account's devices a store
+/// (`account::share_active`). The lists stay as they are: a client sees the share, and
+/// Connect counts it for nothing (and names it in the `void` of its views). Answers the
+/// marks written.
 pub(crate) fn void_shares_naming(tx: &Connection, member: &str, now: u64) -> RelayResult<usize> {
-    tx.execute(
-        "INSERT INTO account_share_void (account_id, peer_account, version, created_at) \
-         SELECT l.account_id, ?1, (SELECT max(h.version) FROM account_list h WHERE h.account_id = l.account_id), ?2 \
-         FROM account_list l WHERE l.peer_account = ?1 AND l.op = 'share' GROUP BY l.account_id \
-         ON CONFLICT(account_id, peer_account) DO UPDATE SET version = excluded.version, created_at = excluded.created_at",
-        params![member, to_i(now)],
-    )
-    .map_err(db)
+    let head = "(SELECT max(h.version) FROM account_list h WHERE h.account_id = l.account_id)";
+    let upsert = "ON CONFLICT(account_id, peer_account) DO UPDATE SET version = excluded.version, \
+                  created_at = excluded.created_at";
+    let naming = tx
+        .execute(
+            &format!(
+                "INSERT INTO account_share_void (account_id, peer_account, version, created_at) \
+                 SELECT l.account_id, ?1, {head}, ?2 \
+                 FROM account_list l WHERE l.peer_account = ?1 AND l.op = 'share' GROUP BY l.account_id {upsert}"
+            ),
+            params![member, to_i(now)],
+        )
+        .map_err(db)?;
+    let made = tx
+        .execute(
+            &format!(
+                "INSERT INTO account_share_void (account_id, peer_account, version, created_at) \
+                 SELECT ?1, l.peer_account, {head}, ?2 \
+                 FROM account_list l WHERE l.account_id = ?1 AND l.op = 'share' GROUP BY l.peer_account {upsert}"
+            ),
+            params![member, to_i(now)],
+        )
+        .map_err(db)?;
+    Ok(naming + made)
+}
+
+/// The shares of the list of `owner` (of the store `team` only, when given) that are
+/// active in the list (the last `share` or `unshare` of the pair is a `share`) and void
+/// at Connect (a mark of `account_share_void` at their version or later), in their order.
+pub(crate) fn void_shares(
+    conn: &Connection,
+    owner: &str,
+    team: Option<&str>,
+) -> RelayResult<Vec<VoidShare>> {
+    let mut statement = conn
+        .prepare(
+            "SELECT l.team_id, l.peer_account FROM account_list l JOIN account_share_void v \
+             ON v.account_id = l.account_id AND v.peer_account = l.peer_account \
+             WHERE l.account_id = ?1 AND l.op = 'share' AND l.version <= v.version \
+             AND (?2 IS NULL OR l.team_id = ?2) \
+             AND NOT EXISTS(SELECT 1 FROM account_list u WHERE u.account_id = l.account_id \
+               AND u.team_id = l.team_id AND u.peer_account = l.peer_account \
+               AND u.op IN ('share', 'unshare') AND u.version > l.version) \
+             ORDER BY l.version",
+        )
+        .map_err(db)?;
+    statement
+        .query_map(params![owner, team], |row| {
+            Ok(VoidShare {
+                team_id: row.get(0)?,
+                account_id: row.get(1)?,
+            })
+        })
+        .map_err(db)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(db)
 }
 
 /// The store rows of the devices of `account` in `team`, queued for removal in `tx`.
@@ -458,6 +603,131 @@ fn queue_account_removals(
     Ok(removals)
 }
 
+/// One checked entry of section 16 of `caller`'s list: its op, the other account (`None`
+/// for a `store`), the root (the pinned root of a `peer`, the list hash of the share that
+/// a `join` answers), the store, and the caller's signature over its message.
+struct Entry<'a> {
+    version: u64,
+    op: ListOp,
+    peer: Option<&'a str>,
+    root: Option<&'a [u8]>,
+    team: Option<&'a TeamId>,
+    statement: &'a [u8],
+}
+
+impl Entry<'_> {
+    /// The `apassy-connect share-list v1` message of the entry after the head `previous`.
+    fn message(&self, origin: &str, caller: &AccountCaller, previous: &str) -> Vec<u8> {
+        let root = self.root.map(encode_b64);
+        device::share_list_message(
+            origin,
+            &caller.account,
+            self.version,
+            previous,
+            self.op.as_str(),
+            self.peer.unwrap_or(device::LIST_NONE),
+            root.as_deref().unwrap_or(device::LIST_NONE),
+            self.team.map_or(device::LIST_NONE, TeamId::as_str),
+            &encode_b64(&caller.public_key),
+        )
+    }
+
+    /// The checks of every entry in the transaction `tx`: `next_entry` (409 for another
+    /// version, 403 `account_limit` for the room, 401 for a signer that is not live in the
+    /// list) and the signature over its message (400). Answers the message.
+    fn signed(
+        &self,
+        tx: &Connection,
+        origin: &str,
+        caller: &AccountCaller,
+    ) -> RelayResult<Vec<u8>> {
+        let previous = next_entry(tx, caller, self.version, self.op, &caller.public_key)?;
+        let message = self.message(origin, caller, &previous);
+        if !device::verify(&caller.public_key, &message, self.statement) {
+            return Err(RelayError::invalid(
+                "The statement is not the signature of this device over the next entry of the device list. Nothing changed.",
+            ));
+        }
+        Ok(message)
+    }
+
+    /// Writes the entry with the hash of `message`.
+    fn write(
+        &self,
+        tx: &Connection,
+        caller: &AccountCaller,
+        message: &[u8],
+        now: u64,
+    ) -> RelayResult<()> {
+        tx.execute(
+            "INSERT INTO account_list (account_id, version, op, key, link_hash, name, by_key, signature, hash, created_at, peer_account, peer_root, team_id) \
+             VALUES (?1, ?2, ?3, NULL, NULL, NULL, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                caller.account,
+                to_i(self.version),
+                self.op.as_str(),
+                caller.public_key,
+                self.statement,
+                device::account_list_hash(message),
+                to_i(now),
+                self.peer,
+                self.root,
+                self.team.map(TeamId::as_str),
+            ],
+        )
+        .map_err(db)
+        .map(drop)
+    }
+}
+
+/// The `store` entry of the new vault store `team` of `caller`, at `version`, signed with
+/// `statement`, inside the directory transaction `tx` that inserts the store
+/// (`Hub::create_vault_store`): the checks of `Entry::signed`, then the rules of section
+/// 16 (409: the list names the store already), then the entry.
+pub(crate) fn store_entry(
+    tx: &Connection,
+    origin: &str,
+    caller: &AccountCaller,
+    team: &TeamId,
+    version: u64,
+    statement: &[u8],
+    now: u64,
+) -> RelayResult<()> {
+    let entry = Entry {
+        version,
+        op: ListOp::Store,
+        peer: None,
+        root: None,
+        team: Some(team),
+        statement,
+    };
+    let message = entry.signed(tx, origin, caller)?;
+    list_state(tx, &caller.account)?.check(ListOp::Store, None, Some(team.as_str()), None)?;
+    entry.write(tx, caller, &message, now)
+}
+
+/// The `share` of `team` with `member` in the list of `owner` that a `join` answers: the
+/// last one, while it is active by the share condition (`account::share_active`, with the
+/// owner's `store` entry), with its version and its list hash.
+fn answered_share(
+    tx: &Connection,
+    owner: &str,
+    team: &TeamId,
+    member: &str,
+) -> RelayResult<Option<(i64, String)>> {
+    if !share_active(tx, owner, team.as_str(), member)? {
+        return Ok(None);
+    }
+    tx.query_row(
+        "SELECT version, hash FROM account_list WHERE account_id = ?1 AND team_id = ?2 \
+         AND peer_account = ?3 AND op = 'share' ORDER BY version DESC LIMIT 1",
+        params![owner, team.as_str(), member],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
+    .map_err(db)
+}
+
 // ---- `POST /v1/account/list` (section 16.3). ----
 
 /// `POST /v1/account/list`: an entry of section 16, signed by the calling device at the
@@ -465,10 +735,11 @@ fn queue_account_removals(
 /// `peer`, `share`, or `join` (403 `not_in_group`, 403 `plan_required`; read before the
 /// transaction and again in it, where the seams read on a transaction), then in one
 /// transaction the version and the room (409, 403 `account_limit`), the signer (401 for a
-/// device that is not in the list), the signature (400), the rules of section 16 (409),
-/// and the conditions of each op; then the entry, for a `join` the share it follows
-/// (`account_join_share`), and for an `unshare` or a `leave` the removal of the store
-/// rows. Nothing is written on a refusal.
+/// device that is not in the list), the signature (400), for a `share` or a `store` the
+/// account that made the store (404 for no store, 403 `forbidden` for another account's),
+/// the rules of section 16 (409), and the conditions of each op; then the entry, for a
+/// `join` the share it answers (`account_join_share`), and for an `unshare` or a `leave`
+/// the removal of the store rows. Nothing is written on a refusal.
 fn append(
     hub: &Hub,
     caller: &AccountCaller,
@@ -476,22 +747,36 @@ fn append(
     now: u64,
 ) -> RelayResult<Value> {
     let op = request.op;
-    if !op.names_account() {
+    if !op.of_section_16() {
         return Err(RelayError::invalid(
             "This route takes the entries of section 16. A device is added by a confirmation and removed by a revoke.",
         ));
     }
-    let peer = request.account_id.as_str();
-    if !is_connect_id(peer, "acc_") || peer == caller.account {
-        return Err(RelayError::invalid(
-            "The account id is not another account.",
-        ));
-    }
-    let root = match (op, request.root.as_deref()) {
-        (ListOp::Peer, Some(root)) => Some(public_key_of(root)?),
-        (ListOp::Peer, None) | (_, Some(_)) => {
+    let peer = match (op, request.account_id.as_deref()) {
+        (ListOp::Store, None) => None,
+        (ListOp::Store, Some(_)) | (_, None) => {
             return Err(RelayError::invalid(
-                "Only a peer entry names a root, and it must.",
+                "A store entry names no account, and every other entry of section 16 names one.",
+            ));
+        }
+        (_, Some(peer)) => {
+            if !is_connect_id(peer, "acc_") || peer == caller.account {
+                return Err(RelayError::invalid(
+                    "The account id is not another account.",
+                ));
+            }
+            Some(peer)
+        }
+    };
+    let root: Option<Vec<u8>> = match (op, request.root.as_deref()) {
+        (ListOp::Peer, Some(root)) => Some(public_key_of(root)?.to_vec()),
+        (ListOp::Join, Some(hash)) if valid_link_hash(hash) => Some(
+            decode_b64(hash, 32)
+                .map_err(|_| RelayError::invalid("The share hash is not valid."))?,
+        ),
+        (ListOp::Peer | ListOp::Join, _) | (_, Some(_)) => {
+            return Err(RelayError::invalid(
+                "A peer entry names the root it pins, and a join the list hash of the share it answers; no other entry names a root.",
             ));
         }
         (_, None) => None,
@@ -503,102 +788,92 @@ fn append(
         (false, None) => None,
         _ => {
             return Err(RelayError::invalid(
-                "Only a share, unshare, join, or leave entry names a store, and each must.",
+                "Only a share, unshare, join, leave, or store entry names a store, and each must.",
             ));
         }
     };
     let statement = decode_b64(&request.statement, device::MAX_SIGNATURE_BYTES)
         .map_err(|_| RelayError::invalid("The statement is not valid."))?;
+    let entry = Entry {
+        version: request.version,
+        op,
+        peer,
+        root: root.as_deref(),
+        team: team.as_ref(),
+        statement: &statement,
+    };
     // The conditions of the service that read the group and the plan seams.
+    let other = peer.unwrap_or_default();
     if matches!(op, ListOp::Peer | ListOp::Share | ListOp::Join)
-        && !same_group(hub, &caller.account, peer, now)?
+        && !same_group(hub, &caller.account, other, now)?
     {
         return Err(not_in_group());
     }
     if op == ListOp::Share
-        && (!shares_plan(hub, &caller.account, now)? || !shares_plan(hub, peer, now)?)
+        && (!shares_plan(hub, &caller.account, now)? || !shares_plan(hub, other, now)?)
     {
         return Err(plan_required());
     }
     let origin = hub.config.public_url.clone();
     let (removals, version) = hub.directory.store.tx(|tx| {
         if matches!(op, ListOp::Peer | ListOp::Share | ListOp::Join) {
-            same_group_on(hub, tx, &caller.account, peer, now)?;
+            same_group_on(hub, tx, &caller.account, other, now)?;
         }
         if op == ListOp::Share {
-            shares_plan_on(hub, tx, [&caller.account, peer], now)?;
+            shares_plan_on(hub, tx, [&caller.account, other], now)?;
         }
-        let previous = next_entry(tx, caller, request.version, op, &caller.public_key)?;
-        let root_b64 = root.as_ref().map(|key| encode_b64(key));
-        let message = device::share_list_message(
-            &origin,
-            &caller.account,
-            request.version,
-            &previous,
-            op.as_str(),
-            peer,
-            root_b64.as_deref().unwrap_or(device::LIST_NONE),
-            team.as_ref().map_or(device::LIST_NONE, TeamId::as_str),
-            &encode_b64(&caller.public_key),
-        );
-        if !device::verify(&caller.public_key, &message, &statement) {
-            return Err(RelayError::invalid(
-                "The statement is not the signature of this device over the next entry of the device list. Nothing changed.",
-            ));
+        let message = entry.signed(tx, &origin, caller)?;
+        if let (ListOp::Share | ListOp::Store, Some(team)) = (op, team.as_ref())
+            && store_owner(tx, team)? != caller.account
+        {
+            return Err(forbidden(if op == ListOp::Share {
+                "Only the account that made a vault store shares it."
+            } else {
+                "Only the account that made a vault store names it in its list."
+            }));
         }
         let state = list_state(tx, &caller.account)?;
-        state.check(op, peer, team.as_ref().map(TeamId::as_str))?;
+        state.check(op, peer, team.as_ref().map(TeamId::as_str), root.as_deref())?;
         let mut removals = Vec::new();
+        let mut answered = None;
         match (op, team.as_ref()) {
             (ListOp::Peer, _) => {
-                if Some(root_of(tx, peer)?.as_slice()) != root.as_ref().map(<[u8; 65]>::as_slice) {
+                if Some(root_of(tx, other)?.as_slice()) != root.as_deref() {
                     return Err(conflict(
                         "That root is not the root of the other account's device list. Nothing changed.",
                     ));
                 }
             }
-            (ListOp::Share, Some(team)) => {
-                if store_owner(tx, team)? != caller.account {
-                    return Err(forbidden("Only the account that made a vault store shares it."));
-                }
-            }
             (ListOp::Join, Some(team)) => {
-                if store_owner(tx, team)? != peer || !share_active(tx, peer, team.as_str(), &caller.account)? {
-                    return Err(conflict("That account does not share this vault store with you. Nothing changed."));
-                }
+                // The share that this join answers: the owner's last `share` of the store
+                // with the caller, active now, named by its list hash.
+                let named = root.as_deref().map(encode_b64);
+                answered = match answered_share(tx, other, team, &caller.account)? {
+                    Some((share_version, hash))
+                        if store_owner(tx, team)? == other && Some(&hash) == named.as_ref() =>
+                    {
+                        Some(share_version)
+                    }
+                    _ => {
+                        return Err(conflict(
+                            "That account does not share this vault store with you by that share. Nothing changed.",
+                        ));
+                    }
+                };
             }
-            (ListOp::Unshare, Some(team)) => removals = queue_account_removals(tx, team, peer, now)?,
+            (ListOp::Unshare, Some(team)) => removals = queue_account_removals(tx, team, other, now)?,
             (ListOp::Leave, Some(team)) => removals = queue_account_removals(tx, team, &caller.account, now)?,
             _ => {}
         }
-        let hash = device::account_list_hash(&message);
-        tx.execute(
-            "INSERT INTO account_list (account_id, version, op, key, link_hash, name, by_key, signature, hash, created_at, peer_account, peer_root, team_id) \
-             VALUES (?1, ?2, ?3, NULL, NULL, NULL, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![
-                caller.account,
-                to_i(request.version),
-                op.as_str(),
-                caller.public_key,
-                statement,
-                hash,
-                to_i(now),
-                peer,
-                root.as_ref().map(<[u8; 65]>::as_slice),
-                team.as_ref().map(TeamId::as_str),
-            ],
-        )
-        .map_err(db)?;
-        if let (ListOp::Join, Some(team)) = (op, team.as_ref()) {
-            // The share that this join follows: the member's devices sign in to the store
+        entry.write(tx, caller, &message, now)?;
+        if let (Some(share_version), Some(team)) = (answered, team.as_ref()) {
+            // The share that this join answers: the member's devices sign in to the store
             // only while it is the active one (`account::store_device_live`).
             tx.execute(
                 "INSERT INTO account_join_share (account_id, team_id, share_version, created_at) \
-                 SELECT ?1, ?2, max(version), ?4 FROM account_list \
-                 WHERE account_id = ?3 AND team_id = ?2 AND peer_account = ?1 AND op = 'share' \
-                 ON CONFLICT(account_id, team_id) DO UPDATE SET share_version = excluded.share_version, \
-                 created_at = excluded.created_at",
-                params![caller.account, team.as_str(), peer, to_i(now)],
+                 VALUES (?1, ?2, ?3, ?4) ON CONFLICT(account_id, team_id) DO UPDATE SET \
+                 share_version = excluded.share_version, created_at = excluded.created_at",
+                params![caller.account, team.as_str(), share_version, to_i(now)],
             )
             .map_err(db)?;
         }
@@ -607,7 +882,7 @@ fn append(
             tx.execute(
                 "UPDATE account_peer_join SET state = 'confirmed', decided_at = ?3 WHERE state = 'pending' \
                  AND account_id = ?2 AND link_id IN (SELECT id FROM account_peer_link WHERE account_id = ?1)",
-                params![caller.account, peer, to_i(now)],
+                params![caller.account, other, to_i(now)],
             )
             .map_err(db)?;
         }
@@ -949,7 +1224,9 @@ fn join_state(hub: &Hub, caller: &AccountCaller, join_id: u64, now: u64) -> Rela
 }
 
 /// `DELETE /v1/account/peers/join/{join_id}`: the device that made the code refuses the
-/// answer, or the device that answered withdraws it. A decided answer stays as it is.
+/// answer, which ends its code at once (it no longer counts for the 3 codes of the
+/// device), or the device that answered withdraws it (the code counts until it expires).
+/// A decided answer stays as it is.
 fn join_end(hub: &Hub, caller: &AccountCaller, join_id: u64, now: u64) -> RelayResult<Value> {
     let view = hub.directory.store.tx(|tx| {
         let (view, maker) = own_join(tx, caller, join_id, now)?;
@@ -962,6 +1239,14 @@ fn join_end(hub: &Hub, caller: &AccountCaller, join_id: u64, now: u64) -> RelayR
             params![to_i(join_id), state, to_i(now)],
         )
         .map_err(db)?;
+        if maker {
+            tx.execute(
+                "UPDATE account_peer_link SET expires_at = min(expires_at, ?2) \
+                 WHERE id = (SELECT link_id FROM account_peer_join WHERE id = ?1)",
+                params![to_i(join_id), to_i(now)],
+            )
+            .map_err(db)?;
+        }
         Ok(PeerJoinView {
             state: state.to_owned(),
             ..view
@@ -970,20 +1255,65 @@ fn join_end(hub: &Hub, caller: &AccountCaller, join_id: u64, now: u64) -> RelayR
     to_value(&view)
 }
 
-/// `GET /v1/account/peers/{account_id}`: another account of the caller's group (403
-/// `not_in_group` outside one), with its name, its live device rows, and its device list
-/// from version 1 (with its peers and the stores it shares and joins), read in a lock of
-/// its own. Which of the rows is a device of it is the list's to say.
+// ---- The lists of other accounts (section 16.4). ----
+
+/// The accounts that take part in a vault store that exists with `account`, `account`
+/// left out: for each store that `account` made or that a `share` of its maker's list
+/// names `account` in, the maker and every account that a `share` of that store in the
+/// maker's list names (active or ended). It ends with the deletion of the store.
+fn store_participants(conn: &Connection, account: &str) -> RelayResult<HashSet<String>> {
+    let mut statement = conn
+        .prepare(
+            "WITH mine(team, owner) AS ( \
+               SELECT id, account_id FROM team WHERE kind = 'account' AND account_id = ?1 \
+               UNION SELECT t.id, t.account_id FROM account_list s JOIN team t ON t.id = s.team_id \
+               WHERE s.peer_account = ?1 AND s.op = 'share' AND t.kind = 'account' AND s.account_id = t.account_id) \
+             SELECT owner FROM mine \
+             UNION SELECT s.peer_account FROM mine m JOIN account_list s \
+               ON s.team_id = m.team AND s.account_id = m.owner AND s.op = 'share'",
+        )
+        .map_err(db)?;
+    let mut accounts = statement
+        .query_map(params![account], |row| row.get::<_, String>(0))
+        .map_err(db)?
+        .collect::<Result<HashSet<_>, _>>()
+        .map_err(db)?;
+    accounts.remove(account);
+    Ok(accounts)
+}
+
+/// Whether `caller` may read the list of `account` (connect-account-v1 section 16.4):
+/// both are active members of one group, or `account` is in `participants`, the
+/// participants of the caller's stores (`store_participants`).
+fn may_read(
+    hub: &Hub,
+    caller: &AccountCaller,
+    participants: &HashSet<String>,
+    account: &str,
+    now: u64,
+) -> RelayResult<bool> {
+    Ok(participants.contains(account) || same_group(hub, &caller.account, account, now)?)
+}
+
+/// `GET /v1/account/peers/{account_id}`: another account whose list the caller may read
+/// (`may_read`: one group, or a vault store of both; 403 `not_in_group` otherwise), with
+/// its name, its live device rows, its device list from version 1 (with its peers and the
+/// stores it makes, shares, and joins), read in a lock of its own, and the void marks of
+/// its shares (`void_shares`). Which of the rows is a device of it is the list's to say.
 fn view(hub: &Hub, caller: &AccountCaller, account: &str, now: u64) -> RelayResult<Value> {
     if account == caller.account {
         return Err(RelayError::invalid(
             "That is this account. Read GET /v1/account.",
         ));
     }
-    if !same_group(hub, &caller.account, account, now)? {
+    let participants = hub
+        .directory
+        .store
+        .with(|conn| store_participants(conn, &caller.account))?;
+    if !may_read(hub, caller, &participants, account, now)? {
         return Err(not_in_group());
     }
-    let (name, devices) = hub.directory.store.with(|conn| {
+    let (name, devices, void) = hub.directory.store.with(|conn| {
         let name: String = conn
             .query_row(
                 "SELECT name FROM account WHERE id = ?1",
@@ -1013,7 +1343,7 @@ fn view(hub: &Hub, caller: &AccountCaller, account: &str, now: u64) -> RelayResu
             .map_err(db)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(db)?;
-        Ok((name, devices))
+        Ok((name, devices, void_shares(conn, account, None)?))
     })?;
     let device_list = hub
         .directory
@@ -1024,7 +1354,114 @@ fn view(hub: &Hub, caller: &AccountCaller, account: &str, now: u64) -> RelayResu
         name,
         devices,
         device_list,
+        void,
     })
+}
+
+/// The name of `account` and the version and hash of the head of its list, or `None` for
+/// no such account.
+fn named_head(conn: &Connection, account: &str) -> RelayResult<Option<(String, u64, String)>> {
+    conn.query_row(
+        "SELECT a.name, l.version, l.hash FROM account a JOIN account_list l ON l.account_id = a.id \
+         WHERE a.id = ?1 ORDER BY l.version DESC LIMIT 1",
+        params![account],
+        |row| Ok((row.get(0)?, to_u(row.get(1)?), row.get(2)?)),
+    )
+    .optional()
+    .map_err(db)
+}
+
+/// `POST /v1/account/peers/lists`: the lists of 1 to `LIST_READ_ACCOUNTS` other accounts
+/// (distinct; 400 otherwise), each against the pin that the client holds (`version` and
+/// `head`, `0` and `""` for none), answered in the asked order: `refused` for an account
+/// that the caller may not read (`may_read`) or that does not exist; `same` with the void
+/// marks when the head of its list is the pin; else `newer` with its name, its list from
+/// version 1, and the void marks, while the lists of the answer stay within
+/// `LIST_READ_BYTES` together (the first `newer` list always comes), and `later` for a
+/// list past it. Each account is read in locks of its own.
+fn lists(
+    hub: &Hub,
+    caller: &AccountCaller,
+    request: &PeerListsRequest,
+    now: u64,
+) -> RelayResult<Value> {
+    let pins = &request.accounts;
+    if pins.is_empty() || pins.len() > LIST_READ_ACCOUNTS {
+        return Err(RelayError::invalid("Name 1 to 64 other accounts."));
+    }
+    let mut seen = HashSet::new();
+    for pin in pins {
+        if !is_connect_id(&pin.account_id, "acc_")
+            || pin.account_id == caller.account
+            || !seen.insert(pin.account_id.as_str())
+        {
+            return Err(RelayError::invalid(
+                "Each account is another account, named once.",
+            ));
+        }
+        if !pin.head.is_empty() && !valid_link_hash(&pin.head) {
+            return Err(RelayError::invalid(
+                "The head of a pin is a list hash, or empty for none.",
+            ));
+        }
+    }
+    let participants = hub
+        .directory
+        .store
+        .with(|conn| store_participants(conn, &caller.account))?;
+    let mut carried = 0usize;
+    let mut newer = false;
+    let mut items = Vec::with_capacity(pins.len());
+    for pin in pins {
+        let item = |state: &str| PeerListItem {
+            account_id: pin.account_id.clone(),
+            state: state.to_owned(),
+            name: None,
+            device_list: None,
+            void: None,
+        };
+        if !may_read(hub, caller, &participants, &pin.account_id, now)? {
+            items.push(item("refused"));
+            continue;
+        }
+        let read = hub.directory.store.with(|conn| {
+            Ok(match named_head(conn, &pin.account_id)? {
+                Some(head) => Some((head, void_shares(conn, &pin.account_id, None)?)),
+                None => None,
+            })
+        })?;
+        let Some(((name, version, hash), void)) = read else {
+            items.push(item("refused"));
+            continue;
+        };
+        if version == pin.version && hash == pin.head {
+            items.push(PeerListItem {
+                void: Some(void),
+                ..item("same")
+            });
+            continue;
+        }
+        let device_list = hub
+            .directory
+            .store
+            .with(|conn| list_entries(conn, &pin.account_id))?;
+        let bytes = serde_json::to_vec(&device_list)
+            .map_err(|_| RelayError::internal("A device list cannot be written."))?
+            .len();
+        if newer && carried.saturating_add(bytes) > LIST_READ_BYTES {
+            items.push(item("later"));
+            continue;
+        }
+        newer = true;
+        carried = carried.saturating_add(bytes);
+        items.push(PeerListItem {
+            name: Some(name),
+            device_list: Some(device_list),
+            void: Some(void),
+            ..item("newer")
+        });
+    }
+    to_value(&PeerLists { accounts: items })
 }
 
 #[cfg(test)]
@@ -1059,6 +1496,18 @@ mod tests {
             PeerEndpoint::View("acc_k7m2q4x3ca".into())
         );
         assert_eq!(
+            route("POST", &["peers", "lists"]).unwrap(),
+            PeerEndpoint::Lists
+        );
+        assert_eq!(
+            route("GET", &["peers", "lists"]).unwrap_err().code,
+            codes::METHOD_NOT_ALLOWED
+        );
+        assert!(
+            PeerEndpoint::Lists.is_read() && PeerEndpoint::View("acc_k7m2q4x3ca".into()).is_read()
+        );
+        assert!(!PeerEndpoint::Pending.is_read() && !PeerEndpoint::Append.is_read());
+        assert_eq!(
             route("GET", &["list"]).unwrap_err().code,
             codes::METHOD_NOT_ALLOWED
         );
@@ -1083,55 +1532,86 @@ mod tests {
     fn the_rules_of_a_list_follow_section_16() {
         let mut state = ListState::default();
         let (p, s) = ("acc_m3n5p7q2rb", "t_7k2m5q4x3c");
-        assert_eq!(
-            state.check(ListOp::Share, p, Some(s)).unwrap_err().code,
-            codes::CONFLICT
-        );
-        assert_eq!(
-            state.check(ListOp::Unpeer, p, None).unwrap_err().code,
-            codes::CONFLICT
-        );
-        state.check(ListOp::Peer, p, None).unwrap();
-        state.take(ListOp::Peer, p.into(), Some(vec![4; 65]), None);
-        assert_eq!(
-            state.check(ListOp::Peer, p, None).unwrap_err().code,
-            codes::CONFLICT
-        );
-        state.check(ListOp::Share, p, Some(s)).unwrap();
-        state.take(ListOp::Share, p.into(), None, Some(s.into()));
-        assert_eq!(
-            state.check(ListOp::Share, p, Some(s)).unwrap_err().code,
-            codes::CONFLICT
-        );
-        // A store that this list shares is not one it joins, and a peer that a share names
-        // is not unpinned.
-        assert_eq!(
-            state.check(ListOp::Join, p, Some(s)).unwrap_err().code,
-            codes::CONFLICT
-        );
-        assert_eq!(
-            state.check(ListOp::Unpeer, p, None).unwrap_err().code,
-            codes::CONFLICT
-        );
-        state.check(ListOp::Unshare, p, Some(s)).unwrap();
-        state.take(ListOp::Unshare, p.into(), None, Some(s.into()));
-        assert_eq!(
-            state.check(ListOp::Unshare, p, Some(s)).unwrap_err().code,
-            codes::CONFLICT
-        );
-        assert_eq!(
-            state.check(ListOp::Leave, p, Some(s)).unwrap_err().code,
-            codes::CONFLICT
-        );
-        state.check(ListOp::Unpeer, p, None).unwrap();
+        let conflict =
+            |result: RelayResult<()>| assert_eq!(result.unwrap_err().code, codes::CONFLICT);
+        conflict(state.check(ListOp::Share, Some(p), Some(s), None));
+        conflict(state.check(ListOp::Unpeer, Some(p), None, None));
+        state.check(ListOp::Peer, Some(p), None, None).unwrap();
+        state.take(ListOp::Peer, Some(p.into()), Some(vec![4; 65]), None);
+        conflict(state.check(ListOp::Peer, Some(p), None, None));
+        // A share needs the list's own `store` entry of the store.
+        conflict(state.check(ListOp::Share, Some(p), Some(s), None));
+        state.check(ListOp::Store, None, Some(s), None).unwrap();
+        state.take(ListOp::Store, None, None, Some(s.into()));
+        conflict(state.check(ListOp::Store, None, Some(s), None));
+        state.check(ListOp::Share, Some(p), Some(s), None).unwrap();
+        state.take(ListOp::Share, Some(p.into()), None, Some(s.into()));
+        conflict(state.check(ListOp::Share, Some(p), Some(s), None));
+        // A store that this list makes or shares is not one it joins, and a peer that a
+        // share names is not unpinned.
+        conflict(state.check(ListOp::Join, Some(p), Some(s), Some(&[1; 32])));
+        conflict(state.check(ListOp::Unpeer, Some(p), None, None));
+        state
+            .check(ListOp::Unshare, Some(p), Some(s), None)
+            .unwrap();
+        state.take(ListOp::Unshare, Some(p.into()), None, Some(s.into()));
+        conflict(state.check(ListOp::Unshare, Some(p), Some(s), None));
+        conflict(state.check(ListOp::Leave, Some(p), Some(s), None));
+        // The made store stays named after the share ends.
+        conflict(state.check(ListOp::Join, Some(p), Some(s), Some(&[1; 32])));
+        state.check(ListOp::Unpeer, Some(p), None, None).unwrap();
         // A field that the op does not take.
-        assert_eq!(
-            state.check(ListOp::Peer, p, Some(s)).unwrap_err().code,
-            codes::INVALID_REQUEST
+        let invalid =
+            |result: RelayResult<()>| assert_eq!(result.unwrap_err().code, codes::INVALID_REQUEST);
+        invalid(state.check(ListOp::Peer, Some(p), Some(s), None));
+        invalid(state.check(ListOp::Share, Some(p), None, None));
+        invalid(state.check(ListOp::Store, Some(p), Some(s), None));
+    }
+
+    #[test]
+    fn a_join_names_one_share_and_a_newer_one_replaces_it() {
+        let mut state = ListState::default();
+        let (p, q, s) = ("acc_m3n5p7q2rb", "acc_n4p6q8r3sc", "t_7k2m5q4x3c");
+        let conflict =
+            |result: RelayResult<()>| assert_eq!(result.unwrap_err().code, codes::CONFLICT);
+        for peer in [p, q] {
+            state.take(ListOp::Peer, Some(peer.into()), Some(vec![4; 65]), None);
+        }
+        state
+            .check(ListOp::Join, Some(p), Some(s), Some(&[1; 32]))
+            .unwrap();
+        state.take(
+            ListOp::Join,
+            Some(p.into()),
+            Some(vec![1; 32]),
+            Some(s.into()),
         );
-        assert_eq!(
-            state.check(ListOp::Share, p, None).unwrap_err().code,
-            codes::INVALID_REQUEST
+        // The same share twice, and a join of the store with another account.
+        conflict(state.check(ListOp::Join, Some(p), Some(s), Some(&[1; 32])));
+        conflict(state.check(ListOp::Join, Some(q), Some(s), Some(&[2; 32])));
+        // A join of the store that a list joins is no `store` of it.
+        conflict(state.check(ListOp::Store, None, Some(s), None));
+        // A newer share: the new join replaces the old one, and adds no count.
+        state
+            .check(ListOp::Join, Some(p), Some(s), Some(&[2; 32]))
+            .unwrap();
+        state.take(
+            ListOp::Join,
+            Some(p.into()),
+            Some(vec![2; 32]),
+            Some(s.into()),
         );
+        assert_eq!(state.joins.len(), 1);
+        // A join stored before joins named a share is replaced by any join of the pair.
+        let mut earlier = ListState::default();
+        earlier.take(ListOp::Peer, Some(p.into()), Some(vec![4; 65]), None);
+        earlier.take(ListOp::Join, Some(p.into()), None, Some(s.into()));
+        earlier
+            .check(ListOp::Join, Some(p), Some(s), Some(&[1; 32]))
+            .unwrap();
+        // One leave ends the pair.
+        state.check(ListOp::Leave, Some(p), Some(s), None).unwrap();
+        state.take(ListOp::Leave, Some(p.into()), None, Some(s.into()));
+        conflict(state.check(ListOp::Leave, Some(p), Some(s), None));
     }
 }

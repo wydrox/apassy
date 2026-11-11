@@ -597,7 +597,9 @@ fn join(
 /// new one (`409 seat_limit` above the plan's maximum); the member becomes active; when
 /// the count exceeds the quantity at Stripe (the stored one, or one Stripe accepted from
 /// Connect since), billing asks Stripe for the count, and when Stripe refuses the member
-/// is pending again. Stripe's webhook then applies the quantity.
+/// is pending again: in that transaction the store rows of its window go and the shares
+/// that name it or that it made are void (`peers::void_shares_naming`), as a removal
+/// from the group does. Stripe's webhook then applies the quantity.
 fn confirm(hub: &Hub, caller: &AccountCaller, target: &str, now: u64) -> RelayResult<MemberView> {
     let member = hub
         .directory
@@ -658,7 +660,8 @@ fn confirm(hub: &Hub, caller: &AccountCaller, target: &str, now: u64) -> RelayRe
         {
             // Back to pending: the store rows that were added between the two
             // transactions, between the member and the group's other accounts, go in the
-            // same transaction, as a removal from the group takes them.
+            // same transaction, and the shares of the window count for nothing, as a
+            // removal from the group takes them.
             let removals = hub.directory.store.tx(|tx| {
                 let changed = tx
                     .execute(
@@ -672,6 +675,7 @@ fn confirm(hub: &Hub, caller: &AccountCaller, target: &str, now: u64) -> RelayRe
                 }
                 let others = other_accounts(tx, &member.group_id, target)?;
                 let (removals, _) = queue_group_store_removals(tx, target, &others, now)?;
+                crate::server::peers::void_shares_naming(tx, target, now)?;
                 hub.directory.audit.write_on(
                     tx,
                     now,
@@ -698,9 +702,12 @@ fn confirm(hub: &Hub, caller: &AccountCaller, target: &str, now: u64) -> RelayRe
 /// other accounts, theirs leave its stores, and the tunnel grants between it and the group
 /// end. The membership and the store rows go in one transaction, with a waiting removal
 /// for each store file; the files take them after the commit, at their next open, or at a
-/// maintenance pass. In the same transaction every `share` that names the removed account
-/// is void at Connect (`peers::void_shares_naming`): after a new admission only a newer
-/// `share`, and the member's `join` after it, give its devices a store again.
+/// maintenance pass. The group's other accounts are read in that transaction. In the same
+/// transaction every `share` that names the removed account, and every `share` that it
+/// made, is void at Connect (`peers::void_shares_naming`): after a new admission only a
+/// newer `share`, and the other account's `join` after it, give a store again. The tunnel
+/// grants end before the transaction, and after it for an account that joined the group
+/// in between.
 fn remove(hub: &Hub, caller: &AccountCaller, target: &str, now: u64) -> RelayResult<RemovedAnswer> {
     let member = hub
         .directory
@@ -739,8 +746,10 @@ fn remove(hub: &Hub, caller: &AccountCaller, target: &str, now: u64) -> RelayRes
         .store
         .with(|conn| other_accounts(conn, &other.group_id, target))?;
     crate::server::billing_store::tunnel_grants_end(hub, target, &others, now)?;
-    let (removals, removed_from_stores) = hub.directory.store.tx(|tx| {
-        let (removals, removed_from_stores) = queue_group_store_removals(tx, target, &others, now)?;
+    let (removals, removed_from_stores, joined) = hub.directory.store.tx(|tx| {
+        let current = other_accounts(tx, &other.group_id, target)?;
+        let (removals, removed_from_stores) =
+            queue_group_store_removals(tx, target, &current, now)?;
         tx.execute(
             "DELETE FROM group_member WHERE group_id = ?1 AND account_id = ?2",
             params![other.group_id, target],
@@ -761,9 +770,16 @@ fn remove(hub: &Hub, caller: &AccountCaller, target: &str, now: u64) -> RelayRes
             &json!({"group_id": other.group_id, "account_id": target,
                     "removed_from_stores": removed_from_stores}),
         )?;
-        Ok((removals, removed_from_stores))
+        let joined: Vec<String> = current
+            .into_iter()
+            .filter(|account| !others.contains(account))
+            .collect();
+        Ok((removals, removed_from_stores, joined))
     })?;
     hub.apply_removals(&removals, now);
+    if !joined.is_empty() {
+        crate::server::billing_store::tunnel_grants_end(hub, target, &joined, now)?;
+    }
     Ok(RemovedAnswer {
         account_id: target.to_string(),
         removed_from_stores,

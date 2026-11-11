@@ -2333,9 +2333,16 @@ fn respond_account(
             return;
         }
     };
-    // The routes of section 16 count for the calling device before the body is read.
-    if matches!(endpoint, account::AccountEndpoint::Peers(_))
-        && let Err(refusal) = hub.accounts.peer_calls().take(&caller.device, now)
+    // The routes of section 16 count for the calling device before the body is read: the
+    // reads of other accounts' lists in a budget of their own, the others in the budget
+    // of the ceremony.
+    if let account::AccountEndpoint::Peers(peers) = &endpoint
+        && let Err(refusal) = if peers.is_read() {
+            hub.accounts.peer_reads()
+        } else {
+            hub.accounts.peer_calls()
+        }
+        .take(&caller.device, now)
     {
         respond_json_with(
             request,

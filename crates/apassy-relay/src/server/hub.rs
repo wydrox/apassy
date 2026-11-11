@@ -157,27 +157,37 @@ pub fn make_team_file(
     owner: &str,
     now: u64,
 ) -> RelayResult<NewTeam> {
-    make_team_file_with_device(config, name, owner, now, None)
+    make_team_file_with_device(config, name, owner, now, None, None)
 }
 
+/// `make_team_file` with the first device of the owner (`device`: its name and key), and
+/// the id `given` (a file that is there already is 409 `conflict`, and stays), else a new
+/// random id.
 fn make_team_file_with_device(
     config: &RelayConfig,
     name: &str,
     owner: &str,
     now: u64,
     device: Option<(&str, &[u8])>,
+    given: Option<&TeamId>,
 ) -> RelayResult<NewTeam> {
     let name = checked_team_name(name)?;
     let owner = admin::checked_member_name(owner)?;
-    let mut id =
-        TeamId::generate().map_err(|_| RelayError::internal("The system has no random source."))?;
-    for _ in 0..8 {
-        if std::fs::symlink_metadata(config.team_path(&id)).is_err() {
-            break;
+    let id = match given {
+        Some(id) => id.clone(),
+        None => {
+            let mut id = TeamId::generate()
+                .map_err(|_| RelayError::internal("The system has no random source."))?;
+            for _ in 0..8 {
+                if std::fs::symlink_metadata(config.team_path(&id)).is_err() {
+                    break;
+                }
+                id = TeamId::generate()
+                    .map_err(|_| RelayError::internal("The system has no random source."))?;
+            }
+            id
         }
-        id = TeamId::generate()
-            .map_err(|_| RelayError::internal("The system has no random source."))?;
-    }
+    };
     let path = config.team_path(&id);
     // `connect` mode: a plain file and no file key (ADR 0037 stage 7).
     let (file_key, store) = if config.connect.plain_files() {
@@ -779,11 +789,15 @@ impl Hub {
     }
 
     /// `POST /v1/account/vaults` (connect-account-v1 section 8): a vault store, a team of
-    /// kind `account` with `TeamLimits::account`, for `vault_id` of `account`. Its owner
+    /// kind `account` with `TeamLimits::account`, for `vault_id` of `account`, with the id
+    /// `team` that the device made (a file at its path is 409 `conflict`). Its owner
     /// member is named by the account id; its device 1 is the account device `device`
     /// (named by its id) with the key `public_key`, so the relay-sync sign-in works with
-    /// the account device key. The directory maps the account device to the store device
-    /// (`account_store_device`). A race for the same vault answers the store that won.
+    /// the account device key. `entry` runs first in the directory transaction that
+    /// inserts the store (the `store` entry of the account's list); then the store row and
+    /// the map of the account device to the store device (`account_store_device`). Any
+    /// failure removes the file. A race for the same vault answers the store that won.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_vault_store(
         &self,
         account: &str,
@@ -791,18 +805,30 @@ impl Hub {
         public_key: &[u8],
         vault_id: &str,
         name: &str,
+        team: &TeamId,
+        entry: impl FnOnce(&Connection) -> RelayResult<()>,
         now: u64,
     ) -> RelayResult<TeamId> {
         let name = checked_team_name(name)?.to_string();
         let limits = TeamLimits::account(1);
         limits.validate()?;
-        let new = make_team_file_with_device(
+        let new = match make_team_file_with_device(
             &self.config,
             &name,
             account,
             now,
             Some((device, public_key)),
-        )?;
+            Some(team),
+        ) {
+            Ok(new) => new,
+            Err(error) if error.code == codes::CONFLICT => {
+                return Err(RelayError::new(
+                    codes::CONFLICT,
+                    "That store id is taken. Make a new id and sign its entry again.",
+                ));
+            }
+            Err(error) => return Err(error),
+        };
         let store_device = new.store.with(|conn| {
             conn.query_row(
                 "SELECT id FROM device WHERE member_id = ?1 AND revoked_at IS NULL",
@@ -813,6 +839,7 @@ impl Hub {
         });
         let added = store_device.and_then(|store_device| {
             self.directory.store.tx(|tx| {
+                entry(tx)?;
                 directory::insert_vault_store(
                     tx, &new.id, &name, &new.file_key, &limits, account, vault_id, now,
                 )?;
@@ -1230,6 +1257,12 @@ impl Hub {
                 params![team.as_str()],
             )
             .map_err(db)?;
+            // The join marks of the store go with it (the entries of the lists stay).
+            tx.execute(
+                "DELETE FROM account_join_share WHERE team_id = ?1",
+                params![team.as_str()],
+            )
+            .map_err(db)?;
             self.directory.audit.write_on(
                 tx,
                 now,
@@ -1292,6 +1325,7 @@ impl Hub {
                 &request.owner,
                 now,
                 Some((&device_name, &public_key)),
+                None,
             )?;
             made = Some(new.id.clone());
             let added = directory::mark_team_code_used(tx, code_id, &new.id, now)
@@ -1428,6 +1462,7 @@ impl Hub {
             PERSONAL_OWNER,
             now,
             Some((&device_name, &public_key)),
+            None,
         )?;
         let added = self.directory.store.tx(|tx| {
             directory::insert_team(tx, &new.id, &name, &new.file_key, false, now)?;
@@ -1594,6 +1629,7 @@ impl Hub {
             CONNECT_OWNER,
             now,
             Some((&device_name, &public_key)),
+            None,
         )?;
         let mut refused: Option<&'static str> = None;
         let added = self.directory.store.tx(|tx| {

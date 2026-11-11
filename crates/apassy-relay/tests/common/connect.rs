@@ -111,6 +111,11 @@ pub fn new_account_id() -> String {
     format!("acc_{id}")
 }
 
+/// A new vault store id as a device makes it: `t_` and 10 random characters of `a-z2-7`.
+pub fn new_team_id() -> String {
+    format!("t_{}", &new_account_id()[4..])
+}
+
 pub fn now() -> u64 {
     apassy_relay::now_unix()
 }
@@ -486,13 +491,23 @@ impl Connect {
     }
 
     /// The version and the hash of the head of `account`'s device list.
+    /// Read through the relay's directory store, so it works for a plain `relay.db` too
+    /// (`connect` mode), as `vault_body` needs it.
     pub fn list_head(&self, account: &str) -> (u64, String) {
-        let row = self.rows(&format!(
-            "SELECT version || ' ' || hash FROM account_list WHERE account_id = '{account}' \
-             ORDER BY version DESC LIMIT 1"
-        ));
-        let (version, hash) = row[0].split_once(' ').unwrap();
-        (version.parse().unwrap(), hash.to_string())
+        self.relay
+            .hub()
+            .directory
+            .store
+            .with(|conn| {
+                conn.query_row(
+                    "SELECT version, hash FROM account_list WHERE account_id = ?1 \
+                     ORDER BY version DESC LIMIT 1",
+                    [account],
+                    |row| Ok((row.get::<_, i64>(0)? as u64, row.get::<_, String>(1)?)),
+                )
+                .map_err(apassy_relay::server::store::db)
+            })
+            .unwrap()
     }
 
     /// The entry `op` of section 16 for `peer` (with `root` for a `peer`, `team` for a
@@ -529,6 +544,37 @@ impl Connect {
         )
     }
 
+    /// The body of `POST /v1/account/vaults` for `vault` of `by`: the store id `team` that
+    /// the device made and its `store` entry at the version after the head, signed by `by`.
+    pub fn vault_body(&self, by: &Dev, vault: &str, name: &str, team: &str) -> Value {
+        let (version, previous) = self.list_head(&by.account);
+        let message = device::share_list_message(
+            self.origin(),
+            &by.account,
+            version + 1,
+            &previous,
+            "store",
+            device::LIST_NONE,
+            device::LIST_NONE,
+            team,
+            &by.key.public_key_b64(),
+        );
+        json!({"vault_id": vault, "name": name, "team_id": team, "version": version + 1,
+               "statement": encode_b64(&by.key.sign(&message).unwrap())})
+    }
+
+    /// The list hash of the last `share` of `team` with `member` in `owner`'s list: the
+    /// root of the `join` that answers it.
+    pub fn share_hash(&self, owner: &Dev, member: &Dev, team: &str) -> String {
+        self.rows(&format!(
+            "SELECT hash FROM account_list WHERE account_id = '{}' AND op = 'share' \
+             AND team_id = '{team}' AND peer_account = '{}' ORDER BY version DESC LIMIT 1",
+            owner.account, member.account
+        ))
+        .pop()
+        .expect("a share")
+    }
+
     /// The entries of the store's owner before a device of another account is in it
     /// (section 16): its `peer` of `member`'s root (`member`'s first device), unless it
     /// has one, and its `share` of `team` with `member`.
@@ -552,7 +598,7 @@ impl Connect {
 
     /// The entries of a member before its devices sign in to a store of `owner` (section
     /// 16): its `peer` of `owner`'s root (`owner`'s first device), unless it has one, and
-    /// its `join` of `team`, after the owner's `share`.
+    /// its `join` of `team` naming the owner's last `share` of it with `member`.
     pub fn join_store(&self, member: &Dev, owner: &Dev, team: &str) {
         let peered = !self
             .rows(&format!(
@@ -567,7 +613,9 @@ impl Connect {
                 self.list_entry(member, "peer", &owner.account, Some(&root), None);
             assert_eq!(status, 200, "{answer}");
         }
-        let (status, answer) = self.list_entry(member, "join", &owner.account, None, Some(team));
+        let share = self.share_hash(owner, member, team);
+        let (status, answer) =
+            self.list_entry(member, "join", &owner.account, Some(&share), Some(team));
         assert_eq!(status, 200, "{answer}");
     }
 
@@ -797,7 +845,7 @@ impl Connect {
             "POST",
             "/v1/account/vaults",
             Some(&dev.token),
-            Some(&json!({"vault_id": vault, "name": "Personal"})),
+            Some(&self.vault_body(dev, vault, "Personal", &new_team_id())),
         );
         (
             store["team_id"].as_str().unwrap().to_string(),

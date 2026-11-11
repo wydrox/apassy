@@ -305,7 +305,7 @@ fn the_plan_state_gates_new_stores_pushes_pulls_downloads_and_the_entitlement_to
         "POST",
         "/v1/account/vaults",
         Some(&a.token),
-        Some(&json!({"vault_id": VAULT, "name": "Personal"})),
+        Some(&c.vault_body(&a, VAULT, "Personal", &connect::new_team_id())),
         403,
         "plan_required",
     );
@@ -380,7 +380,12 @@ fn the_plan_state_gates_new_stores_pushes_pulls_downloads_and_the_entitlement_to
         "POST",
         "/v1/account/vaults",
         Some(&a.token),
-        Some(&json!({"vault_id": "1f3c2a10-5b7e-4d9a-8c21-6f0e4b1d9a77", "name": "Work"})),
+        Some(&c.vault_body(
+            &a,
+            "1f3c2a10-5b7e-4d9a-8c21-6f0e4b1d9a77",
+            "Work",
+            &connect::new_team_id(),
+        )),
         403,
         "plan_required",
     );

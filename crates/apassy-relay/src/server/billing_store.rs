@@ -764,6 +764,27 @@ impl Plans for BillingPlans {
         api_plan(&self.0.plan_view(account, now)?)
     }
 
+    /// The plan of `account` read on `conn`, the open transaction of the directory that
+    /// the caller holds: the billing reads of `plan` (`billing::account_plan`) on that
+    /// transaction, so the answer holds at its commit. It writes nothing, opens no
+    /// transaction of its own (`Store::tx` is not reentrant), takes no billing lock, and
+    /// asks Stripe nothing. A caller may hold the lock of a group (a confirmation takes it
+    /// before its directory transactions); this takes none.
+    fn plan_on(
+        &self,
+        conn: &Connection,
+        account: &str,
+        now: u64,
+    ) -> RelayResult<Option<api::PlanView>> {
+        let mut sql = SqlBilling {
+            conn,
+            audit: &self.0.store.audit,
+        };
+        let view =
+            crate::server::billing::account_plan(&mut sql, account, now, &self.0.config.durations)?;
+        api_plan(&view).map(Some)
+    }
+
     /// The owner of a Family or Team whose group plan is entitled: the people or seats of
     /// that subscription (the quantity at Stripe; members beyond it are not entitled);
     /// every other account: 1.
