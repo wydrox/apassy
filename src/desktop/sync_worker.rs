@@ -857,10 +857,13 @@ impl Shared {
                                 out.push(SyncEvent::NeedsPassphrase(id));
                             }
                             SyncError::Damaged => out.push(SyncEvent::Damaged(id)),
+                            // A head whose signer is not verified yet: the window
+                            // reads the lists again, and its status line says so.
                             SyncError::FolderUnavailable
                             | SyncError::NotDownloaded
                             | SyncError::RelayUnreachable
-                            | SyncError::RelayBusy => {}
+                            | SyncError::RelayBusy
+                            | SyncError::ChecksDeviceList => {}
                             other => out.push(SyncEvent::Failure {
                                 id,
                                 text: format!("Sync: {other}."),

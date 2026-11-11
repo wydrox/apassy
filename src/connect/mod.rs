@@ -3,8 +3,8 @@
 //!
 //! - [`device_key`]: the account device key. One non-exportable-by-Apassy P-256 key for
 //!   each device, kept in the Keychain outside every vault through the signed helper
-//!   (this device only, not synchronizable, behind Touch ID). It signs only the ten
-//!   messages of section 5 ([`SIGNING_TAGS`]) and refuses any other.
+//!   (this device only, not synchronizable, behind Touch ID). It signs only the twelve
+//!   messages of sections 5 and 16 ([`SIGNING_TAGS`]) and refuses any other.
 //! - [`words`]: the ids, the link code with its key fingerprint and its hash, the six
 //!   safety words, and the recovery code with its Ed25519 key.
 //! - [`trust`]: the signed device list and its check against the pin of this device: an
@@ -18,6 +18,10 @@
 //!   deletion; the entitlement token kept in memory. The account file
 //!   (`connect/account.json` in the data directory) holds ids, names, the origin, the
 //!   public key, and the trust store: no private key, no token, no email, no code.
+//! - [`share`]: a vault shared between the accounts of one family or team (section 16):
+//!   the pin of another account's root by a ceremony with six words, the entries of the
+//!   device list that name another account, the trust store of the peers and the shared
+//!   stores in the account file, and the signers of each shared store.
 //! - [`entitlement`]: the check of an entitlement token (section 10).
 //! - [`session`]: the one account session of the app (plan s7 unit M5b): opened with the
 //!   vault unlock, closed at a lock and a quit; Settings › Connect, the sync of the vault
@@ -35,6 +39,7 @@ pub mod device_key;
 pub mod entitlement;
 pub mod key_file;
 pub mod session;
+pub mod share;
 pub mod trust;
 pub mod words;
 
@@ -59,10 +64,15 @@ pub use device_key::{
 pub use entitlement::{Entitlement, EntitlementClaims, EntitlementError, EntitlementKey, Feature};
 pub use key_file::{FileKeyStore, KEYRING_WARNING, key_file, platform_store};
 pub use session::{AccountSession, AccountSlot, Follow, OpenTicket, SessionState};
+pub use share::{
+    PeerPin, Person, ShareLink, ShareNames, ShareOffer, SharePeerJoin, ShareRequest, ShareStatus,
+    StoreShare, store_signer_policy,
+};
 pub use trust::ListEntry;
 pub use words::{
-    LinkCode, RecoveryCode, RecoveryKey, key_fingerprint, link_fingerprint, link_hash,
-    new_account_id, safety_words, same_safety_words,
+    LinkCode, RecoveryCode, RecoveryKey, ShareCode, key_fingerprint, link_fingerprint, link_hash,
+    new_account_id, safety_words, same_safety_words, share_fingerprint, share_link_hash,
+    share_safety_words,
 };
 
 use crate::broker::approvals::ProofRefusal;
@@ -86,7 +96,7 @@ pub const PLATFORM: &str = if cfg!(target_os = "ios") {
 pub const PLATFORMS: [&str; 3] = ["mac", "iphone", "linux"];
 
 /// Sign `message` with the account device key, only when it begins with one of the
-/// ten tags of section 5 (plan 0035 I-1: the allow-list contains
+/// twelve tags of sections 5 and 16 (plan 0035 I-1: the allow-list contains
 /// `apassy-bouncer sign-in v1`). The same as [`AccountSigner::sign`].
 pub fn sign(signer: &AccountSigner, message: &[u8]) -> Result<Vec<u8>, ConnectError> {
     signer.sign(message)
@@ -165,6 +175,10 @@ pub enum ConnectError {
     /// This device did not verify that device as a device of the account (the signed
     /// device list that this device verified does not hold its key).
     NotVerified,
+    /// The account that Connect named for a share code is not the one of the code: the
+    /// root of its device list and the inviting device do not give the fingerprint of the
+    /// code, or the list does not verify or does not hold that device (section 16.2).
+    ShareMismatch,
     /// This Mac already has a Connect account.
     AccountExists,
     /// The account file is from an earlier version of Apassy that kept no signed device
@@ -263,6 +277,9 @@ impl fmt::Display for ConnectError {
             }
             Self::NotVerified => {
                 "Apassy could not verify that device as a device of your account. Nothing was changed."
+            }
+            Self::ShareMismatch => {
+                "The code does not match the account that answered. Nothing was signed. Ask for a new code."
             }
             Self::AccountExists => concat!(
                 "This ",

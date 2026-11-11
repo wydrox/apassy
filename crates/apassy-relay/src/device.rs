@@ -43,6 +43,15 @@ pub const ACCOUNT_LIST_DOMAIN: &str = "apassy-connect device-list v1";
 /// The `previous` of the first entry of a device list, and the `link_hash` of an entry
 /// without a link.
 pub const LIST_NONE: &str = "-";
+/// An entry of the device list that names another account (section 16): a `peer`,
+/// `unpeer`, `share`, `unshare`, `join`, or `leave`, signed by a device of the list.
+pub const SHARE_LIST_DOMAIN: &str = "apassy-connect share-list v1";
+/// The answer of a device of another account to a share code (section 16.2).
+pub const PEER_JOIN_DOMAIN: &str = "apassy-connect peer-join v1";
+/// The hashes of a share code that are not signatures (section 16.2).
+pub const SHARE_KEYS_DOMAIN: &str = "apassy-connect share-keys v1";
+pub const SHARE_LINK_DOMAIN: &str = "apassy-connect share-link v1";
+pub const SHARE_SAFETY_DOMAIN: &str = "apassy-connect share-safety v1";
 pub const ACCOUNT_RECOVER_DOMAIN: &str = "apassy-connect recover v1";
 /// A live device replaces the account's recovery key (`POST /v1/account/recovery`).
 pub const ACCOUNT_RECOVERY_ROTATE_DOMAIN: &str = "apassy-connect recovery-rotate v1";
@@ -186,6 +195,113 @@ pub fn account_list_message(
         name,
         by_b64,
     ])
+}
+
+/// `"apassy-connect share-list v1" 0x00 origin 0x00 account 0x00 version 0x00 previous
+/// 0x00 op 0x00 peer_account 0x00 root_b64 0x00 team_id 0x00 by_b64` (section 16): an
+/// entry of the device list that names another account. `root_b64` is the root that a
+/// `peer` pins, else `-`; `team_id` the store of a store op, else `-`.
+#[allow(clippy::too_many_arguments)]
+pub fn share_list_message(
+    origin: &str,
+    account: &str,
+    version: u64,
+    previous: &str,
+    op: &str,
+    peer_account: &str,
+    root_b64: &str,
+    team_id: &str,
+    by_b64: &str,
+) -> Vec<u8> {
+    joined(&[
+        SHARE_LIST_DOMAIN,
+        origin.trim_end_matches('/'),
+        account,
+        &version.to_string(),
+        previous,
+        op,
+        peer_account,
+        root_b64,
+        team_id,
+        by_b64,
+    ])
+}
+
+/// `"apassy-connect peer-join v1" 0x00 origin 0x00 inviter_account 0x00 link_hash 0x00
+/// joiner_account 0x00 joiner_root_b64 0x00 key_b64` (`POST /v1/account/peers/join`):
+/// signed by the answering device of the joining account.
+pub fn peer_join_message(
+    origin: &str,
+    inviter_account: &str,
+    link_hash: &str,
+    joiner_account: &str,
+    joiner_root_b64: &str,
+    key_b64: &str,
+) -> Vec<u8> {
+    joined(&[
+        PEER_JOIN_DOMAIN,
+        origin.trim_end_matches('/'),
+        inviter_account,
+        link_hash,
+        joiner_account,
+        joiner_root_b64,
+        key_b64,
+    ])
+}
+
+/// The hash of a share code: b64u of SHA-256(`"apassy-connect share-link v1" 0x00
+/// code`), 43 characters.
+pub fn share_link_hash(code: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(SHARE_LINK_DOMAIN.as_bytes());
+    hasher.update([0]);
+    hasher.update(code.as_bytes());
+    encode_b64(&hasher.finalize())
+}
+
+/// The key fingerprint of a share code: the first 16 bytes of SHA-256(`"apassy-connect
+/// share-keys v1" 0x00 root 0x00 inviter key`), keys as 65 raw bytes, as 32 lowercase hex.
+pub fn share_fingerprint(root: &[u8], inviter_key: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(SHARE_KEYS_DOMAIN.as_bytes());
+    hasher.update([0]);
+    hasher.update(root);
+    hasher.update([0]);
+    hasher.update(inviter_key);
+    hasher.finalize()[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// The six words of a share between two accounts (section 16.2): SHA-256(`"apassy-connect
+/// share-safety v1" 0x00 code 0x00 inviter_account 0x00 inviter_root 0x00 inviter_key 0x00
+/// joiner_account 0x00 joiner_root 0x00 joiner_key`), keys as 65 raw bytes, and
+/// `WORDS[digest[0]]` to `WORDS[digest[5]]`. Connect never knows the code.
+pub fn share_safety_words(
+    code: &str,
+    (inviter_account, inviter_root, inviter_key): (&str, &[u8], &[u8]),
+    (joiner_account, joiner_root, joiner_key): (&str, &[u8], &[u8]),
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(SHARE_SAFETY_DOMAIN.as_bytes());
+    for part in [
+        code.as_bytes(),
+        inviter_account.as_bytes(),
+        inviter_root,
+        inviter_key,
+        joiner_account.as_bytes(),
+        joiner_root,
+        joiner_key,
+    ] {
+        hasher.update([0]);
+        hasher.update(part);
+    }
+    hasher.finalize()[..6]
+        .iter()
+        .map(|byte| WORDS[usize::from(*byte)])
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The list hash of an entry: b64u of SHA-256 of its message, 43 characters. The next

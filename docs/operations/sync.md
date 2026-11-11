@@ -447,14 +447,41 @@ The second Mac needs no link code. It holds the same vault (the same vault id, f
 
 ### 18.3 A shared Family or Team vault
 
-A member of a Connect Family or Connect Team joins a shared vault only with a link, the safety words, and the passphrase:
+A vault of one account syncs with another account of the same family or team only when the account that made its store shares it ([connect-account-v1](../contracts/connect-account-v1.md) section 16). The two people compare six words once for each pair of accounts; later vaults between them need no words.
 
-1. On the Mac that syncs the vault through Connect: "Add a device…" makes the link of section 17.2 (`<Connect origin>/link#apassy_lnk_…`). Send it to the member.
-2. On the member's Mac (its own account, signed in, an active member of the same group): "Use a vault from another Mac" › "Apassy relay", or "Join from another Mac" for a vault on that Mac. Apassy sends the link with the member's **account key** and shows the two safety words.
-3. On the first Mac: the member's Mac waits with the same words; "Confirm…" runs the owner check. Connect adds only a device of the same account or of an active member of the same group: anyone else is refused (`403 not_in_group`), also with the right link and words.
-4. On the member's Mac: the passphrase of the vault opens the copy. A wrong passphrase makes no vault.
+**Share (the owner of the vault):**
 
-The store is then `shared`; both sides sync as in section 17.
+1. Settings › Connect › Shared Vaults, the vault's row: "Share with…". Pick the person (an active member of your family or team).
+2. Apassy shows a share code and its QR code: "Send this to <name>." Send it to them (a message, the QR code on the screen). The code works once, for 10 minutes.
+3. When they paste it, both Macs show six words: `"<name>" (<device>) asks to share vaults with you.` Confirm only if their screen shows the same words. "Confirm…" runs the owner check; it names the vault by its name on this Mac and the person by the device name that their signed device list holds, with the short fingerprint of their account key (the name that Apassy Connect gives them shows beside it). Apassy signs the share and adds their devices to the copy.
+4. The row says "<name>: has not joined yet" until they join. If they stopped before "The Words Match…", the row says that they have not finished comparing the words: "Share with…" shows a new code, and nothing is signed twice.
+
+A person with whom you shared a vault before needs no code: "Share with…" and the owner check share the next vault at once.
+
+**Accept and join (the other person):**
+
+1. Settings › Connect › Shared Vaults › "Accept a Shared Vault…": paste the code. "The code does not match the account that answered." means that Apassy Connect named another account than the code: nothing was signed; ask for a new code.
+2. Compare the six words with the other screen. "The Words Match…" runs the owner check. "The Words Differ" signs nothing.
+3. The vault then shows as "<vault>, shared by <name>". "Join" runs an owner check that names the vault and the person, signs the join, and opens the copy: type the passphrase of the vault. A wrong passphrase makes no vault. A vault that this Mac syncs as its own, or that your account shares, is never offered.
+
+Your other Macs (and the other person's) take the share from the signed lists at their next refresh of Settings › Connect; they need no code and no words.
+
+**Stop sharing, or leave:**
+
+- The owner: "Stop Sharing with <name>…" (owner check). Connect removes their devices from the copy at once; their later changes are not merged. The vault stays on every device that has it.
+- The other person: "Leave This Shared Vault…" (owner check). This Mac turns off the sync of that vault; the vault stays on it. Their other Macs do the same when they read the leave: "You left this shared vault on <device>."
+- Apassy ends a share by itself, without an owner check, in two cases: the person left the vault ("<name> left this vault."), or Apassy Connect shows the person outside your family or team ("Sharing with <name> ended: no longer in your family or team."). An end gives no one access. To share again with a person who left, "Share with…" again; they join again.
+- A person who recovered their account needs new words: the owner check of the new code says which shares with the old account end first.
+
+**The lines of the row:**
+
+| The row says | What it means |
+| --- | --- |
+| "Checking who shares this vault…" | The newest copy (or one before it in the chain) was signed by a device that this Mac has not verified yet (for example a new Mac of the other person). Apassy reads the signed lists again after 30 s, then after twice the last wait, up to every 10 minutes, and shows no error for 10 minutes for that copy (a lock does not start the 10 minutes again). Only a read after those 10 minutes that still does not know the device refuses the copy, and the sync line shows the error. |
+| "Waiting for a device that shares this vault" | The newest copy was signed by a device that left (or a person whose share ended) after this Mac's last sync. A device that shares the vault signs a copy of its own over it at its next sync. |
+| "<name> reset the account. Share again." | The other person recovered their account (a new account key). Their devices sign nothing new until you compare new words: stop sharing, then share again with a new code. |
+| "<name> must verify this account again." | The owner recovered their account; ask them to share again with a new code. |
+| "The share ended. The vault stays on this device." | The owner stopped sharing with you. |
 
 ### 18.4 Move the relay copy to Connect
 
@@ -472,7 +499,7 @@ Connect gets the copy **first**; the old copy goes **second**. A move record `<d
 | "The copy is on Apassy Connect, and the old copy is still on apassy-relay.wyderka.cc. Both copies are kept, …" | yes | the hosted relay, as before | "Try Again" goes on from step 1 (Connect gets the changes made since), or "Undo the Move…" deletes the Connect copy after an owner check |
 | "The copy is on Apassy Connect, and the old copy is deleted, but the sync with Apassy Connect did not turn on yet. …" | Connect only | nothing yet; the vault is safe on this Mac | "Try Again" runs step 4 |
 
-The other Macs of the old team: their next sync finds the hosted copy gone. Each turns on 18.2 (same account) or joins with a link (18.3).
+The other Macs of the old team: their next sync finds the hosted copy gone. Each turns on 18.2 (same account), or the owner shares the vault with that person (18.3).
 
 ### 18.5 Plan states
 
@@ -489,4 +516,4 @@ The account key leaves the memory of the sync with the vault key at a lock.
 
 ### 18.6 Tests
 
-`tests/relay_sync.rs`, module `connect_sync`, against the fake Connect with its stores in the fake relay (`FakeConnect::with_relay`; the relay checks every head with `ring`): `enabling_on_connect_pushes_version_one_under_the_account_key`, `a_second_mac_of_the_account_joins_without_a_link_code_and_merges`, `a_family_members_mac_joins_a_shared_vault_only_with_a_link_the_words_and_the_passphrase`, `moving_the_relay_copy_pushes_to_connect_first_and_deletes_the_old_copy_second`, `a_failure_between_the_steps_of_a_move_leaves_both_copies_with_a_clear_state` (also the retry and the undo), and `a_read_only_plan_shows_the_state_and_keeps_pulls`. The words of the states: `the_connect_states_say_what_works_with_their_date` (`src/desktop/ui/sync/relay.rs`); the picker: `the_sync_offers_apassy_connect_only_with_a_plan_that_pushes` (`src/desktop/ui/connect_tests.rs`). The real Connect relay (C1, `crates/apassy-relay`) and a physical second Mac are not covered here.
+`tests/relay_sync.rs`, module `connect_sync`, against the fake Connect with its stores in the fake relay (`FakeConnect::with_relay`; the relay checks every head with `ring`): `enabling_on_connect_pushes_version_one_under_the_account_key`, `a_second_mac_of_the_account_joins_without_a_link_code_and_merges`, `a_store_of_another_account_is_refused_before_any_request`, `moving_the_relay_copy_pushes_to_connect_first_and_deletes_the_old_copy_second`, `a_failure_between_the_steps_of_a_move_leaves_both_copies_with_a_clear_state` (also the retry and the undo), and `a_read_only_plan_shows_the_state_and_keeps_pulls`. The words of the states: `the_connect_states_say_what_works_with_their_date` (`src/desktop/ui/sync/relay.rs`); the picker: `the_sync_offers_apassy_connect_only_with_a_plan_that_pushes` (`src/desktop/ui/connect_tests.rs`). The shared vaults of 18.3: `tests/connect_share.rs` (the fake Connect as a Connect that lies: a store marked shared without a share, a list of another root or with an unsigned key, a substituted inviter or answering key, an inserted or cut list, a member kept in the store after the end of its share, a store of this account offered by a peer; also a second Mac that reads a share and its end at once and follows the chain, a new code for a person who did not finish the words, a leave on every device, a member outside the group, and a re-pin near the end of the list) and, against the real relay, `crates/apassy-relay/tests/app_vault_share.rs`. A physical second Mac is not covered here.

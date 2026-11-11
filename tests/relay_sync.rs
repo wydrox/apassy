@@ -2805,8 +2805,9 @@ mod connect_sync {
         assert_eq!(titles(&vault_b), vec!["Alpha", "Beta", "Gamma"]);
     }
 
-    /// A store of another account (a shared Family or Team vault) is refused before
-    /// anything is asked or made: sharing a vault between accounts is not available yet.
+    /// A store that holds a device of another account, with no share of it that this
+    /// device verified (connect-account-v1 section 16), is refused before anything is
+    /// asked or made.
     #[test]
     fn a_store_of_another_account_is_refused_before_any_request() {
         let cloud = cloud();
@@ -2844,7 +2845,8 @@ mod connect_sync {
             .map(ToString::to_string)
             .unwrap_or_default();
         assert_eq!(
-            text, "Sharing a vault between accounts is not available yet.",
+            text,
+            "This vault is shared with another account, and this device has not verified the share yet. Open Settings › Connect, then try again.",
             "refused with its own text"
         );
         assert_eq!(cloud.connect.log().len(), before, "nothing was asked");

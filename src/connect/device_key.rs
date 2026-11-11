@@ -15,8 +15,8 @@
 //! Secure Enclave `sign`, [`DeviceKeyStore`] is the seam: a store that signs inside the
 //! Enclave replaces the read, and the allow-list of [`AccountSigner::sign`] stays.
 //!
-//! The key signs **only** messages that begin with one of the ten ECDSA tags of
-//! section 5 ([`SIGNING_TAGS`]), each followed by its separator (`0x00`, or `\n` for the
+//! The key signs **only** messages that begin with one of the twelve ECDSA tags of
+//! sections 5 and 16 ([`SIGNING_TAGS`]), each followed by its separator (`0x00`, or `\n` for the
 //! head of relay-sync-v1 section 8). It refuses any other message, also the tags of the
 //! free Connect (`apassy-relay connect v1`) and of the entitlement token, which only
 //! Connect signs.
@@ -70,9 +70,15 @@ pub const BRAIN_SIGN_IN_TAG: &str = "apassy-bouncer sign-in v1";
 pub const RELAY_SIGN_IN_TAG: &str = crate::sync::relay_crypto::SIGN_IN_TAG;
 /// The first line of a relay-sync-v1 head of a vault store.
 pub const SYNC_HEAD_TAG: &str = crate::sync::relay_crypto::HEAD_TAG;
+/// An entry of the signed device list that names another account (section 16): `peer`,
+/// `unpeer`, `share`, `unshare`, `join`, `leave` (`super::share`).
+pub const SHARE_LIST_TAG: &str = "apassy-connect share-list v1";
+/// `POST /v1/account/peers/join`: the device of another account that answers a share code.
+pub const PEER_JOIN_TAG: &str = "apassy-connect peer-join v1";
 
-/// The ten tags that the account device key signs (section 5), and nothing else.
-pub const SIGNING_TAGS: [&str; 10] = [
+/// The twelve tags that the account device key signs (sections 5 and 16), and nothing
+/// else.
+pub const SIGNING_TAGS: [&str; 12] = [
     ACCOUNT_TAG,
     SIGN_IN_TAG,
     JOIN_TAG,
@@ -83,6 +89,8 @@ pub const SIGNING_TAGS: [&str; 10] = [
     BRAIN_SIGN_IN_TAG,
     RELAY_SIGN_IN_TAG,
     SYNC_HEAD_TAG,
+    SHARE_LIST_TAG,
+    PEER_JOIN_TAG,
 ];
 
 /// Whether `message` begins with an allowed tag and its separator.
@@ -199,6 +207,60 @@ pub fn list_message(
         link_hash,
         name,
         by_b64u,
+    ])
+}
+
+/// The `apassy-connect share-list v1` message of version `version` of a device list
+/// (section 16): `previous` is the list hash of the entry before; `op` is `peer`,
+/// `unpeer`, `share`, `unshare`, `join`, or `leave`; `peer_account` is the other account;
+/// `root_b64u` is the root that a `peer` pins, else [`LIST_NONE`]; `team_id` is the vault
+/// store of a `share`, `unshare`, `join`, or `leave`, else [`LIST_NONE`]; `by_b64u` is the
+/// signing device.
+#[allow(clippy::too_many_arguments)]
+pub fn share_list_message(
+    origin: &str,
+    account_id: &str,
+    version: u64,
+    previous: &str,
+    op: &str,
+    peer_account: &str,
+    root_b64u: &str,
+    team_id: &str,
+    by_b64u: &str,
+) -> Vec<u8> {
+    joined(&[
+        SHARE_LIST_TAG,
+        origin,
+        account_id,
+        &version.to_string(),
+        previous,
+        op,
+        peer_account,
+        root_b64u,
+        team_id,
+        by_b64u,
+    ])
+}
+
+/// The `apassy-connect peer-join v1` message (section 16.2): the device `key_b64u` of the
+/// account `joiner_account`, whose root is `joiner_root_b64u`, answers the share code of
+/// `inviter_account` whose hash is `link_hash`.
+pub fn peer_join_message(
+    origin: &str,
+    inviter_account: &str,
+    link_hash: &str,
+    joiner_account: &str,
+    joiner_root_b64u: &str,
+    key_b64u: &str,
+) -> Vec<u8> {
+    joined(&[
+        PEER_JOIN_TAG,
+        origin,
+        inviter_account,
+        link_hash,
+        joiner_account,
+        joiner_root_b64u,
+        key_b64u,
     ])
 }
 
@@ -592,6 +654,55 @@ impl AccountSigner {
         Ok((self.sign(&message)?, list_hash(&message)))
     }
 
+    /// An entry of the device list that names another account (section 16), signed by
+    /// this device: version `version` after the entry with the list hash `previous`, `op`
+    /// for `peer_account`, with the root that a `peer` pins and the store of a `share`,
+    /// `unshare`, `join`, or `leave`. Returns the signature and the list hash of the entry.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sign_share_entry(
+        &self,
+        origin: &str,
+        account_id: &str,
+        (version, previous): (u64, &str),
+        op: &str,
+        peer_account: &str,
+        root_b64u: Option<&str>,
+        team_id: Option<&str>,
+    ) -> Result<(Vec<u8>, String), ConnectError> {
+        let message = share_list_message(
+            origin,
+            account_id,
+            version,
+            previous,
+            op,
+            peer_account,
+            root_b64u.unwrap_or(LIST_NONE),
+            team_id.unwrap_or(LIST_NONE),
+            &self.public_key_b64u(),
+        );
+        Ok((self.sign(&message)?, list_hash(&message)))
+    }
+
+    /// The signature of `POST /v1/account/peers/join`: this device of `joiner_account`
+    /// (root `joiner_root_b64u`) answers the share code of `inviter_account`.
+    pub fn sign_peer_join(
+        &self,
+        origin: &str,
+        inviter_account: &str,
+        link_hash: &str,
+        joiner_account: &str,
+        joiner_root_b64u: &str,
+    ) -> Result<Vec<u8>, ConnectError> {
+        self.sign(&peer_join_message(
+            origin,
+            inviter_account,
+            link_hash,
+            joiner_account,
+            joiner_root_b64u,
+            &self.public_key_b64u(),
+        ))
+    }
+
     /// The root entry of a new device list (version 1) with this device as its root and
     /// only device, named `name`: what `POST /v1/account` and `POST /v1/account/recover`
     /// carry as `statement`. Returns the signature and the list hash of the entry.
@@ -709,7 +820,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_ten_tags_are_signed() {
+    fn only_the_twelve_tags_are_signed() {
         let store = MemoryKeyStore::new();
         let signer = AccountSigner::open_or_create(&store).unwrap();
         let origin = "https://connect.example.test";
@@ -743,6 +854,21 @@ mod tests {
             signer
                 .sign_relay_sign_in(origin, "t_7k2m5q4x3c", nonce)
                 .unwrap(),
+            signer
+                .sign_share_entry(
+                    origin,
+                    account,
+                    (3, "K6tgKp"),
+                    "share",
+                    "acc_m3n5p7q2rb",
+                    None,
+                    Some("t_7k2m5q4x3c"),
+                )
+                .unwrap()
+                .0,
+            signer
+                .sign_peer_join(origin, account, "K6tgKp", "acc_m3n5p7q2rb", "K6tgKp")
+                .unwrap(),
         ] {
             assert!(signature.len() <= 72);
         }
@@ -755,6 +881,10 @@ mod tests {
             b"apassy-connect link v1\0code".to_vec(),
             b"apassy-connect link-keys v1\0keys".to_vec(),
             b"apassy-connect recovery key v1\0bytes".to_vec(),
+            b"apassy-connect share-keys v1\0keys".to_vec(),
+            b"apassy-connect share-safety v1\0words".to_vec(),
+            b"apassy-connect share-link v1\0code".to_vec(),
+            b"apassy-connect share-list v1".to_vec(),
             b"apassy-connect join-cancel v1".to_vec(),
             b"apassy-connect account v1".to_vec(),
             b"apassy-connect account v1x\0origin".to_vec(),

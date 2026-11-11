@@ -2229,6 +2229,148 @@ fn the_copy_that_a_removed_device_left_is_taken_only_after_the_owner_check() {
     assert!(d.app.relay_departed(&d.id).is_none());
 }
 
+/// C3: the signers of a shared store reach the running sync of the vault after a step of
+/// Shared Vaults that wrote the account file, also when a later call of that step failed:
+/// the owner's Mac shares its vault with Ola, Ola adds a second device, and the refresh
+/// that learns it meets a Connect that does not list the stores.
+#[test]
+fn the_signers_reach_the_sync_after_a_share_step_whose_later_call_failed() {
+    use crate::broker::approvals::{OwnerCheck, OwnerGate};
+    use crate::connect::{ShareNames, account_file};
+    let dir = TempDir::new().expect("temp dir");
+    let relay = Arc::new(crate::desktop::fake_relay::FakeRelay::start());
+    let connect = FakeConnect::with_relay(Arc::clone(&relay) as _);
+    let mut app = DesktopApp::new();
+    app.load_vault_list(dir.path().join("mac"), true);
+    let ctx = egui::Context::default();
+    app.vault_list.name_input = "Family".to_owned();
+    app.owner_ui.passphrase.push_str(PASS);
+    app.owner_ui.passphrase_confirm.push_str(PASS);
+    super::start::create_vault(&mut app, &ctx);
+    let data = dir.path().join("data");
+    std::fs::create_dir_all(&data).expect("data dir");
+    app.connect_configure(Some(Arc::new(MemoryKeyStore::new())), Some(data));
+    let live = &mut app.ui.connect.live;
+    live.origin = Some(connect.url.clone());
+    live.poll_every = Some(Duration::from_millis(40));
+    live.join_poll_every = Some(Duration::from_millis(40));
+    super::open_settings(&mut app, super::SettingsSection::Connect);
+    let a_id = create_account(&ctx, &mut app, "Rafal");
+    connect.entitle(&a_id);
+    connect.make_group(&a_id, "family");
+    act(&ctx, &mut app, Action::SignIn);
+    until(&ctx, &mut app, "the plan", |app| {
+        app.ui
+            .connect
+            .live
+            .sync_account()
+            .is_some_and(|account| account.plan.is_some_and(crate::sync::StorePlan::entitled))
+    });
+    let entry = app.current_vault().expect("the open vault").clone();
+    app.relay_enable_connect(&entry.id).expect("turn on");
+    app.relay_settle_for_test();
+    let sync = app.relay_of(&entry.id).expect("the relay sync");
+    let team = sync
+        .state()
+        .expect("state")
+        .and_then(|state| state.team_id)
+        .expect("a store");
+    // Ola's account, and the owner checks of both people (each with a vault of the test).
+    let x_dir = dir.path().join("ola");
+    let x_keys = MemoryKeyStore::new();
+    let (mut ola, _) = ConnectAccount::create(
+        ConnectClient::new(&connect.url).expect("client"),
+        &x_keys,
+        &account_file(&x_dir),
+        "Ola",
+        "Synthetic MacBook",
+    )
+    .expect("Ola");
+    let x_id = ola.state().account_id.clone();
+    connect.entitle(&x_id);
+    connect.add_member(&a_id, &x_id);
+    let gate_dir = TempDir::new().expect("dir");
+    let mut gate_vault =
+        crate::vault::Vault::create(&gate_dir.path().join("gate.db"), PASS).expect("vault");
+    gate_vault.unlock(PASS).expect("unlock");
+    let epoch = gate_vault.epoch();
+    let shared: crate::broker::SharedVault = Arc::new(std::sync::Mutex::new(Some(gate_vault)));
+    let gate = OwnerGate::new(Arc::clone(&shared), None);
+    let proof = |action| {
+        gate.authorize(action, OwnerCheck::passphrase(PASS))
+            .expect("owner check")
+    };
+    let names = ShareNames::default();
+    let session = app.connect_session();
+    let link = session
+        .with_account(|account| account.start_share(&x_id, &team))
+        .expect("code");
+    let answer = ola.accept_code(link.code()).expect("answer");
+    session
+        .with_account(|account| {
+            let requests = account.share_requests(&link)?;
+            let action = account.share_action(&link, &requests[0], &names);
+            account.confirm_share(&link, &requests[0], &names, proof(action), &epoch)
+        })
+        .expect("share");
+    ola.accept_share(
+        &answer,
+        &names,
+        proof(ola.accept_action(&answer, &names)),
+        &epoch,
+    )
+    .expect("Ola accepts");
+    // Ola's second device joins her account.
+    let x2_keys = MemoryKeyStore::new();
+    let ola_link = ola.start_link().expect("link");
+    let mut request = JoinRequest::start(
+        ConnectClient::new(&connect.url).expect("client"),
+        &x2_keys,
+        &account_file(&dir.path().join("ola2")),
+        ola_link.code(),
+        "Synthetic iMac",
+    )
+    .expect("join");
+    assert!(matches!(request.poll().expect("poll"), JoinPoll::Waiting));
+    let pending = ola.pending_joins(&ola_link).expect("pending");
+    ola.confirm_join(
+        &ola_link,
+        &pending[0],
+        proof(pending[0].owner_action(&x_id)),
+        &epoch,
+    )
+    .expect("confirm");
+    let ola2 = match request.poll().expect("poll") {
+        JoinPoll::Confirmed(joined) => *joined,
+        other => panic!("not confirmed: {other:?}"),
+    };
+    let x2_key = ola2.signer().expect("key").public_key().to_vec();
+    // The refresh of Shared Vaults learns the device; the list of the stores then fails.
+    connect.answer_route_error("GET /v1/account/vaults", 500, "relay_error");
+    app.ui.connect.share.refresh_now();
+    until(
+        &ctx,
+        &mut app,
+        "the new device in the signers of the sync",
+        |app| {
+            !app.ui.connect.share.is_busy()
+                && sync
+                    .account_signers()
+                    .is_some_and(|policy| policy.for_team(&team).accepts(&x2_key))
+        },
+    );
+    assert!(
+        app.ui
+            .connect
+            .live
+            .sync_account()
+            .expect("account")
+            .signers
+            .for_team(&team)
+            .accepts(&x2_key)
+    );
+}
+
 // ---- Round 5: the recovery code, the time of the device list, and a long check. ----
 
 /// A creation that a restart interrupted shows the account with a lasting line and "New

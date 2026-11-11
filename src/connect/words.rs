@@ -24,11 +24,19 @@ pub const LINK_KEYS_TAG: &str = "apassy-connect link-keys v1";
 pub const SAFETY_TAG: &str = "apassy-connect safety v1";
 /// The domain of the seed of the recovery key.
 pub const RECOVERY_KEY_TAG: &str = "apassy-connect recovery key v1";
+/// The domain of the key fingerprint inside a share code (section 16.2).
+pub const SHARE_KEYS_TAG: &str = "apassy-connect share-keys v1";
+/// The domain of the hash of a share code that Connect keeps.
+pub const SHARE_LINK_TAG: &str = "apassy-connect share-link v1";
+/// The domain of the six words of a share between two accounts.
+pub const SHARE_SAFETY_TAG: &str = "apassy-connect share-safety v1";
 
 /// The prefix of a link code.
 const LINK_PREFIX: &str = "apassy_alk_";
 /// The prefix of the text form of a recovery code.
 const RECOVERY_PREFIX: &str = "apassy_rec_";
+/// The prefix of a share code.
+const SHARE_PREFIX: &str = "apassy_shr_";
 /// The random bytes of a link code.
 const LINK_BYTES: usize = 32;
 /// The bytes of the key fingerprint of a link code (32 hex characters).
@@ -207,6 +215,134 @@ pub fn link_hash(code: &str) -> String {
     message.push(0);
     message.extend_from_slice(code.as_bytes());
     encode_b64u(&sha256(&message))
+}
+
+/// The key fingerprint of a share code (section 16.2): the first 16 bytes of
+/// `SHA-256("apassy-connect share-keys v1" 0x00 <root of the inviting account> 0x00 <key of
+/// the inviting device>)`, as 32 lowercase hex characters. Both keys are X9.63 (65 bytes).
+pub fn share_fingerprint(root_key: &[u8], inviter_key: &[u8]) -> String {
+    let mut message = Vec::with_capacity(SHARE_KEYS_TAG.len() + 2 + root_key.len() * 2);
+    message.extend_from_slice(SHARE_KEYS_TAG.as_bytes());
+    message.push(0);
+    message.extend_from_slice(root_key);
+    message.push(0);
+    message.extend_from_slice(inviter_key);
+    let digest = sha256(&message);
+    hex_lower(&digest[..FINGERPRINT_BYTES]).to_string()
+}
+
+/// A share code: `apassy_shr_<account id>_<64 hex>_<32 hex fingerprint>` (section 16.2).
+/// The device of the account that shares makes it and keeps it in memory; it never reaches
+/// Connect, which sees only [`ShareCode::link_hash`]. The fingerprint
+/// ([`share_fingerprint`]) lets the other account check the root and the inviting device
+/// that Connect names. Debug is redacted; the text is erased on drop.
+pub struct ShareCode(Zeroizing<String>);
+
+impl fmt::Debug for ShareCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("ShareCode").field(&"[redacted]").finish()
+    }
+}
+
+impl ShareCode {
+    /// A new code of `account_id` from the system random source, with the fingerprint of
+    /// its root `root_key` and of this device's key `inviter_key`.
+    pub fn generate(
+        account_id: &str,
+        root_key: &[u8],
+        inviter_key: &[u8],
+    ) -> Result<Self, ConnectError> {
+        if !valid_account_id(account_id) {
+            return Err(ConnectError::Invalid);
+        }
+        let secret = random::<LINK_BYTES>()?;
+        let mut text = Zeroizing::new(String::with_capacity(LINK_CODE_LEN));
+        text.push_str(SHARE_PREFIX);
+        text.push_str(account_id);
+        text.push('_');
+        text.push_str(&hex_lower(&secret[..]));
+        text.push('_');
+        text.push_str(&share_fingerprint(root_key, inviter_key));
+        Ok(Self(text))
+    }
+
+    /// A code that the person pasted or a QR code gave, trimmed. `None` outside the
+    /// grammar.
+    pub fn parse(text: &str) -> Option<Self> {
+        let text = text.trim();
+        if text.len() != LINK_CODE_LEN {
+            return None;
+        }
+        let rest = text.strip_prefix(SHARE_PREFIX)?;
+        let (account, rest) = (rest.get(..14)?, rest.get(14..)?);
+        let rest = rest.strip_prefix('_')?;
+        let (secret, rest) = (rest.get(..64)?, rest.get(64..)?);
+        let fingerprint = rest.strip_prefix('_')?;
+        (valid_account_id(account)
+            && is_hex(secret, 64)
+            && is_hex(fingerprint, FINGERPRINT_BYTES * 2))
+        .then(|| Self(Zeroizing::new(text.to_owned())))
+    }
+
+    /// The account id of the inviting account.
+    pub fn account_id(&self) -> &str {
+        &self.0[SHARE_PREFIX.len()..SHARE_PREFIX.len() + 14]
+    }
+
+    /// The key fingerprint inside the code: 32 lowercase hex characters.
+    pub fn fingerprint(&self) -> &str {
+        &self.0[LINK_CODE_LEN - FINGERPRINT_BYTES * 2..]
+    }
+
+    /// The text, for the Copy button and the QR code of "Share with…".
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+
+    /// The hash that Connect keeps.
+    pub fn link_hash(&self) -> String {
+        share_link_hash(&self.0)
+    }
+}
+
+/// The hash of a share code: b64u of `SHA-256("apassy-connect share-link v1" 0x00 <code>)`.
+pub fn share_link_hash(code: &str) -> String {
+    let mut message = Zeroizing::new(Vec::with_capacity(SHARE_LINK_TAG.len() + 1 + code.len()));
+    message.extend_from_slice(SHARE_LINK_TAG.as_bytes());
+    message.push(0);
+    message.extend_from_slice(code.as_bytes());
+    encode_b64u(&sha256(&message))
+}
+
+/// The six words of a share between two accounts (section 16.2): both devices compute
+/// them from the code, the inviting account, its root, and its device, and the joining
+/// account, its root, and its device (keys X9.63, 65 bytes each). The store is not in
+/// them: the pin is for the pair of accounts, and each signed `share` names its store.
+pub fn share_safety_words(
+    code: &str,
+    (inviter_account, inviter_root, inviter_key): (&str, &[u8], &[u8]),
+    (joiner_account, joiner_root, joiner_key): (&str, &[u8], &[u8]),
+) -> String {
+    let mut message = Zeroizing::new(Vec::new());
+    for part in [
+        SHARE_SAFETY_TAG.as_bytes(),
+        code.as_bytes(),
+        inviter_account.as_bytes(),
+        inviter_root,
+        inviter_key,
+        joiner_account.as_bytes(),
+        joiner_root,
+    ] {
+        message.extend_from_slice(part);
+        message.push(0);
+    }
+    message.extend_from_slice(joiner_key);
+    let digest = sha256(&message);
+    digest[..SAFETY_WORDS]
+        .iter()
+        .map(|byte| WORDS[usize::from(*byte)])
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The six safety words of a device link (section 7.3): both devices compute them from
@@ -427,6 +563,59 @@ mod tests {
             assert!(LinkCode::parse(&bad).is_none(), "{bad}");
         }
         assert!(LinkCode::generate("t_7k2m5q4x3c", &root, &confirmer).is_err());
+    }
+
+    #[test]
+    fn a_share_code_names_its_account_and_keys_and_hides_in_debug() {
+        let (root, inviter) = ([4u8; 65], [5u8; 65]);
+        let code = ShareCode::generate("acc_k7m2q4x3ca", &root, &inviter).unwrap();
+        assert_eq!(code.account_id(), "acc_k7m2q4x3ca");
+        assert_eq!(code.expose().len(), 123);
+        assert!(code.expose().starts_with("apassy_shr_acc_k7m2q4x3ca_"));
+        assert_eq!(code.fingerprint(), share_fingerprint(&root, &inviter));
+        // Another domain than the device link: the same keys give another fingerprint.
+        assert_ne!(code.fingerprint(), link_fingerprint(&root, &inviter));
+        assert_ne!(code.link_hash(), link_hash(code.expose()));
+        let again = ShareCode::parse(&format!("  {}\n", code.expose())).unwrap();
+        assert_eq!(again.link_hash(), code.link_hash());
+        assert!(!format!("{code:?}").contains(&code.expose()[20..]));
+        // A device link code is no share code, and the reverse.
+        let link = LinkCode::generate("acc_k7m2q4x3ca", &root, &inviter).unwrap();
+        assert!(ShareCode::parse(link.expose()).is_none());
+        assert!(LinkCode::parse(code.expose()).is_none());
+        // The words cover every input: each change gives other words.
+        let (x_root, x_key) = ([6u8; 65], [7u8; 65]);
+        let words = share_safety_words(
+            code.expose(),
+            ("acc_k7m2q4x3ca", &root, &inviter),
+            ("acc_m3n5p7q2rb", &x_root, &x_key),
+        );
+        assert_eq!(words.split(' ').count(), 6);
+        for other in [
+            share_safety_words(
+                link.expose(),
+                ("acc_k7m2q4x3ca", &root, &inviter),
+                ("acc_m3n5p7q2rb", &x_root, &x_key),
+            ),
+            share_safety_words(
+                code.expose(),
+                ("acc_k7m2q4x3ca", &x_root, &inviter),
+                ("acc_m3n5p7q2rb", &x_root, &x_key),
+            ),
+            share_safety_words(
+                code.expose(),
+                ("acc_k7m2q4x3ca", &root, &inviter),
+                ("acc_m3n5p7q2rb", &x_root, &inviter),
+            ),
+            share_safety_words(
+                code.expose(),
+                ("acc_k7m2q4x3ca", &root, &inviter),
+                ("acc_aaaaaaaaaa", &x_root, &x_key),
+            ),
+        ] {
+            assert_ne!(other, words);
+        }
+        assert!(ShareCode::generate("t_7k2m5q4x3c", &root, &inviter).is_err());
     }
 
     #[test]

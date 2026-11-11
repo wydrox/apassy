@@ -519,6 +519,72 @@ pub enum OwnerAction {
         group_id: String,
         change: ConnectGroupChange,
     },
+    /// Share the vault store `team_id` ("`vault_name`", its name on this device) with
+    /// another account of the family or team (connect-account-v1 section 16): this device
+    /// signs `peer` for that account's root (when the people compared the six `words`;
+    /// empty for an account whose root this account pinned already) and `share` of the
+    /// store. The proof names the account, the person by the name that its verified list
+    /// signed (`peer_name`, with its name at Connect `peer_hint` beside it), the short
+    /// fingerprint of the root that the `peer` pins, the store, and the words.
+    ShareConnectVault {
+        account_id: String,
+        peer_account: String,
+        peer_name: String,
+        peer_hint: String,
+        fingerprint: String,
+        team_id: String,
+        vault_name: String,
+        words: String,
+    },
+    /// "The Words Match" on the device of the account that a share code was sent to: this
+    /// device signs `peer` for the root of the inviting account (section 16.2).
+    AcceptConnectShare {
+        account_id: String,
+        peer_account: String,
+        peer_name: String,
+        peer_hint: String,
+        fingerprint: String,
+        words: String,
+    },
+    /// A new pin of an account that was reset (section 16.7), after new words: this device
+    /// signs the ends of the old root first (`unshare` and `leave` of the stores `ends`
+    /// names, then `unpeer`), then `peer` for the new root, and `share` of the store
+    /// `team_id` when one is named. The proof names both root fingerprints and what ends.
+    RepinConnectPeer {
+        account_id: String,
+        peer_account: String,
+        peer_name: String,
+        peer_hint: String,
+        old_fingerprint: String,
+        fingerprint: String,
+        words: String,
+        ends: Vec<String>,
+        team_id: Option<String>,
+        vault_name: Option<String>,
+    },
+    /// "Join" of a store that another account shares with this one: this device signs
+    /// `join` of the store (section 16.2 step 5).
+    JoinConnectShare {
+        account_id: String,
+        peer_account: String,
+        peer_name: String,
+        peer_hint: String,
+        fingerprint: String,
+        team_id: String,
+        vault_name: String,
+    },
+    /// End a vault shared between accounts: the owner's `unshare` ("Stop Sharing with
+    /// <name>…", `leave` false) or a member's `leave` ("Leave This Shared Vault…").
+    EndConnectShare {
+        account_id: String,
+        peer_account: String,
+        peer_name: String,
+        peer_hint: String,
+        fingerprint: String,
+        team_id: String,
+        vault_name: String,
+        leave: bool,
+    },
     /// Turn the tailnet route of this Mac's node on or off (plan S2–S3, unit N7): the
     /// iPhone and the other Macs reach the approvals of this Mac directly, or no longer.
     SetTailnetRoute {
@@ -755,6 +821,12 @@ impl OwnerAction {
             }
             Self::AddStoreDevice { .. } => "Add a device to a relay copy",
             Self::ChangeConnectGroup { .. } => "Change your family or team",
+            Self::ShareConnectVault { .. } => "Share a vault",
+            Self::AcceptConnectShare { .. } => "Accept a shared vault",
+            Self::RepinConnectPeer { .. } => "Verify a reset account",
+            Self::JoinConnectShare { .. } => "Join a shared vault",
+            Self::EndConnectShare { leave: false, .. } => "Stop sharing a vault",
+            Self::EndConnectShare { leave: true, .. } => "Leave a shared vault",
             Self::SetTailnetRoute { on: true } => {
                 concat!("Reach this ", crate::computer!(), " on your tailnet")
             }
@@ -1013,6 +1085,70 @@ impl OwnerAction {
                     format!("change your Apassy Connect plan to {quantity} people or seats")
                 }
             },
+            Self::ShareConnectVault {
+                peer_name,
+                vault_name,
+                words,
+                ..
+            } if words.is_empty() => format!(
+                "share \"{}\" with \"{}\" through Apassy Connect",
+                short_device_name(vault_name),
+                short_device_name(peer_name)
+            ),
+            Self::ShareConnectVault {
+                peer_name,
+                vault_name,
+                words,
+                ..
+            } => format!(
+                "share \"{}\" with \"{}\" through Apassy Connect; both show: {}",
+                short_device_name(vault_name),
+                short_device_name(peer_name),
+                safe_words(words)
+            ),
+            Self::AcceptConnectShare {
+                peer_name, words, ..
+            } => format!(
+                "accept the vaults that \"{}\" shares through Apassy Connect; both show: {}",
+                short_device_name(peer_name),
+                safe_words(words)
+            ),
+            Self::RepinConnectPeer {
+                peer_name, words, ..
+            } => format!(
+                "verify the reset account of \"{}\" through Apassy Connect; both show: {}",
+                short_device_name(peer_name),
+                safe_words(words)
+            ),
+            Self::JoinConnectShare {
+                peer_name,
+                vault_name,
+                ..
+            } => format!(
+                "join \"{}\", shared by \"{}\" through Apassy Connect",
+                short_device_name(vault_name),
+                short_device_name(peer_name)
+            ),
+            Self::EndConnectShare {
+                peer_name,
+                vault_name,
+                leave: false,
+                ..
+            } => format!(
+                "stop sharing \"{}\" with \"{}\" through Apassy Connect",
+                short_device_name(vault_name),
+                short_device_name(peer_name)
+            ),
+            Self::EndConnectShare {
+                peer_name,
+                vault_name,
+                leave: true,
+                ..
+            } => format!(
+                "leave \"{}\", shared by \"{}\" through Apassy Connect",
+                short_device_name(vault_name),
+                short_device_name(peer_name)
+            ),
             Self::SetTailnetRoute { on: true } => concat!(
                 "let your iPhone and ",
                 crate::computers!(),
@@ -1101,6 +1237,11 @@ impl OwnerAction {
                 | Self::TakeDepartedCopy { .. }
                 | Self::AddStoreDevice { .. }
                 | Self::ChangeConnectGroup { .. }
+                | Self::ShareConnectVault { .. }
+                | Self::AcceptConnectShare { .. }
+                | Self::RepinConnectPeer { .. }
+                | Self::JoinConnectShare { .. }
+                | Self::EndConnectShare { .. }
         )
     }
 
@@ -1243,6 +1384,16 @@ fn short_site(origin: &str) -> String {
     } else {
         site
     }
+}
+
+/// The six safety words as an owner check shows them: lowercase letters and spaces only,
+/// at most 80 characters.
+fn safe_words(words: &str) -> String {
+    words
+        .chars()
+        .filter(|c| c.is_ascii_lowercase() || *c == ' ')
+        .take(80)
+        .collect()
 }
 
 /// Device name or login title for the prompt: printable characters only, at most 40
@@ -2489,6 +2640,75 @@ mod evaluation_tests {
                 team_id: "t".repeat(32),
                 device_id: "dev_p4n6r2t7bc".into(),
                 account_id: "acc_m3n5p7q2rb".into(),
+            },
+            OwnerAction::ShareConnectVault {
+                account_id: "acc_k7m2q4x3ca".into(),
+                peer_account: "acc_m3n5p7q2rb".into(),
+                peer_name: long.clone(),
+                peer_hint: "Ola".into(),
+                fingerprint: "1a2b 3c4d 5e6f".into(),
+                team_id: "t_7k2m5q4x3c".into(),
+                vault_name: long.clone(),
+                words: "blaze cable flute board seal tiger".into(),
+            },
+            OwnerAction::ShareConnectVault {
+                account_id: "acc_k7m2q4x3ca".into(),
+                peer_account: "acc_m3n5p7q2rb".into(),
+                peer_name: long.clone(),
+                peer_hint: "Ola".into(),
+                fingerprint: "1a2b 3c4d 5e6f".into(),
+                team_id: "t_7k2m5q4x3c".into(),
+                vault_name: long.clone(),
+                words: String::new(),
+            },
+            OwnerAction::AcceptConnectShare {
+                account_id: "acc_m3n5p7q2rb".into(),
+                peer_account: "acc_k7m2q4x3ca".into(),
+                peer_name: long.clone(),
+                peer_hint: "Rafal".into(),
+                fingerprint: "1a2b 3c4d 5e6f".into(),
+                words: "blaze cable flute board seal tiger".into(),
+            },
+            OwnerAction::RepinConnectPeer {
+                account_id: "acc_k7m2q4x3ca".into(),
+                peer_account: "acc_m3n5p7q2rb".into(),
+                peer_name: long.clone(),
+                peer_hint: "Ola".into(),
+                old_fingerprint: "9a8b 7c6d 5e4f".into(),
+                fingerprint: "1a2b 3c4d 5e6f".into(),
+                words: "blaze cable flute board seal tiger".into(),
+                ends: vec![long.clone()],
+                team_id: Some("t_7k2m5q4x3c".into()),
+                vault_name: Some(long.clone()),
+            },
+            OwnerAction::JoinConnectShare {
+                account_id: "acc_m3n5p7q2rb".into(),
+                peer_account: "acc_k7m2q4x3ca".into(),
+                peer_name: long.clone(),
+                peer_hint: "Rafal".into(),
+                fingerprint: "1a2b 3c4d 5e6f".into(),
+                team_id: "t_7k2m5q4x3c".into(),
+                vault_name: long.clone(),
+            },
+            OwnerAction::EndConnectShare {
+                account_id: "acc_k7m2q4x3ca".into(),
+                peer_account: "acc_m3n5p7q2rb".into(),
+                peer_name: long.clone(),
+                peer_hint: "Ola".into(),
+                fingerprint: "1a2b 3c4d 5e6f".into(),
+                team_id: "t_7k2m5q4x3c".into(),
+                vault_name: long.clone(),
+                leave: false,
+            },
+            OwnerAction::EndConnectShare {
+                account_id: "acc_m3n5p7q2rb".into(),
+                peer_account: "acc_k7m2q4x3ca".into(),
+                peer_name: long.clone(),
+                peer_hint: "Rafal".into(),
+                fingerprint: "1a2b 3c4d 5e6f".into(),
+                team_id: "t_7k2m5q4x3c".into(),
+                vault_name: long.clone(),
+                leave: true,
             },
         ] {
             assert!(action.needs_fresh_local_check(), "{action:?}");

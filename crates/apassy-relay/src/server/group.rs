@@ -656,7 +656,10 @@ fn confirm(hub: &Hub, caller: &AccountCaller, target: &str, now: u64) -> RelayRe
             && wanted > plan.quantity
             && let Err(error) = billing.request_quantity_locked(locked, wanted, now)
         {
-            hub.directory.store.tx(|tx| {
+            // Back to pending: the store rows that were added between the two
+            // transactions, between the member and the group's other accounts, go in the
+            // same transaction, as a removal from the group takes them.
+            let removals = hub.directory.store.tx(|tx| {
                 let changed = tx
                     .execute(
                         "UPDATE group_member SET state = 'pending', joined_at = NULL \
@@ -664,19 +667,23 @@ fn confirm(hub: &Hub, caller: &AccountCaller, target: &str, now: u64) -> RelayRe
                         params![member.group_id, target],
                     )
                     .map_err(db)?;
-                if changed == 1 {
-                    hub.directory.audit.write_on(
-                        tx,
-                        now,
-                        &format!("account:{}", caller.account),
-                        "group_member_confirm_undone",
-                        None,
-                        &json!({"group_id": member.group_id, "account_id": target,
-                                "code": error.code}),
-                    )?;
+                if changed != 1 {
+                    return Ok(Vec::new());
                 }
-                Ok(())
+                let others = other_accounts(tx, &member.group_id, target)?;
+                let (removals, _) = queue_group_store_removals(tx, target, &others, now)?;
+                hub.directory.audit.write_on(
+                    tx,
+                    now,
+                    &format!("account:{}", caller.account),
+                    "group_member_confirm_undone",
+                    None,
+                    &json!({"group_id": member.group_id, "account_id": target,
+                            "code": error.code, "removed_from_stores": removals.len()}),
+                )?;
+                Ok(removals)
             })?;
+            hub.apply_removals(&removals, now);
             return Err(error);
         }
         hub.directory
@@ -691,7 +698,9 @@ fn confirm(hub: &Hub, caller: &AccountCaller, target: &str, now: u64) -> RelayRe
 /// other accounts, theirs leave its stores, and the tunnel grants between it and the group
 /// end. The membership and the store rows go in one transaction, with a waiting removal
 /// for each store file; the files take them after the commit, at their next open, or at a
-/// maintenance pass.
+/// maintenance pass. In the same transaction every `share` that names the removed account
+/// is void at Connect (`peers::void_shares_naming`): after a new admission only a newer
+/// `share`, and the member's `join` after it, give its devices a store again.
 fn remove(hub: &Hub, caller: &AccountCaller, target: &str, now: u64) -> RelayResult<RemovedAnswer> {
     let member = hub
         .directory
@@ -737,6 +746,7 @@ fn remove(hub: &Hub, caller: &AccountCaller, target: &str, now: u64) -> RelayRes
             params![other.group_id, target],
         )
         .map_err(db)?;
+        crate::server::peers::void_shares_naming(tx, target, now)?;
         tx.execute(
             "UPDATE account SET group_id = NULL WHERE id = ?1",
             params![target],
@@ -840,6 +850,14 @@ pub(crate) fn forget_account(conn: &Connection, account: &str) -> RelayResult<()
 
 // ---- The seam of the accounts. ----
 
+/// Whether `account` and `other` are active members of one group, on `conn`.
+fn same_active_group(conn: &Connection, account: &str, other: &str) -> RelayResult<bool> {
+    let (Some(a), Some(b)) = (membership(conn, account)?, membership(conn, other)?) else {
+        return Ok(false);
+    };
+    Ok(a.active() && b.active() && a.group_id == b.group_id)
+}
+
 /// The `Groups` seam of the accounts, on the directory tables.
 pub struct DirectoryGroups;
 
@@ -868,12 +886,17 @@ impl Groups for DirectoryGroups {
         other: &str,
         _now: u64,
     ) -> RelayResult<bool> {
-        directory.with(|conn| {
-            let (Some(a), Some(b)) = (membership(conn, account)?, membership(conn, other)?) else {
-                return Ok(false);
-            };
-            Ok(a.active() && b.active() && a.group_id == b.group_id)
-        })
+        directory.with(|conn| same_active_group(conn, account, other))
+    }
+
+    fn share_group_on(
+        &self,
+        conn: &Connection,
+        account: &str,
+        other: &str,
+        _now: u64,
+    ) -> RelayResult<Option<bool>> {
+        same_active_group(conn, account, other).map(Some)
     }
 
     /// An owner with confirmed members.

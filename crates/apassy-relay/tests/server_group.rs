@@ -359,6 +359,7 @@ fn a_removed_member_keeps_a_free_account_and_leaves_the_shared_stores() {
         Some(&json!({"vault_id": VAULT, "name": "Family"})),
     );
     let team = store["team_id"].as_str().unwrap().to_string();
+    c.share_store(&owner, &anna, &team);
     let added = c.ok(
         "POST",
         &format!("/v1/account/vaults/{team}/devices"),
@@ -431,7 +432,8 @@ fn a_members_device_joins_a_shared_store_and_a_strangers_does_not() {
         .unwrap()
         .to_string();
     let path = format!("/v1/account/vaults/{team}/devices");
-    for outsider in [&stranger, &pending] {
+    // A member of the group without a signed share of the store is refused too.
+    for outsider in [&stranger, &pending, &anna] {
         c.fails(
             "POST",
             &path,
@@ -441,6 +443,7 @@ fn a_members_device_joins_a_shared_store_and_a_strangers_does_not() {
             "not_in_group",
         );
     }
+    c.share_store(&owner, &anna, &team);
     let added = c.ok(
         "POST",
         &path,
@@ -613,6 +616,7 @@ fn a_member_removal_goes_on_past_a_store_that_refuses_the_write() {
             .as_str()
             .unwrap()
             .to_string();
+        c.share_store(&owner, &anna, &team);
         c.ok(
             "POST",
             &format!("/v1/account/vaults/{team}/devices"),
@@ -702,6 +706,7 @@ fn a_store_device_added_again_clears_the_removal_that_waited_for_it() {
         .unwrap()
         .to_string();
     let path = format!("/v1/account/vaults/{team}/devices");
+    c.share_store(&owner, &anna, &team);
     let first = c.ok(
         "POST",
         &path,
@@ -730,8 +735,13 @@ fn a_store_device_added_again_clears_the_removal_that_waited_for_it() {
         c.rows("SELECT team_id FROM account_store_removal"),
         std::slice::from_ref(&team)
     );
-    // Anna joins again and is added again: the live row of the store is hers again.
+    // Anna joins again and is added again after a newer share (the removal voided the
+    // old one): the live row of the store is hers again, and she signs in after her join.
     c.add_member(&owner, &anna);
+    for op in ["unshare", "share"] {
+        let (status, answer) = c.list_entry(&owner, op, &anna.account, None, Some(&team));
+        assert_eq!(status, 200, "{answer}");
+    }
     let again = c.ok(
         "POST",
         &path,
@@ -747,6 +757,7 @@ fn a_store_device_added_again_clears_the_removal_that_waited_for_it() {
         &hub,
         connect::now() + apassy_relay::server::hub::STORE_REMOVAL_MAX_WAIT_SECS,
     );
+    c.join_store(&anna, &owner, &team);
     let (status, answer) = c.call(
         "POST",
         "/v1/auth/challenge",
@@ -774,6 +785,7 @@ fn a_members_store_sign_in_needs_the_group() {
         .as_str()
         .unwrap()
         .to_string();
+    c.share_store(&owner, &anna, &team);
     c.ok(
         "POST",
         &format!("/v1/account/vaults/{team}/devices"),
@@ -789,6 +801,7 @@ fn a_members_store_sign_in_needs_the_group() {
         )
         .0
     };
+    c.join_store(&anna, &owner, &team);
     assert_eq!(challenge(&anna), 200);
     // The membership goes and its store rows stay (a removal that did not run to its end):
     // the sign-in is refused all the same; the owner's own device signs in.
@@ -958,6 +971,45 @@ fn a_confirm_that_stripe_refuses_leaves_the_member_pending() {
     // Asked again, it works.
     assert_eq!(confirm(&c, &owner, &late).0, 200);
     assert_eq!(active_members(&c, &owner), 2);
+}
+
+/// A store row of the member that came while its confirmation waited for Stripe goes
+/// in the transaction that makes it pending again, with a waiting removal for the file.
+#[test]
+fn a_confirm_that_stripe_refuses_removes_the_store_rows_of_its_window() {
+    let c = start();
+    let owner = team(&c, 1);
+    let late = pending(&c, &owner, "Late");
+    let (store, _) = c.store(&owner, VAULT);
+    c.stripe.delay_next("/v1/subscription_items/", 1500);
+    c.stripe.fail_path("/v1/subscription_items/", 400, 1);
+    std::thread::scope(|scope| {
+        let confirmed = scope.spawn(|| confirm(&c, &owner, &late));
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        // The member is active for the moment: a row of its device in the owner's store.
+        c.edit_directory(&format!(
+            "INSERT INTO account_store_device (team_id, device_id, account_id, store_device, added_at) \
+             VALUES ('{store}', '{}', '{}', 2, 1);",
+            late.id, late.account
+        ));
+        assert_eq!(
+            code_of(&confirmed.join().unwrap()),
+            (502, Some("upstream_failed"))
+        );
+    });
+    assert_eq!(active_members(&c, &owner), 1);
+    assert!(
+        c.rows(&format!(
+            "SELECT device_id FROM account_store_device WHERE device_id = '{}'",
+            late.id
+        ))
+        .is_empty()
+    );
+    assert_eq!(
+        c.rows("SELECT action FROM audit WHERE action = 'group_member_confirm_undone'")
+            .len(),
+        1
+    );
 }
 
 #[test]

@@ -490,7 +490,7 @@ fn the_account_key_refuses_every_other_tag() {
             ConnectError::TagRefused
         );
     }
-    assert_eq!(apassy::connect::SIGNING_TAGS.len(), 10);
+    assert_eq!(apassy::connect::SIGNING_TAGS.len(), 12);
 }
 
 /// The entitlement tokens of the vectors verify with the published key and fail with a

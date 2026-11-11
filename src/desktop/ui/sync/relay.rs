@@ -853,6 +853,18 @@ fn problem(text: &str) -> Option<SyncError> {
     .find(|error| error.to_string() == text)
 }
 
+/// Whether `status` is a refusal of a head whose signer the policy does not hold: the
+/// device list is checked ([`SyncError::ChecksDeviceList`]), or a fresh list still refused
+/// it ([`SyncError::UnknownSigner`], or a damaged copy for the current head itself).
+/// Shared Vaults keys its quiet time on it, with the head of `RelaySync::unlisted_head`.
+pub(crate) fn is_unlisted_signer(status: &UiStatus) -> bool {
+    matches!(status, UiStatus::Damaged)
+        || matches!(status, UiStatus::Problem(text) if matches!(
+            problem(text),
+            Some(SyncError::ChecksDeviceList | SyncError::UnknownSigner)
+        ))
+}
+
 /// The short tag of the status of a vault on the relay, and its tone.
 pub(crate) fn tag(status: &UiStatus) -> (&'static str, Tone) {
     match status {
@@ -2540,13 +2552,14 @@ impl DesktopApp {
         });
     }
 
-    /// The account key and the plan state of this Mac's Connect account go to the relay
-    /// sync of each vault (plan s7 unit M3): a vault store signs with that key and shows
-    /// the plan state. Settings › Connect calls it after each refresh.
-    pub(crate) fn relay_share_connect(&mut self) {
-        let Some(account) = self.ui.connect.live.sync_account() else {
-            return;
-        };
+    /// The account key, the signers of the vault stores, and the plan state go to the
+    /// relay sync of each vault, and the sessions that run take the signers at their next
+    /// check of a head. Nothing else: no registration of devices. Returns the account of
+    /// the session.
+    pub(crate) fn relay_hand_over_signers(
+        &mut self,
+    ) -> Option<crate::desktop::ui::connect::live::SyncAccount> {
+        let account = self.ui.connect.live.sync_account()?;
         for relay in lock(&self.sync.relay.cache).values() {
             if let Some(signer) = &account.signer {
                 relay.set_account_signers(Some(account.signers.clone()));
@@ -2557,6 +2570,16 @@ impl DesktopApp {
             }
         }
         self.relay_take_list(&account);
+        Some(account)
+    }
+
+    /// The account key and the plan state of this Mac's Connect account go to the relay
+    /// sync of each vault (plan s7 unit M3): a vault store signs with that key and shows
+    /// the plan state. Settings › Connect calls it after each refresh.
+    pub(crate) fn relay_share_connect(&mut self) {
+        let Some(account) = self.relay_hand_over_signers() else {
+            return;
+        };
         // The open vault store takes the newer devices of the account (connect-account-v1
         // section 8); no owner check, as at its start (`register_own_store_device`).
         if let Some(id) = self.current_vault().map(|entry| entry.id.clone())
@@ -3105,8 +3128,17 @@ impl DesktopApp {
         let Some(asked) = account.verified_at else {
             return;
         };
-        for relay in lock(&self.sync.relay.cache).values() {
-            relay.note_device_list(asked);
+        let ids: Vec<String> = lock(&self.sync.relay.cache).keys().cloned().collect();
+        for id in ids {
+            // A store shared between accounts: Shared Vaults reads the lists of the other
+            // accounts too, and notes them after the quiet time of the head
+            // (`connect::share`).
+            if self.share_reads_lists(&id) {
+                continue;
+            }
+            if let Some(relay) = self.relay_of(&id) {
+                relay.note_device_list(asked);
+            }
         }
         if self.sync.relay.listed.replace(asked) == Some(asked) {
             return;
@@ -4388,10 +4420,11 @@ impl DesktopApp {
                 Ok(stores
                     .into_iter()
                     .filter(|store| {
-                        // A store of another account (shared) is not offered: sharing a
-                        // vault between accounts is not available yet.
+                        // A store that holds devices of another account is offered only
+                        // with a share of it that this device verified (connect-account-v1
+                        // section 16).
                         !known.contains(&store.vault_id)
-                            && !store.shared
+                            && (!store.shared || account.shares_store(&store.team_id))
                             && store
                                 .devices
                                 .iter()

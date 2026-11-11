@@ -1376,6 +1376,18 @@ pub enum ListOp {
     Add,
     /// A device of the list is removed by a device of the list (also itself).
     Remove,
+    /// Section 16: the root of another account is pinned (after the six words).
+    Peer,
+    /// Section 16: the pin of another account ends (no share or join names it).
+    Unpeer,
+    /// Section 16: a vault store of this account syncs with the devices of a peer.
+    Share,
+    /// Section 16: a share ends; Connect removes the peer's devices from the store.
+    Unshare,
+    /// Section 16: this account syncs a store that a peer made and shares with it.
+    Join,
+    /// Section 16: a join ends; Connect removes this account's devices from the store.
+    Leave,
 }
 
 impl ListOp {
@@ -1384,6 +1396,12 @@ impl ListOp {
             Self::Root => "root",
             Self::Add => "add",
             Self::Remove => "remove",
+            Self::Peer => "peer",
+            Self::Unpeer => "unpeer",
+            Self::Share => "share",
+            Self::Unshare => "unshare",
+            Self::Join => "join",
+            Self::Leave => "leave",
         }
     }
 
@@ -1392,21 +1410,50 @@ impl ListOp {
             "root" => Some(Self::Root),
             "add" => Some(Self::Add),
             "remove" => Some(Self::Remove),
+            "peer" => Some(Self::Peer),
+            "unpeer" => Some(Self::Unpeer),
+            "share" => Some(Self::Share),
+            "unshare" => Some(Self::Unshare),
+            "join" => Some(Self::Join),
+            "leave" => Some(Self::Leave),
             _ => None,
         }
     }
+
+    /// An entry of section 16: it names another account, not a device.
+    pub fn names_account(self) -> bool {
+        matches!(
+            self,
+            Self::Peer | Self::Unpeer | Self::Share | Self::Unshare | Self::Join | Self::Leave
+        )
+    }
+
+    /// An entry that adds something (`add`, `peer`, `share`, `join`): it comes only while
+    /// the list has room to end every device, peer, share, and join.
+    pub fn adds(self) -> bool {
+        matches!(self, Self::Add | Self::Peer | Self::Share | Self::Join)
+    }
+
+    /// An entry of section 16 that names a vault store.
+    pub fn names_store(self) -> bool {
+        matches!(self, Self::Share | Self::Unshare | Self::Join | Self::Leave)
+    }
 }
 
-/// One entry of the signed device list of an account (connect-account-v1 section 7.5):
-/// `by` signed the `apassy-connect device-list v1` message of `version`, the hash of the
-/// entry before, `op`, `key`, `link_hash`, and `name`. The root entry (version 1) is
-/// signed by its own key; its authority is still the root that each device pinned itself.
+/// One entry of the signed device list of an account (connect-account-v1 sections 7.5 and
+/// 16): `by` signed the `apassy-connect device-list v1` message of `version`, the hash of
+/// the entry before, `op`, `key`, `link_hash`, and `name`; or, for an entry that names
+/// another account, the `apassy-connect share-list v1` message of `version`, the hash of
+/// the entry before, `op`, `account_id`, `root`, and `team_id`. The root entry (the
+/// first version) is signed by its own key; its authority is still the root that each
+/// device pinned itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListEntry {
     pub version: u64,
     pub op: ListOp,
-    /// b64u of the key that the entry adds or removes (the root key for `root`).
-    pub key: String,
+    /// b64u of the key that the entry adds or removes (the root key for `root`); `None`
+    /// for an entry of section 16.
+    pub key: Option<String>,
     /// The link of an `add`, else `None`.
     pub link_hash: Option<String>,
     /// The device name of a `root` or an `add` that the entry signs, `None` for `remove`.
@@ -1415,6 +1462,124 @@ pub struct ListEntry {
     pub by: String,
     /// b64u of the DER signature of `by`: every entry has one, the root too.
     pub signature: Option<String>,
+    /// Section 16: the other account, else `None`. A device entry carries none of the
+    /// three fields of section 16 on the wire (a client reads an absent one as `null`), so
+    /// its JSON is that of section 7.5.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+    /// Section 16: b64u of the root that a `peer` pins, else `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<String>,
+    /// Section 16: the vault store of a `share`, `unshare`, `join`, or `leave`, else
+    /// `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team_id: Option<String>,
+}
+
+/// `POST /v1/account/list` (section 16.3): an entry of the device list that names another
+/// account, signed by the calling device at the version after the head.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountListAppend {
+    pub version: u64,
+    pub op: ListOp,
+    pub account_id: String,
+    pub root: Option<String>,
+    pub team_id: Option<String>,
+    /// b64u of the caller's DER signature over the `apassy-connect share-list v1` message.
+    pub statement: String,
+}
+
+/// `POST /v1/account/list` answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountListAppended {
+    pub version: u64,
+    pub op: ListOp,
+}
+
+/// `POST /v1/account/peers/link` (section 16.2): the hash of a share code for the member
+/// `account_id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerLinkRequest {
+    pub link_hash: String,
+    pub account_id: String,
+}
+
+/// `POST /v1/account/peers/join`: the answer of a device of another account to a share
+/// code, signed over the `apassy-connect peer-join v1` message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerJoinRequest {
+    /// The account that made the code.
+    pub account_id: String,
+    pub link_hash: String,
+    pub signature: String,
+}
+
+/// The device that made a share code.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerInviter {
+    pub account_id: String,
+    pub device_id: String,
+    /// The person's name of that account.
+    pub name: String,
+    pub public_key: String,
+}
+
+/// `POST /v1/account/peers/join` answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerJoined {
+    pub join_id: u64,
+    pub inviter: PeerInviter,
+    pub expires_at: u64,
+    /// The signed device list of the inviting account, from version 1.
+    pub device_list: Vec<ListEntry>,
+}
+
+/// One answer to a share code that the calling device made.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerPending {
+    pub join_id: u64,
+    pub link_id: u64,
+    /// The answering account and its person's name.
+    pub account_id: String,
+    pub name: String,
+    /// The answering device and its signature over the `apassy-connect peer-join v1`
+    /// message.
+    pub public_key: String,
+    pub signature: String,
+    pub created_at: u64,
+    pub expires_at: u64,
+    /// The signed device list of the answering account, from version 1.
+    pub device_list: Vec<ListEntry>,
+}
+
+/// `GET` and `DELETE /v1/account/peers/join/{join_id}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerJoinView {
+    pub join_id: u64,
+    /// `pending`, `confirmed`, `refused`, `cancelled`, or `expired`.
+    pub state: String,
+    pub expires_at: u64,
+}
+
+/// A device of another account as `GET /v1/account/peers/{account_id}` lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerDevice {
+    pub device_id: String,
+    pub name: String,
+    pub platform: Platform,
+    pub public_key: String,
+}
+
+/// `GET /v1/account/peers/{account_id}`: another account of the caller's group.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerView {
+    pub account_id: String,
+    pub name: String,
+    pub devices: Vec<PeerDevice>,
+    pub device_list: Vec<ListEntry>,
 }
 
 /// The plan of an account (connect-billing-v1 section 8). Billing (C2) fills it; without

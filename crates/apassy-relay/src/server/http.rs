@@ -2013,7 +2013,7 @@ fn handle(hub: &Hub, proxy: Option<&Proxy>, listener: &Listener, mut request: Re
     // has no items, agents, questions, feed, or push. Pushes need an entitled plan of the
     // account that made it, pulls a plan that still allows them.
     if core.kind == TeamKind::Account
-        && let Err(error) = vault_store_allows(hub, &core, endpoint, now)
+        && let Err(error) = vault_store_allows(hub, &core, endpoint, principal.as_ref(), now)
     {
         respond_error(request, &error);
         return;
@@ -2143,26 +2143,54 @@ fn handle(hub: &Hub, proxy: Option<&Proxy>, listener: &Listener, mut request: Re
 /// What a vault store serves (connect-account-v1 section 8): `GET /v1/me`, the device
 /// list, and relay sync. Every other team route is 403 `forbidden`. A push and a receipt
 /// need an entitled plan of the store's account (403 `plan_required`, the place of the
-/// `sync_bytes` check of relay-sync-v1 section 4); a pull or a download needs a plan that
-/// allows pulls (`PlanView::can_pull`); `DELETE /v1/sync` always works.
-fn vault_store_allows(hub: &Hub, core: &Core, endpoint: Endpoint, now: u64) -> RelayResult<()> {
+/// `sync_bytes` check of relay-sync-v1 section 4), and a push by a device of another
+/// account (a shared store, section 16) an entitled plan of that account too: a member
+/// beyond the paid seats, or one whose plan is read-only, pulls and does not push. A pull
+/// or a download needs a plan of the store's account that allows pulls
+/// (`PlanView::can_pull`); `DELETE /v1/sync` always works.
+fn vault_store_allows(
+    hub: &Hub,
+    core: &Core,
+    endpoint: Endpoint,
+    principal: Option<&Principal>,
+    now: u64,
+) -> RelayResult<()> {
     let plan_required = || {
         RelayError::new(
             codes::PLAN_REQUIRED,
             "This account is not on Apassy Connect.",
         )
     };
-    let plan = |hub: &Hub| -> RelayResult<api::PlanView> {
-        let account = hub
-            .account_of_team(&core.team)?
-            .ok_or_else(|| RelayError::internal("A vault store has no account."))?;
+    let owner = |hub: &Hub| -> RelayResult<String> {
+        hub.account_of_team(&core.team)?
+            .ok_or_else(|| RelayError::internal("A vault store has no account."))
+    };
+    let plan_of = |account: &str| {
         hub.accounts
             .plans()
-            .plan(&hub.directory.store, &account, now)
+            .plan(&hub.directory.store, account, now)
     };
+    let plan = |hub: &Hub| -> RelayResult<api::PlanView> { plan_of(&owner(hub)?) };
     match endpoint {
         Endpoint::Me | Endpoint::DeviceList | Endpoint::SyncDelete => Ok(()),
-        Endpoint::SyncPush | Endpoint::SyncReceipt => {
+        Endpoint::SyncPush => {
+            let owner = owner(hub)?;
+            if !plan_of(&owner)?.entitled {
+                return Err(plan_required());
+            }
+            let pusher = store_device_account(hub, core, principal)?;
+            if pusher.as_deref() == Some(owner.as_str()) {
+                return Ok(());
+            }
+            match pusher {
+                Some(account) if plan_of(&account)?.entitled => Ok(()),
+                _ => Err(RelayError::new(
+                    codes::PLAN_REQUIRED,
+                    "Your account cannot change this shared vault: its plan is read-only or has no seat. It still gets the changes of the others.",
+                )),
+            }
+        }
+        Endpoint::SyncReceipt => {
             if plan(hub)?.entitled {
                 Ok(())
             } else {
@@ -2180,6 +2208,31 @@ fn vault_store_allows(hub: &Hub, core: &Core, endpoint: Endpoint, now: u64) -> R
             "A vault store of Apassy Connect serves relay sync only; its devices come from the account.",
         )),
     }
+}
+
+/// The account of the store device of `principal` in the vault store of `core`
+/// (`account_store_device`), or `None` for a caller without a store device row.
+fn store_device_account(
+    hub: &Hub,
+    core: &Core,
+    principal: Option<&Principal>,
+) -> RelayResult<Option<String>> {
+    let Some(device) = principal.and_then(|principal| match principal {
+        Principal::Member(member) => member.device.as_ref().map(|device| device.id.0),
+        Principal::Agent(_) => None,
+    }) else {
+        return Ok(None);
+    };
+    use rusqlite::OptionalExtension;
+    hub.directory.store.with(|conn| {
+        conn.query_row(
+            "SELECT account_id FROM account_store_device WHERE team_id = ?1 AND store_device = ?2",
+            rusqlite::params![core.team.as_str(), crate::server::store::to_i(device)],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(crate::server::store::db)
+    })
 }
 
 /// One request of an account route (connect-account-v1): the route (404, 405), then for
@@ -2272,9 +2325,31 @@ fn respond_account(
             );
         }
     };
-    if let Err(error) = account::authenticate(hub, token, now) {
-        refused(&error);
-        respond_error(request, &error);
+    let caller = match account::authenticate(hub, token, now) {
+        Ok(caller) => caller,
+        Err(error) => {
+            refused(&error);
+            respond_error(request, &error);
+            return;
+        }
+    };
+    // The routes of section 16 count for the calling device before the body is read.
+    if matches!(endpoint, account::AccountEndpoint::Peers(_))
+        && let Err(refusal) = hub.accounts.peer_calls().take(&caller.device, now)
+    {
+        respond_json_with(
+            request,
+            refusal.error.status(),
+            &refusal.error.to_envelope(),
+            false,
+            Header::from_bytes(
+                &b"Retry-After"[..],
+                refusal.retry_after.to_string().as_bytes(),
+            )
+            .ok()
+            .into_iter()
+            .collect(),
+        );
         return;
     }
     let body = match read_body(&mut request, body_method) {

@@ -4522,7 +4522,7 @@ mod connect_v1 {
         /// then `add` (with a link) and `remove` (without one), each signed; at most 256.
         fn list_is_valid(list: &[ListEntry]) -> bool {
             !list.is_empty()
-                && list.len() <= 256
+                && list.len() <= 1024
                 && list.iter().enumerate().all(|(index, entry)| {
                     let shape = match (index, entry.op.as_str()) {
                         (0, "root") => {
@@ -4584,7 +4584,188 @@ mod connect_v1 {
                         .all(|d| d.account_id == view.devices[0].account_id))
         }
 
+        /// `POST /v1/account/list` (section 16.3).
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ListAppend {
+            version: u64,
+            op: String,
+            account_id: String,
+            root: Option<String>,
+            team_id: Option<String>,
+            statement: String,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ListAppended {
+            version: u64,
+            op: String,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PeerLink {
+            link_hash: String,
+            account_id: String,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PeerJoin {
+            account_id: String,
+            link_hash: String,
+            signature: String,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PeerInviter {
+            account_id: String,
+            device_id: String,
+            name: String,
+            public_key: String,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PeerJoined {
+            join_id: u64,
+            inviter: PeerInviter,
+            expires_at: u64,
+            device_list: Vec<ListEntry>,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PeerPending {
+            join_id: u64,
+            link_id: u64,
+            account_id: String,
+            name: String,
+            public_key: String,
+            signature: String,
+            created_at: u64,
+            expires_at: u64,
+            device_list: Vec<ListEntry>,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PeerJoinState {
+            join_id: u64,
+            state: String,
+            expires_at: u64,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PeerDevice {
+            device_id: String,
+            name: String,
+            platform: String,
+            public_key: String,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PeerView {
+            account_id: String,
+            name: String,
+            devices: Vec<PeerDevice>,
+            device_list: Vec<ListEntry>,
+        }
+
+        /// The examples of section 16.
+        fn check_share(example: &Example) -> bool {
+            match example.name.as_str() {
+                "list_append" => {
+                    let body: ListAppend = strict(example);
+                    assert!(
+                        ["peer", "unpeer", "share", "unshare", "join", "leave"]
+                            .contains(&body.op.as_str())
+                    );
+                    assert!(is_id(&body.account_id, "acc_") && is_signature(&body.statement));
+                    assert_eq!(body.op == "peer", body.root.is_some());
+                    assert_eq!(
+                        ["share", "unshare", "join", "leave"].contains(&body.op.as_str()),
+                        body.team_id.is_some()
+                    );
+                    assert!(body.version >= 2);
+                }
+                "list_appended" => {
+                    let body: ListAppended = strict(example);
+                    assert!(body.version >= 2 && !body.op.is_empty());
+                }
+                "peer_link" => {
+                    let body: PeerLink = strict(example);
+                    assert!(is_link_hash(&body.link_hash) && is_id(&body.account_id, "acc_"));
+                }
+                "peer_link_created" => {
+                    let body: LinkAnswer = strict(example);
+                    assert!(body.link_id > 0 && body.expires_at > 0);
+                }
+                "peer_join" => {
+                    let body: PeerJoin = strict(example);
+                    assert!(is_id(&body.account_id, "acc_") && is_link_hash(&body.link_hash));
+                    assert!(is_signature(&body.signature));
+                }
+                "peer_joined" => {
+                    let body: PeerJoined = strict(example);
+                    assert!(
+                        is_id(&body.inviter.account_id, "acc_")
+                            && is_id(&body.inviter.device_id, "dev_")
+                    );
+                    assert!(is_public_key(&body.inviter.public_key) && is_name(&body.inviter.name));
+                    assert!(
+                        list_is_valid(&body.device_list) && body.join_id > 0 && body.expires_at > 0
+                    );
+                }
+                "peer_pending" => {
+                    let body: Vec<PeerPending> = strict(example);
+                    for answer in &body {
+                        assert!(is_id(&answer.account_id, "acc_") && is_name(&answer.name));
+                        assert!(
+                            is_public_key(&answer.public_key) && is_signature(&answer.signature)
+                        );
+                        assert!(list_is_valid(&answer.device_list));
+                        assert!(
+                            answer.join_id > 0
+                                && answer.link_id > 0
+                                && answer.expires_at > answer.created_at
+                        );
+                    }
+                }
+                "peer_join_state" => {
+                    let body: PeerJoinState = strict(example);
+                    assert!(
+                        ["pending", "confirmed", "refused", "cancelled", "expired"]
+                            .contains(&body.state.as_str())
+                    );
+                    assert!(body.join_id > 0 && body.expires_at > 0);
+                }
+                "peer_view" => {
+                    let body: PeerView = strict(example);
+                    assert!(is_id(&body.account_id, "acc_") && is_name(&body.name));
+                    assert!(
+                        body.devices
+                            .iter()
+                            .all(|device| is_id(&device.device_id, "dev_")
+                                && is_name(&device.name)
+                                && is_platform(&device.platform)
+                                && is_public_key(&device.public_key))
+                    );
+                    assert!(list_is_valid(&body.device_list));
+                }
+                _ => return false,
+            }
+            true
+        }
+
         fn check_one(example: &Example) -> bool {
+            if check_share(example) {
+                return true;
+            }
             match example.name.as_str() {
                 "account_create" => {
                     let body: AccountCreate = strict(example);
@@ -6844,6 +7025,226 @@ mod connect_v1 {
 
         pub fn check_examples() {
             examples("connect-tunnel-v1", EXAMPLES, TUNNEL_CONTRACT, check_one);
+        }
+    }
+}
+
+/// The share vectors of connect-account-v1 sections 15 and 16, with `ring` only: each
+/// message is the join of its parts and starts with its tag, each signature verifies with
+/// its signer's key and fails over a changed byte, the share fingerprint, the share link
+/// hash, and the six share words come from their inputs, and each list hash names the
+/// message of its entry, the next entry naming it as its `previous`.
+#[cfg(feature = "vault")]
+#[test]
+fn connect_account_v1_share_vectors_match_the_contract() {
+    use ring::signature::{ECDSA_P256_SHA256_ASN1, UnparsedPublicKey};
+    use serde_json::Value;
+
+    fn sha256(data: &[u8]) -> Vec<u8> {
+        ring::digest::digest(&ring::digest::SHA256, data)
+            .as_ref()
+            .to_vec()
+    }
+    fn b64u(data: &[u8]) -> String {
+        apassy::sync::encode_b64u(data)
+    }
+    fn hex(text: &str) -> Vec<u8> {
+        (0..text.len() / 2)
+            .map(|index| u8::from_str_radix(&text[index * 2..index * 2 + 2], 16).unwrap())
+            .collect()
+    }
+    fn joined(parts: &[&[u8]]) -> Vec<u8> {
+        parts.join(&0u8)
+    }
+    let v: Value = serde_json::from_str(include_str!(
+        "fixtures/connect-account-v1/share-vectors.json"
+    ))
+    .unwrap();
+    let contract = include_str!("../docs/contracts/connect-account-v1.md");
+    for tag in [
+        "apassy-connect share-list v1",
+        "apassy-connect peer-join v1",
+        "apassy-connect share-keys v1",
+        "apassy-connect share-link v1",
+        "apassy-connect share-safety v1",
+    ] {
+        assert!(contract.contains(tag), "{tag}");
+    }
+    let (origin, a, x, store) = (
+        v["origin"].as_str().unwrap().as_bytes(),
+        v["account_a"].as_str().unwrap().as_bytes(),
+        v["account_x"].as_str().unwrap().as_bytes(),
+        v["store"].as_str().unwrap().as_bytes(),
+    );
+    let pub_a = hex(v["device_a"]["public_hex"].as_str().unwrap());
+    let pub_b = hex(v["device_b"]["public_hex"].as_str().unwrap());
+    let (a64, b64) = (b64u(&pub_a), b64u(&pub_b));
+    let code = v["code"]["code"].as_str().unwrap();
+    assert_eq!(code.len(), 123);
+    assert!(code.starts_with(&format!("apassy_shr_{}_", v["account_a"].as_str().unwrap())));
+    let fingerprint = &sha256(&joined(&[b"apassy-connect share-keys v1", &pub_a, &pub_a]))[..16];
+    let fingerprint: String = fingerprint
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    assert_eq!(fingerprint, v["code"]["fingerprint"].as_str().unwrap());
+    assert!(code.ends_with(&format!("_{fingerprint}")));
+    let link_hash = b64u(&sha256(&joined(&[
+        b"apassy-connect share-link v1",
+        code.as_bytes(),
+    ])));
+    assert_eq!(link_hash, v["code"]["link_hash"].as_str().unwrap());
+    let safety = sha256(&joined(&[
+        b"apassy-connect share-safety v1",
+        code.as_bytes(),
+        a,
+        &pub_a,
+        &pub_a,
+        x,
+        &pub_b,
+        &pub_b,
+    ]));
+    assert_eq!(
+        safety
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>(),
+        v["words"]["sha256"].as_str().unwrap()
+    );
+    let words: Vec<&str> = v["words"]["words"].as_str().unwrap().split(' ').collect();
+    assert_eq!(words.len(), 6);
+    let list = |name: &str, version: usize| {
+        v["lists"][name]["hashes"][version - 1]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let (a_root, x_root) = (list("a", 1), list("x", 1));
+    let (a_peer, x_peer) = (list("a", 2), list("x", 2));
+    let expected: Vec<(&str, Vec<u8>)> = vec![
+        (
+            "share_list_peer",
+            joined(&[
+                b"apassy-connect share-list v1",
+                origin,
+                a,
+                b"2",
+                a_root.as_bytes(),
+                b"peer",
+                x,
+                b64.as_bytes(),
+                b"-",
+                a64.as_bytes(),
+            ]),
+        ),
+        (
+            "share_list_share",
+            joined(&[
+                b"apassy-connect share-list v1",
+                origin,
+                a,
+                b"3",
+                a_peer.as_bytes(),
+                b"share",
+                x,
+                b"-",
+                store,
+                a64.as_bytes(),
+            ]),
+        ),
+        (
+            "share_list_member_peer",
+            joined(&[
+                b"apassy-connect share-list v1",
+                origin,
+                x,
+                b"2",
+                x_root.as_bytes(),
+                b"peer",
+                a,
+                a64.as_bytes(),
+                b"-",
+                b64.as_bytes(),
+            ]),
+        ),
+        (
+            "share_list_join",
+            joined(&[
+                b"apassy-connect share-list v1",
+                origin,
+                x,
+                b"3",
+                x_peer.as_bytes(),
+                b"join",
+                a,
+                b"-",
+                store,
+                b64.as_bytes(),
+            ]),
+        ),
+        (
+            "peer_join",
+            joined(&[
+                b"apassy-connect peer-join v1",
+                origin,
+                a,
+                link_hash.as_bytes(),
+                x,
+                b64.as_bytes(),
+                b64.as_bytes(),
+            ]),
+        ),
+    ];
+    for (name, message) in expected {
+        let vector = v["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|vector| vector["name"] == name)
+            .unwrap();
+        assert_eq!(
+            b64u(&message),
+            vector["message_b64u"].as_str().unwrap(),
+            "{name}"
+        );
+        assert!(
+            message.starts_with(vector["tag"].as_str().unwrap().as_bytes()),
+            "{name}"
+        );
+        assert_eq!(
+            sha256(&message)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>(),
+            vector["sha256"].as_str().unwrap()
+        );
+        let key = if vector["signer"] == "device_a" {
+            &pub_a
+        } else {
+            &pub_b
+        };
+        let signature =
+            apassy::sync::decode_b64u(vector["signature_b64u"].as_str().unwrap()).unwrap();
+        let verify = |data: &[u8]| {
+            UnparsedPublicKey::new(&ECDSA_P256_SHA256_ASN1, key)
+                .verify(data, &signature)
+                .is_ok()
+        };
+        assert!(verify(&message), "{name}");
+        let mut changed = message.clone();
+        changed[0] ^= 1;
+        assert!(!verify(&changed), "{name}");
+        if name.starts_with("share_list") {
+            let hash = b64u(&sha256(&message));
+            assert!(
+                v["lists"]["a"]["hashes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .chain(v["lists"]["x"]["hashes"].as_array().unwrap())
+                    .any(|held| held == &Value::String(hash.clone())),
+                "{name}"
+            );
         }
     }
 }

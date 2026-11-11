@@ -978,6 +978,19 @@ pub struct SignerPolicy {
     /// head of the chain: the device that signed the head above it had taken it. A key that
     /// this Mac never knew as a device signs nothing.
     pub left: Vec<Vec<u8>>,
+    /// The vault stores shared between accounts (connect-account-v1 section 16): each has
+    /// signers of its own, which replace `accepted` and `left` for a head of that store
+    /// (`crate::connect::store_signer_policy`).
+    pub stores: Vec<StoreSigners>,
+}
+
+/// The signers of one vault store shared between accounts, from the trust store of this
+/// Mac alone: as [`SignerPolicy::accepted`] and [`SignerPolicy::left`], for that store.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StoreSigners {
+    pub team_id: String,
+    pub accepted: Vec<Vec<u8>>,
+    pub left: Vec<Vec<u8>>,
 }
 
 impl SignerPolicy {
@@ -986,6 +999,24 @@ impl SignerPolicy {
         Self {
             accepted: keys,
             left: Vec::new(),
+            stores: Vec::new(),
+        }
+    }
+
+    /// The policy for a head of the store `team_id`: the store's own signers when it is
+    /// shared between accounts, else the account's.
+    pub fn for_team(&self, team_id: &str) -> Self {
+        match self.stores.iter().find(|store| store.team_id == team_id) {
+            Some(store) => Self {
+                accepted: store.accepted.clone(),
+                left: store.left.clone(),
+                stores: Vec::new(),
+            },
+            None => Self {
+                accepted: self.accepted.clone(),
+                left: self.left.clone(),
+                stores: Vec::new(),
+            },
         }
     }
 
@@ -1024,10 +1055,10 @@ impl SignerSource {
         }
     }
 
-    /// How `key` may sign: as the head of `version` with the anchor `anchor`, or as a
-    /// head of the chain below such a head ([`Signing`]).
-    fn signs(&self, key: &[u8], role: Role, anchor: u64) -> Signing {
-        let Some(policy) = self.policy() else {
+    /// How `key` may sign a head of the store `team_id`: as the head of `version` with the
+    /// anchor `anchor`, or as a head of the chain below such a head ([`Signing`]).
+    fn signs(&self, team_id: &str, key: &[u8], role: Role, anchor: u64) -> Signing {
+        let Some(policy) = self.policy().map(|policy| policy.for_team(team_id)) else {
             return Signing::No;
         };
         match role {
@@ -1150,7 +1181,8 @@ fn signed_by_member(
     };
     match allowed {
         None => Signing::Accepted,
-        Some(allowed) => allowed.signs(&key, role, anchor),
+        // The head names its store; the callers check it against the session's first.
+        Some(allowed) => allowed.signs(&head.fields.team_id, &key, role, anchor),
     }
 }
 
@@ -2143,6 +2175,17 @@ impl RelaySync {
             plan: Arc::new(Mutex::new(None)),
             notes: Arc::default(),
         }
+    }
+
+    /// The head hash of a vault store whose signer, or the signer of a head of whose
+    /// chain, the policy does not hold ([`SyncError::ChecksDeviceList`], and after a fresh
+    /// device list [`SyncError::UnknownSigner`] or a damaged head), as the last check that
+    /// met it found it; `None` after a check that accepted a head. Shared Vaults keys its
+    /// quiet time on it.
+    pub fn unlisted_head(&self) -> Option<String> {
+        lock(&self.notes.unlisted)
+            .as_ref()
+            .map(|seen| seen.head.clone())
     }
 
     /// Ask the relay again `every` after it refused the device of this Mac, instead of
@@ -3963,6 +4006,7 @@ mod tests {
     fn a_signer_policy_takes_a_departed_key_only_up_to_the_anchor() {
         let (mine, left, other) = (vec![1u8; 65], vec![3u8; 65], vec![4u8; 65]);
         let policy = SignerPolicy {
+            stores: Vec::new(),
             accepted: vec![mine.clone()],
             left: vec![left.clone()],
         };
@@ -3978,22 +4022,75 @@ mod tests {
         // any version; a key never known never does (it is unlisted: the window asks for
         // a fresh device list before it offers the relay copy).
         let source = SignerSource::Fixed(Arc::new(policy.clone()));
-        assert_eq!(source.signs(&left, Role::Below, 0), Signing::Left);
         assert_eq!(
-            source.signs(&left, Role::Head(5), 4),
+            source.signs("t_7k2m5q4x3c", &left, Role::Below, 0),
+            Signing::Left
+        );
+        assert_eq!(
+            source.signs("t_7k2m5q4x3c", &left, Role::Head(5), 4),
             Signing::LeftAfterAnchor
         );
-        assert_eq!(source.signs(&left, Role::Head(4), 4), Signing::Left);
-        assert_eq!(source.signs(&other, Role::Below, 9), Signing::Unlisted);
-        assert_eq!(source.signs(&mine, Role::Below, 0), Signing::Accepted);
+        assert_eq!(
+            source.signs("t_7k2m5q4x3c", &left, Role::Head(4), 4),
+            Signing::Left
+        );
+        assert_eq!(
+            source.signs("t_7k2m5q4x3c", &other, Role::Below, 9),
+            Signing::Unlisted
+        );
+        assert_eq!(
+            source.signs("t_7k2m5q4x3c", &mine, Role::Below, 0),
+            Signing::Accepted
+        );
         // A shared source follows its slot; an empty slot takes no key.
         let slot = Arc::new(Mutex::new(None));
         let source = SignerSource::Shared(Arc::clone(&slot));
-        assert_eq!(source.signs(&mine, Role::Head(1), 0), Signing::No);
+        assert_eq!(
+            source.signs("t_7k2m5q4x3c", &mine, Role::Head(1), 0),
+            Signing::No
+        );
         *lock(&slot) = Some(policy);
-        assert_eq!(source.signs(&mine, Role::Head(1), 0), Signing::Accepted);
+        assert_eq!(
+            source.signs("t_7k2m5q4x3c", &mine, Role::Head(1), 0),
+            Signing::Accepted
+        );
         lock(&slot).as_mut().unwrap().accepted.clear();
-        assert_eq!(source.signs(&mine, Role::Head(1), 0), Signing::Unlisted);
+        assert_eq!(
+            source.signs("t_7k2m5q4x3c", &mine, Role::Head(1), 0),
+            Signing::Unlisted
+        );
+        // A store shared between accounts has signers of its own: there they replace the
+        // account's, and every other store keeps the account's.
+        let shared = SignerPolicy {
+            accepted: vec![mine.clone()],
+            left: Vec::new(),
+            stores: vec![StoreSigners {
+                team_id: "t_aaaaaaaaaa".into(),
+                accepted: vec![other.clone()],
+                left: vec![left.clone()],
+            }],
+        };
+        let source = SignerSource::Fixed(Arc::new(shared));
+        assert_eq!(
+            source.signs("t_aaaaaaaaaa", &other, Role::Head(9), 0),
+            Signing::Accepted
+        );
+        assert_eq!(
+            source.signs("t_aaaaaaaaaa", &mine, Role::Head(9), 0),
+            Signing::Unlisted
+        );
+        assert_eq!(
+            source.signs("t_aaaaaaaaaa", &left, Role::Head(2), 4),
+            Signing::Left
+        );
+        assert_eq!(
+            source.signs("t_7k2m5q4x3c", &other, Role::Head(9), 0),
+            Signing::Unlisted
+        );
+        assert_eq!(
+            source.signs("t_7k2m5q4x3c", &mine, Role::Head(9), 0),
+            Signing::Accepted
+        );
     }
 
     /// A vault store of a Connect account accepts a head only from the keys of the
@@ -4078,6 +4175,7 @@ mod tests {
         // A key that left signs the version at the anchor; after it, the client waits for
         // a live device of the account instead of calling the copy damaged.
         let departed = transport(None).with_signer_policy(SignerPolicy {
+            stores: Vec::new(),
             accepted: Vec::new(),
             left: vec![public],
         });

@@ -1753,7 +1753,9 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                             relay::OLDER_COPY_WORDS.to_owned()
                         }
                         (Some(_), Some(status)) if on_relay => {
-                            relay::words(status, app.sync.relay.receipt(&entry.id))
+                            app.share_sync_line(&entry.id, status).unwrap_or_else(|| {
+                                relay::words(status, app.sync.relay.receipt(&entry.id))
+                            })
                         }
                         (Some(_), None) if on_relay => "Syncs through the Apassy relay.".to_owned(),
                         (Some(link), Some(status)) => format!(
