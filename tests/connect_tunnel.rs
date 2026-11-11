@@ -187,10 +187,16 @@ impl NodeSocket {
         }
     }
 
+    /// The next frame of the node that is not a `window` (flow control, contract 4).
     fn next_frame(&mut self) -> frame::Frame {
-        match self.next() {
-            Message::Binary(bytes) => frame::decode(&bytes).expect("a frame of the node"),
-            other => panic!("expected a frame, got {other:?}"),
+        loop {
+            let frame = match self.next() {
+                Message::Binary(bytes) => frame::decode(&bytes).expect("a frame of the node"),
+                other => panic!("expected a frame, got {other:?}"),
+            };
+            if !frame.is_window() {
+                return frame;
+            }
         }
     }
 }
@@ -302,7 +308,6 @@ fn tunnel(addr: SocketAddr, ping: Duration, idle: Duration) -> Running {
     setup.acme = None;
     setup.ping_interval = ping;
     setup.idle_limit = idle;
-    setup.close_grace = Duration::from_millis(300);
     setup.zone = ZONE.to_owned();
     let handle = Tunnel::start(TunnelOptions {
         setup,
