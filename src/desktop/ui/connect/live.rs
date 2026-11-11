@@ -82,6 +82,8 @@ pub(crate) enum Guarded {
         device_id: String,
     },
     Delete,
+    /// "New Recovery Code…" (connect-account-v1 section 9.1).
+    NewRecoveryCode,
     /// "Forget the Account on This Mac…" of an account file of an earlier version.
     ForgetOld,
     Group {
@@ -98,6 +100,8 @@ struct Snapshot {
     /// Which keys may sign the heads of a vault store: from the trust store of the account
     /// after this view (`crate::connect::signer_policy`), never from the view itself.
     signers: crate::sync::SignerPolicy,
+    /// When this refresh was asked of Connect.
+    asked: Instant,
 }
 
 /// The result of one worker step.
@@ -116,10 +120,16 @@ enum Outcome {
     /// A revoke: `Some` when this device revoked itself.
     Revoked(Result<Option<Forgotten>, ConnectError>),
     Deleted(Result<Forgotten, ConnectError>),
+    /// "New Recovery Code…": the words of the new code, shown once.
+    NewRecovery(Result<Zeroizing<String>, ConnectError>),
     Invited(Result<(String, u64), ConnectError>),
     JoinedGroup(Result<String, ConnectError>),
     GroupChanged(Result<String, ConnectError>),
-    JoinStarted(Result<(String, String), ConnectError>),
+    /// A join started (or resumed): the confirmer's name, the words (empty for a key in the
+    /// account already), and whether this device made a new key for it.
+    JoinStarted(Result<(String, String, bool), ConnectError>),
+    /// A join of this device that waited on disk resumed: `None` when there was none.
+    JoinResumed(Option<(String, String)>),
     /// A poll of this device's join: `None` waits, `Some(state)` is confirmed.
     JoinPolled(Result<Option<AccountState>, ConnectError>),
     JoinCancelled,
@@ -146,6 +156,7 @@ impl Outcome {
             | Self::Refused(Err(error))
             | Self::Revoked(Err(error))
             | Self::Deleted(Err(error))
+            | Self::NewRecovery(Err(error))
             | Self::Invited(Err(error))
             | Self::JoinedGroup(Err(error))
             | Self::GroupChanged(Err(error))
@@ -183,9 +194,10 @@ pub(crate) struct SyncAccount {
     /// version 1, so also a device removed before this one joined), by key; empty while
     /// no verified list is in memory, or while a worker holds the account.
     pub(crate) removed_names: Vec<(Vec<u8>, String)>,
-    /// When the refresh whose answer gave `signers` was asked; `None` before an answer,
-    /// while a step of the section runs, or after Connect could not be reached.
-    pub(crate) listed_at: Option<Instant>,
+    /// When the refresh whose device list verified on this device (and gave `signers`)
+    /// was asked of Connect; `None` before such an answer. A refresh whose list did not
+    /// verify, and any other step, leave it as it was.
+    pub(crate) verified_at: Option<Instant>,
 }
 
 /// The vault build's part of the section state.
@@ -210,10 +222,16 @@ pub(crate) struct Live {
     pending_at: Option<Instant>,
     join: Slot<JoinRequest>,
     join_at: Option<Instant>,
+    /// A join of this device that waited on disk was looked for in this session
+    /// ([`resume_join`]).
+    resume_tried: bool,
     /// When the account was last asked; `None`: ask at the next frame.
     refreshed_at: Option<Instant>,
     /// The last refresh could not reach Connect, and when.
     unreachable: Option<(ConnectError, Instant)>,
+    /// When the newest refresh whose device list verified here was asked
+    /// ([`SyncAccount::verified_at`]).
+    verified_at: Option<Instant>,
     /// The start screen showed the Connect path at the last frame ([`start_path`]).
     start_path: bool,
     /// A link for the account's origin on the start screen waits for the session of the
@@ -273,16 +291,41 @@ impl Live {
     /// Forget what the section showed of the account, and read the account file again.
     /// The session itself follows the vault ([`step`]).
     fn reset(&mut self) {
+        self.end_join();
         self.file = OnceCell::new();
         self.snapshot = None;
         self.guarded = None;
         self.waiting = None;
         self.link = slot();
         self.pending.clear();
-        self.join = slot();
         self.refreshed_at = None;
         self.unreachable = None;
+        self.verified_at = None;
         self.error = None;
+    }
+
+    /// The join step ends (a lock, a quit, the end of the start-screen step, another
+    /// session): the join of this device is cancelled at Connect on a thread of its own,
+    /// best effort. When Connect does not take the cancel (it cannot be reached, or the
+    /// other device confirmed first), the pending join stays on disk, and the next visit of
+    /// the join step resumes it ([`resume_join`]). Returns the thread of the cancel.
+    fn end_join(&mut self) -> Option<std::thread::JoinHandle<()>> {
+        let join = std::mem::replace(&mut self.join, slot());
+        self.join_at = None;
+        self.resume_tried = false;
+        // A poll that runs holds the lock until it ends: the thread waits for it.
+        let held = join.try_lock().map(|guard| guard.is_some()).unwrap_or(true);
+        held.then(|| {
+            std::thread::spawn(move || {
+                let taken = join
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                if let Some(request) = taken {
+                    let _ = request.cancel();
+                }
+            })
+        })
     }
 
     /// The account of this device for the sync through Apassy Connect (plan s7 unit M3):
@@ -322,9 +365,7 @@ impl Live {
                         })
                 })
                 .unwrap_or_default(),
-            listed_at: snapshot
-                .and(self.refreshed_at)
-                .filter(|_| self.task.is_none() && self.unreachable.is_none()),
+            verified_at: self.verified_at,
         })
     }
 
@@ -344,6 +385,13 @@ impl Live {
         {
             self.refreshed_at = None;
         }
+    }
+
+    /// Ask Connect for the account at the next frame ("Try Again" of a vault store that
+    /// checks the device list).
+    pub(crate) fn refresh_now(&mut self) {
+        self.refreshed_at = None;
+        self.unreachable = None;
     }
 
     /// The poll intervals.
@@ -398,6 +446,18 @@ impl Live {
 }
 
 impl DesktopApp {
+    /// Before the app quits: a join of this device is cancelled at Connect, and the quit
+    /// waits up to two seconds for it. A cancel that Connect did not take leaves the pending
+    /// join on disk for the next start.
+    pub(crate) fn connect_quit(&mut self) {
+        if let Some(cancel) = self.ui.connect.live.end_join() {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !cancel.is_finished() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
+
     /// The one Apassy Connect account session of the app, for the node's tunnel and the
     /// sync worker.
     pub(crate) fn connect_session(&self) -> Arc<AccountSession> {
@@ -593,6 +653,7 @@ fn account_of(snapshot: &Snapshot, this_device: &str) -> Account {
         list_verified: view.list_verified,
         list_nearly_full: view.list_verified
             && adds_left <= crate::connect::trust::ADDS_LEFT_WARNING,
+        recovery_unseen: false,
     }
 }
 
@@ -611,7 +672,10 @@ pub(crate) fn view(app: &DesktopApp) -> ConnectView {
             note: removed_note(error),
         },
         (Some(file), SessionState::Open) => match (&live.snapshot, &live.unreachable) {
-            (Some(snapshot), _) => Shown::Account(account_of(snapshot, &file.device_id)),
+            (Some(snapshot), _) => Shown::Account(Account {
+                recovery_unseen: file.recovery_unseen,
+                ..account_of(snapshot, &file.device_id)
+            }),
             (None, Some((error, _))) if !live.busy() => Shown::Unreachable {
                 name: file.name.clone(),
                 device_name: file.device_name.clone(),
@@ -658,6 +722,7 @@ pub(crate) fn status_line(app: &DesktopApp) -> String {
 pub(crate) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
     step(app, &ctx);
+    resume_join(app, &ctx);
     let view = view(app);
     if let Some(action) = super::draw(ui, &view) {
         act(app, &ctx, action);
@@ -709,6 +774,9 @@ pub(crate) fn sheets(app: &mut DesktopApp, ctx: &egui::Context) {
 pub(crate) fn step(app: &mut DesktopApp, ctx: &egui::Context) {
     start_path(app, ctx);
     follow(app, ctx);
+    if app.ui.connect.live.start_path {
+        resume_join(app, ctx);
+    }
     link_after_open(app, ctx);
     finish(app, ctx);
     guarded(app, ctx);
@@ -746,9 +814,46 @@ fn follow(app: &mut DesktopApp, ctx: &egui::Context) {
     }
 }
 
+/// The join step shows (Settings › Connect, or the start screen's Connect path) and this
+/// device has no account file: a join of this device that waited on disk (a restart, a
+/// lock, or a quit came while it waited, and Connect did not take its cancel) resumes,
+/// once for each session, and asks Connect at once.
+fn resume_join(app: &mut DesktopApp, ctx: &egui::Context) {
+    let live = &mut app.ui.connect.live;
+    if live.resume_tried || live.busy() || app.ui.connect.sheet.is_some() {
+        return;
+    }
+    let (Some(store), Some(path)) = (live.store(), live.path()) else {
+        return;
+    };
+    if live.file().is_some() || !crate::connect::has_pending_join(&path) {
+        return;
+    }
+    let free = live.join.try_lock().is_ok_and(|guard| guard.is_none());
+    if !free {
+        return;
+    }
+    live.resume_tried = true;
+    let join = Arc::clone(&live.join);
+    live.spawn(ctx, move || {
+        let Ok(Some(request)) = JoinRequest::resume(store.as_ref(), &path) else {
+            return Outcome::JoinResumed(None);
+        };
+        let shown = (
+            request.confirmer_name().to_owned(),
+            request.words().to_owned(),
+        );
+        *join
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(request);
+        Outcome::JoinResumed(Some(shown))
+    });
+}
+
 /// Whether the start screen shows a step that needs the account session: "Use a vault
 /// from another Mac" › "Apassy Connect" while no vault is unlocked, or its relay source
-/// while a link for the account's origin waits for the session or uses it.
+/// while a link for the account's origin waits for the session or a join of that link
+/// holds the account key.
 fn start_wanted(app: &DesktopApp) -> bool {
     use crate::desktop::ui::start::Step;
     use crate::desktop::ui::sync::OpenSource;
@@ -758,15 +863,24 @@ fn start_wanted(app: &DesktopApp) -> bool {
     let live = &app.ui.connect.live;
     match app.sync.relay.source {
         OpenSource::Connect => true,
-        OpenSource::Relay => live.link_after_open.is_some() || live.session.start_epoch().is_some(),
+        OpenSource::Relay => {
+            live.link_after_open.is_some()
+                || app.sync.relay.join_with_account() == Some(OpenSource::Relay)
+        }
         OpenSource::Folder => false,
     }
 }
 
 /// The start-screen step follows the screen: entering "Apassy Connect" opens the session
 /// for it, and leaving the screen closes it. Each visit lists the vault stores again.
+/// Every way out (another source of the segment, another start screen, a vault session)
+/// also ends what holds the account key: a join from a vault store of the account that
+/// started on the source that is left, and a join of this device into the account.
 fn start_path(app: &mut DesktopApp, ctx: &egui::Context) {
     let wanted = start_wanted(app);
+    if !wanted && app.ui.connect.live.start_path {
+        end_start_holders(app);
+    }
     if wanted == app.ui.connect.live.start_path {
         return;
     }
@@ -778,6 +892,24 @@ fn start_path(app: &mut DesktopApp, ctx: &egui::Context) {
         live.session.end_start();
     } else if app.sync.relay.source == crate::desktop::ui::sync::OpenSource::Connect {
         begin_start(app, Some(ctx));
+    }
+}
+
+/// The start-screen step ends: a join that holds the account key of its session goes (a
+/// vault that its passphrase opens already is not stopped: it opens in a moment), and so
+/// does the sheet of a join of this device (its join is cancelled with the session).
+fn end_start_holders(app: &mut DesktopApp) {
+    if app.owner_ui.session.epoch().is_some() {
+        return;
+    }
+    if app.sync.relay.join_with_account().is_some() {
+        app.relay_join_cancel();
+    }
+    if matches!(
+        app.ui.connect.sheet,
+        Some(Sheet::JoinAccount { .. } | Sheet::JoinWaiting { .. })
+    ) {
+        app.ui.connect.sheet = None;
     }
 }
 
@@ -944,6 +1076,7 @@ fn refresh(app: &mut DesktopApp, ctx: &egui::Context) {
         return;
     }
     let want_plans = live.plans.is_none();
+    let asked = Instant::now();
     app.ui.connect.live.with_account(ctx, move |account| {
         let snapshot = account.view().and_then(|view| {
             let group = if view.group.is_some() {
@@ -955,6 +1088,7 @@ fn refresh(app: &mut DesktopApp, ctx: &egui::Context) {
                 view,
                 group,
                 signers: crate::connect::signer_policy(account.state()),
+                asked,
             })
         });
         match snapshot {
@@ -1003,6 +1137,11 @@ fn apply(app: &mut DesktopApp, ctx: &egui::Context, outcome: Outcome) {
             live.refreshed_at = Some(Instant::now());
             app.ui.connect.sheet = Some(Sheet::Recovery { words });
         }
+        Outcome::NewRecovery(Ok(words)) => {
+            // The mark of a code that was never shown went from the account file.
+            live.file = OnceCell::new();
+            app.ui.connect.sheet = Some(Sheet::Recovery { words });
+        }
         Outcome::Created(Err(ConnectError::RecoveryCodeNotShown)) => {
             // An earlier run left the creation pending: the account is made and its file
             // written, but its recovery code was never shown. The section shows the
@@ -1015,6 +1154,9 @@ fn apply(app: &mut DesktopApp, ctx: &egui::Context, outcome: Outcome) {
             live.error = Some(message(&ConnectError::RecoveryCodeNotShown));
         }
         Outcome::Refreshed(Ok((snapshot, plans))) => {
+            if snapshot.view.list_verified {
+                live.verified_at = Some(snapshot.asked);
+            }
             live.snapshot = Some(snapshot);
             live.unreachable = None;
             if let Some(plans) = plans {
@@ -1155,10 +1297,27 @@ fn apply(app: &mut DesktopApp, ctx: &egui::Context, outcome: Outcome) {
             app.set_ok(text);
             refresh(app, ctx);
         }
-        Outcome::JoinStarted(Ok((confirmer, words))) => {
-            live.join_at = Some(Instant::now());
-            app.ui.connect.sheet = Some(Sheet::JoinWaiting { confirmer, words });
+        Outcome::JoinStarted(Ok((confirmer, words, new_key))) => {
+            // A key in the account already finishes at the next poll.
+            live.join_at = (!words.is_empty()).then(Instant::now);
+            app.ui.connect.sheet = Some(Sheet::JoinWaiting {
+                confirmer,
+                words,
+                note: new_key.then(|| super::JOIN_NEW_KEY.to_owned()),
+            });
         }
+        Outcome::JoinResumed(Some((confirmer, words))) => {
+            // Ask Connect at once: the other device may have confirmed meanwhile.
+            live.join_at = None;
+            if app.ui.connect.sheet.is_none() {
+                app.ui.connect.sheet = Some(Sheet::JoinWaiting {
+                    confirmer,
+                    words,
+                    note: None,
+                });
+            }
+        }
+        Outcome::JoinResumed(None) => {}
         Outcome::JoinPolled(Ok(None)) => live.join_at = Some(Instant::now()),
         Outcome::JoinPolled(Ok(Some(_))) => {
             live.file = OnceCell::new();
@@ -1171,7 +1330,10 @@ fn apply(app: &mut DesktopApp, ctx: &egui::Context, outcome: Outcome) {
             live.error = Some(message(&error));
         }
         Outcome::JoinCancelled => {
+            // A cancel that Connect did not take leaves the pending join on disk; it waits
+            // for the next session instead of coming back now.
             live.join = slot();
+            live.resume_tried = true;
         }
         Outcome::Forgot(Ok(forgotten)) => {
             drop_rows(app, &forgotten);
@@ -1199,6 +1361,7 @@ fn apply(app: &mut DesktopApp, ctx: &egui::Context, outcome: Outcome) {
         | Outcome::Confirmed(Err(error))
         | Outcome::Refused(Err(error))
         | Outcome::Revoked(Err(error))
+        | Outcome::NewRecovery(Err(error))
         | Outcome::Invited(Err(error))
         | Outcome::JoinedGroup(Err(error))
         | Outcome::GroupChanged(Err(error))
@@ -1324,6 +1487,15 @@ fn run_guarded(
                     account
                         .delete(store.as_ref(), proof, &epoch)
                         .map(|(_, forgotten)| forgotten),
+                )
+            });
+        }
+        Guarded::NewRecoveryCode => {
+            live.with_account(ctx, move |account| {
+                Outcome::NewRecovery(
+                    account
+                        .new_recovery_code(proof, &epoch)
+                        .map(|code| code.words()),
                 )
             });
         }
@@ -1568,6 +1740,19 @@ pub(crate) fn act(app: &mut DesktopApp, ctx: &egui::Context, action: Action) {
             });
         }
         Action::Delete => app.ui.connect.sheet = Some(Sheet::Delete),
+        Action::NewRecoveryCode => {
+            let Some(account) = account else {
+                return;
+            };
+            app.ui.connect.live.error = None;
+            app.ui.connect.live.guarded = Some(Guarded::NewRecoveryCode);
+            app.ask_owner(
+                OwnerRequest::NewRecoveryCode {
+                    account_id: account.account_id,
+                },
+                Some(ctx),
+            );
+        }
         Action::ForgetOld => {
             app.ui.connect.live.error = None;
             app.ui.connect.live.guarded = Some(Guarded::ForgetOld);
@@ -1837,6 +2022,7 @@ pub(crate) fn choose(app: &mut DesktopApp, ctx: &egui::Context, choice: SheetCho
                     let shown = (
                         request.confirmer_name().to_owned(),
                         request.words().to_owned(),
+                        request.made_new_key(),
                     );
                     *join
                         .lock()

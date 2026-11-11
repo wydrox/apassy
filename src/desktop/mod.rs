@@ -585,6 +585,8 @@ impl eframe::App for DesktopApp {
         {
             // A Mac that joins through the relay cancels its link or its device.
             self.relay_quit();
+            // A device that joins an Apassy Connect account cancels its join.
+            self.connect_quit();
             // No background sync after this: the lock in `shut_down` syncs last.
             self.stop_sync_worker();
             self.shut_down();

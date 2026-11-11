@@ -105,6 +105,21 @@ pub(crate) const RECOVERY_NOTE: &str = concat!(
     ". The vault copies at Connect are deleted then; your vaults stay on your devices."
 );
 pub(crate) const SAVED_IT: &str = "I Saved It";
+/// A join whose key is in the account already (connect-account-v1 section 7.2).
+pub(crate) const JOIN_FINISHING_TITLE: &str = "Finishing the Join…";
+/// A join that made a new account key because the earlier one was used.
+pub(crate) const JOIN_NEW_KEY: &str = concat!(
+    "This ",
+    crate::computer!(),
+    " made a new device key: its earlier key was used by a join that did not finish here. If the account lists that earlier device, remove it on another device of the account."
+);
+/// Settings › Connect: a new recovery code (connect-account-v1 section 9.1).
+pub(crate) const RECOVERY_ROW: &str = "Recovery Code";
+pub(crate) const RECOVERY_ROW_NOTE: &str =
+    "Make a new code if you cannot find the one you saved. The old code stops working.";
+pub(crate) const NEW_RECOVERY: &str = "New Recovery Code…";
+pub(crate) const RECOVERY_UNSEEN: &str =
+    "This account has no recovery code that you have seen. Make a new one now.";
 
 pub(crate) const PICKER_TITLE: &str = "Choose a Plan";
 pub(crate) const PICKER_LEAD: &str = "Apassy Connect, the hosted service of the Apassy project.";
@@ -550,6 +565,9 @@ pub(crate) struct Account {
     /// The list has [`crate::connect::trust::ADDS_LEFT_WARNING`] or fewer versions left
     /// for a new device.
     pub(crate) list_nearly_full: bool,
+    /// The recovery code of the account was never shown on this device (the account file
+    /// keeps the mark until a new code is made).
+    pub(crate) recovery_unseen: bool,
 }
 
 impl Account {
@@ -757,6 +775,8 @@ pub(crate) enum Action {
     /// Leave… of a member's own group.
     Leave,
     JoinGroup,
+    /// "New Recovery Code…" (section 9.1).
+    NewRecoveryCode,
     Delete,
 }
 
@@ -964,6 +984,28 @@ fn account_section(
         }
         None => {}
     }
+    rows::group(ui, Some(RECOVERY_ROW), |g| {
+        if account.recovery_unseen {
+            g.tone_row(RECOVERY_UNSEEN, Tone::Warning.text());
+        }
+        g.line_note(
+            RECOVERY_ROW,
+            None,
+            Some(rows::note(RECOVERY_ROW_NOTE)),
+            |ui| {
+                let enabled = !view.locked && account.list_verified;
+                if ui
+                    .add_enabled_ui(enabled, |ui| {
+                        kit::small_button(ui, NEW_RECOVERY, Style::Bordered)
+                    })
+                    .inner
+                    .clicked()
+                {
+                    *action = Some(Action::NewRecoveryCode);
+                }
+            },
+        );
+    });
     ui.add_space(6.0);
     rows::group(ui, None, |g| {
         ui_enabled_row(g, !view.locked, |g| {
@@ -1281,7 +1323,13 @@ pub(crate) enum Sheet {
     /// Frame 8a.
     JoinAccount { code: zeroize::Zeroizing<String> },
     /// Frame 8b.
-    JoinWaiting { confirmer: String, words: String },
+    /// `words` is empty for a device whose key is in the account already (the join finishes
+    /// from the device list); `note` says that this device made a new key for the join.
+    JoinWaiting {
+        confirmer: String,
+        words: String,
+        note: Option<String>,
+    },
     /// Frame 8c.
     Joined,
     /// Frame 9a and 9b: `link` after Create Link.
@@ -1882,16 +1930,38 @@ fn sheet_body(
             let ready = !code.trim().is_empty();
             cancel_and(ui, "Continue", ready, busy)
         }
-        Sheet::JoinWaiting { confirmer, words } => {
+        Sheet::JoinWaiting {
+            confirmer,
+            words,
+            note,
+        } => {
             let mut choice = None;
-            kit::sheet_title(
-                ui,
-                &format!("Waiting for {confirmer}…"),
-                Some(&format!(
-                    "Both devices show these words. Confirm on {confirmer} only if they match."
-                )),
-            );
-            big_words(ui, words);
+            if words.is_empty() {
+                kit::sheet_title(
+                    ui,
+                    JOIN_FINISHING_TITLE,
+                    Some(&format!(
+                        concat!(
+                            "{} confirmed this ",
+                            crate::computer!(),
+                            " earlier. Apassy finishes the join."
+                        ),
+                        confirmer
+                    )),
+                );
+            } else {
+                kit::sheet_title(
+                    ui,
+                    &format!("Waiting for {confirmer}…"),
+                    Some(&format!(
+                        "Both devices show these words. Confirm on {confirmer} only if they match."
+                    )),
+                );
+                big_words(ui, words);
+            }
+            if let Some(note) = note {
+                kit::note(ui, note.as_str());
+            }
             kit::sheet_buttons(
                 ui,
                 |ui| {

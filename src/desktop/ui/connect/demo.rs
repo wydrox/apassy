@@ -220,6 +220,7 @@ fn account(plan: Plan, group: Option<Group>) -> Account {
         group,
         list_verified: true,
         list_nearly_full: false,
+        recovery_unseen: false,
     }
 }
 
@@ -403,6 +404,7 @@ fn frame(code: &str) -> (Shown, Option<Sheet>) {
             Some(Sheet::JoinWaiting {
                 confirmer: "MacBook Pro".to_owned(),
                 words: words.to_owned(),
+                note: None,
             }),
         ),
         "8c" => (personal(), Some(Sheet::Joined)),

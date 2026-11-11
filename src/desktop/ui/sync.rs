@@ -1680,6 +1680,7 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let mut open_synced = false;
     let mut move_to: Option<String> = None;
     let mut undo_move: Option<String> = None;
+    let mut check_list: Option<String> = None;
     super::settings::rows::section(
         ui,
         Some("Sync"),
@@ -1772,6 +1773,12 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                         }
                     };
                     ui.add(Label::new(super::settings::rows::note(&line)).wrap());
+                    if on_relay && open_unlocked && app.relay_checks_list_long(&entry.id) {
+                        kit::tone_note(ui, relay::CHECK_LIST_UNREACHABLE, Tone::Warning);
+                        if kit::small_button(ui, "Try Again", Style::Prominent).clicked() {
+                            check_list = Some(entry.id.clone());
+                        }
+                    }
                     if let Some(departed) = &departed {
                         ui.add(Label::new(super::settings::rows::note(&departed.words())).wrap());
                     }
@@ -1903,6 +1910,9 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
         },
     );
     let ctx = ui.ctx().clone();
+    if let Some(id) = check_list {
+        app.relay_check_list_again(&id);
+    }
     if let Some(id) = move_to {
         if let Err(text) = app.relay_move_to_connect(&id) {
             app.set_err(text);

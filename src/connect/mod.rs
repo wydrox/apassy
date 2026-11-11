@@ -3,7 +3,7 @@
 //!
 //! - [`device_key`]: the account device key. One non-exportable-by-Apassy P-256 key for
 //!   each device, kept in the Keychain outside every vault through the signed helper
-//!   (this device only, not synchronizable, behind Touch ID). It signs only the nine
+//!   (this device only, not synchronizable, behind Touch ID). It signs only the ten
 //!   messages of section 5 ([`SIGNING_TAGS`]) and refuses any other.
 //! - [`words`]: the ids, the link code with its key fingerprint and its hash, the six
 //!   safety words, and the recovery code with its Ed25519 key.
@@ -43,8 +43,8 @@ use std::fmt;
 pub use account::{
     AccountState, Clock, ConnectAccount, DeviceLink, Forgotten, JoinPoll, JoinRequest, PendingJoin,
     RevokeOutcome, Sleeper, account_file, drop_account_rows, drop_stale_account_rows,
-    forget_old_account_file, forget_this_device, group_invite_code, is_old_account_file,
-    signer_policy,
+    forget_old_account_file, forget_this_device, group_invite_code, has_pending_join,
+    is_old_account_file, signer_policy,
 };
 pub use client::{
     AccountCreated, AccountDeleted, AccountView, CheckoutAnswer, CheckoutRequest, ConnectClient,
@@ -86,7 +86,7 @@ pub const PLATFORM: &str = if cfg!(target_os = "ios") {
 pub const PLATFORMS: [&str; 3] = ["mac", "iphone", "linux"];
 
 /// Sign `message` with the account device key, only when it begins with one of the
-/// nine tags of section 5 (plan 0035 I-1: the allow-list contains
+/// ten tags of section 5 (plan 0035 I-1: the allow-list contains
 /// `apassy-bouncer sign-in v1`). The same as [`AccountSigner::sign`].
 pub fn sign(signer: &AccountSigner, message: &[u8]) -> Result<Vec<u8>, ConnectError> {
     signer.sign(message)
@@ -215,7 +215,7 @@ impl fmt::Display for ConnectError {
                 "Apassy Connect holds that account id already. Apassy makes a new one; try again."
             }
             Self::RecoveryCodeNotShown => concat!(
-                "Your Connect account is made, but Apassy was closed before it could show its recovery code, so it was not shown. Add a second device in Settings › Connect › Add a Device…, so that you can reach the account from it if this ",
+                "Your Connect account is made, but Apassy was closed before it could show its recovery code, so it was not shown. Make a new one in Settings › Connect › New Recovery Code…, and add a second device, so that you can reach the account if this ",
                 crate::computer!(),
                 " is lost."
             ),
