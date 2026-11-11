@@ -220,7 +220,6 @@ struct Forgot {
 
 /// `connect_recovery_change_seen`: the recovery key that the line named.
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ChangeSeen {
     recovery_key: String,
 }
