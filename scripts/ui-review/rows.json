@@ -1,0 +1,1230 @@
+{
+ "title": "Apassy 0.5.20 UI review: Connect and Linux views",
+ "intro": [],
+ "sections": [
+  {
+   "title": "1. Settings › Connect",
+   "rows": [
+    {
+     "title": "No account (Not on Connect)",
+     "mockups": [
+      "connect-1.png"
+     ],
+     "shots": [
+      "connect-demo-1.png",
+      "linux-settings-connect-none.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Create the account",
+     "mockups": [
+      "connect-2a.png"
+     ],
+     "shots": [
+      "connect-demo-2a.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "The recovery code, shown once",
+     "mockups": [
+      "connect-2b.png"
+     ],
+     "shots": [
+      "connect-demo-2b.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Create: busy and error",
+     "mockups": [
+      "connect-2c.png"
+     ],
+     "shots": [],
+     "note": ""
+    },
+    {
+     "title": "Account, no plan",
+     "mockups": [
+      "connect-3.png"
+     ],
+     "shots": [
+      "connect-demo-3.png",
+      "connect-demo-3-2.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Signed out",
+     "mockups": [
+      "connect-3b.png"
+     ],
+     "shots": [
+      "connect-demo-S.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Asking Connect",
+     "mockups": [
+      "connect-3c.png"
+     ],
+     "shots": [
+      "connect-demo-T1.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Join: paste the code (this device)",
+     "mockups": [
+      "connect-8a.png"
+     ],
+     "shots": [
+      "connect-demo-8a.png",
+      "start-join-code-empty.png",
+      "start-join-code.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Join: the six safety words (this device)",
+     "mockups": [
+      "connect-8b.png"
+     ],
+     "shots": [
+      "connect-demo-8b.png",
+      "start-join-words.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Join: added",
+     "mockups": [
+      "connect-8c.png"
+     ],
+     "shots": [
+      "connect-demo-8c.png",
+      "start-join-added.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Add a Device… (the other device)",
+     "mockups": [
+      "connect-7a.png"
+     ],
+     "shots": [
+      "connect-demo-7a.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "The safety words (the other device)",
+     "mockups": [
+      "connect-7b.png"
+     ],
+     "shots": [
+      "connect-demo-7b.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Device added (the other device)",
+     "mockups": [],
+     "shots": [
+      "connect-demo-T8.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Signed in: plan row and devices (verified, this device)",
+     "mockups": [
+      "connect-6a.png"
+     ],
+     "shots": [
+      "connect-demo-6a.png",
+      "connect-demo-6a-2.png",
+      "connect-live-account.png",
+      "connect-live-account-2.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Revoke… with name and key fingerprint",
+     "mockups": [
+      "connect-7c.png"
+     ],
+     "shots": [
+      "connect-demo-7c.png",
+      "connect-live-revoke.png",
+      "owner-check-revoke.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Forget this computer",
+     "mockups": [
+      "connect-7d.png"
+     ],
+     "shots": [
+      "connect-demo-7d.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Device list not verified, a device \"Not verified\"",
+     "mockups": [],
+     "shots": [
+      "connect-demo-T6.png",
+      "connect-demo-T6-2.png",
+      "connect-live-past-due.png",
+      "connect-live-past-due-2.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Device list nearly full",
+     "mockups": [],
+     "shots": [
+      "connect-demo-T7.png",
+      "connect-demo-T7-2.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Account file of an earlier version",
+     "mockups": [],
+     "shots": [
+      "connect-demo-T5.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Removed from the account",
+     "mockups": [],
+     "shots": [
+      "connect-demo-T3.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Removed: Forget the Account…",
+     "mockups": [],
+     "shots": [
+      "connect-demo-T4.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Connect cannot be reached",
+     "mockups": [],
+     "shots": [
+      "connect-demo-T2.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Recovery Code row: a code that was never shown",
+     "mockups": [
+      "connect-13a.png"
+     ],
+     "shots": [
+      "connect-demo-13a.png",
+      "connect-demo-13a-2.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "New Recovery Code… (owner check)",
+     "mockups": [
+      "connect-13b.png"
+     ],
+     "shots": [
+      "owner-check-recovery.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "The new recovery code, shown once",
+     "mockups": [
+      "connect-13c.png"
+     ],
+     "shots": [
+      "connect-demo-13c.png",
+      "recovery-new-code.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Choose a Plan: Personal, monthly",
+     "mockups": [
+      "connect-4a.png"
+     ],
+     "shots": [
+      "connect-demo-4a.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Choose a Plan: Family, yearly",
+     "mockups": [
+      "connect-4b.png"
+     ],
+     "shots": [
+      "connect-demo-4b.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Choose a Plan: Team, monthly",
+     "mockups": [
+      "connect-4c.png"
+     ],
+     "shots": [
+      "connect-demo-4c.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Checkout: waiting for the payment",
+     "mockups": [
+      "connect-5a.png"
+     ],
+     "shots": [
+      "connect-demo-5a.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Checkout: confirmed",
+     "mockups": [
+      "connect-5b.png"
+     ],
+     "shots": [
+      "connect-demo-5b.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Checkout: stopped waiting",
+     "mockups": [
+      "connect-5c.png"
+     ],
+     "shots": [
+      "connect-demo-5c.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Plan: canceled at the end of the period",
+     "mockups": [
+      "connect-6b.png"
+     ],
+     "shots": [
+      "connect-demo-6b.png",
+      "connect-demo-6b-2.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Plan: past due",
+     "mockups": [
+      "connect-6c.png"
+     ],
+     "shots": [
+      "connect-demo-6c.png",
+      "connect-demo-6c-2.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Plan: read-only until a date",
+     "mockups": [
+      "connect-6d.png"
+     ],
+     "shots": [
+      "connect-demo-6d.png",
+      "connect-demo-6d-2.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Plan: suspended",
+     "mockups": [
+      "connect-6e.png"
+     ],
+     "shots": [
+      "connect-demo-6e.png",
+      "connect-demo-6e-2.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Plan: waiting for the payment",
+     "mockups": [
+      "connect-6f.png"
+     ],
+     "shots": [
+      "connect-demo-6f.png",
+      "connect-demo-6f-2.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Family: organizer",
+     "mockups": [
+      "connect-6g.png",
+      "connect-9.png"
+     ],
+     "shots": [
+      "connect-demo-6g.png",
+      "connect-demo-6g-2.png",
+      "connect-demo-9.png",
+      "connect-demo-9-2.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Family: member",
+     "mockups": [
+      "connect-6h.png",
+      "connect-9e.png"
+     ],
+     "shots": [
+      "connect-demo-6h.png",
+      "connect-demo-6h-2.png",
+      "connect-demo-9e.png",
+      "connect-demo-9e-2.png",
+      "connect-live-member.png",
+      "connect-live-member-2.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Invite…",
+     "mockups": [
+      "connect-9a.png"
+     ],
+     "shots": [
+      "connect-demo-9a.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Invite to a team",
+     "mockups": [
+      "connect-9b.png"
+     ],
+     "shots": [
+      "connect-demo-9b.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Remove a member",
+     "mockups": [
+      "connect-9c.png"
+     ],
+     "shots": [
+      "connect-demo-9c.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Change the people (seats)",
+     "mockups": [
+      "connect-9d.png"
+     ],
+     "shots": [
+      "connect-demo-9d.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Join a family or team",
+     "mockups": [
+      "connect-10a.png"
+     ],
+     "shots": [
+      "connect-demo-10a.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Join request sent",
+     "mockups": [
+      "connect-10b.png"
+     ],
+     "shots": [
+      "connect-demo-10b.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Join refused",
+     "mockups": [
+      "connect-10c.png"
+     ],
+     "shots": [
+      "connect-demo-10c.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Delete Account…",
+     "mockups": [
+      "connect-11a.png"
+     ],
+     "shots": [
+      "connect-demo-11a.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Delete: members first",
+     "mockups": [
+      "connect-11b.png"
+     ],
+     "shots": [
+      "connect-demo-11b.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "After the deletion",
+     "mockups": [
+      "connect-11c.png"
+     ],
+     "shots": [],
+     "note": ""
+    }
+   ]
+  },
+  {
+   "title": "2. Settings › Connect › Shared Vaults (frame 12; screens under rework in fix/connect-vault-sharing-3)",
+   "rows": [
+    {
+     "title": "The section: own vault, Share with…, Accept a Shared Vault…",
+     "mockups": [
+      "connect-12a.png"
+     ],
+     "shots": [
+      "share-section.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "A member who did not finish the words",
+     "mockups": [
+      "connect-12a.png"
+     ],
+     "shots": [
+      "share-not-compared.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "\"has not joined yet\"",
+     "mockups": [
+      "connect-12a.png"
+     ],
+     "shots": [
+      "share-not-joined.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "The member syncs the vault; Stop Sharing with …",
+     "mockups": [
+      "connect-12a.png"
+     ],
+     "shots": [
+      "share-syncs.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "An offer with Join (the member)",
+     "mockups": [
+      "connect-12a.png"
+     ],
+     "shots": [
+      "share-offer-join.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Joined: Leave This Shared Vault… (the member)",
+     "mockups": [
+      "connect-12a.png"
+     ],
+     "shots": [
+      "share-joined.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Share with…: pick a person",
+     "mockups": [
+      "connect-12b.png"
+     ],
+     "shots": [
+      "share-pick.png",
+      "share-pick-chosen.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "The share code and QR",
+     "mockups": [
+      "connect-12c.png"
+     ],
+     "shots": [
+      "share-code.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "The words on the owner's side",
+     "mockups": [
+      "connect-12d.png"
+     ],
+     "shots": [
+      "share-words-owner.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Shared (result)",
+     "mockups": [],
+     "shots": [
+      "share-done.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Accept a Shared Vault…",
+     "mockups": [
+      "connect-12e.png"
+     ],
+     "shots": [
+      "share-accept-empty.png",
+      "share-accept-code.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "The words on the member's side",
+     "mockups": [
+      "connect-12f.png"
+     ],
+     "shots": [
+      "share-words-member.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Accepted (result)",
+     "mockups": [],
+     "shots": [
+      "share-accepted.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Stop Sharing with …",
+     "mockups": [
+      "connect-12g.png"
+     ],
+     "shots": [
+      "share-stop.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Leave This Shared Vault…",
+     "mockups": [
+      "connect-12g.png"
+     ],
+     "shots": [
+      "share-leave.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "The sync line of a shared vault (Settings › Vault › Sync)",
+     "mockups": [
+      "connect-12h.png"
+     ],
+     "shots": [],
+     "note": ""
+    }
+   ]
+  },
+  {
+   "title": "3. The start screen: Use a vault from another computer › Apassy Connect",
+   "rows": [
+    {
+     "title": "The start screen without a vault",
+     "mockups": [],
+     "shots": [
+      "start-screen.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Not in an account: join the account there",
+     "mockups": [
+      "devices-settings-10b.png"
+     ],
+     "shots": [
+      "start-connect-join.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Nothing waits: Check Again",
+     "mockups": [
+      "devices-settings-10b.png"
+     ],
+     "shots": [
+      "start-connect-empty.png",
+      "start-join-after.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "The store list",
+     "mockups": [
+      "devices-settings-10a.png"
+     ],
+     "shots": [
+      "start-connect-list.png",
+      "start-connect-after-cancel.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "The store list cannot be read: Try Again",
+     "mockups": [],
+     "shots": [
+      "start-connect-error.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "The passphrase step",
+     "mockups": [
+      "devices-settings-10c.png"
+     ],
+     "shots": [
+      "start-connect-passphrase.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "With a vault open: the vault menu › Use a vault from Apassy Connect…",
+     "mockups": [
+      "devices-settings-10a.png"
+     ],
+     "shots": [
+      "vault-menu.png",
+      "open-connect-list.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "With a vault open: the passphrase step",
+     "mockups": [
+      "devices-settings-10c.png"
+     ],
+     "shots": [
+      "open-connect-passphrase.png"
+     ],
+     "note": ""
+    }
+   ]
+  },
+  {
+   "title": "4. Settings › Vault › Sync",
+   "rows": [
+    {
+     "title": "Sync off, the picker",
+     "mockups": [],
+     "shots": [
+      "linux-settings-vault.png",
+      "sync-picker.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "The relay setup sheet: its default choice",
+     "mockups": [],
+     "shots": [
+      "sync-setup-default.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "The Apassy Connect choice",
+     "mockups": [],
+     "shots": [
+      "sync-setup-connect.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Syncing through Apassy Connect",
+     "mockups": [],
+     "shots": [
+      "sync-connect-on.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Connect plan past due",
+     "mockups": [],
+     "shots": [
+      "sync-connect-past-due.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Connect read-only until a date",
+     "mockups": [],
+     "shots": [
+      "sync-connect-read-only.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "A relay copy that the hosted relay ended",
+     "mockups": [
+      "devices-settings-9f.png"
+     ],
+     "shots": [],
+     "note": ""
+    }
+   ]
+  },
+  {
+   "title": "5. Settings › Devices (demo frames)",
+   "rows": [
+    {
+     "title": "Both moves: Move Approvals to This Mac / to Connect",
+     "mockups": [
+      "devices-settings-9a.png"
+     ],
+     "shots": [
+      "devices-demo-9a.png",
+      "devices-demo-9a-2.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Connect without Tailscale",
+     "mockups": [
+      "devices-settings-9b.png"
+     ],
+     "shots": [
+      "devices-demo-9b.png",
+      "devices-demo-9b-2.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Waits for the first approval through Connect",
+     "mockups": [
+      "devices-settings-9c.png"
+     ],
+     "shots": [
+      "devices-demo-9c.png",
+      "devices-demo-9c-2.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "The hosted relay ended the free approvals (410)",
+     "mockups": [
+      "devices-settings-9d.png"
+     ],
+     "shots": [
+      "devices-demo-9d.png",
+      "devices-demo-9d-2.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "The hosted relay serves Connect only (hosted_retired)",
+     "mockups": [
+      "devices-settings-9d.png"
+     ],
+     "shots": [
+      "devices-demo-9d-later.png",
+      "devices-demo-9d-later-2.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "A device through Apassy Connect",
+     "mockups": [
+      "devices-settings-9e.png"
+     ],
+     "shots": [
+      "devices-demo-9e.png",
+      "devices-demo-9e-2.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "The Relay group with the end of the free approvals",
+     "mockups": [],
+     "shots": [
+      "devices-demo-R.png",
+      "devices-demo-R-2.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Wi-Fi notice, tailnet",
+     "mockups": [
+      "devices-settings-6a.png"
+     ],
+     "shots": [
+      "devices-demo-6a.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Wi-Fi notice, relay",
+     "mockups": [
+      "devices-settings-6b.png"
+     ],
+     "shots": [
+      "devices-demo-6b.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Wi-Fi pairing, the next version",
+     "mockups": [
+      "devices-settings-6d.png"
+     ],
+     "shots": [
+      "devices-demo-6d.png",
+      "devices-demo-6d-2.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Devices: tailnet on",
+     "mockups": [
+      "devices-settings-1.png"
+     ],
+     "shots": [
+      "devices-demo-1.png",
+      "devices-demo-1-2.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Add an iPhone: the link",
+     "mockups": [
+      "devices-settings-2a.png"
+     ],
+     "shots": [
+      "devices-demo-2a.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Add an iPhone: the words",
+     "mockups": [
+      "devices-settings-2b.png"
+     ],
+     "shots": [
+      "devices-demo-2b.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Add an iPhone: added",
+     "mockups": [
+      "devices-settings-2c.png"
+     ],
+     "shots": [
+      "devices-demo-2c.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "No Tailscale",
+     "mockups": [
+      "devices-settings-3a.png"
+     ],
+     "shots": [
+      "devices-demo-3a.png",
+      "devices-demo-3a-2.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Not connected",
+     "mockups": [
+      "devices-settings-3b.png"
+     ],
+     "shots": [
+      "devices-demo-3b.png",
+      "devices-demo-3b-2.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Route off",
+     "mockups": [
+      "devices-settings-3c.png"
+     ],
+     "shots": [
+      "devices-demo-3c.png",
+      "devices-demo-3c-2.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Starting",
+     "mockups": [
+      "devices-settings-3d.png"
+     ],
+     "shots": [
+      "devices-demo-3d.png",
+      "devices-demo-3d-2.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Vault locked",
+     "mockups": [
+      "devices-settings-3f.png"
+     ],
+     "shots": [
+      "devices-demo-3f.png",
+      "devices-demo-3f-2.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Port in use",
+     "mockups": [
+      "devices-settings-3g.png"
+     ],
+     "shots": [
+      "devices-demo-3g.png",
+      "devices-demo-3g-2.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Address changed",
+     "mockups": [
+      "devices-settings-3h.png"
+     ],
+     "shots": [
+      "devices-demo-3h.png",
+      "devices-demo-3h-2.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Move approvals to this computer",
+     "mockups": [
+      "devices-settings-4.png"
+     ],
+     "shots": [
+      "devices-demo-4.png",
+      "devices-demo-4-2.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Move sheet",
+     "mockups": [
+      "devices-settings-4b.png"
+     ],
+     "shots": [
+      "devices-demo-4b.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Approvals moved",
+     "mockups": [
+      "devices-settings-4c.png"
+     ],
+     "shots": [
+      "devices-demo-4c.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Old entry on the relay",
+     "mockups": [
+      "devices-settings-4d.png"
+     ],
+     "shots": [
+      "devices-demo-4d.png",
+      "devices-demo-4d-later.png",
+      "devices-demo-4d-later-2.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Revoke an iPhone",
+     "mockups": [
+      "devices-settings-5a.png"
+     ],
+     "shots": [
+      "devices-demo-5a.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Revoke a computer",
+     "mockups": [
+      "devices-settings-5b.png"
+     ],
+     "shots": [
+      "devices-demo-5b.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "After a revoke",
+     "mockups": [
+      "devices-settings-5c.png"
+     ],
+     "shots": [
+      "devices-demo-5c.png",
+      "devices-demo-5c-2.png",
+      "devices-demo-5c-3.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "First run, no Tailscale",
+     "mockups": [
+      "devices-settings-7.png"
+     ],
+     "shots": [
+      "devices-demo-7.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Pairing through the Connect route",
+     "mockups": [],
+     "shots": [],
+     "note": ""
+    }
+   ]
+  },
+  {
+   "title": "6. Linux only",
+   "rows": [
+    {
+     "title": "The unlock window (passphrase)",
+     "mockups": [],
+     "shots": [
+      "unlock-passphrase.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Settings › Security: How often to ask, the keyring and polkit texts",
+     "mockups": [],
+     "shots": [
+      "linux-settings-security.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Settings › Tools and the browser rows",
+     "mockups": [],
+     "shots": [
+      "linux-settings-tools.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Settings › Devices on Linux (live, no Tailscale)",
+     "mockups": [],
+     "shots": [
+      "linux-settings-devices.png"
+     ],
+     "note": ""
+    }
+   ]
+  },
+  {
+   "title": "7. Owner checks drawn by the window",
+   "rows": [
+    {
+     "title": "Share (Confirm…)",
+     "mockups": [
+      "connect-12d.png"
+     ],
+     "shots": [
+      "owner-check-share.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Accept (The Words Match…)",
+     "mockups": [
+      "connect-12f.png"
+     ],
+     "shots": [
+      "owner-check-accept.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Join a shared vault",
+     "mockups": [],
+     "shots": [
+      "owner-check-join.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Revoke a device",
+     "mockups": [
+      "connect-7c.png"
+     ],
+     "shots": [
+      "owner-check-revoke.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "New recovery code",
+     "mockups": [
+      "connect-13b.png"
+     ],
+     "shots": [
+      "owner-check-recovery.png"
+     ],
+     "note": ""
+    },
+    {
+     "title": "Stop sharing, leave, re-pin, take a removed device's copy",
+     "mockups": [
+      "connect-12g.png"
+     ],
+     "shots": [],
+     "note": ""
+    }
+   ]
+  }
+ ]
+}
