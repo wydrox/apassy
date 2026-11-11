@@ -144,6 +144,9 @@ fn a_share_needs_a_peer_the_group_and_a_store_of_the_caller() {
         200
     );
     assert_eq!(add_to_store(c, owner, &f.team, member).0, 200);
+    // The owner adds the member's device before the member's `join`; it signs in after it.
+    assert_eq!(store_challenge(c, &f.team, member), 401);
+    c.join_store(member, owner, &f.team);
     assert_eq!(store_challenge(c, &f.team, member), 200);
     // The same share again.
     assert_eq!(
@@ -246,6 +249,7 @@ fn an_unshare_removes_the_member_from_the_store_in_its_transaction() {
     let (c, owner, member) = (&f.c, &f.owner, &f.member);
     c.share_store(owner, member, &f.team);
     assert_eq!(add_to_store(c, owner, &f.team, member).0, 200);
+    c.join_store(member, owner, &f.team);
     assert_eq!(store_challenge(c, &f.team, member), 200);
     let rows = |account: &str| {
         c.rows(&format!(
@@ -352,12 +356,11 @@ fn a_join_needs_the_owners_share_and_a_leave_removes_the_callers_devices() {
 }
 
 #[test]
-fn a_revoked_device_signs_no_entry() {
+fn another_accounts_key_signs_no_entry() {
     let f = family();
     let (c, owner, member) = (&f.c, &f.owner, &f.member);
     assert_eq!(peer(c, owner, member).0, 200);
-    // The member's token ends with its account deletion; another account's key never
-    // signs the owner's list.
+    // Another account's key never signs the owner's list, also with the owner's token.
     let (head, previous) = c.list_head(&owner.account);
     let message = device::share_list_message(
         c.origin(),
@@ -802,4 +805,682 @@ fn the_share_vectors_are_the_messages_of_this_relay() {
             assert_eq!(hash.as_str().unwrap().len(), 43);
         }
     }
+}
+
+// ---- The share condition of the service (docs/SPEC.md section 33.13). ----
+
+/// The challenge status of `dev` in `team` after the owner `owner` shared it, added `dev`,
+/// and `dev`'s account joined it: a family with the store shared, added, and joined.
+fn shared_and_joined() -> Family {
+    let f = family();
+    f.c.share_store(&f.owner, &f.member, &f.team);
+    assert_eq!(add_to_store(&f.c, &f.owner, &f.team, &f.member).0, 200);
+    f.c.join_store(&f.member, &f.owner, &f.team);
+    assert_eq!(store_challenge(&f.c, &f.team, &f.member), 200);
+    f
+}
+
+/// Whether the store device `store_device` of `team` may sign in (`store_device_live`).
+fn live(c: &Connect, team: &str, store_device: u64) -> bool {
+    let team = apassy_relay::ids::TeamId::parse(team).unwrap();
+    c.relay
+        .hub()
+        .directory
+        .store
+        .with(|conn| apassy_relay::server::account::store_device_live(conn, &team, store_device))
+        .unwrap()
+}
+
+/// A store row of `dev` in `team` as store device `store_device`, left behind or put there.
+fn put_row(c: &Connect, team: &str, dev: &Dev, store_device: u64) {
+    c.edit_directory(&format!(
+        "INSERT INTO account_store_device (team_id, device_id, account_id, store_device, added_at) \
+         VALUES ('{team}', '{}', '{}', {store_device}, 1);",
+        dev.id, dev.account
+    ));
+}
+
+/// A member that recovers its account has a new root: the owner's `peer` pins the old one,
+/// so the old share adds none of its new devices, and none signs in, until the owner pins
+/// the new root and shares again (section 16.7).
+#[test]
+fn a_member_that_recovers_gets_no_new_device_into_the_shared_store() {
+    let f = shared_and_joined();
+    let (c, owner, member) = (&f.c, &f.owner, &f.member);
+    let renewed = c.recover(member);
+    assert_eq!(
+        code(&add_to_store(c, owner, &f.team, &renewed)),
+        (403, Some("not_in_group"))
+    );
+    // Its new list pins the owner and asks to join: the share names the old root.
+    assert_eq!(peer(c, &renewed, owner).0, 200);
+    assert_eq!(
+        code(&c.list_entry(&renewed, "join", &owner.account, None, Some(&f.team))),
+        (409, Some("conflict"))
+    );
+    put_row(c, &f.team, &renewed, 7);
+    assert!(
+        !live(c, &f.team, 7),
+        "a row under the old root is no live store device"
+    );
+    assert_eq!(store_challenge(c, &f.team, &renewed), 401);
+    c.edit_directory(&format!(
+        "DELETE FROM account_store_device WHERE device_id = '{}';",
+        renewed.id
+    ));
+    // New words: unshare, unpeer, peer of the new root, share; then the member joins.
+    for (op, root, team) in [
+        ("unshare", None, Some(f.team.as_str())),
+        ("unpeer", None, None),
+    ] {
+        assert_eq!(c.list_entry(owner, op, &member.account, root, team).0, 200);
+    }
+    assert_eq!(peer(c, owner, &renewed).0, 200);
+    assert_eq!(
+        c.list_entry(owner, "share", &member.account, None, Some(&f.team))
+            .0,
+        200
+    );
+    assert_eq!(add_to_store(c, owner, &f.team, &renewed).0, 200);
+    c.join_store(&renewed, owner, &f.team);
+    assert_eq!(store_challenge(c, &f.team, &renewed), 200);
+}
+
+/// A removal from the group voids the shares that name the member at Connect: after a new
+/// admission the old share adds no device and signs none in, and the old `join` counts
+/// for nothing; a newer `share` and the member's `join` after it do (contract section 16:
+/// a removal is never a grant).
+#[test]
+fn a_removal_from_the_group_grants_nothing_after_a_new_admission() {
+    let f = shared_and_joined();
+    let (c, owner, member) = (&f.c, &f.owner, &f.member);
+    let removed = c.call(
+        "DELETE",
+        &format!("/v1/account/group/members/{}", member.account),
+        Some(&owner.token),
+        None,
+    );
+    assert_eq!(removed.0, 200, "{:?}", removed.1);
+    c.add_member(owner, member);
+    assert_eq!(
+        code(&add_to_store(c, owner, &f.team, member)),
+        (403, Some("not_in_group"))
+    );
+    put_row(c, &f.team, member, 7);
+    assert!(!live(c, &f.team, 7), "the old share is void");
+    assert_eq!(store_challenge(c, &f.team, member), 401);
+    c.edit_directory(&format!(
+        "DELETE FROM account_store_device WHERE device_id = '{}';",
+        member.id
+    ));
+    // A newer share: the device is added, and signs in only after the member's new join.
+    assert_eq!(
+        c.list_entry(owner, "unshare", &member.account, None, Some(&f.team))
+            .0,
+        200
+    );
+    assert_eq!(
+        c.list_entry(owner, "share", &member.account, None, Some(&f.team))
+            .0,
+        200
+    );
+    assert_eq!(add_to_store(c, owner, &f.team, member).0, 200);
+    assert_eq!(store_challenge(c, &f.team, member), 401, "the old join");
+    assert_eq!(
+        c.list_entry(member, "leave", &owner.account, None, Some(&f.team))
+            .0,
+        200
+    );
+    assert_eq!(add_to_store(c, owner, &f.team, member).0, 200);
+    c.join_store(member, owner, &f.team);
+    assert_eq!(store_challenge(c, &f.team, member), 200);
+}
+
+/// A member that left a store is added again by another member's device: the row is
+/// there, and it signs in only after its own new `join`.
+#[test]
+fn a_member_that_left_signs_in_again_only_after_its_own_join() {
+    let f = shared_and_joined();
+    let (c, owner, member) = (&f.c, &f.owner, &f.member);
+    let anna = c.account("Anna");
+    c.add_member(owner, &anna);
+    c.share_store(owner, &anna, &f.team);
+    assert_eq!(add_to_store(c, owner, &f.team, &anna).0, 200);
+    c.join_store(&anna, owner, &f.team);
+    assert_eq!(
+        c.list_entry(member, "leave", &owner.account, None, Some(&f.team))
+            .0,
+        200
+    );
+    assert_eq!(store_challenge(c, &f.team, member), 401);
+    assert_eq!(add_to_store(c, &anna, &f.team, member).0, 200);
+    assert_eq!(store_challenge(c, &f.team, member), 401);
+    c.join_store(member, owner, &f.team);
+    assert_eq!(store_challenge(c, &f.team, member), 200);
+}
+
+/// The store add checks the share again in the transaction that maps the device: an
+/// `unshare` after the checks of the route maps nothing.
+#[test]
+fn an_unshare_that_races_a_store_add_maps_nothing() {
+    let f = family();
+    let (c, owner, member) = (&f.c, &f.owner, &f.member);
+    c.share_store(owner, member, &f.team);
+    // The route checked the share; then the owner's unshare; then the add runs.
+    assert_eq!(
+        c.list_entry(owner, "unshare", &member.account, None, Some(&f.team))
+            .0,
+        200
+    );
+    let team = apassy_relay::ids::TeamId::parse(&f.team).unwrap();
+    let added = c.relay.hub().add_store_device(
+        &team,
+        &member.account,
+        &member.id,
+        &member.key.public_key(),
+        connect::now(),
+    );
+    assert_eq!(
+        added.as_ref().map_err(|error| error.code),
+        Err(apassy_relay::error::codes::NOT_IN_GROUP),
+        "{added:?}"
+    );
+    assert!(
+        c.rows(&format!(
+            "SELECT team_id FROM account_store_device WHERE device_id = '{}'",
+            member.id
+        ))
+        .is_empty()
+    );
+    assert_eq!(store_challenge(c, &f.team, member), 401);
+}
+
+/// The share code `index` of `owner`, its hash, and the answer of `by` to it.
+fn share_code(owner: &Dev, index: u32) -> String {
+    let code = format!(
+        "apassy_shr_{}_{index:064x}_{}",
+        owner.account,
+        "ab".repeat(16)
+    );
+    device::share_link_hash(&code)
+}
+
+fn make_code(c: &Connect, owner: &Dev, for_account: &str, hash: &str) -> (u16, Value) {
+    c.call(
+        "POST",
+        "/v1/account/peers/link",
+        Some(&owner.token),
+        Some(&json!({"link_hash": hash, "account_id": for_account})),
+    )
+}
+
+fn answer_code(c: &Connect, by: &Dev, owner: &Dev, hash: &str) -> u64 {
+    let message = device::peer_join_message(
+        c.origin(),
+        &owner.account,
+        hash,
+        &by.account,
+        &by.key.public_key_b64(),
+        &by.key.public_key_b64(),
+    );
+    let answer = c.call(
+        "POST",
+        "/v1/account/peers/join",
+        Some(&by.token),
+        Some(&json!({"account_id": owner.account, "link_hash": hash,
+                     "signature": encode_b64(&by.key.sign(&message).unwrap())})),
+    );
+    assert_eq!(answer.0, 200, "{:?}", answer.1);
+    answer.1["result"]["join_id"].as_u64().unwrap()
+}
+
+fn join_state(c: &Connect, by: &Dev, join_id: u64) -> (u16, Value) {
+    c.call(
+        "GET",
+        &format!("/v1/account/peers/join/{join_id}"),
+        Some(&by.token),
+        None,
+    )
+}
+
+/// A used code counts for the 3 of a device until it expires, and a device has at most 8
+/// pending answers: a ninth ends the oldest.
+#[test]
+fn a_used_code_counts_until_it_expires_and_pending_answers_are_bounded() {
+    let f = family();
+    let (c, owner, member) = (&f.c, &f.owner, &f.member);
+    let first = share_code(owner, 0);
+    for index in 0..3 {
+        assert_eq!(
+            make_code(c, owner, &member.account, &share_code(owner, index)).0,
+            200
+        );
+    }
+    let oldest = answer_code(c, member, owner, &first);
+    assert_eq!(
+        code(&make_code(c, owner, &member.account, &share_code(owner, 3))),
+        (403, Some("account_limit"))
+    );
+    // Codes that expire make room; their answers keep their own time.
+    for index in 3..11 {
+        c.edit_directory(&format!(
+            "UPDATE account_peer_link SET expires_at = 1 WHERE device_id = '{}';",
+            owner.id
+        ));
+        let hash = share_code(owner, index);
+        assert_eq!(make_code(c, owner, &member.account, &hash).0, 200);
+        answer_code(c, member, owner, &hash);
+    }
+    let pending = c.ok("GET", "/v1/account/peers/pending", Some(&owner.token), None);
+    let ids: Vec<u64> = pending
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|answer| answer["join_id"].as_u64().unwrap())
+        .collect();
+    assert_eq!(ids.len(), 8, "{pending}");
+    assert!(!ids.contains(&oldest));
+    assert!(ids.windows(2).all(|pair| pair[0] < pair[1]), "{ids:?}");
+    assert_eq!(
+        join_state(c, member, oldest).1["result"]["state"],
+        "expired"
+    );
+}
+
+/// A revoke ends the share codes that the device made, the pending answers to them, and
+/// the answers that it gave.
+#[test]
+fn a_revoked_device_ends_its_share_codes_and_answers() {
+    let f = family();
+    let (c, owner, member) = (&f.c, &f.owner, &f.member);
+    let anna = c.account("Anna");
+    c.add_member(owner, &anna);
+    let (ola_code, anna_code, open_code) = (
+        share_code(owner, 1),
+        share_code(owner, 2),
+        share_code(owner, 3),
+    );
+    make_code(c, owner, &member.account, &ola_code);
+    make_code(c, owner, &anna.account, &anna_code);
+    make_code(c, owner, &anna.account, &open_code);
+    let ola_answer = answer_code(c, member, owner, &ola_code);
+    let anna_answer = answer_code(c, &anna, owner, &anna_code);
+    // The answering device goes: its answer ends.
+    let (status, answer) = c.revoke(member, &member.id, &member.key.public_key_b64());
+    assert_eq!(status, 200, "{answer}");
+    let pending = c.ok("GET", "/v1/account/peers/pending", Some(&owner.token), None);
+    assert_eq!(
+        pending
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|answer| answer["join_id"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        [anna_answer]
+    );
+    assert_eq!(
+        c.rows(&format!(
+            "SELECT state FROM account_peer_join WHERE id = {ola_answer}"
+        )),
+        ["expired"]
+    );
+    // The device that made the codes goes: the answers to them and its codes end.
+    let now = connect::now();
+    let (status, answer) = c.revoke(owner, &owner.id, &owner.key.public_key_b64());
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(
+        join_state(c, &anna, anna_answer).1["result"]["state"],
+        "expired"
+    );
+    let open: Vec<String> = c.rows(&format!(
+        "SELECT link_hash FROM account_peer_link WHERE device_id = '{}' AND expires_at > {}",
+        owner.id,
+        now + 5
+    ));
+    assert!(open.is_empty(), "{open:?}");
+}
+
+/// `DELETE /v1/account/peers/join/{id}`: the device that made the code refuses, the device
+/// that answered withdraws, any other device gets 404, and a decided answer stays.
+#[test]
+fn an_answer_is_refused_by_its_maker_or_withdrawn_by_its_answerer() {
+    let f = family();
+    let (c, owner, member) = (&f.c, &f.owner, &f.member);
+    let anna = c.account("Anna");
+    c.add_member(owner, &anna);
+    let stranger = c.account("Stranger");
+    let end = |by: &Dev, join_id: u64| {
+        c.call(
+            "DELETE",
+            &format!("/v1/account/peers/join/{join_id}"),
+            Some(&by.token),
+            Some(&json!({})),
+        )
+    };
+    let (first, second) = (share_code(owner, 1), share_code(owner, 2));
+    make_code(c, owner, &member.account, &first);
+    make_code(c, owner, &member.account, &second);
+    let refused = answer_code(c, member, owner, &first);
+    let withdrawn = answer_code(c, member, owner, &second);
+    for other in [&anna, &stranger] {
+        assert_eq!(code(&end(other, refused)), (404, Some("not_found")));
+        assert_eq!(
+            code(&join_state(c, other, refused)),
+            (404, Some("not_found"))
+        );
+    }
+    assert_eq!(end(owner, refused).1["result"]["state"], "refused");
+    assert_eq!(end(member, refused).1["result"]["state"], "refused");
+    assert_eq!(end(member, withdrawn).1["result"]["state"], "cancelled");
+    assert_eq!(end(owner, withdrawn).1["result"]["state"], "cancelled");
+    assert_eq!(
+        c.ok("GET", "/v1/account/peers/pending", Some(&owner.token), None),
+        json!([])
+    );
+}
+
+/// The signer of an entry is a live device of the list: a key whose last device entry is
+/// a `remove` signs nothing (401), and a revoked device's token ends at its revoke.
+#[test]
+fn a_device_that_its_list_removed_signs_no_entry() {
+    let f = family();
+    let (c, owner, member) = (&f.c, &f.owner, &f.member);
+    // The list ends the key while its device row is live (the row and the list disagree).
+    let (head, hash) = c.list_head(&owner.account);
+    c.edit_directory(&format!(
+        "INSERT INTO account_list (account_id, version, op, key, link_hash, name, by_key, signature, hash, created_at) \
+         SELECT account_id, {}, 'remove', key, NULL, NULL, key, x'00', '{hash}', 1 FROM account_list \
+         WHERE account_id = '{}' AND version = 1;",
+        head + 1,
+        owner.account
+    ));
+    assert_eq!(
+        code(&peer(c, owner, member)),
+        (401, Some("unauthenticated"))
+    );
+    assert_eq!(
+        c.list_head(&owner.account).0,
+        head + 1,
+        "nothing was stored"
+    );
+    // A revoked device: its token ends.
+    let (status, answer) = c.revoke(member, &member.id, &member.key.public_key_b64());
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(
+        code(&peer(c, member, owner)),
+        (401, Some("unauthenticated"))
+    );
+}
+
+/// Each entry that adds something (`peer`, `share`, `join`; `add` in
+/// `tests/server_account.rs`) is taken at version 822 and refused at 823 with 403
+/// `account_limit`; each end (`unshare`, `unpeer`, `leave`; `remove` in
+/// `tests/server_account.rs`) works up to 1024.
+#[test]
+fn each_adding_entry_stops_at_822_and_each_end_works_up_to_1024() {
+    use apassy_relay::server::account::{
+        LAST_ADD_VERSION, LIST_REMOVAL_RESERVE, MAX_DEVICES, MAX_LIST_ENTRIES, MAX_PEERS,
+        MAX_SHARED,
+    };
+    assert_eq!(LIST_REMOVAL_RESERVE, MAX_DEVICES + MAX_PEERS + MAX_SHARED);
+    assert_eq!((LAST_ADD_VERSION, MAX_LIST_ENTRIES), (822, 1024));
+    let f = family();
+    let (c, owner, member) = (&f.c, &f.owner, &f.member);
+    let (anna, late) = (c.account("Anna"), c.account("Late"));
+    c.add_member(owner, &anna);
+    c.add_member(owner, &late);
+    assert_eq!(peer(c, owner, &anna).0, 200);
+    assert_eq!(peer(c, member, &anna).0, 200);
+    let move_row = |account: &str, from: u64, to: u64| {
+        c.edit_directory(&format!(
+            "UPDATE account_list SET version = {to} WHERE account_id = '{account}' AND version = {from};"
+        ));
+    };
+    let move_head = |account: &str, to: u64| move_row(account, c.list_head(account).0, to);
+    let limited = |answer: (u16, Value)| {
+        assert_eq!(code(&answer), (403, Some("account_limit")), "{answer:?}");
+    };
+    // The owner's peer and share at 822; nothing more at 823.
+    move_head(&owner.account, LAST_ADD_VERSION - 1);
+    assert_eq!(peer(c, owner, member).0, 200);
+    assert_eq!(c.list_head(&owner.account).0, LAST_ADD_VERSION);
+    limited(c.list_entry(owner, "share", &member.account, None, Some(&f.team)));
+    move_row(&owner.account, LAST_ADD_VERSION - 1, LAST_ADD_VERSION - 2);
+    move_row(&owner.account, LAST_ADD_VERSION, LAST_ADD_VERSION - 1);
+    assert_eq!(
+        c.list_entry(owner, "share", &member.account, None, Some(&f.team))
+            .0,
+        200
+    );
+    limited(peer(c, owner, &late));
+    // The member's peer and join at 822; nothing more at 823.
+    move_head(&member.account, LAST_ADD_VERSION - 1);
+    assert_eq!(peer(c, member, owner).0, 200);
+    limited(c.list_entry(member, "join", &owner.account, None, Some(&f.team)));
+    move_row(&member.account, LAST_ADD_VERSION - 1, LAST_ADD_VERSION - 2);
+    move_row(&member.account, LAST_ADD_VERSION, LAST_ADD_VERSION - 1);
+    assert_eq!(
+        c.list_entry(member, "join", &owner.account, None, Some(&f.team))
+            .0,
+        200
+    );
+    // The ends up to 1024: the owner's unshare at 1023 and unpeer at 1024, the member's
+    // leave at 1024; nothing at 1025.
+    move_head(&owner.account, MAX_LIST_ENTRIES - 2);
+    assert_eq!(
+        c.list_entry(owner, "unshare", &member.account, None, Some(&f.team))
+            .0,
+        200
+    );
+    assert_eq!(
+        c.list_entry(owner, "unpeer", &anna.account, None, None).0,
+        200
+    );
+    assert_eq!(c.list_head(&owner.account).0, MAX_LIST_ENTRIES);
+    limited(c.list_entry(owner, "unpeer", &member.account, None, None));
+    move_head(&member.account, MAX_LIST_ENTRIES - 1);
+    assert_eq!(
+        c.list_entry(member, "leave", &owner.account, None, Some(&f.team))
+            .0,
+        200
+    );
+    limited(c.list_entry(member, "unpeer", &owner.account, None, None));
+}
+
+/// At most 128 active shares and joins of one list together (403 `account_limit`).
+#[test]
+fn a_list_holds_at_most_128_shares_and_joins() {
+    use apassy_relay::server::account::MAX_SHARED;
+    let f = family();
+    let (c, owner, member) = (&f.c, &f.owner, &f.member);
+    assert_eq!(peer(c, owner, member).0, 200);
+    assert_eq!(peer(c, member, owner).0, 200);
+    // A store id of base32 for each index.
+    let fake_store = |index: u64| {
+        const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+        let tail: String = (0..10)
+            .map(|place| char::from(ALPHABET[((index >> (5 * place)) & 31) as usize]))
+            .collect();
+        format!("t_{tail}")
+    };
+    // Rows that stand for entries of the list, each with the hash of the head before them.
+    let fill = |account: &str, op: &str, peer_account: &str, count: u64| {
+        let (head, hash) = c.list_head(account);
+        let mut sql = String::new();
+        for index in 0..count {
+            sql.push_str(&format!(
+                "INSERT INTO account_list (account_id, version, op, key, link_hash, name, by_key, signature, hash, created_at, peer_account, peer_root, team_id) \
+                 VALUES ('{account}', {}, '{op}', NULL, NULL, NULL, x'00', x'00', '{hash}', 1, '{peer_account}', NULL, '{}');",
+                head + 1 + index,
+                fake_store(index)
+            ));
+        }
+        c.edit_directory(&sql);
+    };
+    fill(&owner.account, "share", &member.account, MAX_SHARED - 1);
+    assert_eq!(
+        c.list_entry(owner, "share", &member.account, None, Some(&f.team))
+            .0,
+        200
+    );
+    let second = store(c, owner, OTHER_VAULT);
+    assert_eq!(
+        code(&c.list_entry(owner, "share", &member.account, None, Some(&second))),
+        (403, Some("account_limit"))
+    );
+    fill(&member.account, "join", &owner.account, MAX_SHARED);
+    assert_eq!(
+        code(&c.list_entry(member, "join", &owner.account, None, Some(&f.team))),
+        (403, Some("account_limit"))
+    );
+}
+
+/// A Connect seam of plans for these tests: each account's view, `none` for any other.
+struct MapPlans(std::collections::HashMap<String, apassy_relay::api::PlanView>);
+
+impl apassy_relay::server::account::Plans for MapPlans {
+    fn plan(
+        &self,
+        _: &apassy_relay::server::store::Store,
+        account: &str,
+        _: u64,
+    ) -> apassy_relay::error::RelayResult<apassy_relay::api::PlanView> {
+        Ok(self
+            .0
+            .get(account)
+            .cloned()
+            .unwrap_or_else(apassy_relay::api::PlanView::none))
+    }
+}
+
+fn plan_view(plan: &str, status: &str, entitled: bool) -> apassy_relay::api::PlanView {
+    apassy_relay::api::PlanView {
+        plan: Some(plan.into()),
+        status: status.into(),
+        entitled,
+        ..apassy_relay::api::PlanView::none()
+    }
+}
+
+/// A share needs a plan that allows sharing on both accounts: a Family on one side only
+/// is 403 `plan_required`, in either direction.
+#[test]
+fn a_share_needs_the_plan_on_both_accounts() {
+    let f = family();
+    let (c, owner, member) = (&f.c, &f.owner, &f.member);
+    assert_eq!(peer(c, owner, member).0, 200);
+    let set = |owner_plan: Option<&str>, member_plan: Option<&str>| {
+        let mut plans = std::collections::HashMap::new();
+        for (account, plan) in [(&owner.account, owner_plan), (&member.account, member_plan)] {
+            if let Some(plan) = plan {
+                plans.insert(account.clone(), plan_view(plan, "active", true));
+            }
+        }
+        c.relay
+            .hub()
+            .set_plans(std::sync::Arc::new(MapPlans(plans)));
+    };
+    for (one, other) in [(Some("family"), None), (None, Some("family"))] {
+        set(one, other);
+        assert_eq!(
+            code(&c.list_entry(owner, "share", &member.account, None, Some(&f.team))),
+            (403, Some("plan_required"))
+        );
+    }
+    set(Some("family"), Some("team"));
+    assert_eq!(
+        c.list_entry(owner, "share", &member.account, None, Some(&f.team))
+            .0,
+        200
+    );
+}
+
+/// A member whose plan is read-only (beyond the paid seats, or after its plan ended)
+/// pulls a shared store and does not push to it (403 `plan_required`); the owner pushes.
+#[test]
+fn a_read_only_member_pulls_a_shared_store_and_does_not_push() {
+    let f = family();
+    let (c, owner, member) = (&f.c, &f.owner, &f.member);
+    c.share_store(owner, member, &f.team);
+    let added = add_to_store(c, owner, &f.team, member);
+    assert_eq!(added.0, 200, "{:?}", added.1);
+    let member_device = added.1["result"]["store_device_id"].as_u64().unwrap();
+    c.join_store(member, owner, &f.team);
+    let mut plans = std::collections::HashMap::new();
+    plans.insert(owner.account.clone(), plan_view("family", "active", true));
+    plans.insert(
+        member.account.clone(),
+        plan_view("family", "read_only", false),
+    );
+    c.relay
+        .hub()
+        .set_plans(std::sync::Arc::new(MapPlans(plans)));
+    let mut pusher = connect::Pusher::new(&f.team, VAULT);
+    let owner_token = c.store_token(&f.team, owner);
+    let pushed = c.try_push(&pusher, &owner_token, 1, owner, b"version one");
+    assert_eq!(pushed.status, 200, "{}", pushed.body);
+    pusher.pushed(1, b"version one");
+    let member_token = c.store_token(&f.team, member);
+    let refused = c.try_push(
+        &pusher,
+        &member_token,
+        member_device,
+        member,
+        b"version two",
+    );
+    assert_eq!(
+        (refused.status, refused.body["error"]["code"].as_str()),
+        (403, Some("plan_required")),
+        "{}",
+        refused.body
+    );
+    assert_eq!(c.pull(&member_token, pusher.version), (200, 200));
+}
+
+/// Every route of shared vaults counts for the calling device: 60 a minute, then 429
+/// `rate_limited` with `Retry-After`; another device and the other account routes go on.
+#[test]
+fn the_routes_of_shared_vaults_count_for_each_device() {
+    let f = family();
+    let (c, owner, member) = (&f.c, &f.owner, &f.member);
+    let pending = |dev: &Dev| {
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .build()
+            .into();
+        let response = agent
+            .get(format!("{}/v1/account/peers/pending", c.relay.url))
+            .header("X-Apassy-Edge", relay::EDGE_SECRET)
+            .header("Authorization", format!("Bearer {}", dev.token))
+            .call()
+            .unwrap();
+        let retry = response
+            .headers()
+            .get("Retry-After")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        (response.status().as_u16(), retry)
+    };
+    for _ in 0..60 {
+        assert_eq!(pending(owner).0, 200);
+    }
+    let (status, retry) = pending(owner);
+    assert_eq!(status, 429);
+    let retry: u64 = retry.expect("Retry-After").parse().unwrap();
+    assert!((1..=60).contains(&retry), "{retry}");
+    assert_eq!(
+        code(&c.list_entry(
+            owner,
+            "peer",
+            &member.account,
+            Some(&member.key.public_key_b64()),
+            None
+        )),
+        (429, Some("rate_limited"))
+    );
+    assert_eq!(pending(member).0, 200);
+    assert_eq!(
+        c.call("GET", "/v1/account", Some(&owner.token), None).0,
+        200
+    );
 }

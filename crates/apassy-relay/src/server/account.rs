@@ -144,6 +144,19 @@ pub trait Plans: Send + Sync {
     /// The `PlanView` of `account` at `now`.
     fn plan(&self, directory: &Store, account: &str, now: u64) -> RelayResult<PlanView>;
 
+    /// The `PlanView` of `account` at `now` read on `conn`, the open transaction of the
+    /// directory, for a check that must hold at the commit of the change it guards (the
+    /// `share` entry of section 16). `None`: this seam reads only through the store, and
+    /// the caller keeps the answer of [`Plans::plan`] that it read before the transaction.
+    fn plan_on(
+        &self,
+        _conn: &Connection,
+        _account: &str,
+        _now: u64,
+    ) -> RelayResult<Option<PlanView>> {
+        Ok(None)
+    }
+
     /// The people (Family) or members (Team) that count for the store limit: 1 for
     /// Personal and without a plan.
     fn people(&self, _directory: &Store, _account: &str, _now: u64) -> RelayResult<u64> {
@@ -194,6 +207,20 @@ pub trait Groups: Send + Sync {
         _now: u64,
     ) -> RelayResult<bool> {
         Ok(false)
+    }
+
+    /// [`Groups::share_group`] read on `conn`, the open transaction of the directory, for a
+    /// check that must hold at the commit of the change it guards (the entries and share
+    /// codes of section 16). `None`: this seam reads only through the store, and the caller
+    /// keeps the answer of [`Groups::share_group`] that it read before the transaction.
+    fn share_group_on(
+        &self,
+        _conn: &Connection,
+        _account: &str,
+        _other: &str,
+        _now: u64,
+    ) -> RelayResult<Option<bool>> {
+        Ok(None)
     }
 
     /// Whether `DELETE /v1/account` is refused (409 `conflict`): an organizer or a Team
@@ -718,6 +745,8 @@ pub struct Accounts {
     stand_in_recovery_key: [u8; device::RECOVERY_KEY_BYTES],
     /// The new accounts of each client prefix today.
     prefixes: PrefixLimiter,
+    /// The requests of each device to the routes of section 16 (`peers::PeerCalls`).
+    peer_calls: crate::server::peers::PeerCalls,
     plans: RwLock<Arc<dyn Plans>>,
     groups: RwLock<Arc<dyn Groups>>,
     signer: Option<EntitlementSigner>,
@@ -747,6 +776,7 @@ impl Accounts {
                     .public_key()
             },
             prefixes: PrefixLimiter::default(),
+            peer_calls: crate::server::peers::PeerCalls::default(),
             plans: RwLock::new(Arc::new(NoPlans)),
             groups: RwLock::new(Arc::new(NoGroups)),
             signer,
@@ -756,6 +786,11 @@ impl Accounts {
 
     fn state(&self) -> std::sync::MutexGuard<'_, AuthState> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The requests of each device to the routes of section 16.
+    pub fn peer_calls(&self) -> &crate::server::peers::PeerCalls {
+        &self.peer_calls
     }
 
     fn recovery(&self) -> std::sync::MutexGuard<'_, RecoveryState> {
@@ -1193,7 +1228,7 @@ fn write_list_entry(
 
 /// A new device list of `account` with the checked root entry `root` (`root_change`) as
 /// its version 1: at the account's creation and at a recovery, which drops the list
-/// before.
+/// before, with the share marks of section 16 that name its versions.
 fn start_list(
     conn: &Connection,
     origin: &str,
@@ -1201,11 +1236,13 @@ fn start_list(
     root: &ListChange<'_>,
     now: u64,
 ) -> RelayResult<()> {
-    conn.execute(
+    for sql in [
         "DELETE FROM account_list WHERE account_id = ?1",
-        params![account],
-    )
-    .map_err(db)?;
+        "DELETE FROM account_share_void WHERE account_id = ?1",
+        "DELETE FROM account_join_share WHERE account_id = ?1",
+    ] {
+        conn.execute(sql, params![account]).map_err(db)?;
+    }
     write_list_entry(conn, origin, account, 1, None, root, now).map(drop)
 }
 
@@ -2249,8 +2286,9 @@ pub(crate) fn queue_device_removals(
 /// the device's key (409 when the version is not the next one, 400 when it does not
 /// verify; nothing changes). At once, in one transaction: the entry, the revoke in
 /// `relay.db` (every later request of its tokens fails there), its open links end, its
-/// node goes, the brain gets `revoke`, and its store rows go with a waiting removal for
-/// each store file. Then its tokens leave memory, its tunnel closes, and each removal is
+/// share codes end with the pending answers to them and the answers it gave, its node
+/// goes, the brain gets `revoke`, and its store rows go with a waiting removal for each
+/// store file. Then its tokens leave memory, its tunnel closes, and each removal is
 /// applied to its store file when that file is open. Its row stays (revoked): its key
 /// stays used, and Connect tells the device itself that it was removed.
 fn revoke(
@@ -2288,6 +2326,19 @@ fn revoke(
         .map_err(db)?;
         tx.execute(
             "UPDATE account_link SET expires_at = min(expires_at, ?2) WHERE device_id = ?1 AND used_at IS NULL",
+            params![device, to_i(now)],
+        )
+        .map_err(db)?;
+        // Its share codes end, with the pending answers to them and the ones it gave
+        // (section 16.2).
+        tx.execute(
+            "UPDATE account_peer_join SET state = 'expired', decided_at = ?2 WHERE state = 'pending' \
+             AND (device_id = ?1 OR link_id IN (SELECT id FROM account_peer_link WHERE device_id = ?1))",
+            params![device, to_i(now)],
+        )
+        .map_err(db)?;
+        tx.execute(
+            "UPDATE account_peer_link SET expires_at = min(expires_at, ?2) WHERE device_id = ?1",
             params![device, to_i(now)],
         )
         .map_err(db)?;
@@ -2996,20 +3047,44 @@ pub fn prune(hub: &Hub, now: u64) -> RelayResult<(usize, usize)> {
 }
 
 /// The SQL of an active share (section 16) of the store `<team>` by the account that made
-/// it (`<owner>`) with the account `<member>`: the last `share` or `unshare` entry of the
-/// owner's list for that store and that account is a `share`.
+/// it (`<owner>`) with the account `<member>`, as Connect counts it (docs/SPEC.md section
+/// 33.13): the last `share` or `unshare` entry of the owner's list for that store and that
+/// account is a `share` (`l`); it came after the last removal of `<member>` from its group
+/// (`account_share_void`: a removal is never a grant, so only a newer `share` counts);
+/// and the owner's last `peer` entry of `<member>` pins the root of `<member>`'s list now
+/// (the key of its version 1: after a recovery of `<member>` the old pin names no device of
+/// it). `<join>` is empty, or [`MEMBER_JOINED`] for a sign-in.
 const ACTIVE_SHARE: &str = "EXISTS(SELECT 1 FROM account_list l WHERE l.account_id = <owner> \
      AND l.team_id = <team> AND l.peer_account = <member> AND l.op = 'share' \
      AND NOT EXISTS(SELECT 1 FROM account_list u WHERE u.account_id = l.account_id \
        AND u.team_id = l.team_id AND u.peer_account = l.peer_account AND u.op = 'unshare' \
-       AND u.version > l.version))";
+       AND u.version > l.version) \
+     AND l.version > coalesce((SELECT v.version FROM account_share_void v \
+       WHERE v.account_id = l.account_id AND v.peer_account = l.peer_account), 0) \
+     AND (SELECT p.peer_root FROM account_list p WHERE p.account_id = l.account_id \
+       AND p.peer_account = l.peer_account AND p.op = 'peer' ORDER BY p.version DESC LIMIT 1) \
+       = (SELECT r.key FROM account_list r WHERE r.account_id = l.peer_account AND r.version = 1)\
+     <join>)";
 
-/// [`ACTIVE_SHARE`] with its three values.
-fn active_share_sql(owner: &str, team: &str, member: &str) -> String {
+/// The part of [`ACTIVE_SHARE`] for a sign-in: the member's list has an active `join` of
+/// the store naming the owner (no later `leave`), made while the share `l` was the active
+/// one (`account_join_share`). The owner may add the member's devices to the store before
+/// it; they sign in only after it.
+const MEMBER_JOINED: &str = " AND EXISTS(SELECT 1 FROM account_list j \
+       JOIN account_join_share js ON js.account_id = j.account_id AND js.team_id = j.team_id \
+       WHERE j.account_id = l.peer_account AND j.team_id = l.team_id \
+       AND j.peer_account = l.account_id AND j.op = 'join' AND js.share_version = l.version \
+       AND NOT EXISTS(SELECT 1 FROM account_list e WHERE e.account_id = j.account_id \
+         AND e.team_id = j.team_id AND e.peer_account = j.peer_account AND e.op = 'leave' \
+         AND e.version > j.version))";
+
+/// [`ACTIVE_SHARE`] with its three values, and the member's `join` when `joined`.
+fn active_share_sql(owner: &str, team: &str, member: &str, joined: bool) -> String {
     ACTIVE_SHARE
         .replace("<owner>", owner)
         .replace("<team>", team)
         .replace("<member>", member)
+        .replace("<join>", if joined { MEMBER_JOINED } else { "" })
 }
 
 /// Whether the account device `device` of `account`, with the key `public_key`, may be in
@@ -3031,7 +3106,7 @@ pub(crate) fn may_join_store(
          AND t.kind = 'account' AND (t.account_id = ?3 OR ({} AND EXISTS(SELECT 1 FROM group_member x \
            JOIN group_member y ON y.group_id = x.group_id WHERE x.account_id = ?3 \
            AND y.account_id = t.account_id AND x.state = 'active' AND y.state = 'active'))))",
-        active_share_sql("t.account_id", "t.id", "?3")
+        active_share_sql("t.account_id", "t.id", "?3", false)
     );
     conn.query_row(
         &sql,
@@ -3041,7 +3116,8 @@ pub(crate) fn may_join_store(
     .map_err(db)
 }
 
-/// Whether the list of `owner` has an active `share` of its store `team` with `member`.
+/// Whether the list of `owner` has an active `share` of its store `team` with `member`
+/// ([`ACTIVE_SHARE`] without the member's `join`).
 pub(crate) fn share_active(
     conn: &Connection,
     owner: &str,
@@ -3049,7 +3125,7 @@ pub(crate) fn share_active(
     member: &str,
 ) -> RelayResult<bool> {
     conn.query_row(
-        &format!("SELECT {}", active_share_sql("?1", "?2", "?3")),
+        &format!("SELECT {}", active_share_sql("?1", "?2", "?3", false)),
         params![owner, team, member],
         |row| row.get(0),
     )
@@ -3059,10 +3135,11 @@ pub(crate) fn share_active(
 /// Whether the store device `store_device` of the vault store `team` is a live account
 /// device in `relay.db` (`account_store_device` and `account_device`) that may be in the
 /// store now: a device of the account that made the store, or of an account that the
-/// owner's list shares the store with (section 16) and that is an active member of one
-/// group with it. The relay-sync sign-in to a vault store needs it, besides its row in
-/// the store file, so a device of another account signs in no more from the moment the
-/// share ends or the two accounts share no group.
+/// owner's list shares the store with ([`ACTIVE_SHARE`]), whose own list joined it after
+/// that share ([`MEMBER_JOINED`]), and that is an active member of one group with it. The
+/// relay-sync sign-in to a vault store needs it, besides its row in the store file, so a
+/// device of another account signs in no more from the moment the share ends, the member
+/// leaves, or the two accounts share no group.
 pub fn store_device_live(conn: &Connection, team: &TeamId, store_device: u64) -> RelayResult<bool> {
     let sql = format!(
         "SELECT EXISTS(SELECT 1 FROM account_store_device s JOIN account_device d ON d.id = s.device_id \
@@ -3071,7 +3148,7 @@ pub fn store_device_live(conn: &Connection, team: &TeamId, store_device: u64) ->
          AND (s.account_id = t.account_id OR ({} AND EXISTS(SELECT 1 FROM group_member a JOIN group_member b \
            ON b.group_id = a.group_id WHERE a.account_id = s.account_id AND b.account_id = t.account_id \
            AND a.state = 'active' AND b.state = 'active'))))",
-        active_share_sql("t.account_id", "t.id", "s.account_id")
+        active_share_sql("t.account_id", "t.id", "s.account_id", true)
     );
     conn.query_row(&sql, params![team.as_str(), to_i(store_device)], |row| {
         row.get(0)

@@ -3399,10 +3399,10 @@ fn add_at_head(c: &Connect, by: &Dev, token: &str) -> (u16, Value) {
     )
 }
 
-/// The end of a device list is kept for removals: an `add` is refused after
-/// `LAST_ADD_VERSION` (246) with 403 `account_limit`, while a `remove` works up to
-/// `MAX_LIST_ENTRIES` (256), also the last device removing itself at 256; the account then
-/// recovers and starts a new list.
+/// The end of a device list is kept for removals: an `add` is taken at
+/// `LAST_ADD_VERSION` (822) and refused after it with 403 `account_limit`, while a
+/// `remove` works up to `MAX_LIST_ENTRIES` (1024), also the last device removing itself at
+/// 1024; the account then recovers and starts a new list.
 #[test]
 fn the_end_of_a_device_list_keeps_room_to_remove_every_device_and_recover() {
     use apassy_relay::server::account::{LAST_ADD_VERSION, MAX_DEVICES, MAX_LIST_ENTRIES};

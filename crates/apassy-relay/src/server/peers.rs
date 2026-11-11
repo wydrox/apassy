@@ -17,14 +17,21 @@
 //! that account's list; a `join` names a store that the other account made and shares
 //! with the caller. An `unshare` removes the other account's devices from the store, and
 //! a `leave` the caller's, in the transaction of the entry. A device of another account
-//! is in a store only while the owner's list shares it with that account and both are
-//! active members of one group (`account::may_join_store`, `account::store_device_live`).
+//! is added to a store only while the owner's list shares it with that account (a share
+//! newer than the last removal of that account from its group, with the root of that
+//! account's list now pinned by the owner's `peer`), and both are active members of one
+//! group (`account::may_join_store`); it signs in only after its own list joined the store
+//! while that share was active (`account::store_device_live`).
 //!
 //! The ceremony of section 16.2 meets here: `POST /v1/account/peers/link` keeps the hash
 //! of a share code for one member (600 s, one use), `POST /v1/account/peers/join` takes
 //! the signed answer of a device of that member, and `GET /v1/account/peers/pending`
 //! shows it to the device that made the code, with the answering account's device list.
-//! Connect never sees the code, so it cannot compute the six words.
+//! Connect never sees the code, so it cannot compute the six words. Every route here
+//! counts for the calling device (`PeerCalls`: 60 a minute).
+
+use std::collections::HashMap;
+use std::sync::{Mutex, PoisonError};
 
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
@@ -32,7 +39,7 @@ use serde_json::{Value, json};
 use crate::api::{
     AccountLinkCreated, AccountListAppend, AccountListAppended, EmptyRequest, ListOp, PeerDevice,
     PeerInviter, PeerJoinRequest, PeerJoinView, PeerJoined, PeerLinkRequest, PeerPending, PeerView,
-    Platform, TeamKind,
+    PlanView, Platform, TeamKind,
 };
 use crate::device;
 use crate::error::{RelayError, RelayResult, codes};
@@ -46,6 +53,73 @@ use crate::server::account::{
 };
 use crate::server::hub::{Hub, StoreRemoval, queue_store_removal};
 use crate::server::store::{db, to_i, to_u};
+
+/// Pending answers to the share codes of one device at most: a newer answer ends the
+/// oldest (`expired`), and `GET /v1/account/peers/pending` gives at most this many.
+pub const PENDING_PER_DEVICE: u64 = 8;
+/// Requests of one device to the routes of this module in one minute at most (429
+/// `rate_limited` with `Retry-After`).
+pub const PEER_CALLS_PER_MINUTE: u32 = 60;
+/// The window of `PEER_CALLS_PER_MINUTE`, in seconds.
+pub const PEER_CALL_WINDOW_SECS: u64 = 60;
+/// Devices counted at once at most (the live account tokens of the relay are at most
+/// `account::MAX_TOKENS`); a new device past it is 503 `busy` until a window ends.
+pub const PEER_CALL_DEVICES: usize = 100_000;
+
+/// The requests of each device to the routes of section 16 in fixed windows of
+/// `PEER_CALL_WINDOW_SECS` that start at its first request. In memory only: a restart
+/// resets them (and ends every account token).
+#[derive(Debug, Default)]
+pub struct PeerCalls {
+    windows: Mutex<HashMap<String, (u64, u32)>>,
+}
+
+/// A request that `PeerCalls` refused: the error and the seconds of its `Retry-After`.
+#[derive(Debug)]
+pub struct PeerCallRefused {
+    pub error: RelayError,
+    pub retry_after: u64,
+}
+
+impl PeerCalls {
+    /// Counts one request of `device` at `now`: refused with 429 `rate_limited` over
+    /// `PEER_CALLS_PER_MINUTE` in its window (until the window ends), and with 503 `busy`
+    /// for a new device while `PEER_CALL_DEVICES` windows are open.
+    pub fn take(&self, device: &str, now: u64) -> Result<(), PeerCallRefused> {
+        let mut windows = self.windows.lock().unwrap_or_else(PoisonError::into_inner);
+        let ended = |start: u64| now >= start.saturating_add(PEER_CALL_WINDOW_SECS);
+        if !windows.contains_key(device) && windows.len() >= PEER_CALL_DEVICES {
+            windows.retain(|_, (start, _)| !ended(*start));
+            if windows.len() >= PEER_CALL_DEVICES {
+                return Err(PeerCallRefused {
+                    error: crate::server::account::busy(
+                        "The relay counts too many devices now. Try again in a minute.",
+                    ),
+                    retry_after: PEER_CALL_WINDOW_SECS,
+                });
+            }
+        }
+        let window = windows.entry(device.to_owned()).or_insert((now, 0));
+        if ended(window.0) {
+            *window = (now, 0);
+        }
+        if window.1 >= PEER_CALLS_PER_MINUTE {
+            return Err(PeerCallRefused {
+                error: RelayError::new(
+                    codes::RATE_LIMITED,
+                    "This device asked too often about shared vaults. Try again in a minute.",
+                ),
+                retry_after: window
+                    .0
+                    .saturating_add(PEER_CALL_WINDOW_SECS)
+                    .saturating_sub(now)
+                    .max(1),
+            });
+        }
+        window.1 += 1;
+        Ok(())
+    }
+}
 
 /// The routes of section 16 below `/v1/account`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -287,13 +361,18 @@ fn store_owner(conn: &Connection, team: &TeamId) -> RelayResult<String> {
         .ok_or_else(|| RelayError::not_found("vault store"))
 }
 
-/// Whether the plan of `account` allows sharing: an entitled Family or Team plan.
+/// Whether `plan` allows sharing: an entitled Family or Team plan.
+fn allows_sharing(plan: &PlanView) -> bool {
+    plan.entitled && matches!(plan.plan.as_deref(), Some("family" | "team"))
+}
+
+/// Whether the plan of `account` allows sharing.
 fn shares_plan(hub: &Hub, account: &str, now: u64) -> RelayResult<bool> {
     let plan = hub
         .accounts
         .plans()
         .plan(&hub.directory.store, account, now)?;
-    Ok(plan.entitled && matches!(plan.plan.as_deref(), Some("family" | "team")))
+    Ok(allows_sharing(&plan))
 }
 
 /// Whether `a` and `b` are active members of one group.
@@ -301,6 +380,48 @@ fn same_group(hub: &Hub, a: &str, b: &str, now: u64) -> RelayResult<bool> {
     hub.accounts
         .groups()
         .share_group(&hub.directory.store, a, b, now)
+}
+
+/// The group check again on `tx`, the transaction of the change it guards, when the seam
+/// reads on a transaction (`Groups::share_group_on`): a removal from the group that
+/// committed after the check before the transaction refuses the change (403
+/// `not_in_group`).
+fn same_group_on(hub: &Hub, tx: &Connection, a: &str, b: &str, now: u64) -> RelayResult<()> {
+    if hub.accounts.groups().share_group_on(tx, a, b, now)? == Some(false) {
+        return Err(not_in_group());
+    }
+    Ok(())
+}
+
+/// The plan check of a `share` again on `tx`, when the seam reads on a transaction
+/// (`Plans::plan_on`; 403 `plan_required`).
+fn shares_plan_on(hub: &Hub, tx: &Connection, accounts: [&str; 2], now: u64) -> RelayResult<()> {
+    let plans = hub.accounts.plans();
+    for account in accounts {
+        if plans
+            .plan_on(tx, account, now)?
+            .is_some_and(|plan| !allows_sharing(&plan))
+        {
+            return Err(plan_required());
+        }
+    }
+    Ok(())
+}
+
+/// A removal of `member` from its group (in its transaction `tx`): every `share` that
+/// names `member` is void at Connect from the head of its owner's list on
+/// (`account_share_void`), so after a new admission only a newer `share` gives `member`'s
+/// devices a store (`account::share_active`). The lists stay as they are: a client sees
+/// the share, and Connect counts it for nothing.
+pub(crate) fn void_shares_naming(tx: &Connection, member: &str, now: u64) -> RelayResult<usize> {
+    tx.execute(
+        "INSERT INTO account_share_void (account_id, peer_account, version, created_at) \
+         SELECT l.account_id, ?1, (SELECT max(h.version) FROM account_list h WHERE h.account_id = l.account_id), ?2 \
+         FROM account_list l WHERE l.peer_account = ?1 AND l.op = 'share' GROUP BY l.account_id \
+         ON CONFLICT(account_id, peer_account) DO UPDATE SET version = excluded.version, created_at = excluded.created_at",
+        params![member, to_i(now)],
+    )
+    .map_err(db)
 }
 
 /// The store rows of the devices of `account` in `team`, queued for removal in `tx`.
@@ -341,11 +462,13 @@ fn queue_account_removals(
 
 /// `POST /v1/account/list`: an entry of section 16, signed by the calling device at the
 /// version after the head. In this order: the shape (400), the group and the plan of a
-/// `peer`, `share`, or `join` (403 `not_in_group`, 403 `plan_required`), then in one
+/// `peer`, `share`, or `join` (403 `not_in_group`, 403 `plan_required`; read before the
+/// transaction and again in it, where the seams read on a transaction), then in one
 /// transaction the version and the room (409, 403 `account_limit`), the signer (401 for a
 /// device that is not in the list), the signature (400), the rules of section 16 (409),
-/// and the conditions of each op; then the entry, and for an `unshare` or a `leave` the
-/// removal of the store rows. Nothing is written on a refusal.
+/// and the conditions of each op; then the entry, for a `join` the share it follows
+/// (`account_join_share`), and for an `unshare` or a `leave` the removal of the store
+/// rows. Nothing is written on a refusal.
 fn append(
     hub: &Hub,
     caller: &AccountCaller,
@@ -399,6 +522,12 @@ fn append(
     }
     let origin = hub.config.public_url.clone();
     let (removals, version) = hub.directory.store.tx(|tx| {
+        if matches!(op, ListOp::Peer | ListOp::Share | ListOp::Join) {
+            same_group_on(hub, tx, &caller.account, peer, now)?;
+        }
+        if op == ListOp::Share {
+            shares_plan_on(hub, tx, [&caller.account, peer], now)?;
+        }
         let previous = next_entry(tx, caller, request.version, op, &caller.public_key)?;
         let root_b64 = root.as_ref().map(|key| encode_b64(key));
         let message = device::share_list_message(
@@ -460,6 +589,19 @@ fn append(
             ],
         )
         .map_err(db)?;
+        if let (ListOp::Join, Some(team)) = (op, team.as_ref()) {
+            // The share that this join follows: the member's devices sign in to the store
+            // only while it is the active one (`account::store_device_live`).
+            tx.execute(
+                "INSERT INTO account_join_share (account_id, team_id, share_version, created_at) \
+                 SELECT ?1, ?2, max(version), ?4 FROM account_list \
+                 WHERE account_id = ?3 AND team_id = ?2 AND peer_account = ?1 AND op = 'share' \
+                 ON CONFLICT(account_id, team_id) DO UPDATE SET share_version = excluded.share_version, \
+                 created_at = excluded.created_at",
+                params![caller.account, team.as_str(), peer, to_i(now)],
+            )
+            .map_err(db)?;
+        }
         if op == ListOp::Peer {
             // The answer of that account to a share code of this account is confirmed.
             tx.execute(
@@ -488,8 +630,9 @@ fn append(
 // ---- The ceremony (section 16.2). ----
 
 /// `POST /v1/account/peers/link`: the hash of a share code that the calling device made
-/// for the member `account_id` of its group (403 `not_in_group` otherwise). One use, 600
-/// s, at most 3 open codes of one device.
+/// for the member `account_id` of its group (403 `not_in_group` otherwise, also in the
+/// transaction). One use, 600 s, at most 3 codes of one device that have not expired,
+/// used or not (403 `account_limit`).
 fn link(
     hub: &Hub,
     caller: &AccountCaller,
@@ -509,15 +652,19 @@ fn link(
     }
     let expires_at = now.saturating_add(LINK_SECS);
     let link_id = hub.directory.store.tx(|tx| {
+        same_group_on(hub, tx, &caller.account, &request.account_id, now)?;
+        // A used code counts until it expires: its answer waits for the confirmation.
         let open: i64 = tx
             .query_row(
-                "SELECT count(*) FROM account_peer_link WHERE device_id = ?1 AND used_at IS NULL AND expires_at > ?2",
+                "SELECT count(*) FROM account_peer_link WHERE device_id = ?1 AND expires_at > ?2",
                 params![caller.device, to_i(now)],
                 |row| row.get(0),
             )
             .map_err(db)?;
         if to_u(open) >= LINKS_PER_DEVICE {
-            return Err(account_limit("This device has 3 open share codes. Wait until one ends."));
+            return Err(account_limit(
+                "This device made 3 share codes in the last 10 minutes. Wait until one ends.",
+            ));
         }
         let taken: bool = tx
             .query_row(
@@ -575,8 +722,9 @@ fn inviter(conn: &Connection, link_id: i64) -> RelayResult<PeerInviter> {
 /// answers it, with its signature over the `apassy-connect peer-join v1` message of its
 /// account, its root, and its key (400 otherwise). An unknown, used, or expired code, or
 /// a code for another account, is 403 `forbidden`; the same body again answers the same
-/// result. The answer names the device that made the code and carries its account's
-/// device list.
+/// result. A new answer ends the oldest pending answers to the codes of the same device
+/// beyond `PENDING_PER_DEVICE`. The answer names the device that made the code and
+/// carries its account's device list, read after the transaction.
 fn join(
     hub: &Hub,
     caller: &AccountCaller,
@@ -613,7 +761,8 @@ fn join(
         return Err(not_in_group());
     }
     let hash = body_hash(request)?;
-    let joined = hub.directory.store.tx(|tx| {
+    let (join_id, inviter, expires_at) = hub.directory.store.tx(|tx| {
+        same_group_on(hub, tx, &caller.account, &request.account_id, now)?;
         let earlier: Option<(i64, i64, i64)> = tx
             .query_row(
                 "SELECT id, link_id, expires_at FROM account_peer_join WHERE body_hash = ?1 AND device_id = ?2",
@@ -650,6 +799,16 @@ fn join(
                 )
                 .map_err(db)?;
                 let join_id = tx.last_insert_rowid();
+                // At most `PENDING_PER_DEVICE` pending answers to the codes of the device
+                // that made this one: the oldest end first.
+                tx.execute(
+                    "UPDATE account_peer_join SET state = 'expired', decided_at = ?2 WHERE id IN \
+                     (SELECT j.id FROM account_peer_join j JOIN account_peer_link l ON l.id = j.link_id \
+                      WHERE l.device_id = (SELECT device_id FROM account_peer_link WHERE id = ?1) \
+                      AND j.state = 'pending' AND j.expires_at > ?2 ORDER BY j.id DESC LIMIT -1 OFFSET ?3)",
+                    params![link_id, to_i(now), to_i(PENDING_PER_DEVICE)],
+                )
+                .map_err(db)?;
                 hub.directory.audit.write_on(
                     tx,
                     now,
@@ -661,14 +820,18 @@ fn join(
                 (join_id, link_id, expires_at)
             }
         };
-        Ok(PeerJoined {
-            join_id: to_u(join_id),
-            inviter: inviter(tx, link_id)?,
-            expires_at: to_u(expires_at),
-            device_list: list_entries(tx, &request.account_id)?,
-        })
+        Ok((join_id, inviter(tx, link_id)?, expires_at))
     })?;
-    to_value(&joined)
+    let device_list = hub
+        .directory
+        .store
+        .with(|conn| list_entries(conn, &request.account_id))?;
+    to_value(&PeerJoined {
+        join_id: to_u(join_id),
+        inviter,
+        expires_at: to_u(expires_at),
+        device_list,
+    })
 }
 
 /// One pending answer as `relay.db` holds it: the answer, the code, the account and its
@@ -676,19 +839,22 @@ fn join(
 type PendingRow = (i64, i64, String, String, Vec<u8>, Vec<u8>, i64, i64);
 
 /// `GET /v1/account/peers/pending`: the pending answers to the share codes that this
-/// device made, each with the answering account's device list.
+/// device made (at most `PENDING_PER_DEVICE`, the newest, in their order), each with the
+/// answering account's device list. The lists are read after the answers, each account's
+/// once and each in a lock of its own.
 fn pending(hub: &Hub, caller: &AccountCaller, now: u64) -> RelayResult<Value> {
-    let answers = hub.directory.store.with(|conn| {
-        let rows: Vec<PendingRow> = {
-            let mut statement = conn
-                .prepare(
-                    "SELECT j.id, j.link_id, j.account_id, a.name, j.public_key, j.signature, j.created_at, j.expires_at \
-                     FROM account_peer_join j JOIN account_peer_link l ON l.id = j.link_id JOIN account a ON a.id = j.account_id \
-                     WHERE l.device_id = ?1 AND j.state = 'pending' AND j.expires_at > ?2 ORDER BY j.id",
-                )
-                .map_err(db)?;
-            statement
-                .query_map(params![caller.device, to_i(now)], |row| {
+    let mut rows: Vec<PendingRow> = hub.directory.store.with(|conn| {
+        let mut statement = conn
+            .prepare(
+                "SELECT j.id, j.link_id, j.account_id, a.name, j.public_key, j.signature, j.created_at, j.expires_at \
+                 FROM account_peer_join j JOIN account_peer_link l ON l.id = j.link_id JOIN account a ON a.id = j.account_id \
+                 WHERE l.device_id = ?1 AND j.state = 'pending' AND j.expires_at > ?2 ORDER BY j.id DESC LIMIT ?3",
+            )
+            .map_err(db)?;
+        statement
+            .query_map(
+                params![caller.device, to_i(now), to_i(PENDING_PER_DEVICE)],
+                |row| {
                     Ok((
                         row.get(0)?,
                         row.get(1)?,
@@ -699,27 +865,39 @@ fn pending(hub: &Hub, caller: &AccountCaller, now: u64) -> RelayResult<Value> {
                         row.get(6)?,
                         row.get(7)?,
                     ))
-                })
-                .map_err(db)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(db)?
-        };
-        rows.into_iter()
-            .map(|(join_id, link_id, account, name, key, signature, created_at, expires_at)| {
-                Ok(PeerPending {
-                    join_id: to_u(join_id),
-                    link_id: to_u(link_id),
-                    device_list: list_entries(conn, &account)?,
-                    account_id: account,
-                    name,
-                    public_key: encode_b64(&key),
-                    signature: encode_b64(&signature),
-                    created_at: to_u(created_at),
-                    expires_at: to_u(expires_at),
-                })
-            })
-            .collect::<RelayResult<Vec<_>>>()
+                },
+            )
+            .map_err(db)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(db)
     })?;
+    rows.reverse();
+    let mut lists: HashMap<String, Vec<crate::api::ListEntry>> = HashMap::new();
+    let mut answers = Vec::with_capacity(rows.len());
+    for (join_id, link_id, account, name, key, signature, created_at, expires_at) in rows {
+        let device_list = match lists.get(&account) {
+            Some(list) => list.clone(),
+            None => {
+                let list = hub
+                    .directory
+                    .store
+                    .with(|conn| list_entries(conn, &account))?;
+                lists.insert(account.clone(), list.clone());
+                list
+            }
+        };
+        answers.push(PeerPending {
+            join_id: to_u(join_id),
+            link_id: to_u(link_id),
+            device_list,
+            account_id: account,
+            name,
+            public_key: encode_b64(&key),
+            signature: encode_b64(&signature),
+            created_at: to_u(created_at),
+            expires_at: to_u(expires_at),
+        });
+    }
     to_value(&answers)
 }
 
@@ -794,7 +972,8 @@ fn join_end(hub: &Hub, caller: &AccountCaller, join_id: u64, now: u64) -> RelayR
 
 /// `GET /v1/account/peers/{account_id}`: another account of the caller's group (403
 /// `not_in_group` outside one), with its name, its live device rows, and its device list
-/// from version 1. Which of the rows is a device of it is the list's to say.
+/// from version 1 (with its peers and the stores it shares and joins), read in a lock of
+/// its own. Which of the rows is a device of it is the list's to say.
 fn view(hub: &Hub, caller: &AccountCaller, account: &str, now: u64) -> RelayResult<Value> {
     if account == caller.account {
         return Err(RelayError::invalid(
@@ -804,7 +983,7 @@ fn view(hub: &Hub, caller: &AccountCaller, account: &str, now: u64) -> RelayResu
     if !same_group(hub, &caller.account, account, now)? {
         return Err(not_in_group());
     }
-    let view = hub.directory.store.with(|conn| {
+    let (name, devices) = hub.directory.store.with(|conn| {
         let name: String = conn
             .query_row(
                 "SELECT name FROM account WHERE id = ?1",
@@ -834,14 +1013,18 @@ fn view(hub: &Hub, caller: &AccountCaller, account: &str, now: u64) -> RelayResu
             .map_err(db)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(db)?;
-        Ok(PeerView {
-            account_id: account.to_string(),
-            name,
-            devices,
-            device_list: list_entries(conn, account)?,
-        })
+        Ok((name, devices))
     })?;
-    to_value(&view)
+    let device_list = hub
+        .directory
+        .store
+        .with(|conn| list_entries(conn, account))?;
+    to_value(&PeerView {
+        account_id: account.to_string(),
+        name,
+        devices,
+        device_list,
+    })
 }
 
 #[cfg(test)]

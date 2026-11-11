@@ -108,6 +108,10 @@ const RECOVER_PATH = "/v1/account/recover";
 const TUNNEL_PREFIX = "/v1/tunnel/";
 /** The dial of a node (connect-tunnel-v1 section 3.3), limited per client. */
 const DIAL_PREFIX = "/v1/tunnel/dial/";
+/** The entries of a device list that name another account (connect-account-v1 section 16.3). */
+const ACCOUNT_LIST_PATH = "/v1/account/list";
+/** The share codes and the other accounts of a family or team (sections 16.2 and 16.4). */
+const PEERS_PREFIX = "/v1/account/peers/";
 /** The WebSocket of a node (connect-tunnel-v1 section 3.2), limited apart from the dials. */
 const NODE_PATH = "/v1/tunnel/node";
 
@@ -395,8 +399,13 @@ export default {
     // and the node still connects.
     const isDial = request.method === "GET" && url.pathname.startsWith(DIAL_PREFIX);
     const isNode = request.method === "GET" && url.pathname === NODE_PATH;
+    // The routes of shared vaults (connect-account-v1 section 16), every method, in a budget
+    // of AUTH_LIMITER of their own (key `peers:` and the /64 or IPv4 address): the polling of
+    // `GET /v1/account/peers/pending` never uses up the sign-in budget of that address. The
+    // relay also limits each device (60 a minute).
+    const isPeers = url.pathname === ACCOUNT_LIST_PATH || url.pathname.startsWith(PEERS_PREFIX);
     const limiter = limiterFor(request.method, url.pathname, env);
-    if (limiter || isConnect || isAccount || isDial || isNode) {
+    if (limiter || isConnect || isAccount || isDial || isNode || isPeers) {
       // Fail open if a binding is missing or fails: the relay itself checks codes, keys, and
       // signatures; this limit is a guard against floods, not an authorization check.
       // For Connect the relay also caps the teams of a day for everyone.
@@ -409,7 +418,9 @@ export default {
             ? [[env.TUNNEL_LIMITER, connectKey(address)]]
             : isNode
               ? [[env.TUNNEL_NODE_LIMITER, connectKey(address)]]
-              : [[limiter, address]];
+              : isPeers
+                ? [[env.AUTH_LIMITER, `peers:${connectKey(address)}`]]
+                : [[limiter, address]];
       for (const [guard, key] of guards) {
         if (!guard) continue;
         try {
