@@ -711,8 +711,14 @@ impl Activity {
 pub trait Conn: Read + Write + Send + Sized + 'static {
     /// A second handle to the same connection.
     fn try_clone(&self) -> io::Result<Self>;
-    /// `Write`: no more bytes go to the peer. `Both`: the connection ends.
+    /// `Write`: no more bytes go to the peer. `Both`: the connection ends now (bytes not
+    /// yet delivered may be lost).
     fn shutdown(&self, how: Shutdown) -> io::Result<()>;
+    /// The last bytes are written: the connection ends after them reach the peer. On TCP
+    /// this is `shutdown(Both)`, which still sends the queued bytes before the FIN.
+    fn finish(&self) -> io::Result<()> {
+        self.shutdown(Shutdown::Both)
+    }
     fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()>;
     fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()>;
 }
@@ -737,8 +743,10 @@ impl Conn for TcpStream {
 /// The same handshake deadline, connection to the loopback `target`, pump, and idle limit
 /// as a tailnet connection. There is no peer check and no per-peer slot: Connect tells
 /// the node nothing about the caller, who authenticates inside TLS as on the tailnet, and
-/// the tunnel has its own stream limits. `stop` ends the pump (the tunnel stops). It
-/// returns when the connection ended.
+/// the tunnel has its own stream limits. While it pumps, the connection to the target is
+/// written down as a tunnel stream in [`front_peers`], so the relay never reads a header
+/// of the client for its failed-auth counts (`X-Forwarded-For` comes from the client
+/// here). `stop` ends the pump (the tunnel stops). It returns when the connection ended.
 pub fn serve_connection<C: Conn>(
     mut conn: C,
     config: Arc<ServerConfig>,
@@ -764,10 +772,15 @@ pub fn serve_connection<C: Conn>(
         let mut out = Vec::new();
         tls.outgoing(&mut out);
         let _ = conn.write_all(&out);
-        let _ = conn.shutdown(Shutdown::Both);
+        let _ = conn.finish();
         return;
     };
     let _ = target.set_nodelay(true);
+    // Before the first byte to the target: the relay reads the request only after it.
+    let _entry = match (target.local_addr(), target.peer_addr()) {
+        (Ok(source), Ok(listener)) => Some(front_peers::register_tunnel(source, listener)),
+        _ => None,
+    };
     pump(limits, stop, conn, target, tls, early);
 }
 
@@ -1128,7 +1141,7 @@ fn down_pump<C: Conn>(
                 let mut side = locked(peer);
                 side.tls.close();
                 let _ = side.flush();
-                let _ = side.socket.shutdown(Shutdown::Both);
+                let _ = side.socket.finish();
                 return;
             }
             Ok(read) => read,

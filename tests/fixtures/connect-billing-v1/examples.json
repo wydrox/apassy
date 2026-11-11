@@ -162,6 +162,14 @@
         [
           "cancel_url",
           "https://apassy.wyderka.cc/connect/cancel"
+        ],
+        [
+          "customer",
+          "cus_SynthAcc0001"
+        ],
+        [
+          "customer_update[address]",
+          "auto"
         ]
       ]
     },

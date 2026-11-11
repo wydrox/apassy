@@ -51,6 +51,7 @@ use apassy::broker::approvals::{OwnerCheck, OwnerGate};
 use apassy::connect::{ConnectAccount, ConnectClient, MemoryKeyStore, account_file};
 use apassy::contracts::CredentialKind;
 use apassy::net::certificate::NodeCertificate;
+use apassy::net::sealed_key::{CONNECT_INFO, SealKey};
 use apassy::net::tls_front::{Front, FrontHandle, FrontLimits, FrontOptions};
 use apassy::node::tunnel::{
     ConnectSetup, Failure, SystemClock, Targets, Tunnel, TunnelAuth, TunnelHandle, TunnelOptions,
@@ -533,7 +534,9 @@ impl Node {
             clock: Arc::new(SystemClock::default()),
             ping_interval: ping,
             idle_limit: idle,
+            close_grace: Duration::from_secs(10),
             limits: limits(),
+            zone: ZONE.to_owned(),
         };
         let handle = Tunnel::start(TunnelOptions {
             setup,
@@ -544,6 +547,7 @@ impl Node {
                 device: Some(self.dial.addr),
                 public: None,
             },
+            seal: Arc::new(SealKey::derive(&[3u8; 32], CONNECT_INFO).expect("seal")),
         })
         .expect("tunnel");
         wait_until("the node's tunnel is on", || {

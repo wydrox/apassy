@@ -155,13 +155,32 @@ the contracts allow, and it becomes true when units C1 to C5 ship. The security 
 | The email | A copy of the Stripe customer's email, for the devices list and support | — | Connect sends no mail in stage 7. Account deletion deletes the copy |
 | Stripe (payment processor) | The customer: email, billing address, payment method, tax id; subscriptions and invoices (kept for legal retention) | The checkout and portal sessions, and the account id in `client_reference_id` and metadata | A device key, a token, a vault id, a device name, a value. Connect never sees card data or the address |
 | The webhook | Event ids for 30 days | Stripe events, checked with the endpoint secret | A forged or replayed event changes nothing: signature, 300 s tolerance, idempotency by event id |
-| The tunnel (byte relay) | Nodes and grants; for each account and month the counts of dials and streams and the bytes | TLS records, sizes, times; the client address of a WebSocket in memory | Requests, tokens, values: TLS ends on the node, pinned for devices. It logs no stream content |
-| The SNI ingress (ports 443 and 80 of the Connect host, DNS-only, not through Cloudflare) | — | The server name `<node>.node.apassy.wyderka.cc`, the client address in memory only (never logged), the TLS records, and the plain ACME HTTP-01 challenge requests on port 80 | The cloud agent's requests, its token, session keys, placeholders, values: TLS ends on the node with its own Let's Encrypt certificate, whose key never leaves the node |
+| The tunnel (byte relay) | Nodes and grants; for each account and month the counts of dials and streams and the bytes (also apart for the ingress and for each other account that dials its nodes), 13 months | TLS records, sizes, times; the client address of a WebSocket in memory | A device's requests, tokens, values: its TLS ends on the node and is pinned to the node's own certificate, which no CA issues. It logs no stream content |
+| The SNI ingress (ports 443 and 80 of the Connect host, DNS-only, not through Cloudflare) | — | The server name `<node>.node.apassy.wyderka.cc`, the client address in memory only (never logged), the TLS records, and the plain ACME HTTP-01 challenge requests on port 80 | Run as specified, the cloud agent's requests, its token, session keys, placeholders, values: TLS ends on the node with its own Let's Encrypt certificate, whose key never leaves the node. This holds only as long as nobody else gets a certificate for the node's public name (below) |
 | Certificate Transparency logs | The node certificates | The public node names, for ever, once a node gets a certificate | Traffic |
 | The Cloudflare Worker (edge) | — | The account and billing requests (public keys, names, signed messages, Stripe events) and the WebSocket upgrades; after an upgrade, the tunnel's TLS records | Values, vault contents |
 | The entitlement token | The Mac keeps it in memory (24 hours) | Account id, plan, group, features, times; it is signed by Connect | It is not a credential for Connect. A service accepts it only for the account of the device that signed in to that service |
 | Bouncer brain service, through Connect (ADR 0035; the row above) | Its own token after the device sign-in `apassy-bouncer sign-in v1`; the entitlement token | What the row above says; from Connect only `account`, the two entitlements, and `revoked` for a device (I-3), and `revoke` and `forget` events (I-4) | The account token: the Mac never sends it to the brain (I-2). Connect does not call the brain for a request |
 | Fallback F1 (not chosen) | — | If the owner chose it, Cloudflare and Connect would end the cloud agent's TLS and see its requests (the bearer token, placeholders, session keys), never values | Not in effect. Choosing it changes this table and the Funnel parity of the ingress row |
+
+**The public name of a node is Web PKI trust, as a Tailscale Funnel name.** A cloud agent checks the
+node's public certificate as any HTTPS client checks a name. A CA issues a certificate for
+`<node>.node.apassy.wyderka.cc` to whoever passes its challenge for that name. Whoever operates
+Connect (it answers port 80 of those names and runs the zone's records), or whoever controls the DNS
+of the zone or that port 80, can therefore obtain a certificate of their own for a node's public name,
+end a cloud agent's TLS with it, and see that agent's requests, its token, session keys, and the
+placeholders. It is the same trust that Tailscale Funnel needs for a Funnel name. Such a certificate is
+visible in the Certificate Transparency logs. The device route is different: a device dials the node
+through Connect with TLS pinned to the node's own certificate (the pin of the pairing), so neither
+Connect nor a CA can stand in for the node there.
+
+**What a `device` stream reaches.** A dial reaches the node's device routes (`Scope::Tailnet`, relay
+SPEC 32.1 and 35.3), the same routes as the tailnet. Every device of the node's account, every device
+of an account with a grant, and Connect itself (which can open any stream on a node's WebSocket) can
+open one. TLS has no client authentication there, so each route's own token decides: without one only
+the sign-in steps, a device link (a one-use link code and the owner's confirmation with the safety
+words), and the health check answer. Through a stream of the tunnel the node refuses the routes of team
+codes, invites, and joins (`404`), which no device needs through Connect.
 
 The iPhone shows the plan only; it has no purchase, link, or price (connect-billing-v1 section 10).
 

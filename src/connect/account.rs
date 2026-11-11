@@ -1327,14 +1327,15 @@ impl ConnectAccount {
     /// `POST /v1/account/checkout` (section 4): a Stripe Checkout session for `request`.
     /// The caller opens [`CheckoutAnswer::url`] in the default browser and polls
     /// [`Self::view`] every 3 s until the plan is entitled; the browser's return changes
-    /// nothing. A URL that is not `https://` is [`ConnectError::BadAnswer`]. No owner
-    /// check: a checkout gives no authority over a vault or a device.
+    /// nothing. A URL that is not a page of `https://checkout.stripe.com/` is
+    /// [`ConnectError::BadAnswer`]. No owner check: a checkout gives no authority over a
+    /// vault or a device.
     pub fn checkout(&mut self, request: &CheckoutRequest) -> Result<CheckoutAnswer, ConnectError> {
         if !valid_checkout(request) {
             return Err(ConnectError::Invalid);
         }
         let answer = self.with_token(|client, token| client.checkout(token, request))?;
-        if !browser_url(&answer.url) || answer.session_id.trim().is_empty() {
+        if !stripe_page(&answer.url, CHECKOUT_ORIGIN) || answer.session_id.trim().is_empty() {
             return Err(ConnectError::BadAnswer);
         }
         Ok(answer)
@@ -1342,10 +1343,11 @@ impl ConnectAccount {
 
     /// `POST /v1/account/portal` (section 5): the Stripe Customer Portal of the account
     /// that pays. It needs no owner check (section 5): the portal changes nothing in
-    /// Apassy, and Stripe confirms its own changes.
+    /// Apassy, and Stripe confirms its own changes. A URL that is not a page of
+    /// `https://billing.stripe.com/` is [`ConnectError::BadAnswer`].
     pub fn portal(&mut self) -> Result<PortalAnswer, ConnectError> {
         let answer = self.with_token(|client, token| client.portal(token))?;
-        if !browser_url(&answer.url) {
+        if !stripe_page(&answer.url, PORTAL_ORIGIN) {
             return Err(ConnectError::BadAnswer);
         }
         Ok(answer)
@@ -1483,8 +1485,23 @@ impl ConnectAccount {
     }
 }
 
-/// A URL that the Mac opens in the default browser: `https://`, a host, and no space or
-/// control character. Connect sends the Checkout, Portal, and invite URLs.
+/// The only origin of a Checkout Session the Mac opens (connect-billing-v1 section 4).
+const CHECKOUT_ORIGIN: &str = "https://checkout.stripe.com/";
+/// The only origin of a Customer Portal session the Mac opens (section 5).
+const PORTAL_ORIGIN: &str = "https://billing.stripe.com/";
+
+/// A Stripe page that the Mac opens in the default browser: `origin` itself followed by a
+/// path, at most 4096 bytes, no space or control character. Another host, a longer host
+/// that starts with Stripe's, or `http://` is refused.
+fn stripe_page(url: &str, origin: &str) -> bool {
+    url.len() <= 4096
+        && url
+            .strip_prefix(origin)
+            .is_some_and(|path| !path.is_empty())
+        && !url.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
+/// An invite link the Mac shows: `https://`, a host, and no space or control character.
 fn browser_url(url: &str) -> bool {
     url.len() <= 4096
         && url
@@ -1870,6 +1887,34 @@ mod tests {
         assert!(!valid_token(
             "apassy_act_acc_k7m2q4x3ca_ef",
             "acc_k7m2q4x3ca"
+        ));
+    }
+
+    #[test]
+    fn only_stripe_pages_open_for_checkout_and_the_portal() {
+        assert!(stripe_page(
+            "https://checkout.stripe.com/c/pay/cs_test_a1",
+            CHECKOUT_ORIGIN
+        ));
+        assert!(stripe_page(
+            "https://billing.stripe.com/p/session/test_a1",
+            PORTAL_ORIGIN
+        ));
+        for bad in [
+            "https://checkout.stripe.com/",
+            "https://checkout.stripe.com.evil.example/c/pay/cs_1",
+            "https://evil.example/c/pay/cs_1",
+            "http://checkout.stripe.com/c/pay/cs_1",
+            "https://checkout.stripe.com@evil.example/c/pay/cs_1",
+            "https://billing.stripe.com/p/session/test_a1",
+            "https://checkout.stripe.com/c/pay/cs 1",
+            "http://127.0.0.1:4242/c/pay/cs_1",
+        ] {
+            assert!(!stripe_page(bad, CHECKOUT_ORIGIN), "{bad}");
+        }
+        assert!(!stripe_page(
+            "https://checkout.stripe.com/c/pay/cs_1",
+            PORTAL_ORIGIN
         ));
     }
 

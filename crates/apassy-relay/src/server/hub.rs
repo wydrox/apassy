@@ -1696,6 +1696,7 @@ impl Hub {
         }
         Ok(
             json!({"ready": ready, "teams": teams, "push": self.push.status(),
+            "billing": crate::server::billing_store::readiness(self),
             "connect": {"held": held, "capacity": self.config.connect_teams_max,
                 "high_water": (held as u64).saturating_mul(10) >= self.config.connect_teams_max.saturating_mul(8)}}),
         )

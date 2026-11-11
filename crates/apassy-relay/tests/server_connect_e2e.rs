@@ -132,9 +132,15 @@ fn connect_works_end_to_end_with_the_app_client() {
     );
     assert_eq!(owner.view().unwrap().plan.status, "none");
 
-    // 3. Stripe's signed webhooks: the plan becomes active in the app's view.
+    // 3. Stripe's signed webhooks: the plan becomes active in the app's view. The
+    // customer is the one Connect made before the session and named in it.
     let tail = &owner_id[4..];
-    let (customer, subscription) = (format!("cus_{tail}"), format!("sub_{tail}"));
+    let customer = session
+        .field("customer")
+        .expect("the session's customer")
+        .to_string();
+    assert!(customer.starts_with("cus_"));
+    let subscription = format!("sub_{tail}");
     c.deliver_ok(&c.checkout_completed(&owner_id, &customer, &subscription));
     c.deliver_ok(&c.subscription_event(
         "created",

@@ -178,17 +178,7 @@ impl ClientConnection {
             && !headers.iter().any(|h: &crate::Header| {
                 h.field.equiv("Content-Length") || h.field.equiv("Transfer-Encoding")
             });
-        if self.deadline.is_some()
-            && !bodyless_get
-            && headers.iter().any(|h: &crate::Header| {
-                h.field.equiv("Upgrade")
-                    || (h.field.equiv("Connection")
-                        && h.value
-                            .as_str()
-                            .split(',')
-                            .any(|token| token.trim().eq_ignore_ascii_case("upgrade")))
-            })
-        {
+        if self.deadline.is_some() && !bodyless_get && crate::common::asks_upgrade(&headers) {
             // Relay endpoints upgrade only a body-less GET. Upstream's upgrade reader
             // ignores Content-Length and Transfer-Encoding, so never select it otherwise.
             return Err(ReadError::WrongHeader(version));
@@ -318,10 +308,13 @@ impl Iterator for ClientConnection {
                 .map(|h| h.value.as_str());
 
             let lowercase = connection_header.map(|h| h.to_ascii_lowercase());
+            // Apassy: an upgrade is the one rule of the crate (`asks_upgrade`).
+            if crate::common::asks_upgrade(rq.headers()) {
+                self.no_more_requests = true;
+            }
 
             match lowercase {
                 Some(ref val) if val.contains("close") => self.no_more_requests = true,
-                Some(ref val) if val.contains("upgrade") => self.no_more_requests = true,
                 Some(ref val)
                     if !val.contains("keep-alive") && *rq.http_version() == HTTPVersion(1, 0) =>
                 {

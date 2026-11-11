@@ -8,6 +8,8 @@
 //! `#[path]`s.
 #![allow(dead_code)]
 
+use std::collections::HashMap;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -55,6 +57,9 @@ pub struct Connect {
     pub stripe: FakeStripe,
     /// `created` of the next synthetic event: strictly increasing, from now.
     clock: AtomicU64,
+    /// `created` of the newest delivered event of each subscription: the fake Stripe
+    /// answers its object to a read, as Stripe would.
+    stripe_state: Mutex<HashMap<String, u64>>,
 }
 
 /// An account device of a test.
@@ -81,10 +86,16 @@ pub fn start_with_config(edit: impl FnOnce(&mut RelayConfig)) -> Connect {
         },
         UpstreamOptions::default(),
     );
+    // The tests run the billing pass themselves (`billing_store::maintain`).
+    apassy_relay::server::billing_store::defer_background_pass(
+        &relay.hub(),
+        apassy_relay::now_unix(),
+    );
     Connect {
         relay,
         stripe,
         clock: AtomicU64::new(apassy_relay::now_unix()),
+        stripe_state: Mutex::new(HashMap::new()),
     }
 }
 
@@ -96,10 +107,15 @@ impl Connect {
     /// A handle of a relay started on its own (`relay::start_existing`) and the fake Stripe
     /// that its billing settings name.
     pub fn around(relay: TestRelay, stripe: FakeStripe) -> Self {
+        apassy_relay::server::billing_store::defer_background_pass(
+            &relay.hub(),
+            apassy_relay::now_unix(),
+        );
         Self {
             relay,
             stripe,
             clock: AtomicU64::new(apassy_relay::now_unix()),
+            stripe_state: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -231,13 +247,31 @@ impl Connect {
         granted["token"].as_str().unwrap().to_string()
     }
 
-    /// The next `created` time of a synthetic event.
+    /// The next `created` time of a synthetic event. The fake Stripe's clock (its `Date`
+    /// header) follows it, as Stripe's own clock is never behind its events.
     pub fn tick(&self) -> u64 {
-        self.clock.fetch_add(1, Ordering::Relaxed) + 1
+        let created = self.clock.fetch_add(1, Ordering::Relaxed) + 1;
+        self.stripe.set_date(Some(created));
+        created
     }
 
     /// Delivers `event` as Stripe does: the exact bytes with a `Stripe-Signature` of now.
+    /// A subscription event's object becomes the fake Stripe's state of it when it is the
+    /// newest of that subscription.
     pub fn deliver(&self, event: &Value) -> (u16, Value) {
+        if event["type"]
+            .as_str()
+            .is_some_and(|kind| kind.starts_with("customer.subscription."))
+            && let Some(id) = event["data"]["object"]["id"].as_str()
+        {
+            let created = event["created"].as_u64().unwrap_or(0);
+            let mut seen = self.stripe_state.lock().unwrap();
+            if seen.get(id).is_none_or(|last| created >= *last) {
+                seen.insert(id.to_string(), created);
+                self.stripe
+                    .put_subscription(event["data"]["object"].clone());
+            }
+        }
         let body = serde_json::to_vec(event).unwrap();
         self.deliver_bytes(
             &body,
@@ -313,11 +347,28 @@ impl Connect {
                        "price": {"id": "price_Synth", "lookup_key": lookup_key}}]}}}})
     }
 
+    /// The Stripe customer of `dev`: the one Connect made at its first checkout, else
+    /// `cus_<account tail>`.
+    /// Read through the relay's billing store, so it works for a plain `relay.db` too.
+    pub fn customer_of(&self, dev: &Dev) -> String {
+        use apassy_relay::server::billing::BillingStore;
+        let hub = self.relay.hub();
+        hub.billing()
+            .and_then(|billing| {
+                billing
+                    .store
+                    .transaction(|tx| tx.customer_of_account(&dev.account))
+                    .unwrap()
+            })
+            .map(|row| row.customer)
+            .unwrap_or_else(|| format!("cus_{}", &dev.account[4..]))
+    }
+
     /// A paid subscription: the checkout and the subscription's own `created` event.
     /// Answers the subscription id.
     pub fn subscribe(&self, dev: &Dev, lookup_key: &str, quantity: u32) -> String {
         let tail: String = dev.account[4..].to_string();
-        let customer = format!("cus_{tail}");
+        let customer = self.customer_of(dev);
         let subscription = format!("sub_{tail}");
         self.deliver_ok(&self.checkout_completed(&dev.account, &customer, &subscription));
         self.deliver_ok(&self.subscription_event(
@@ -343,12 +394,24 @@ impl Connect {
         self.deliver_ok(&self.subscription_event(
             kind,
             &dev.account,
-            &format!("cus_{tail}"),
+            &self.customer_of(dev),
             &format!("sub_{tail}"),
             lookup_key,
             quantity,
             status,
         ));
+    }
+
+    /// Moves the end of `subscription` to `ended_at`, in `relay.db` and in the fake
+    /// Stripe's object (Stripe's `ended_at` wins when the relay reads the subscription).
+    pub fn end_subscription_at(&self, subscription: &str, ended_at: u64) {
+        self.edit_directory(&format!(
+            "UPDATE stripe_subscription SET ended_at = {ended_at} WHERE subscription_id = '{subscription}'"
+        ));
+        if let Some(mut object) = self.stripe.subscription(subscription) {
+            object["ended_at"] = json!(ended_at);
+            self.stripe.put_subscription(object);
+        }
     }
 
     /// `GET /v1/account/plan` of `dev`.

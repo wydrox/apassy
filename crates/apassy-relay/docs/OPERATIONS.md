@@ -1795,9 +1795,12 @@ the master key and the edge secret, never in the compose file or the environment
 | `stripe-key` | A **restricted** key (`rk_live_…`; in a sandbox `rk_test_…`). The relay refuses a live secret key (`sk_live_…`). | `STRIPE_SECRET_KEY_FILE` |
 | `stripe-webhook-secret` | The signing secret of the webhook endpoint (`whsec_…`) | `STRIPE_WEBHOOK_SECRET_FILE` |
 
-The restricted key needs these permissions and no other: Checkout Sessions (write),
-Customer portal (write), Customers (read), Subscriptions (write: item quantity and
-cancel), Prices and Products (read), Events (read; for support and the sandbox job). To
+The restricted key needs these permissions and no other: Checkout Sessions (write: make,
+read back, and expire a session), Customer portal (write), Customers (write: the relay
+makes each account's customer before its first checkout), Subscriptions (write: item
+quantity and cancel; read: the maintenance pass reads a subscription before it deletes
+stores, and one whose period ended without an event), Prices and Products (read), Events
+(read; for support and the sandbox job). To
 rotate either secret: make the new one in the Stripe dashboard, replace the file, restart
 the relay, then revoke the old key (or roll the webhook secret with an overlap; Stripe
 signs with both while the old one lives, and the relay accepts any matching `v1`).
@@ -1826,6 +1829,13 @@ Settings › Billing › Customer portal, in the sandbox and the live account:
 - Payment methods: update on. Invoices: history on.
 - Subscriptions: switch plans on, products Connect Personal and Connect Family (both
   intervals); **quantity changes off** (people and seats change through Connect, SPEC 34.4).
+  A switch from Family to Personal ends the family's plan for its members (read-only, then
+  suspended; their stores are never deleted for it); the owner pays Personal from the
+  switch. A switch back to Family restores the family.
+- Settings › Billing › Subscriptions and emails › Manage failed payments: after the last
+  retry, **cancel the subscription** or **mark it as unpaid**. A subscription that Stripe
+  leaves `past_due` keeps its stores: the relay deletes stores only when Stripe also shows
+  the subscription ended.
 - Business information: the terms and privacy URLs of the site; the return link is set by
   Connect (`<APASSY_CONNECT_SITE_URL>/connect/done`).
 
@@ -1838,7 +1848,15 @@ Whether the portal can switch to the tiered Family price is confirmed in the san
 (`apassy_connect_personal`, `_family`, `_team`) and the six prices with their lookup keys,
 idempotently: a price whose lookup key exists with the same amounts is kept; other amounts
 get a new price that takes the lookup key (`transfer_lookup_key=true`) and the old one is
-archived. It needs the Stripe CLI and jq.
+archived. Every price carries `metadata[apassy_plan]` (`personal`, `family`, `team`); a
+price of an earlier run gets it. It needs the Stripe CLI and jq.
+
+A price change moves only new checkouts to the new price. Existing subscriptions keep the
+old price until they change plan in the portal; their events then carry no lookup key. The
+relay reads their plan from `metadata[apassy_plan]` and the price's interval, or keeps the
+plan and interval it stored, and always applies their status: a cancellation, a failed
+payment, and an `unpaid` end apply as before. Run the script with `--dry-run` first and
+check that it names every replaced price with its metadata.
 
 ```sh
 stripe login                                   # the sandbox account
@@ -1879,16 +1897,46 @@ than `https://api.stripe.com`.
 - **At start:** it reads the six prices from Stripe on a thread of its own (a failure is
   logged as `the Stripe prices could not be read at start` and the next `GET /v1/plans`
   asks again); the start never waits for Stripe.
-- **Each hour** (the maintenance pass): event ids older than 30 days go; each ended plan at
-  its deletion day (end + `APASSY_CONNECT_DELETE_DAYS`) loses its vault stores and tunnel
-  nodes, those of its group's active members whose plan is over too, with one audit row
-  `plan_stores_deleted` (actor `billing`, counts only) and an I-4 `forget` for each account.
-  The accounts and their devices stay. The rows are in the relay audit of
-  `relay.db` (`audit` table); a failed pass logs `the billing maintenance pass failed`.
+- **Each hour** (the maintenance pass): event ids older than 30 days go. A live
+  subscription whose period ended more than two days ago without an event is read from
+  Stripe (once a day at most) and Stripe's state applies. A group with more active members
+  than its quantity at Stripe gets the quantity raised to them, with prorations (members
+  beyond the paid people or seats are read-only until then). Each ended plan at its
+  deletion day (end + `APASSY_CONNECT_DELETE_DAYS`) is read from Stripe first: only when
+  Stripe shows it ended, and the relay's clock is within a day of Stripe's, it loses its
+  vault stores and tunnel nodes, with those of its group's active members whose plan is
+  over too (never for a plan that is not the group's own, and never while another
+  subscription of the group gives a plan), one audit row `plan_stores_deleted` (actor
+  `billing`, counts only, `failed` for accounts that could not be deleted) and an I-4
+  `forget` for each account. Stripe out of reach, or one failed account, is logged and
+  tried again at the next pass; the pass goes on with the other plans. The accounts and
+  their devices stay. The rows are in the relay audit of `relay.db` (`audit` table); a
+  failed pass logs `the billing maintenance pass failed`.
+- **After a gap:** when a pass runs more than two days after the last one (the relay was
+  down, or the clock jumped), no store is deleted until the operator checks the clock
+  (`timedatectl`) and runs `apassy-relay admin billing --resume-deletions` (audit row
+  `billing_deletions_resumed`). `apassy-relay admin readiness` shows
+  `billing.deletions_held_since` meanwhile.
 - **On `DELETE /v1/account`:** the subscription is canceled at Stripe first; if Stripe
   fails, nothing is deleted and the app can ask again.
 
-### 27.8 Groups
+### 27.8 Problems for the operator
+
+When Stripe reports a subscription that charges, or a completed checkout, that the relay
+cannot apply for a known account or customer (an account bound to another customer, an
+account that was deleted, a price that is not Connect's), the relay answers Stripe 200 and
+records it: one row in `billing_problem`, the audit row `billing_problem_recorded` (ids
+only), and the count `billing.open_problems` in `apassy-relay admin readiness`.
+
+```sh
+apassy-relay admin billing                    # the open problems and the deletion clock
+apassy-relay admin billing --resolve <id>     # after the cancel or refund in the dashboard
+```
+
+Look the subscription up in the Stripe dashboard by its id, cancel it (and refund if it
+charged), then resolve the row. A later event of the same subscription reopens it.
+
+### 27.9 Groups
 
 Family and Team groups (SPEC section 36) need no setting of their own: the webhook makes a
 group for a Family or Team subscription, and the invite links use
@@ -1905,14 +1953,14 @@ The broker and the ingress (docs/SPEC.md section 35) run on a relay with the acc
 
 - `APASSY_CONNECT_INGRESS_LISTEN` (hosted `0.0.0.0:443`) and `APASSY_CONNECT_ACME_LISTEN` (hosted `0.0.0.0:80`): raw TCP listeners on the Connect host, not through the Cloudflare Worker (it carries HTTP only). Open both in the host firewall and publish both ports of the container. Unset, that listener is off. A port that cannot be bound stops the start ("The tunnel ingress cannot listen on …").
 - `APASSY_CONNECT_NODE_ZONE` (default and hosted `node.apassy.wyderka.cc`): a DNS-only (grey cloud) wildcard record `*.node.apassy.wyderka.cc` to the Connect host's address. A proxied record would end TLS at Cloudflare and break the ingress.
-- The limits of the contract (section 8) are keys with the contract's defaults: `APASSY_CONNECT_TUNNEL_STREAMS` (64), `_NODES` (8), `_DIALS_PER_MINUTE` (60), `_GIB_PER_MONTH` (20 for each person or member), `_PING_SECS` (30), `_IDLE_SECS` (90), `_STREAM_IDLE_SECS` (900), `_STREAM_BUFFER_KIB` (256). docs/SPEC.md section 6 has their bounds; a value out of bounds stops the start.
+- The limits of the contract (section 8) are keys with the contract's defaults: `APASSY_CONNECT_TUNNEL_STREAMS` (64), `_NODES` (8), `_DIALS_PER_MINUTE` (60), `_GIB_PER_MONTH` (20 for each person or member), `_PING_SECS` (30), `_IDLE_SECS` (90), `_STREAM_IDLE_SECS` (900), `_STREAM_BUFFER_KIB` (256). docs/SPEC.md section 6 has their bounds; a value out of bounds stops the start. The limits of the ingress (16 open streams of an account, 60 new streams of a node a minute, a first frame of the node within 10 s, 5 GiB a month for each person or member) and of other accounts' dials (16 open for each, 32 together, half of the dial budget) have no key yet: docs/SPEC.md section 35.4.
 - The tunnel routes stay behind the Worker. It forwards a WebSocket upgrade only on `GET /v1/tunnel/*`, unchanged, returns the relay's `101` as it is, refuses an upgrade anywhere else, and limits dials with `TUNNEL_LIMITER` (namespace 1007, 60 a minute for each address or IPv6 /64; `wrangler.jsonc`). **Not verified**: whether the Workers VPC binding (`RELAY`) carries WebSocket upgrades. Check it on a staging deploy with one dial before nodes use Connect; if it does not, the fallback is a Cloudflare Tunnel public hostname for `/v1/tunnel/*`, or the routes directly on the Connect host behind its own TLS.
 - Let's Encrypt allows 50 new certificates a week for one registered domain; every node is one. A dedicated registered domain for node names keeps the site's and the relay's certificates out of that count.
 
 ### 28.2 What to watch
 
-- `IngressHandle::stats` of both listeners (once exported): `rate_limited` and `busy` rising together is one or few addresses flooding; `timeouts` and `malformed` rising is scanning; `unrecognized` is names of no online node; `limited` is accounts at their stream limit or budget.
-- `tunnel_usage` in `relay.db` (`account_id`, `month`, `dials`, `streams`, `bytes`): the counters of each account and month, written every 60 seconds and at stop. Accounts near 20 GiB for each person or member are near their budget; compare the sum with the host's own traffic allowance.
+- `IngressHandle::stats` of both listeners (once exported): `rate_limited` and `busy` rising together is one or few addresses flooding; `timeouts` and `malformed` rising is scanning; `unrecognized` is names of no online node; `limited` is accounts at their ingress slots, a node at its open rate, or an ingress budget; `accept_errors` is the host out of descriptors (the loop waits up to 1 s between tries).
+- `tunnel_usage` in `relay.db` (`account_id`, `month`, `dials`, `streams`, `bytes`): the counters of each account and month, written every 60 seconds and at stop. A row whose `account_id` is an account id counts all of it; `<account>/ingress` counts its public and ACME streams, and `<account>/dial/<other account>` the dials of another account to its nodes. Accounts whose dial bytes (all bytes without the ingress row) near 20 GiB for each person or member are near their budget; compare the sum of the account rows with the host's own traffic allowance. Rows older than 13 months are deleted at the start and with each write.
 - The relay audit: `tunnel_node_registered`, `tunnel_node_updated`, `tunnel_node_removed`, `tunnel_grant_created`, `tunnel_grant_removed`, `tunnel_grants_ended` (ids only).
 - The thread count of the relay process: each open stream uses two threads and each node WebSocket two, bounded by `max_streams` (4096) and `max_nodes` (4096).
 - Nothing in the logs names a client address or carries stream bytes. If a line ever does, it is a bug: stop and report it. The one tunnel line is "the tunnel usage cannot be written" (a `relay.db` write failed).

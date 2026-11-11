@@ -1141,7 +1141,7 @@ fn the_directory_moves_from_1002_to_1005_and_keeps_its_teams() {
              DROP TABLE account_device; DROP TABLE account; DROP TABLE account_key;
              DROP TABLE brain_event; DROP TABLE \"group\"; DROP TABLE group_member;
              DROP TABLE group_invite; DROP TABLE stripe_customer; DROP TABLE stripe_subscription;
-             DROP TABLE stripe_event; DROP TABLE tunnel_node; DROP TABLE tunnel_grant;
+             DROP TABLE stripe_event; DROP TABLE billing_problem; DROP TABLE billing_clock; DROP TABLE tunnel_node; DROP TABLE tunnel_grant;
              DROP TABLE tunnel_usage; DROP TABLE entitlement_key;
              CREATE TABLE team_1002 (
                id TEXT PRIMARY KEY, name TEXT NOT NULL, file_key TEXT NOT NULL,

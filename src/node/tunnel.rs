@@ -29,15 +29,28 @@
 //! /v1/tunnel/nodes`, contract 3.1), opens the WebSocket, and reads frames until the
 //! WebSocket ends. A ping thread pings every [`PING_INTERVAL`] and ends a WebSocket that
 //! is silent for [`IDLE_LIMIT`]. After an end or a refusal it tries again with backoff:
-//! 1 s, doubling, at most 60 s ([`Backoff`]); an account without the tunnel waits longer.
-//! An end of the WebSocket resets every open stream: the front ends its connections to
-//! the relay, so no stream survives. [`TunnelHandle::stop`] (a lock, a quit, a node stop)
-//! closes the WebSocket with 1000, ends every stream at once, and joins its threads (at
-//! most [`STOP_WAIT`] for one inside a request with its own deadline).
+//! 1 s, doubling, at most 60 s ([`Backoff`]), each wait a random time between half and
+//! all of it ([`jitter`]); the backoff starts again only after a WebSocket that stayed
+//! open for [`STABLE_LINK`]. A WebSocket that Connect replaced (another process of this
+//! node, close 4005) waits [`REPLACED_WAIT`]; a tunnel limit or byte budget of the account
+//! (close 4002, `429 tunnel_limit`, `403 account_limit`) waits [`LIMIT_WAIT`]; an account
+//! without the tunnel waits [`NOT_ON_CONNECT_WAIT`]. An end of the WebSocket resets every
+//! open stream: the front ends its connections to the relay, so no stream survives.
+//! [`TunnelHandle::stop`] (a lock, a quit, a node stop) closes the WebSocket with 1000,
+//! ends every stream at once, and joins its threads (at most [`STOP_WAIT`] for one inside
+//! a request with its own deadline).
 //!
-//! Limits of the node: at most [`MAX_STREAMS`] open streams (a stream over it is reset),
-//! at most [`STREAM_BUFFER`] bytes buffered toward the front for one stream (over it, a
-//! reset, contract 4), and the front's own limits for each connection.
+//! A stream ends on the node in one of two ways, and the node forgets it at once either
+//! way: the front's connection ended cleanly (`Conn::finish`: the node's `close` follows
+//! its last bytes, and Connect ends the stream after them), or it ended otherwise
+//! (`shutdown(Both)`: a `reset`). A stream whose own side is closed is reset when Connect
+//! stays silent on it for [`CLOSE_GRACE`], so no half-closed stream outlives its use.
+//!
+//! Limits of the node: at most [`MAX_DEVICE_STREAMS`] open `device` streams and
+//! [`MAX_INGRESS_STREAMS`] `public` and `acme` streams (the dial and ingress slots of
+//! contract 8; a stream over them is reset), at most [`STREAM_BUFFER`] bytes buffered
+//! toward the front for one stream (over it, a reset, contract 4), and the front's own
+//! limits for each connection.
 //!
 //! No stream content is logged. The account token stays in the account seam: it goes
 //! only into the `Authorization` header of the requests to the Connect origin.
@@ -71,6 +84,7 @@ use crate::connect::{
     KeychainDeviceKeyStore, account_file,
 };
 use crate::net::certificate::NodeCertificate;
+use crate::net::sealed_key::SealKey;
 use crate::net::tls_front::{self, Conn, FrontLimits};
 
 /// The path of the node's WebSocket (contract 3.2).
@@ -85,10 +99,30 @@ pub const BACKOFF_FIRST: Duration = Duration::from_secs(1);
 pub const BACKOFF_MAX: Duration = Duration::from_secs(60);
 /// The wait after Connect said the account has no plan with the tunnel.
 pub const NOT_ON_CONNECT_WAIT: Duration = Duration::from_secs(15 * 60);
+/// The wait after Connect replaced this WebSocket with another one of this node (close
+/// 4005: another process with this node's account device).
+pub const REPLACED_WAIT: Duration = Duration::from_secs(5 * 60);
+/// The wait after a tunnel limit or the byte budget of the account (close 4002, `429
+/// tunnel_limit`, `403 account_limit`).
+pub const LIMIT_WAIT: Duration = Duration::from_secs(15 * 60);
+/// A WebSocket that stayed open this long starts the backoff again at 1 s.
+pub const STABLE_LINK: Duration = Duration::from_secs(60);
+/// A stream whose own side is closed is reset when Connect sends nothing on it for this
+/// long (Connect's own close grace, contract 4).
+pub const CLOSE_GRACE: Duration = Duration::from_secs(10);
 /// Bytes buffered toward the front for one stream (contract 4: 256 KiB).
 pub const STREAM_BUFFER: usize = 256 * 1024;
-/// Open streams of this node at once (the account limit of contract 8).
-pub const MAX_STREAMS: usize = 64;
+/// Open `device` streams of this node at once (the dial slots of contract 8).
+pub const MAX_DEVICE_STREAMS: usize = 64;
+/// Open `public` and `acme` streams of this node at once (the ingress slots of contract
+/// 8).
+pub const MAX_INGRESS_STREAMS: usize = 16;
+/// Open streams of this node at once.
+pub const MAX_STREAMS: usize = MAX_DEVICE_STREAMS + MAX_INGRESS_STREAMS;
+/// The zone of the public names when `APASSY_CONNECT_NODE_ZONE` is not set (contract 2).
+pub const DEFAULT_NODE_ZONE: &str = "node.apassy.wyderka.cc";
+/// The setting of the zone of the public names (a sandbox Connect).
+pub const NODE_ZONE_ENV: &str = "APASSY_CONNECT_NODE_ZONE";
 /// The connection, the TLS handshake, and the WebSocket handshake end within this.
 const CONNECT_DEADLINE: Duration = Duration::from_secs(20);
 /// The longest ACME request head (contract 7.2: 8 KiB).
@@ -156,7 +190,7 @@ impl Clock for SystemClock {
 }
 
 /// The waits between tries: 1 s, doubling, at most 60 s (contract 3.2). A WebSocket that
-/// opened resets it.
+/// stayed open for [`STABLE_LINK`] resets it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Backoff {
     next: Duration,
@@ -181,6 +215,49 @@ impl Backoff {
     pub fn reset(&mut self) {
         self.next = BACKOFF_FIRST;
     }
+}
+
+/// A random time between half of `wait` and all of it, so that many nodes that lost
+/// Connect at once do not come back at once.
+pub fn jitter(wait: Duration) -> Duration {
+    use std::hash::{BuildHasher, Hasher};
+    // A fresh `RandomState` is seeded from the system's randomness (per process, then
+    // advanced per instance): enough for a spread of waits, and no new crate.
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
+    hasher.write_u128(now);
+    jitter_with(wait, hasher.finish())
+}
+
+/// [`jitter`] with the random value `random`: `wait / 2 + (random mod (wait / 2 + 1))`
+/// in milliseconds.
+pub fn jitter_with(wait: Duration, random: u64) -> Duration {
+    let millis = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX);
+    let half = millis / 2;
+    Duration::from_millis(half + random % (millis - half + 1))
+}
+
+/// The zone of the public names of this build: [`NODE_ZONE_ENV`] when it is set, else
+/// [`DEFAULT_NODE_ZONE`]. Lowercase, without a trailing dot.
+pub fn configured_zone() -> String {
+    std::env::var(NODE_ZONE_ENV)
+        .ok()
+        .map(|zone| zone.trim().trim_end_matches('.').to_ascii_lowercase())
+        .filter(|zone| !zone.is_empty())
+        .unwrap_or_else(|| DEFAULT_NODE_ZONE.to_owned())
+}
+
+/// The public name of the node `node_id` in `zone` (contract 2): the 10 characters after
+/// `node_`, `.`, and the zone. `None` for an id of another form.
+pub fn expected_public_name(node_id: &str, zone: &str) -> Option<String> {
+    let label = node_id.strip_prefix("node_")?;
+    let name = format!(
+        "{label}.{}",
+        zone.trim_end_matches('.').to_ascii_lowercase()
+    );
+    (label.len() == 10 && public_cert::valid_public_name(&name)).then_some(name)
 }
 
 // ---------------------------------------------------------------------------
@@ -406,11 +483,14 @@ fn node_file(node_dir: &Path) -> PathBuf {
     node_dir.join(public_cert::CONNECT_DIR).join(NODE_FILE)
 }
 
-/// The kept registration of `node_dir` for `origin`, if any.
-pub fn load_node_file(node_dir: &Path, origin: &str) -> Option<NodeFile> {
+/// The kept registration of `node_dir` for `origin`, if any, and only when its public
+/// name is the node's own name in `zone`.
+pub fn load_node_file(node_dir: &Path, origin: &str, zone: &str) -> Option<NodeFile> {
     let bytes = public_cert::read_private(&node_file(node_dir)).ok()??;
     let file: NodeFile = serde_json::from_slice(&bytes).ok()?;
-    (file.origin == origin && public_cert::valid_public_name(&file.public_name)).then_some(file)
+    (file.origin == origin
+        && expected_public_name(&file.node_id, zone).as_deref() == Some(file.public_name.as_str()))
+    .then_some(file)
 }
 
 fn save_node_file(node_dir: &Path, file: &NodeFile) -> io::Result<()> {
@@ -428,9 +508,10 @@ pub fn register_now(
     node_dir: &Path,
     name: &str,
     pin: &str,
+    zone: &str,
 ) -> Result<NodeView, Failure> {
     auth.entitled()?;
-    let view = register(auth, name, pin)?;
+    let view = register(auth, name, pin, zone)?;
     let _ = save_node_file(
         node_dir,
         &NodeFile {
@@ -443,7 +524,7 @@ pub fn register_now(
     Ok(view)
 }
 
-fn register(auth: &dyn TunnelAuth, name: &str, pin: &str) -> Result<NodeView, Failure> {
+fn register(auth: &dyn TunnelAuth, name: &str, pin: &str, zone: &str) -> Result<NodeView, Failure> {
     let client = ConnectClient::new(&auth.origin()).map_err(from_connect)?;
     let mut view = None;
     auth.with_token(&mut |token| {
@@ -462,7 +543,10 @@ fn register(auth: &dyn TunnelAuth, name: &str, pin: &str) -> Result<NodeView, Fa
         Ok(())
     })?;
     let view = view.ok_or(Failure::Offline("no answer".to_owned()))?;
-    if !public_cert::valid_public_name(&view.public_name) || view.pin != pin {
+    // The public name must be this node's own: its id's label in the configured zone. A
+    // certificate is ordered for it and agents are sent to it.
+    let own = expected_public_name(&view.node_id, zone);
+    if own.as_deref() != Some(view.public_name.as_str()) || view.pin != pin {
         return Err(Failure::Offline(
             "the registration answer does not match this node".to_owned(),
         ));
@@ -741,14 +825,20 @@ struct Link {
 }
 
 impl Link {
+    /// Milliseconds since the link started.
+    fn millis(&self) -> u64 {
+        u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
     fn touch(&self) {
-        let now = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        self.last_seen.store(now, Ordering::Relaxed);
+        self.last_seen.store(self.millis(), Ordering::Relaxed);
     }
 
     fn silent_for(&self) -> Duration {
-        let now = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        Duration::from_millis(now.saturating_sub(self.last_seen.load(Ordering::Relaxed)))
+        Duration::from_millis(
+            self.millis()
+                .saturating_sub(self.last_seen.load(Ordering::Relaxed)),
+        )
     }
 
     fn send(&self, opcode: u8, payload: &[u8]) -> io::Result<()> {
@@ -789,14 +879,23 @@ impl Link {
         (self.shutdown)();
     }
 
-    /// Reset a live stream from this side: Connect gets `reset`, the front's connection
-    /// ends.
+    /// Reset a stream from this side: Connect gets `reset`, the front's connection ends.
+    /// Also for an id that is not live (a broken rule of a frame for it).
     fn reset(&self, id: u32, kind: Kind) {
         let removed = lock(&self.seq).remove(id);
         if let Some(stream) = removed {
             stream.abort();
         }
         let _ = self.send_frame(id, kind, RESET, &[]);
+    }
+
+    /// Reset a live stream; nothing for a stream that already ended.
+    fn reset_live(&self, id: u32, kind: Kind) {
+        let removed = lock(&self.seq).remove(id);
+        if let Some(stream) = removed {
+            stream.abort();
+            let _ = self.send_frame(id, kind, RESET, &[]);
+        }
     }
 
     fn live(&self) -> usize {
@@ -810,6 +909,26 @@ impl Link {
             stream.abort();
         }
     }
+
+    /// Reset each stream whose own side is closed and on which Connect sent nothing for
+    /// `grace` since then.
+    fn expire(&self, grace: Duration) {
+        let now = self.millis();
+        let grace = u64::try_from(grace.as_millis()).unwrap_or(u64::MAX);
+        let stale: Vec<(u32, Kind)> = lock(&self.seq)
+            .values()
+            .filter(|(_, stream)| {
+                let closed_at = stream.closed_at.load(Ordering::Relaxed);
+                closed_at != 0
+                    && now.saturating_sub(closed_at.max(stream.last_in.load(Ordering::Relaxed)))
+                        >= grace
+            })
+            .map(|(id, stream)| (id, stream.kind))
+            .collect();
+        for (id, kind) in stale {
+            self.reset_live(id, kind);
+        }
+    }
 }
 
 #[derive(Default)]
@@ -817,10 +936,9 @@ struct Inbox {
     bytes: VecDeque<u8>,
     /// Connect closed its direction: reads end after the bytes.
     eof: bool,
-    /// The stream ended by a reset or the end of the WebSocket.
+    /// The stream ended by a reset, the end of the WebSocket, or this side's end: reads
+    /// fail, writes fail, and nothing more is buffered.
     aborted: bool,
-    /// This side ended the stream (`shutdown(Both)`): later bytes are dropped.
-    discard: bool,
     /// This side sent its `close`.
     closed_out: bool,
 }
@@ -833,10 +951,16 @@ struct StreamShared {
     inbox: Mutex<Inbox>,
     ready: Condvar,
     read_timeout: Mutex<Option<Duration>>,
+    /// Milliseconds after the link's start of the last frame from Connect on this stream.
+    last_in: AtomicU64,
+    /// Milliseconds after the link's start when this side closed its direction (0: open;
+    /// at least 1).
+    closed_at: AtomicU64,
 }
 
 impl StreamShared {
     fn new(id: u32, kind: Kind, link: Arc<Link>) -> Arc<Self> {
+        let now = link.millis();
         Arc::new(Self {
             id,
             kind,
@@ -844,13 +968,16 @@ impl StreamShared {
             inbox: Mutex::new(Inbox::default()),
             ready: Condvar::new(),
             read_timeout: Mutex::new(None),
+            last_in: AtomicU64::new(now),
+            closed_at: AtomicU64::new(0),
         })
     }
 
     /// Bytes from Connect. False when the buffer is over its cap (the caller resets).
     fn push(&self, payload: &[u8], eof: bool) -> bool {
+        self.last_in.store(self.link.millis(), Ordering::Relaxed);
         let mut inbox = lock(&self.inbox);
-        if !inbox.discard && !inbox.aborted {
+        if !inbox.aborted {
             if inbox.bytes.len() + payload.len() > STREAM_BUFFER {
                 return false;
             }
@@ -894,9 +1021,26 @@ impl StreamShared {
             }
             inbox.closed_out = true;
         }
+        self.closed_at
+            .store(self.link.millis().max(1), Ordering::Relaxed);
         if self.admit_out(CLOSE) {
             let _ = self.link.send_frame(self.id, self.kind, CLOSE, &[]);
         }
+    }
+
+    /// The front's connection ended cleanly after its last bytes: this side's `close`
+    /// follows them (Connect ends the stream once they reached the client), and the node
+    /// forgets the stream now; later frames of Connect for it are dropped.
+    fn finish(self: &Arc<Self>) {
+        self.close_out();
+        lock(&self.link.seq).remove(self.id);
+        self.abort();
+    }
+
+    /// The front's connection ended otherwise: `reset`, and the node forgets the stream.
+    fn end_now(&self) {
+        self.link.reset_live(self.id, self.kind);
+        self.abort();
     }
 }
 
@@ -930,7 +1074,7 @@ impl Read for TunnelStream {
             if inbox.aborted {
                 return Err(io::ErrorKind::ConnectionReset.into());
             }
-            if inbox.eof || inbox.discard {
+            if inbox.eof {
                 return Ok(0);
             }
             match until {
@@ -990,21 +1134,20 @@ impl Conn for TunnelStream {
         Ok(self.clone())
     }
 
-    /// `Write`: `close` to Connect. `Both`: `close`, and later bytes from Connect are
-    /// dropped (the stream ends when Connect closes too, as a TCP FIN). `Read`: nothing.
+    /// `Write`: `close` to Connect. `Both`: the connection ends now: `reset` to Connect,
+    /// and the node forgets the stream. `Read`: nothing.
     fn shutdown(&self, how: Shutdown) -> io::Result<()> {
         match how {
             Shutdown::Read => {}
             Shutdown::Write => self.0.close_out(),
-            Shutdown::Both => {
-                self.0.close_out();
-                let mut inbox = lock(&self.0.inbox);
-                inbox.discard = true;
-                inbox.bytes.clear();
-                drop(inbox);
-                self.0.ready.notify_all();
-            }
+            Shutdown::Both => self.0.end_now(),
         }
+        Ok(())
+    }
+
+    /// The last bytes are written: `close` after them, and the node forgets the stream.
+    fn finish(&self) -> io::Result<()> {
+        self.0.finish();
         Ok(())
     }
 
@@ -1048,6 +1191,8 @@ fn serve_stream(serving: &Serving, stream: TunnelStream) {
                 serving.limits,
                 &serving.stop,
             );
+            // A clean end already let the stream go (`Conn::finish`); anything else ends
+            // it now.
             let _ = stream.shutdown(Shutdown::Both);
         }
     }
@@ -1073,17 +1218,19 @@ fn answer_acme(challenges: &Challenges, mut stream: TunnelStream) {
     }
     let answer = acme::http01_answer(challenges, &head);
     let _ = stream.write_all(&answer);
-    let _ = stream.shutdown(Shutdown::Both);
+    let _ = stream.finish();
 }
 
-/// Read frames until the WebSocket ends. Every stream is reset at the end.
+/// Read frames until the WebSocket ends. Every stream is reset at the end. Returns the
+/// close code that Connect sent, if it sent one.
 fn read_link(
     link: &Arc<Link>,
     reader: Box<dyn Read + Send>,
     serving: &Arc<Serving>,
     workers: &Mutex<Vec<JoinHandle<()>>>,
-) {
+) -> Option<u16> {
     let mut reader = ws::Reader::client(reader, frame::MAX_MESSAGE);
+    let mut code = None;
     loop {
         let message = match reader.read_message() {
             Ok(message) => message,
@@ -1114,7 +1261,8 @@ fn read_link(
                 link.close(close::UNSUPPORTED);
                 break;
             }
-            Message::Close(_) => {
+            Message::Close(sent) => {
+                code = sent;
                 link.close(close::NORMAL);
                 break;
             }
@@ -1122,6 +1270,15 @@ fn read_link(
     }
     link.end();
     link.drain();
+    code
+}
+
+/// The open streams of `kind`'s slots: `device`, or `public` and `acme` together.
+fn live_of(seq: &Sequencer<Arc<StreamShared>>, kind: Kind) -> usize {
+    let ingress = |kind: Kind| kind != Kind::Device;
+    seq.values()
+        .filter(|(_, stream)| ingress(stream.kind) == ingress(kind))
+        .count()
 }
 
 fn apply(
@@ -1133,7 +1290,11 @@ fn apply(
     let (id, kind) = (frame.stream, frame.kind);
     let applied = {
         let mut seq = lock(&link.seq);
-        if frame.flags & OPEN != 0 && seq.live() >= MAX_STREAMS {
+        let cap = match kind {
+            Kind::Device => MAX_DEVICE_STREAMS,
+            Kind::Public | Kind::Acme => MAX_INGRESS_STREAMS,
+        };
+        if frame.flags & OPEN != 0 && live_of(&seq, kind) >= cap {
             // Over the node's cap: the id is used up, the stream is refused.
             drop(seq);
             let _ = link.send_frame(id, kind, RESET, &[]);
@@ -1144,10 +1305,10 @@ fn apply(
         })
     };
     match applied {
-        Err(_) => {
-            // A broken stream rule resets that stream; the WebSocket stays.
-            link.reset(id, kind);
-        }
+        // A broken stream rule resets that stream; the WebSocket stays. A reset is never
+        // answered with a reset.
+        Err(_) if frame.flags & RESET != 0 => {}
+        Err(_) => link.reset(id, kind),
         Ok(Applied::Dropped) => {}
         Ok(Applied::Opened(stream)) => {
             if !stream.push(&frame.payload, frame.flags & CLOSE != 0) {
@@ -1184,9 +1345,11 @@ fn apply(
     }
 }
 
-/// Ping every `interval`; end the WebSocket after `idle` without a message.
-fn ping_link(link: &Link, interval: Duration, idle: Duration, stop: &AtomicBool) {
+/// Ping every `interval`; end the WebSocket after `idle` without a message; reset the
+/// streams whose own side is closed and on which Connect stayed silent for `grace`.
+fn ping_link(link: &Link, interval: Duration, idle: Duration, grace: Duration, stop: &AtomicBool) {
     let mut next = Instant::now() + interval;
+    let mut swept = Instant::now();
     while !link.closed.load(Ordering::SeqCst) {
         if stop.load(Ordering::SeqCst) {
             return;
@@ -1200,6 +1363,10 @@ fn ping_link(link: &Link, interval: Duration, idle: Duration, stop: &AtomicBool)
             if link.send(ws::OP_PING, b"apassy").is_err() {
                 return;
             }
+        }
+        if swept.elapsed() >= (grace / 4).clamp(STEP, Duration::from_secs(1)) {
+            swept = Instant::now();
+            link.expire(grace);
         }
         thread::sleep(STEP);
     }
@@ -1280,8 +1447,13 @@ pub struct ConnectSetup {
     pub clock: Arc<dyn Clock>,
     pub ping_interval: Duration,
     pub idle_limit: Duration,
+    /// A stream whose own side is closed is reset after this much silence of Connect.
+    pub close_grace: Duration,
     /// The limits of each stream's connection to the relay (the front's).
     pub limits: FrontLimits,
+    /// The zone of the public names (contract 2): Connect's answer must name this node's
+    /// label in it.
+    pub zone: String,
 }
 
 impl std::fmt::Debug for ConnectSetup {
@@ -1304,7 +1476,9 @@ impl ConnectSetup {
             clock: Arc::new(SystemClock::default()),
             ping_interval: PING_INTERVAL,
             idle_limit: IDLE_LIMIT,
+            close_grace: CLOSE_GRACE,
             limits: FrontLimits::default(),
+            zone: configured_zone(),
         }
     }
 
@@ -1324,6 +1498,10 @@ pub struct TunnelOptions {
     /// The pinned node certificate (its pin goes to Connect; its key serves `device`).
     pub certificate: NodeCertificate,
     pub targets: Targets,
+    /// Seals the keys of the Connect files (the public certificate's key, the ACME
+    /// account key): derived from the node master key
+    /// (`crate::net::sealed_key::CONNECT_INFO`).
+    pub seal: Arc<SealKey>,
 }
 
 struct Shared {
@@ -1377,6 +1555,7 @@ impl Tunnel {
             name,
             certificate,
             targets,
+            seal,
         } = options;
         let shared = Arc::new(Shared {
             stop: Arc::new(AtomicBool::new(false)),
@@ -1392,15 +1571,16 @@ impl Tunnel {
         // A kept registration with this pin gives the public name (and the kept
         // certificate) at once, and Connect knows the node: the tunnel registers again
         // only when Connect answers `node_unknown`.
-        let kept = load_node_file(&node_dir, &origin).filter(|file| file.pin == pin);
+        let kept = load_node_file(&node_dir, &origin, &setup.zone).filter(|file| file.pin == pin);
         if let Some(file) = &kept {
-            install_picker(&shared, &node_dir, &certificate, &file.public_name);
+            install_picker(&shared, &node_dir, &certificate, &file.public_name, &seal);
         }
         let registered = kept.is_some();
         let auth = Arc::clone(&setup.auth);
         let main_shared = Arc::clone(&shared);
         let main_setup = setup.clone();
         let main_dir = node_dir.clone();
+        let main_seal = Arc::clone(&seal);
         let main = thread::Builder::new()
             .name("apassy-tunnel".to_owned())
             .spawn(move || {
@@ -1412,6 +1592,7 @@ impl Tunnel {
                     &certificate,
                     targets,
                     registered,
+                    &main_seal,
                 );
             })?;
         let acme = match setup.acme.clone() {
@@ -1421,7 +1602,9 @@ impl Tunnel {
                 Some(
                     thread::Builder::new()
                         .name("apassy-tunnel-acme".to_owned())
-                        .spawn(move || renew_loop(&acme_shared, &options, &node_dir, &*clock))?,
+                        .spawn(move || {
+                            renew_loop(&acme_shared, &options, &node_dir, &*clock, &seal);
+                        })?,
                 )
             }
             None => None,
@@ -1487,12 +1670,18 @@ impl Drop for TunnelHandle {
     }
 }
 
-fn install_picker(shared: &Shared, node_dir: &Path, certificate: &NodeCertificate, name: &str) {
+fn install_picker(
+    shared: &Shared,
+    node_dir: &Path,
+    certificate: &NodeCertificate,
+    name: &str,
+    seal: &SealKey,
+) {
     let Ok(picker) = CertPicker::new(certificate, name) else {
         return;
     };
     let picker = Arc::new(picker);
-    match public_cert::load_public(node_dir) {
+    match public_cert::load_public(node_dir, seal) {
         Ok(Some(stored)) => match acme::not_after(&stored.chain[0]) {
             Some(not_after)
                 if acme::covers(&stored.chain[0], name)
@@ -1518,7 +1707,50 @@ fn install_picker(shared: &Shared, node_dir: &Path, certificate: &NodeCertificat
     *lock(&shared.picker) = Some(picker);
 }
 
+/// How one open WebSocket ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinkEnd {
+    /// How long it was open, on the tunnel's clock.
+    pub lasted: Duration,
+    /// The close code that Connect sent, if it sent one.
+    pub code: Option<u16>,
+}
+
+/// What the tunnel waits for after a try, before the jitter: the next step of the backoff
+/// (`reset`: from 1 s again), or a fixed wait.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NextTry {
+    Backoff { reset: bool },
+    Wait(Duration),
+}
+
+/// The wait after a WebSocket that opened and ended (module text): a replaced WebSocket
+/// and a limit of the account wait long; a WebSocket that stayed open for
+/// [`STABLE_LINK`] starts the backoff again; any other end takes its next step.
+pub fn after_link(end: LinkEnd) -> NextTry {
+    match end.code {
+        Some(close::REPLACED) => NextTry::Wait(REPLACED_WAIT),
+        Some(close::TUNNEL_LIMIT) => NextTry::Wait(LIMIT_WAIT),
+        _ => NextTry::Backoff {
+            reset: end.lasted >= STABLE_LINK,
+        },
+    }
+}
+
+/// The wait after a refusal before a WebSocket opened.
+pub fn after_refusal(failure: &Failure) -> NextTry {
+    match failure {
+        Failure::NotEntitled | Failure::NoAccount => NextTry::Wait(NOT_ON_CONNECT_WAIT),
+        Failure::Refused { status: 429, .. } => NextTry::Wait(LIMIT_WAIT),
+        Failure::Refused { status: 403, code } if code == "account_limit" => {
+            NextTry::Wait(LIMIT_WAIT)
+        }
+        _ => NextTry::Backoff { reset: false },
+    }
+}
+
 /// The tunnel thread: register, connect, read, and try again. See the module text.
+#[allow(clippy::too_many_arguments)] // The whole state of the thread; a struct would only rename it.
 fn run(
     shared: &Arc<Shared>,
     setup: &ConnectSetup,
@@ -1527,6 +1759,7 @@ fn run(
     certificate: &NodeCertificate,
     targets: Targets,
     registered: bool,
+    seal: &SealKey,
 ) {
     let auth = setup.auth.as_ref();
     let origin = auth.origin();
@@ -1554,17 +1787,17 @@ fn run(
     let mut backoff = Backoff::default();
     let stop = &shared.stop;
     while !stop.load(Ordering::SeqCst) {
-        let outcome = (|| -> Result<(), Failure> {
+        let outcome = (|| -> Result<LinkEnd, Failure> {
             if registered {
                 auth.entitled()?;
             }
             if !registered {
-                let view = register_now(auth, node_dir, name, &pin)?;
+                let view = register_now(auth, node_dir, name, &pin, &setup.zone)?;
                 let known = lock(&shared.picker)
                     .as_ref()
                     .is_some_and(|picker| picker.public_name() == view.public_name);
                 if !known {
-                    install_picker(shared, node_dir, certificate, &view.public_name);
+                    install_picker(shared, node_dir, certificate, &view.public_name, seal);
                 }
                 registered = true;
             }
@@ -1590,39 +1823,54 @@ fn run(
                 Ok(())
             })?;
             let socket = opened.ok_or_else(|| Failure::Offline("no socket".to_owned()))?;
-            backoff.reset();
-            serve_link(shared, setup, socket, picker, targets);
-            Ok(())
+            Ok(serve_link(shared, setup, socket, picker, targets))
         })();
         if stop.load(Ordering::SeqCst) {
             break;
         }
-        let wait = match outcome {
-            Ok(()) => {
+        let next = match &outcome {
+            Ok(end) => {
                 shared.set_state(TunnelState::Reconnecting {
-                    why: "the connection to Apassy Connect ended".to_owned(),
+                    why: match end.code {
+                        Some(close::REPLACED) => {
+                            "another Apassy of this Mac connected to Apassy Connect".to_owned()
+                        }
+                        Some(close::TUNNEL_LIMIT) => {
+                            "a tunnel limit of the account is reached".to_owned()
+                        }
+                        _ => "the connection to Apassy Connect ended".to_owned(),
+                    },
                 });
-                backoff.next_wait()
-            }
-            Err(Failure::NotEntitled | Failure::NoAccount) => {
-                shared.set_state(TunnelState::NotOnConnect);
-                NOT_ON_CONNECT_WAIT
-            }
-            Err(Failure::NodeUnknown) => {
-                registered = false;
-                shared.set_state(TunnelState::Reconnecting {
-                    why: Failure::NodeUnknown.to_string(),
-                });
-                backoff.next_wait()
+                after_link(*end)
             }
             Err(failure) => {
-                shared.set_state(TunnelState::Reconnecting {
-                    why: failure.to_string(),
-                });
-                backoff.next_wait()
+                match failure {
+                    Failure::NotEntitled | Failure::NoAccount => {
+                        shared.set_state(TunnelState::NotOnConnect);
+                    }
+                    Failure::NodeUnknown => {
+                        registered = false;
+                        shared.set_state(TunnelState::Reconnecting {
+                            why: Failure::NodeUnknown.to_string(),
+                        });
+                    }
+                    failure => shared.set_state(TunnelState::Reconnecting {
+                        why: failure.to_string(),
+                    }),
+                }
+                after_refusal(failure)
             }
         };
-        if !setup.clock.wait(wait, stop) {
+        let wait = match next {
+            NextTry::Backoff { reset } => {
+                if reset {
+                    backoff.reset();
+                }
+                backoff.next_wait()
+            }
+            NextTry::Wait(wait) => wait,
+        };
+        if !setup.clock.wait(jitter(wait), stop) {
             break;
         }
     }
@@ -1635,12 +1883,13 @@ fn serve_link(
     socket: Socket,
     picker: Arc<CertPicker>,
     targets: Targets,
-) {
+) -> LinkEnd {
     let Socket {
         reader,
         writer,
         shutdown,
     } = socket;
+    let opened_at = setup.clock.now();
     let link = Arc::new(Link {
         writer: Mutex::new(writer),
         shutdown,
@@ -1653,13 +1902,16 @@ fn serve_link(
     if shared.stop.load(Ordering::SeqCst) {
         link.close(close::NORMAL);
         lock(&shared.link).take();
-        return;
+        return LinkEnd {
+            lasted: Duration::ZERO,
+            code: None,
+        };
     }
     {
         let mut status = lock(&shared.status);
         status.state = TunnelState::On;
         status.connects += 1;
-        status.connected_at = Some(setup.clock.now());
+        status.connected_at = Some(opened_at);
     }
     let serving = Arc::new(Serving {
         targets,
@@ -1671,21 +1923,31 @@ fn serve_link(
     let pinger = {
         let link = Arc::clone(&link);
         let stop = Arc::clone(&shared.stop);
-        let (interval, idle) = (setup.ping_interval, setup.idle_limit);
+        let (interval, idle, grace) = (setup.ping_interval, setup.idle_limit, setup.close_grace);
         thread::Builder::new()
             .name("apassy-tunnel-ping".to_owned())
-            .spawn(move || ping_link(&link, interval, idle, &stop))
+            .spawn(move || ping_link(&link, interval, idle, grace, &stop))
     };
-    read_link(&link, reader, &serving, &shared.workers);
+    let code = read_link(&link, reader, &serving, &shared.workers);
     if let Ok(pinger) = pinger {
         let _ = pinger.join();
     }
     lock(&shared.link).take();
+    LinkEnd {
+        lasted: setup.clock.now().saturating_sub(opened_at),
+        code,
+    }
 }
 
 /// The certificate thread: order a certificate when there is none or it ends within the
 /// renewal window, through the tunnel once it is open; then look again every hour.
-fn renew_loop(shared: &Arc<Shared>, options: &AcmeOptions, node_dir: &Path, clock: &dyn Clock) {
+fn renew_loop(
+    shared: &Arc<Shared>,
+    options: &AcmeOptions,
+    node_dir: &Path,
+    clock: &dyn Clock,
+    seal: &SealKey,
+) {
     let stop = &shared.stop;
     let mut failures: u32 = 0;
     while !stop.load(Ordering::SeqCst) {
@@ -1711,10 +1973,11 @@ fn renew_loop(shared: &Arc<Shared>, options: &AcmeOptions, node_dir: &Path, cloc
         }
         shared.set_cert(CertState::Requesting);
         let name = picker.public_name().to_owned();
-        match acme::obtain(options, node_dir, &name, &shared.challenges, stop) {
+        match acme::obtain(options, node_dir, seal, &name, &shared.challenges, stop) {
             Ok(issued) => {
-                let installed = public_cert::store_public(node_dir, &issued.chain_pem, &issued.key)
-                    .and_then(|()| picker.install_public(&issued.chain, &issued.key));
+                let installed =
+                    public_cert::store_public(node_dir, &issued.chain_pem, &issued.key, seal)
+                        .and_then(|()| picker.install_public(&issued.chain, &issued.key));
                 match installed {
                     Ok(()) => {
                         failures = 0;
@@ -1774,8 +2037,167 @@ mod tests {
         assert_eq!(PING_INTERVAL, Duration::from_secs(30));
         assert_eq!(IDLE_LIMIT, Duration::from_secs(90));
         assert_eq!(STREAM_BUFFER, 256 * 1024);
-        assert_eq!(MAX_STREAMS, 64);
+        assert_eq!((MAX_DEVICE_STREAMS, MAX_INGRESS_STREAMS), (64, 16));
+        assert_eq!(CLOSE_GRACE, Duration::from_secs(10));
         assert_eq!(ws::SUBPROTOCOL, "apassy-tunnel-v1");
+    }
+
+    #[test]
+    fn a_wait_is_between_half_and_all_of_it() {
+        let wait = Duration::from_secs(8);
+        assert_eq!(jitter_with(wait, 0), Duration::from_secs(4));
+        assert_eq!(jitter_with(wait, 4000), Duration::from_secs(8));
+        assert_eq!(jitter_with(wait, 4001), Duration::from_secs(4));
+        assert_eq!(jitter_with(Duration::ZERO, 7), Duration::ZERO);
+        for _ in 0..100 {
+            let got = jitter(wait);
+            assert!(got >= Duration::from_secs(4) && got <= wait, "{got:?}");
+        }
+        let spread: std::collections::HashSet<_> = (0..20).map(|_| jitter(wait)).collect();
+        assert!(spread.len() > 1, "the waits are spread");
+    }
+
+    #[test]
+    fn the_backoff_starts_again_only_after_a_stable_link_and_codes_wait_long() {
+        let short = LinkEnd {
+            lasted: Duration::from_secs(2),
+            code: None,
+        };
+        assert_eq!(after_link(short), NextTry::Backoff { reset: false });
+        let stable = LinkEnd {
+            lasted: STABLE_LINK,
+            code: Some(close::NORMAL),
+        };
+        assert_eq!(after_link(stable), NextTry::Backoff { reset: true });
+        for (code, wait) in [
+            (close::REPLACED, REPLACED_WAIT),
+            (close::TUNNEL_LIMIT, LIMIT_WAIT),
+        ] {
+            let end = LinkEnd {
+                lasted: Duration::from_secs(3600),
+                code: Some(code),
+            };
+            assert_eq!(after_link(end), NextTry::Wait(wait), "{code}");
+        }
+        let limited = Failure::Refused {
+            status: 429,
+            code: "tunnel_limit".to_owned(),
+        };
+        assert_eq!(after_refusal(&limited), NextTry::Wait(LIMIT_WAIT));
+        let nodes = Failure::Refused {
+            status: 403,
+            code: "account_limit".to_owned(),
+        };
+        assert_eq!(after_refusal(&nodes), NextTry::Wait(LIMIT_WAIT));
+        assert_eq!(
+            after_refusal(&Failure::NotEntitled),
+            NextTry::Wait(NOT_ON_CONNECT_WAIT)
+        );
+        assert_eq!(
+            after_refusal(&Failure::Offline("x".to_owned())),
+            NextTry::Backoff { reset: false }
+        );
+    }
+
+    #[test]
+    fn the_public_name_is_the_node_label_in_the_zone() {
+        assert_eq!(
+            expected_public_name("node_k7m2q4x3ca", "Node.Example.Test.").as_deref(),
+            Some("k7m2q4x3ca.node.example.test")
+        );
+        assert_eq!(expected_public_name("node_k7m2", "node.example.test"), None);
+        assert_eq!(
+            expected_public_name("k7m2q4x3ca", "node.example.test"),
+            None
+        );
+        assert_eq!(
+            expected_public_name("node_K7M2Q4X3CA", "node.example.test"),
+            None
+        );
+    }
+
+    /// A writer that keeps what the link sends.
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            lock(&self.0).extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn test_link() -> (Arc<Link>, Arc<Mutex<Vec<u8>>>) {
+        let out = Arc::new(Mutex::new(Vec::new()));
+        let link = Arc::new(Link {
+            writer: Mutex::new(Box::new(Capture(Arc::clone(&out)))),
+            shutdown: Arc::new(|| {}),
+            seq: Mutex::new(Sequencer::new()),
+            started: Instant::now(),
+            last_seen: AtomicU64::new(0),
+            closed: AtomicBool::new(false),
+        });
+        (link, out)
+    }
+
+    fn opened(link: &Arc<Link>, id: u32) -> Arc<StreamShared> {
+        let stream = StreamShared::new(id, Kind::Public, Arc::clone(link));
+        lock(&link.seq)
+            .apply_head(Dir::ToNode, id, Kind::Public, OPEN, || Arc::clone(&stream))
+            .expect("open");
+        stream
+    }
+
+    /// The frames that the link sent: (stream, flags).
+    fn sent(out: &Mutex<Vec<u8>>) -> Vec<(u32, u8)> {
+        let bytes = lock(out).clone();
+        let mut reader = ws::Reader::server(io::Cursor::new(bytes), frame::MAX_MESSAGE);
+        let mut frames = Vec::new();
+        while let Ok(Message::Binary(message)) = reader.read_message() {
+            let frame = frame::decode(&message).expect("frame");
+            frames.push((frame.stream, frame.flags));
+        }
+        frames
+    }
+
+    #[test]
+    fn a_clean_end_closes_and_forgets_the_stream_and_any_other_end_resets_it() {
+        let (link, out) = test_link();
+        let clean = TunnelStream(opened(&link, 3));
+        let abrupt = TunnelStream(opened(&link, 4));
+        clean.finish().expect("finish");
+        assert_eq!(
+            link.live(),
+            1,
+            "the node forgets a stream that ended cleanly"
+        );
+        assert!(clean.0.is_aborted());
+        abrupt.shutdown(Shutdown::Both).expect("shutdown");
+        assert_eq!(link.live(), 0);
+        // A later end of either sends nothing more, and bytes of Connect are not kept.
+        clean.shutdown(Shutdown::Both).expect("again");
+        assert!(clean.0.push(&[0u8; STREAM_BUFFER], false));
+        assert!(lock(&clean.0.inbox).bytes.is_empty());
+        assert_eq!(sent(&out), [(3, CLOSE), (4, RESET)]);
+    }
+
+    #[test]
+    fn a_stream_whose_own_side_closed_is_reset_when_connect_stays_silent() {
+        let (link, out) = test_link();
+        let quiet = opened(&link, 1);
+        let busy = opened(&link, 2);
+        quiet.close_out();
+        busy.close_out();
+        thread::sleep(Duration::from_millis(80));
+        // Connect still sends on stream 2.
+        assert!(busy.push(b"more", false));
+        link.expire(Duration::from_millis(50));
+        assert_eq!(sent(&out), [(1, CLOSE), (2, CLOSE), (1, RESET)]);
+        assert_eq!(link.live(), 1);
+        assert!(quiet.is_aborted());
+        assert!(!busy.is_aborted());
     }
 
     #[test]

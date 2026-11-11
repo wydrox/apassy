@@ -328,13 +328,23 @@ pub fn dispatch(
     }
 }
 
-/// Whether the owner's plan is entitled now.
-fn owner_entitled(hub: &Hub, owner: &str, now: u64) -> RelayResult<bool> {
-    Ok(hub
-        .accounts
-        .plans()
-        .plan(&hub.directory.store, owner, now)?
-        .entitled)
+/// The plan of the group itself: its subscription of the group's kind with the best
+/// state (connect-billing-v1 section 8). Not the owner's own plan: an owner who switched
+/// to Personal has a plan, its family has none.
+fn group_plan(
+    hub: &Hub,
+    group: &str,
+    now: u64,
+) -> RelayResult<Option<crate::server::billing::GroupPlan>> {
+    match crate::server::account::billing(hub) {
+        Ok(billing) => billing.group_plan(group, now),
+        Err(_) => Ok(None),
+    }
+}
+
+/// Whether the group's plan is entitled now.
+fn group_entitled(hub: &Hub, group: &str, now: u64) -> RelayResult<bool> {
+    Ok(group_plan(hub, group, now)?.is_some_and(|plan| plan.state.entitled))
 }
 
 /// `GET /v1/account/group`: the `GroupView`. A pending member sees the owner and itself.
@@ -344,11 +354,12 @@ fn view(hub: &Hub, caller: &AccountCaller, now: u64) -> RelayResult<GroupView> {
         .store
         .with(|conn| membership(conn, &caller.account))?
         .ok_or_else(|| RelayError::not_found("group"))?;
-    let quantity = hub
-        .accounts
-        .plans()
-        .plan(&hub.directory.store, &member.owner, now)?
-        .quantity;
+    let quantity = match crate::server::account::billing(hub) {
+        Ok(billing) => billing
+            .group_quantity(&member.group_id, now)?
+            .map(u64::from),
+        Err(_) => None,
+    };
     hub.directory.store.with(|conn| {
         let mut statement = conn
             .prepare(
@@ -402,7 +413,7 @@ fn invite(
         "admin" => {}
         _ => return Err(RelayError::invalid("The role is member or admin.")),
     }
-    if !owner_entitled(hub, &member.owner, now)? {
+    if !group_entitled(hub, &member.group_id, now)? {
         return Err(plan_required());
     }
     let code = new_code(&member.group_id)?;
@@ -569,9 +580,12 @@ fn join(
 }
 
 /// `POST /v1/account/group/members/{account}/confirm`: the owner or an admin makes a
-/// pending member active. When the active members would exceed the subscription's
-/// quantity, billing raises it to the member count first (`409 seat_limit` above the
-/// plan's maximum); Stripe's webhook then applies it.
+/// pending member active. Under the lock of the group (`Billing::with_group_lock`), in
+/// this order: the group's plan must be entitled; the active members are counted with the
+/// new one (`409 seat_limit` above the plan's maximum); the member becomes active; when
+/// the count exceeds the quantity at Stripe (the stored one, or one Stripe accepted from
+/// Connect since), billing asks Stripe for the count, and when Stripe refuses the member
+/// is pending again. Stripe's webhook then applies the quantity.
 fn confirm(hub: &Hub, caller: &AccountCaller, target: &str, now: u64) -> RelayResult<MemberView> {
     let member = hub
         .directory
@@ -594,46 +608,68 @@ fn confirm(hub: &Hub, caller: &AccountCaller, target: &str, now: u64) -> RelayRe
             .store
             .with(|conn| member_view(conn, &member.group_id, target));
     }
-    let plan = hub
-        .accounts
-        .plans()
-        .plan(&hub.directory.store, &member.owner, now)?;
-    if !plan.entitled {
-        return Err(plan_required());
-    }
-    let active = hub
-        .directory
-        .store
-        .with(|conn| active_count(conn, &member.group_id))?;
-    let wanted = active + 1;
-    let quantity = plan.quantity.unwrap_or(0);
-    if wanted > quantity {
-        let wanted = u32::try_from(wanted).unwrap_or(u32::MAX);
-        crate::server::account::billing(hub)?.request_group_quantity(
-            &member.group_id,
-            wanted,
-            now,
-        )?;
-    }
-    hub.directory.store.tx(|tx| {
-        let changed = tx
-            .execute(
-                "UPDATE group_member SET state = 'active', joined_at = ?3 \
-                 WHERE group_id = ?1 AND account_id = ?2 AND state = 'pending'",
-                params![member.group_id, target, to_i(now)],
-            )
-            .map_err(db)?;
-        if changed == 1 {
-            hub.directory.audit.write_on(
-                tx,
-                now,
-                &format!("account:{}", caller.account),
-                "group_member_confirmed",
-                None,
-                &json!({"group_id": member.group_id, "account_id": target}),
-            )?;
+    let billing = crate::server::account::billing(hub).map_err(|_| plan_required())?;
+    billing.with_group_lock(&member.group_id, |locked| {
+        let plan = billing
+            .group_plan(&member.group_id, now)?
+            .filter(|plan| plan.state.entitled)
+            .ok_or_else(plan_required)?;
+        let active = hub
+            .directory
+            .store
+            .with(|conn| active_count(conn, &member.group_id))?;
+        let wanted = u32::try_from(active + 1).unwrap_or(u32::MAX);
+        crate::server::billing::check_count(plan.plan, wanted)?;
+        let activated = hub.directory.store.tx(|tx| {
+            let changed = tx
+                .execute(
+                    "UPDATE group_member SET state = 'active', joined_at = ?3 \
+                     WHERE group_id = ?1 AND account_id = ?2 AND state = 'pending'",
+                    params![member.group_id, target, to_i(now)],
+                )
+                .map_err(db)?;
+            if changed == 1 {
+                hub.directory.audit.write_on(
+                    tx,
+                    now,
+                    &format!("account:{}", caller.account),
+                    "group_member_confirmed",
+                    None,
+                    &json!({"group_id": member.group_id, "account_id": target}),
+                )?;
+            }
+            Ok(changed == 1)
+        })?;
+        if activated
+            && wanted > plan.quantity
+            && let Err(error) = billing.request_quantity_locked(locked, wanted, now)
+        {
+            hub.directory.store.tx(|tx| {
+                let changed = tx
+                    .execute(
+                        "UPDATE group_member SET state = 'pending', joined_at = NULL \
+                         WHERE group_id = ?1 AND account_id = ?2 AND state = 'active'",
+                        params![member.group_id, target],
+                    )
+                    .map_err(db)?;
+                if changed == 1 {
+                    hub.directory.audit.write_on(
+                        tx,
+                        now,
+                        &format!("account:{}", caller.account),
+                        "group_member_confirm_undone",
+                        None,
+                        &json!({"group_id": member.group_id, "account_id": target,
+                                "code": error.code}),
+                    )?;
+                }
+                Ok(())
+            })?;
+            return Err(error);
         }
-        member_view(tx, &member.group_id, target)
+        hub.directory
+            .store
+            .with(|conn| member_view(conn, &member.group_id, target))
     })
 }
 

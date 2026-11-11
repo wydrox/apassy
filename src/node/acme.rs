@@ -9,8 +9,9 @@
 //! The private key of the certificate is made here and never leaves this Mac; only the
 //! CSR goes to the CA.
 //!
-//! - The account key is ECDSA P-256 (`ring`), kept as PKCS#8 in
-//!   `<node dir>/connect/acme-account.der`, mode 0600. Requests are flattened JWS with
+//! - The account key is ECDSA P-256 (`ring`), kept as PKCS#8 sealed under the node
+//!   master key (`crate::net::sealed_key`, info `apassy-node-connect-v1`) in
+//!   `<node dir>/connect/acme-account.sealed`, mode 0600. Requests are flattened JWS with
 //!   `ES256` (RFC 7518 3.4: `r || s`), the `jwk` for `newAccount` and the `kid` after it,
 //!   a fresh `Replay-Nonce` for each request, one retry after `badNonce`, and POST-as-GET
 //!   for reads (RFC 8555 6.3).
@@ -21,7 +22,10 @@
 //!   `super::public_cert::store_public`, mode 0600.
 //! - Renewal: when 30 days or less are left ([`renewal_due`]).
 //! - The directory URL is configuration ([`AcmeOptions::directory`]): the product uses
-//!   Let's Encrypt (or `APASSY_CONNECT_ACME_DIRECTORY`), tests a fake CA on the loopback.
+//!   Let's Encrypt (or `APASSY_CONNECT_ACME_DIRECTORY`, `https://` only), tests a fake CA
+//!   on the loopback. Every URL that the CA's answers name must be `https://`; a plain
+//!   loopback URL is taken only when the configured directory is itself one (the test CA),
+//!   so a CA's answer never points the node at a service of this Mac.
 //!
 //! No value of this module is a secret of the vault. The account key and the certificate
 //! key are secrets of the node and stay in its directory.
@@ -43,6 +47,7 @@ use super::public_cert::{self, pem_certificates};
 use crate::broker::http::{
     Body, DestinationUrl, HttpRequest, HttpResponse, Method, TlsClient, parse_destination, send,
 };
+use crate::net::sealed_key::SealKey;
 
 /// Let's Encrypt's production directory.
 pub const LETS_ENCRYPT: &str = "https://acme-v02.api.letsencrypt.org/directory";
@@ -50,8 +55,12 @@ pub const LETS_ENCRYPT: &str = "https://acme-v02.api.letsencrypt.org/directory";
 pub const DIRECTORY_ENV: &str = "APASSY_CONNECT_ACME_DIRECTORY";
 /// Renew when this much is left (plan s7 M4: 30 days).
 pub const RENEW_BEFORE: Duration = Duration::from_secs(30 * 86_400);
-/// The file of the ACME account key in the Connect directory of the node.
-pub const ACCOUNT_KEY_FILE: &str = "acme-account.der";
+/// The file of the ACME account key (sealed) in the Connect directory of the node.
+pub const ACCOUNT_KEY_FILE: &str = "acme-account.sealed";
+/// The plain key file of earlier builds; removed when it is found.
+const OLD_ACCOUNT_KEY_FILE: &str = "acme-account.der";
+/// The associated data of the sealed account key.
+const ACCOUNT_KEY_CONTEXT: &[u8] = b"apassy-acme-account-v1";
 /// One request ends within this.
 const REQUEST_DEADLINE: Duration = Duration::from_secs(30);
 /// The answer to every ACME stream that is not the pending token (contract 7.2).
@@ -280,18 +289,25 @@ impl AccountKey {
         Ok((Self::from_pkcs8(&pkcs8)?, pkcs8))
     }
 
-    /// The key of `node_dir`, made and written (mode 0600) at the first order.
-    pub fn load_or_make(node_dir: &Path) -> Result<Self, AcmeError> {
+    /// The key of `node_dir`, sealed with `seal`; made and written (mode 0600) at the
+    /// first order, or again when the kept one does not open with this node key.
+    pub fn load_or_make(node_dir: &Path, seal: &SealKey) -> Result<Self, AcmeError> {
         let dir = node_dir.join(public_cert::CONNECT_DIR);
         let path = dir.join(ACCOUNT_KEY_FILE);
+        public_cert::remove_plain(&dir.join(OLD_ACCOUNT_KEY_FILE));
         let local =
             |error: std::io::Error| AcmeError::Local(format!("the ACME account key file: {error}"));
-        if let Some(pkcs8) = public_cert::read_private(&path).map_err(local)? {
+        if let Some(sealed) = public_cert::read_private(&path).map_err(local)?
+            && let Ok(pkcs8) = seal.open(ACCOUNT_KEY_CONTEXT, &sealed)
+        {
             return Self::from_pkcs8(&pkcs8);
         }
         let (key, pkcs8) = Self::generate()?;
+        let sealed = seal
+            .seal(ACCOUNT_KEY_CONTEXT, &pkcs8)
+            .map_err(|error| AcmeError::Local(format!("the ACME account key: {error}")))?;
         public_cert::ensure_private_dir(&dir).map_err(local)?;
-        public_cert::write_private(&path, &pkcs8).map_err(local)?;
+        public_cert::write_private(&path, &sealed).map_err(local)?;
         Ok(key)
     }
 
@@ -360,8 +376,10 @@ impl AccountKey {
 
 // ---- The HTTP side. ----
 
-/// `https://host[:port]/path` → the destination and the path (`/` at least).
-fn split_url(url: &str) -> Result<(DestinationUrl, String), AcmeError> {
+/// `https://host[:port]/path` → the destination and the path (`/` at least). A plain
+/// loopback URL only with `loopback` (the configured directory is the test CA on the
+/// loopback); else only `https://`.
+fn split_url(url: &str, loopback: bool) -> Result<(DestinationUrl, String), AcmeError> {
     let bad = || AcmeError::BadAnswer(format!("not a URL of the CA: {url}"));
     let (scheme, rest) = url.split_once("://").ok_or_else(bad)?;
     let (authority, path) = match rest.find('/') {
@@ -369,10 +387,21 @@ fn split_url(url: &str) -> Result<(DestinationUrl, String), AcmeError> {
         None => (rest, "/"),
     };
     let destination = parse_destination(&format!("{scheme}://{authority}")).map_err(|_| bad())?;
+    if matches!(destination, DestinationUrl::Loopback { .. }) && !loopback {
+        return Err(bad());
+    }
     if !path.bytes().all(|b| (0x21..0x7f).contains(&b)) {
         return Err(bad());
     }
     Ok((destination, path.to_owned()))
+}
+
+/// The configured directory is a plain URL on the loopback (the test CA).
+fn loopback_directory(directory: &str) -> bool {
+    matches!(
+        split_url(directory, true),
+        Ok((DestinationUrl::Loopback { .. }, _))
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -422,6 +451,8 @@ struct Challenge {
 struct Session<'a> {
     options: &'a AcmeOptions,
     tls: TlsClient,
+    /// The configured directory is the test CA on the loopback.
+    loopback: bool,
     key: AccountKey,
     kid: Option<String>,
     nonce: Option<String>,
@@ -436,12 +467,13 @@ fn json_of<T: serde::de::DeserializeOwned>(response: &HttpResponse) -> Result<T,
 
 fn exchange(
     tls: &TlsClient,
+    loopback: bool,
     url: &str,
     method: Method,
     body: Option<&[u8]>,
     accept: Option<&str>,
 ) -> Result<HttpResponse, AcmeError> {
-    let (destination, path) = split_url(url)?;
+    let (destination, path) = split_url(url, loopback)?;
     let accept_header;
     let headers: &[(&str, &str)] = match accept {
         Some(accept) => {
@@ -470,6 +502,7 @@ impl Session<'_> {
     fn open<'a>(
         options: &'a AcmeOptions,
         node_dir: &Path,
+        seal: &SealKey,
         stop: &'a AtomicBool,
     ) -> Result<Session<'a>, AcmeError> {
         let tls = match &options.tls {
@@ -477,7 +510,8 @@ impl Session<'_> {
             None => TlsClient::platform()
                 .map_err(|error| AcmeError::Local(format!("TLS is not available: {error}")))?,
         };
-        let response = exchange(&tls, &options.directory, Method::Get, None, None)?;
+        let loopback = loopback_directory(&options.directory);
+        let response = exchange(&tls, loopback, &options.directory, Method::Get, None, None)?;
         if response.status != 200 {
             return Err(AcmeError::Unreachable(format!(
                 "the directory answered {}",
@@ -488,7 +522,8 @@ impl Session<'_> {
         Ok(Session {
             options,
             tls,
-            key: AccountKey::load_or_make(node_dir)?,
+            loopback,
+            key: AccountKey::load_or_make(node_dir, seal)?,
             kid: None,
             nonce: None,
             directory,
@@ -507,6 +542,7 @@ impl Session<'_> {
     fn fresh_nonce(&self) -> Result<String, AcmeError> {
         let response = exchange(
             &self.tls,
+            self.loopback,
             &self.directory.new_nonce,
             Method::Get,
             None,
@@ -532,7 +568,14 @@ impl Session<'_> {
                 None => self.fresh_nonce()?,
             };
             let body = self.key.sign(url, &nonce, self.kid.as_deref(), payload)?;
-            let response = exchange(&self.tls, url, Method::Post, Some(&body), accept)?;
+            let response = exchange(
+                &self.tls,
+                self.loopback,
+                url,
+                Method::Post,
+                Some(&body),
+                accept,
+            )?;
             self.nonce = response.header("replay-nonce").map(str::to_owned);
             if response.status < 400 {
                 return Ok(response);
@@ -666,11 +709,12 @@ pub fn csr(name: &str) -> Result<(Vec<u8>, Zeroizing<Vec<u8>>), AcmeError> {
 pub fn obtain(
     options: &AcmeOptions,
     node_dir: &Path,
+    seal: &SealKey,
     name: &str,
     challenges: &Challenges,
     stop: &AtomicBool,
 ) -> Result<Issued, AcmeError> {
-    let result = obtain_inner(options, node_dir, name, challenges, stop);
+    let result = obtain_inner(options, node_dir, seal, name, challenges, stop);
     challenges.clear();
     result
 }
@@ -678,11 +722,12 @@ pub fn obtain(
 fn obtain_inner(
     options: &AcmeOptions,
     node_dir: &Path,
+    seal: &SealKey,
     name: &str,
     challenges: &Challenges,
     stop: &AtomicBool,
 ) -> Result<Issued, AcmeError> {
-    let mut session = Session::open(options, node_dir, stop)?;
+    let mut session = Session::open(options, node_dir, seal, stop)?;
     session.account()?;
     let new_order = session.directory.new_order.clone();
     let response = session.post(
@@ -793,24 +838,33 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
+/// The number of ASCII digits `digits` (all checked to be digits by the caller).
+fn number(digits: &[u8]) -> i64 {
+    digits
+        .iter()
+        .fold(0, |acc, digit| acc * 10 + i64::from(digit - b'0'))
+}
+
+/// A UTCTime (`0x17`, `YYMMDDHHMMSSZ`) or GeneralizedTime (`0x18`,
+/// `YYYYMMDDHHMMSSZ`) as Unix seconds. It reads bytes, never slices text, so a malformed
+/// value of any length or with any byte is `None`, never a panic.
 fn time_of(tag: u8, content: &[u8]) -> Option<u64> {
-    let text = std::str::from_utf8(content).ok()?;
-    let text = text.strip_suffix('Z')?;
-    let (year, rest) = match tag {
-        0x17 if text.len() == 12 => {
-            let year: i64 = text[..2].parse().ok()?;
-            (
-                if year >= 50 { 1900 + year } else { 2000 + year },
-                &text[2..],
-            )
-        }
-        0x18 if text.len() == 14 => (text[..4].parse().ok()?, &text[4..]),
-        _ => return None,
-    };
-    if !rest.bytes().all(|b| b.is_ascii_digit()) {
+    let digits = content.strip_suffix(b"Z")?;
+    if !digits.iter().all(u8::is_ascii_digit) {
         return None;
     }
-    let field = |at: usize| rest[at..at + 2].parse::<i64>().ok();
+    let (year, rest) = match (tag, digits.len()) {
+        (0x17, 12) => {
+            let year = number(&digits[..2]);
+            (
+                if year >= 50 { 1900 + year } else { 2000 + year },
+                &digits[2..],
+            )
+        }
+        (0x18, 14) => (number(&digits[..4]), &digits[4..]),
+        _ => return None,
+    };
+    let field = |at: usize| Some(number(rest.get(at..at + 2)?));
     let (month, day, hour, minute, second) =
         (field(0)?, field(2)?, field(4)?, field(6)?, field(8)?);
     if !(1..=12).contains(&month)
@@ -908,6 +962,60 @@ mod tests {
         assert_eq!(not_after(&der), Some(2_556_144_000));
         assert_eq!(not_after(b"\x30\x00"), None);
         assert!(dns_names(b"junk").is_empty());
+    }
+
+    #[test]
+    fn a_malformed_date_is_none_and_never_panics() {
+        for (tag, text) in [
+            (0x17u8, "1\u{20ac}12345678Z"),
+            (0x18, "202\u{20ac}12345678Z"),
+            (0x17, "+61130120000Z"),
+            (0x17, "2611301200Z"),
+            (0x17, "261130120000"),
+            (0x18, "2026113012000Z"),
+            (0x17, "261330120000Z"),
+            (0x17, ""),
+            (0x05, "261130120000Z"),
+        ] {
+            assert_eq!(time_of(tag, text.as_bytes()), None, "{text}");
+        }
+        // 2026-11-30T12:00:00Z.
+        assert_eq!(time_of(0x17, b"261130120000Z"), Some(1_796_040_000));
+        assert_eq!(time_of(0x18, b"20261130120000Z"), Some(1_796_040_000));
+    }
+
+    #[test]
+    fn the_urls_of_the_ca_are_https_unless_the_directory_is_the_test_ca() {
+        assert!(split_url("https://ca.example.test/acme/order/1", false).is_ok());
+        for url in [
+            "http://127.0.0.1:8080/acme/new-order",
+            "http://localhost:8080/x",
+            "http://[::1]:8080/x",
+        ] {
+            assert!(split_url(url, false).is_err(), "{url}");
+            assert!(split_url(url, true).is_ok(), "{url}");
+        }
+        assert!(loopback_directory("http://127.0.0.1:14000/dir"));
+        assert!(!loopback_directory(LETS_ENCRYPT));
+    }
+
+    #[test]
+    fn the_account_key_is_sealed_and_a_key_that_does_not_open_is_made_again() {
+        use crate::net::sealed_key::CONNECT_INFO;
+        let dir = tempfile::tempdir().unwrap();
+        let seal = SealKey::derive(&[9u8; 32], CONNECT_INFO).unwrap();
+        let first = AccountKey::load_or_make(dir.path(), &seal).unwrap();
+        let again = AccountKey::load_or_make(dir.path(), &seal).unwrap();
+        assert_eq!(first.thumbprint(), again.thumbprint());
+        let path = dir
+            .path()
+            .join(public_cert::CONNECT_DIR)
+            .join(ACCOUNT_KEY_FILE);
+        let stored = std::fs::read(&path).unwrap();
+        assert!(AccountKey::from_pkcs8(&stored).is_err(), "not plain PKCS#8");
+        let other = SealKey::derive(&[10u8; 32], CONNECT_INFO).unwrap();
+        let replaced = AccountKey::load_or_make(dir.path(), &other).unwrap();
+        assert_ne!(replaced.thumbprint(), first.thumbprint());
     }
 
     #[test]
@@ -1035,13 +1143,13 @@ mod tests {
 
     #[test]
     fn urls_split_into_destination_and_path() {
-        let (destination, path) = split_url("https://ca.test/acme/new-order").unwrap();
+        let (destination, path) = split_url("https://ca.test/acme/new-order", false).unwrap();
         assert_eq!(destination.host_header(), "ca.test");
         assert_eq!(path, "/acme/new-order");
-        let (destination, path) = split_url("http://127.0.0.1:4000/dir").unwrap();
+        let (destination, path) = split_url("http://127.0.0.1:4000/dir", true).unwrap();
         assert_eq!(destination.host_header(), "127.0.0.1:4000");
         assert_eq!(path, "/dir");
-        assert!(split_url("http://ca.test/dir").is_err());
-        assert!(split_url("ca.test/dir").is_err());
+        assert!(split_url("http://ca.test/dir", true).is_err());
+        assert!(split_url("ca.test/dir", true).is_err());
     }
 }
