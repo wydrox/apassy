@@ -194,6 +194,7 @@ fn connect(tune: impl FnOnce(&mut TunnelSettings)) -> Connect {
             tailnet_agents: false,
             public_url: format!("http://127.0.0.1:{port}"),
             sign_in_origins: Vec::new(),
+            public_origins: Vec::new(),
             edge: EdgeMode::Off,
             master_key: SecretString::new("a synthetic vault passphrase for tests".to_owned()),
             session_ttl_secs: 60,
