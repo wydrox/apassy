@@ -359,6 +359,7 @@ fn a_removed_member_keeps_a_free_account_and_leaves_the_shared_stores() {
         Some(&json!({"vault_id": VAULT, "name": "Family"})),
     );
     let team = store["team_id"].as_str().unwrap().to_string();
+    c.share_store(&owner, &anna, &team);
     let added = c.ok(
         "POST",
         &format!("/v1/account/vaults/{team}/devices"),
@@ -431,7 +432,8 @@ fn a_members_device_joins_a_shared_store_and_a_strangers_does_not() {
         .unwrap()
         .to_string();
     let path = format!("/v1/account/vaults/{team}/devices");
-    for outsider in [&stranger, &pending] {
+    // A member of the group without a signed share of the store is refused too.
+    for outsider in [&stranger, &pending, &anna] {
         c.fails(
             "POST",
             &path,
@@ -441,6 +443,7 @@ fn a_members_device_joins_a_shared_store_and_a_strangers_does_not() {
             "not_in_group",
         );
     }
+    c.share_store(&owner, &anna, &team);
     let added = c.ok(
         "POST",
         &path,
@@ -613,6 +616,7 @@ fn a_member_removal_goes_on_past_a_store_that_refuses_the_write() {
             .as_str()
             .unwrap()
             .to_string();
+        c.share_store(&owner, &anna, &team);
         c.ok(
             "POST",
             &format!("/v1/account/vaults/{team}/devices"),
@@ -702,6 +706,7 @@ fn a_store_device_added_again_clears_the_removal_that_waited_for_it() {
         .unwrap()
         .to_string();
     let path = format!("/v1/account/vaults/{team}/devices");
+    c.share_store(&owner, &anna, &team);
     let first = c.ok(
         "POST",
         &path,
@@ -774,6 +779,7 @@ fn a_members_store_sign_in_needs_the_group() {
         .as_str()
         .unwrap()
         .to_string();
+    c.share_store(&owner, &anna, &team);
     c.ok(
         "POST",
         &format!("/v1/account/vaults/{team}/devices"),

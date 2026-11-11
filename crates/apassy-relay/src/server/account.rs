@@ -114,13 +114,20 @@ pub const CREATE_RETRY_SECS: u64 = 600;
 pub const RECOVER_RETRY_SECS: u64 = 600;
 /// The longest signed device list of an account: a change past it is 403 `account_limit`
 /// (a recovery starts a new list).
-pub const MAX_LIST_ENTRIES: u64 = 256;
-/// The versions kept for removals at the end of a list: the live-device limit, at least
-/// 10. An `add` past `LAST_ADD_VERSION` is 403 `account_limit`, so every live device of a
-/// list can still be removed (also the last one by itself) before `MAX_LIST_ENTRIES`, and
-/// the account can then be recovered.
-pub const LIST_REMOVAL_RESERVE: u64 = if MAX_DEVICES > 10 { MAX_DEVICES } else { 10 };
-/// The last version of a device list that may be an `add` (246).
+pub const MAX_LIST_ENTRIES: u64 = 1024;
+/// Active peers of one account at most (section 16, `403 account_limit`).
+pub const MAX_PEERS: u64 = 64;
+/// Active shares and joins of one account together at most (section 16).
+pub const MAX_SHARED: u64 = 128;
+/// The versions kept at the end of a list for the entries that end something: the
+/// live-device limit (at least 10), every peer, and every share and join. An entry that
+/// adds something (`add`, `peer`, `share`, `join`) past `LAST_ADD_VERSION` is 403
+/// `account_limit`, so every live device (also the last one by itself), peer, share, and
+/// join of a list can still be ended before `MAX_LIST_ENTRIES`, and the account can then be
+/// recovered.
+pub const LIST_REMOVAL_RESERVE: u64 =
+    (if MAX_DEVICES > 10 { MAX_DEVICES } else { 10 }) + MAX_PEERS + MAX_SHARED;
+/// The last version of a device list that may add something (822).
 pub const LAST_ADD_VERSION: u64 = MAX_LIST_ENTRIES - LIST_REMOVAL_RESERVE;
 /// Links (with their joins) are kept this long after they expire.
 pub const LINK_KEEP_SECS: u64 = 86_400;
@@ -228,6 +235,8 @@ pub enum AccountEndpoint {
     StoreDeviceAdd(TeamId),
     VaultDelete(TeamId),
     Entitlement,
+    /// `POST /v1/account/list` and `/v1/account/peers/…` (section 16, `server::peers`).
+    Peers(crate::server::peers::PeerEndpoint),
     // connect-billing-v1 (docs/SPEC.md section 34).
     Plan,
     Checkout,
@@ -282,6 +291,10 @@ pub fn route(method: &str, path: &str) -> RelayResult<(Need, AccountEndpoint)> {
             let (need, endpoint) = crate::server::group::route(method, rest)?;
             Ok((need, Group(endpoint)))
         }
+        ["v1", "account", "list"] | ["v1", "account", "peers", ..] => {
+            let endpoint = crate::server::peers::route(method, &segments[2..])?;
+            Ok((Need::Account, Peers(endpoint)))
+        }
         ["v1", "account", "devices", "link"] => pick(vec![("POST", Need::Account, Link)]),
         ["v1", "account", "devices", "pending"] => pick(vec![("GET", Need::Account, Pending)]),
         ["v1", "account", "devices", "join"] => pick(vec![("POST", Need::Edge, Join)]),
@@ -317,26 +330,26 @@ pub fn route(method: &str, path: &str) -> RelayResult<(Need, AccountEndpoint)> {
 
 // ---- Errors. ----
 
-fn forbidden(message: &str) -> RelayError {
+pub(crate) fn forbidden(message: &str) -> RelayError {
     RelayError::new(codes::FORBIDDEN, message)
 }
 
-fn conflict(message: &str) -> RelayError {
+pub(crate) fn conflict(message: &str) -> RelayError {
     RelayError::new(codes::CONFLICT, message)
 }
 
-fn plan_required() -> RelayError {
+pub(crate) fn plan_required() -> RelayError {
     RelayError::new(
         codes::PLAN_REQUIRED,
         "This account is not on Apassy Connect.",
     )
 }
 
-fn account_limit(message: &str) -> RelayError {
+pub(crate) fn account_limit(message: &str) -> RelayError {
     RelayError::new(codes::ACCOUNT_LIMIT, message)
 }
 
-fn not_in_group() -> RelayError {
+pub(crate) fn not_in_group() -> RelayError {
     RelayError::new(
         codes::NOT_IN_GROUP,
         "That device belongs to an account outside your family or team.",
@@ -356,7 +369,7 @@ fn random_source() -> RelayError {
     RelayError::internal("The system has no random source.")
 }
 
-fn busy(message: &str) -> RelayError {
+pub(crate) fn busy(message: &str) -> RelayError {
     RelayError::new(codes::BUSY, message)
 }
 
@@ -400,17 +413,17 @@ fn valid_vault_id(text: &str) -> bool {
 }
 
 /// A link hash: b64u of 32 bytes, 43 characters.
-fn valid_link_hash(text: &str) -> bool {
+pub(crate) fn valid_link_hash(text: &str) -> bool {
     text.len() == 43 && decode_b64(text, 32).is_ok_and(|bytes| bytes.len() == 32)
 }
 
 /// The public key of a request: b64u of a P-256 point (65 bytes). 400 otherwise.
-fn public_key_of(text: &str) -> RelayResult<[u8; device::PUBLIC_KEY_BYTES]> {
+pub(crate) fn public_key_of(text: &str) -> RelayResult<[u8; device::PUBLIC_KEY_BYTES]> {
     device::decode_public_key(text)
         .map_err(|_| RelayError::invalid("The public key is not a P-256 key."))
 }
 
-fn signature_of(text: &str) -> RelayResult<Vec<u8>> {
+pub(crate) fn signature_of(text: &str) -> RelayResult<Vec<u8>> {
     decode_b64(text, device::MAX_SIGNATURE_BYTES)
         .map_err(|_| RelayError::invalid("The signature is not valid."))
 }
@@ -422,27 +435,27 @@ fn key_hash(public_key: &[u8]) -> [u8; 32] {
 
 /// The SHA-256 of a request body as Connect parsed it: the same body again has the same
 /// hash.
-fn body_hash<T: Serialize>(body: &T) -> RelayResult<[u8; 32]> {
+pub(crate) fn body_hash<T: Serialize>(body: &T) -> RelayResult<[u8; 32]> {
     let bytes =
         serde_json::to_vec(body).map_err(|_| RelayError::internal("A body cannot be written."))?;
     Ok(Sha256::digest(bytes).into())
 }
 
 /// A strict request body: unknown, duplicate, and missing fields are 400.
-fn strict<T: DeserializeOwned>(body: &[u8]) -> RelayResult<T> {
+pub(crate) fn strict<T: DeserializeOwned>(body: &[u8]) -> RelayResult<T> {
     serde_json::from_slice(body)
         .map_err(|_| RelayError::invalid("The request body does not match the contract."))
 }
 
 /// An empty body or `{}`: the DELETE routes without a body.
-fn no_body(body: &[u8]) -> RelayResult<()> {
+pub(crate) fn no_body(body: &[u8]) -> RelayResult<()> {
     if body.iter().all(u8::is_ascii_whitespace) {
         return Ok(());
     }
     strict::<EmptyRequest>(body).map(drop)
 }
 
-fn to_value<T: Serialize>(value: &T) -> RelayResult<Value> {
+pub(crate) fn to_value<T: Serialize>(value: &T) -> RelayResult<Value> {
     serde_json::to_value(value).map_err(|_| RelayError::internal("The answer cannot be written."))
 }
 
@@ -451,7 +464,7 @@ fn hour(now: u64) -> u64 {
     now - now % 3600
 }
 
-fn actor(account: &str) -> String {
+pub(crate) fn actor(account: &str) -> String {
     format!("account:{account}")
 }
 
@@ -864,7 +877,7 @@ pub struct AccountCaller {
 }
 
 /// One live device of an account, from `relay.db`.
-fn live_device(conn: &Connection, device: &str) -> RelayResult<Option<AccountCaller>> {
+pub(crate) fn live_device(conn: &Connection, device: &str) -> RelayResult<Option<AccountCaller>> {
     conn.query_row(
         "SELECT d.account_id, d.public_key FROM account_device d JOIN account a ON a.id = d.account_id \
          WHERE d.id = ?1 AND d.revoked_at IS NULL",
@@ -991,6 +1004,9 @@ pub fn dispatch(
         AccountEndpoint::Group(endpoint) => {
             crate::server::group::dispatch(hub, caller, endpoint, body, now)
         }
+        AccountEndpoint::Peers(endpoint) => {
+            crate::server::peers::dispatch(hub, caller, endpoint, body, now)
+        }
         _ => Err(RelayError::internal("Not an account endpoint.")),
     }
 }
@@ -1031,7 +1047,7 @@ fn device_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AccountDevice> {
 // ---- The signed device list (section 7.5). ----
 
 /// The head of the device list of `account`: its version and list hash.
-fn list_head(conn: &Connection, account: &str) -> RelayResult<(u64, String)> {
+pub(crate) fn list_head(conn: &Connection, account: &str) -> RelayResult<(u64, String)> {
     conn.query_row(
         "SELECT version, hash FROM account_list WHERE account_id = ?1 ORDER BY version DESC LIMIT 1",
         params![account],
@@ -1042,28 +1058,32 @@ fn list_head(conn: &Connection, account: &str) -> RelayResult<(u64, String)> {
     .ok_or_else(|| RelayError::internal("An account has no device list."))
 }
 
-/// The device list of `account`, from version 1.
-fn list_entries(conn: &Connection, account: &str) -> RelayResult<Vec<ListEntry>> {
+/// The device list of `account`, from version 1, with the entries of section 16.
+pub(crate) fn list_entries(conn: &Connection, account: &str) -> RelayResult<Vec<ListEntry>> {
     let mut statement = conn
         .prepare(
-            "SELECT version, op, key, link_hash, name, by_key, signature FROM account_list \
-             WHERE account_id = ?1 ORDER BY version",
+            "SELECT version, op, key, link_hash, name, by_key, signature, peer_account, peer_root, team_id \
+             FROM account_list WHERE account_id = ?1 ORDER BY version",
         )
         .map_err(db)?;
     let rows = statement
         .query_map(params![account], |row| {
             let op: String = row.get(1)?;
-            let key: Vec<u8> = row.get(2)?;
+            let key: Option<Vec<u8>> = row.get(2)?;
             let by: Vec<u8> = row.get(5)?;
             let signature: Vec<u8> = row.get(6)?;
+            let root: Option<Vec<u8>> = row.get(8)?;
             Ok(ListEntry {
                 version: to_u(row.get(0)?),
                 op: ListOp::parse(&op).ok_or(rusqlite::Error::InvalidQuery)?,
-                key: encode_b64(&key),
+                key: key.as_deref().map(encode_b64),
                 link_hash: row.get(3)?,
                 name: row.get(4)?,
                 by: encode_b64(&by),
                 signature: Some(encode_b64(&signature)),
+                account_id: row.get(7)?,
+                root: root.as_deref().map(encode_b64),
+                team_id: row.get(9)?,
             })
         })
         .map_err(db)?;
@@ -1185,20 +1205,19 @@ fn start_list(
     write_list_entry(conn, origin, account, 1, None, root, now).map(drop)
 }
 
-/// Appends a signed change of `caller` to the device list of its account, inside the
+/// The checks of every new entry of the list of `caller`'s account, inside the
 /// transaction of the change: `version` must be the head's version and 1 (409 `conflict`
 /// otherwise: the list moved, and the device signs again from the new head), the list must
-/// have room (`MAX_LIST_ENTRIES` for any change, `LAST_ADD_VERSION` for an `add`: 403
-/// `account_limit`), and the change's signature must be the caller's over the entry's
-/// message with the head's hash (400 otherwise). Nothing is written on a refusal.
-fn append_signed(
+/// have room (`MAX_LIST_ENTRIES` for any entry, `LAST_ADD_VERSION` for one that adds
+/// something: 403 `account_limit`), and `by` must be a device of the list at its head.
+/// Answers the hash of the head, which the entry names.
+pub(crate) fn next_entry(
     conn: &Connection,
-    origin: &str,
     caller: &AccountCaller,
     version: u64,
-    change: &ListChange<'_>,
-    now: u64,
-) -> RelayResult<()> {
+    op: ListOp,
+    by: &[u8],
+) -> RelayResult<String> {
     let (head, previous) = list_head(conn, &caller.account)?;
     if version != head.saturating_add(1) {
         return Err(conflict(
@@ -1210,26 +1229,44 @@ fn append_signed(
             "This account changed its devices too often. Recover the account to start a new device list.",
         ));
     }
-    if change.op == ListOp::Add && version > LAST_ADD_VERSION {
+    if op.adds() && version > LAST_ADD_VERSION {
         return Err(account_limit(
-            "The device list of this account is nearly full, so no device can be added. Removing a device still works, and a recovery starts a new device list.",
+            "The device list of this account is nearly full, so nothing more can be added to it. Removing a device still works, and so does ending a share; a recovery starts a new device list.",
         ));
     }
-    // The list stays a list that every device verifies: the signer is a device of it, an
-    // `add` names a key that was never in it, and a `remove` a key that is in it now.
-    let last_op = |key: &[u8]| -> RelayResult<Option<String>> {
-        conn.query_row(
-            "SELECT op FROM account_list WHERE account_id = ?1 AND key = ?2 ORDER BY version DESC LIMIT 1",
-            params![caller.account, key],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(db)
-    };
-    if last_op(change.by)?.is_none_or(|op| op == ListOp::Remove.as_str()) {
+    if key_last_op(conn, &caller.account, by)?.is_none_or(|op| op == ListOp::Remove.as_str()) {
         return Err(RelayError::unauthenticated());
     }
-    match (change.op, last_op(change.key)?) {
+    Ok(previous)
+}
+
+/// The op of the last device entry of `account`'s list that names `key`.
+fn key_last_op(conn: &Connection, account: &str, key: &[u8]) -> RelayResult<Option<String>> {
+    conn.query_row(
+        "SELECT op FROM account_list WHERE account_id = ?1 AND key = ?2 ORDER BY version DESC LIMIT 1",
+        params![account, key],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(db)
+}
+
+/// Appends a signed change of `caller` to the device list of its account, inside the
+/// transaction of the change: the checks of `next_entry`, and the change's signature must
+/// be the caller's over the entry's message with the head's hash (400 otherwise). Nothing
+/// is written on a refusal.
+fn append_signed(
+    conn: &Connection,
+    origin: &str,
+    caller: &AccountCaller,
+    version: u64,
+    change: &ListChange<'_>,
+    now: u64,
+) -> RelayResult<()> {
+    let previous = next_entry(conn, caller, version, change.op, change.by)?;
+    // The list stays a list that every device verifies: the signer is a device of it, an
+    // `add` names a key that was never in it, and a `remove` a key that is in it now.
+    match (change.op, key_last_op(conn, &caller.account, change.key)?) {
         (ListOp::Add, None) => {}
         (ListOp::Add, Some(_)) => {
             return Err(conflict(
@@ -2377,11 +2414,12 @@ fn store_of(
 }
 
 /// `POST /v1/account/vaults/{team_id}/devices`, from a device in the store: adds a live
-/// device of the caller's account, or of an account that shares a group with it
+/// device of the account that made the store, or of an account that the owner's list
+/// shares the store with (section 16) and that shares a group with it
 /// ([`Groups::share_group`]), when its key is the key the caller verified (else 409); an
 /// unknown or revoked device, and a device of any other account, is 403 `not_in_group`.
-/// `Hub::add_store_device` checks the device and the group again in the transaction that
-/// maps it (`may_join_store`).
+/// `Hub::add_store_device` checks the device, the share, and the group again in the
+/// transaction that maps it (`may_join_store`).
 fn store_device_add(
     hub: &Hub,
     caller: &AccountCaller,
@@ -2407,13 +2445,17 @@ fn store_device_add(
         .store
         .with(|conn| live_device(conn, &request.device_id))?
         .ok_or_else(not_in_group)?;
-    if target.account != caller.account
-        && !hub.accounts.groups().share_group(
-            &hub.directory.store,
-            &caller.account,
-            &target.account,
-            now,
-        )?
+    if target.account != owner
+        && (!hub
+            .directory
+            .store
+            .with(|conn| share_active(conn, &owner, team.as_str(), &target.account))?
+            || !hub.accounts.groups().share_group(
+                &hub.directory.store,
+                &owner,
+                &target.account,
+                now,
+            )?)
     {
         return Err(not_in_group());
     }
@@ -2871,7 +2913,8 @@ pub fn prune(hub: &Hub, now: u64) -> RelayResult<(usize, usize)> {
                 "DELETE FROM account_link WHERE expires_at < ?1",
                 params![to_i(now.saturating_sub(LINK_KEEP_SECS))],
             )
-            .map_err(db)?;
+            .map_err(db)?
+            + crate::server::peers::prune_links(tx, now)?;
         let audit = tx
             .execute(
                 "DELETE FROM audit WHERE actor LIKE 'account:%' AND at < ?1",
@@ -2892,10 +2935,28 @@ pub fn prune(hub: &Hub, now: u64) -> RelayResult<(usize, usize)> {
     })
 }
 
+/// The SQL of an active share (section 16) of the store `<team>` by the account that made
+/// it (`<owner>`) with the account `<member>`: the last `share` or `unshare` entry of the
+/// owner's list for that store and that account is a `share`.
+const ACTIVE_SHARE: &str = "EXISTS(SELECT 1 FROM account_list l WHERE l.account_id = <owner> \
+     AND l.team_id = <team> AND l.peer_account = <member> AND l.op = 'share' \
+     AND NOT EXISTS(SELECT 1 FROM account_list u WHERE u.account_id = l.account_id \
+       AND u.team_id = l.team_id AND u.peer_account = l.peer_account AND u.op = 'unshare' \
+       AND u.version > l.version))";
+
+/// [`ACTIVE_SHARE`] with its three values.
+fn active_share_sql(owner: &str, team: &str, member: &str) -> String {
+    ACTIVE_SHARE
+        .replace("<owner>", owner)
+        .replace("<team>", team)
+        .replace("<member>", member)
+}
+
 /// Whether the account device `device` of `account`, with the key `public_key`, may be in
-/// the vault store `team` now: it is live, and its account made the store or is an
-/// active member of one group with the account that made it. `Hub::add_store_device`
-/// checks it in the directory transaction that maps the device.
+/// the vault store `team` now: it is live, and its account made the store, or the list of
+/// the account that made it has an active `share` of the store with it (section 16) and
+/// both are active members of one group. `Hub::add_store_device` checks it in the
+/// directory transaction that maps the device.
 pub(crate) fn may_join_store(
     conn: &Connection,
     team: &TeamId,
@@ -2903,14 +2964,33 @@ pub(crate) fn may_join_store(
     device: &str,
     public_key: &[u8],
 ) -> RelayResult<bool> {
-    conn.query_row(
+    let sql = format!(
         "SELECT EXISTS(SELECT 1 FROM account_device d JOIN account a ON a.id = d.account_id \
          JOIN team t ON t.id = ?1 \
          WHERE d.id = ?2 AND d.account_id = ?3 AND d.public_key = ?4 AND d.revoked_at IS NULL \
-         AND t.kind = 'account' AND (t.account_id = ?3 OR EXISTS(SELECT 1 FROM group_member x \
+         AND t.kind = 'account' AND (t.account_id = ?3 OR ({} AND EXISTS(SELECT 1 FROM group_member x \
            JOIN group_member y ON y.group_id = x.group_id WHERE x.account_id = ?3 \
-           AND y.account_id = t.account_id AND x.state = 'active' AND y.state = 'active')))",
+           AND y.account_id = t.account_id AND x.state = 'active' AND y.state = 'active'))))",
+        active_share_sql("t.account_id", "t.id", "?3")
+    );
+    conn.query_row(
+        &sql,
         params![team.as_str(), device, account, public_key],
+        |row| row.get(0),
+    )
+    .map_err(db)
+}
+
+/// Whether the list of `owner` has an active `share` of its store `team` with `member`.
+pub(crate) fn share_active(
+    conn: &Connection,
+    owner: &str,
+    team: &str,
+    member: &str,
+) -> RelayResult<bool> {
+    conn.query_row(
+        &format!("SELECT {}", active_share_sql("?1", "?2", "?3")),
+        params![owner, team, member],
         |row| row.get(0),
     )
     .map_err(db)
@@ -2918,21 +2998,24 @@ pub(crate) fn may_join_store(
 
 /// Whether the store device `store_device` of the vault store `team` is a live account
 /// device in `relay.db` (`account_store_device` and `account_device`) that may be in the
-/// store now: a device of the account that made the store, or of an account that is an
-/// active member of one group with it. The relay-sync sign-in to a vault store needs it,
-/// besides its row in the store file, so a device of another account signs in no more
-/// from the moment the two accounts share no group.
+/// store now: a device of the account that made the store, or of an account that the
+/// owner's list shares the store with (section 16) and that is an active member of one
+/// group with it. The relay-sync sign-in to a vault store needs it, besides its row in
+/// the store file, so a device of another account signs in no more from the moment the
+/// share ends or the two accounts share no group.
 pub fn store_device_live(conn: &Connection, team: &TeamId, store_device: u64) -> RelayResult<bool> {
-    conn.query_row(
+    let sql = format!(
         "SELECT EXISTS(SELECT 1 FROM account_store_device s JOIN account_device d ON d.id = s.device_id \
          JOIN team t ON t.id = s.team_id \
          WHERE s.team_id = ?1 AND s.store_device = ?2 AND d.revoked_at IS NULL AND d.account_id = s.account_id \
-         AND (s.account_id = t.account_id OR EXISTS(SELECT 1 FROM group_member a JOIN group_member b \
+         AND (s.account_id = t.account_id OR ({} AND EXISTS(SELECT 1 FROM group_member a JOIN group_member b \
            ON b.group_id = a.group_id WHERE a.account_id = s.account_id AND b.account_id = t.account_id \
-           AND a.state = 'active' AND b.state = 'active')))",
-        params![team.as_str(), to_i(store_device)],
-        |row| row.get(0),
-    )
+           AND a.state = 'active' AND b.state = 'active'))))",
+        active_share_sql("t.account_id", "t.id", "s.account_id")
+    );
+    conn.query_row(&sql, params![team.as_str(), to_i(store_device)], |row| {
+        row.get(0)
+    })
     .map_err(db)
 }
 

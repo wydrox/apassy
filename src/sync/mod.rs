@@ -61,7 +61,7 @@ pub use relay::{
     LinkRefusal, MAX_LINK_BYTES, MAX_NODE_NAME_CHARS, PIN_CHANGED_TEXT, PairedLink, PendingJoin,
     PendingLink, Receipt, RelayAdoptReport, RelayCallError, RelayConfig, RelayDownload,
     RelayEnableReport, RelayMember, RelayPoll, RelaySync, RelayTransport, SignerPolicy,
-    clean_node_name, clear_relay_work, encode_node_name, membership_relay_url,
+    StoreSigners, clean_node_name, clear_relay_work, encode_node_name, membership_relay_url,
 };
 pub use relay_crypto::{
     DeviceKey, HeadFields, MAX_SNAPSHOT_BYTES, NO_PREVIOUS, SignedHead, WORDS, decode_b64u,

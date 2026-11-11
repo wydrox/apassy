@@ -503,6 +503,38 @@ pub enum OwnerAction {
         group_id: String,
         change: ConnectGroupChange,
     },
+    /// Share the vault store `team_id` with another account of the family or team
+    /// (connect-account-v1 section 16): this device signs `peer` for that account's root
+    /// (when the people compared the six `words`; empty for an account whose root this
+    /// account pinned already) and `share` of the store. The proof names the account, the
+    /// person as the sheet showed them, the store, the words, and the short fingerprint of
+    /// the root that the `peer` pins.
+    ShareConnectVault {
+        account_id: String,
+        peer_account: String,
+        peer_name: String,
+        team_id: String,
+        words: String,
+        fingerprint: String,
+    },
+    /// "The Words Match" on the device of the account that a share code was sent to: this
+    /// device signs `peer` for the root of the inviting account (section 16.2).
+    AcceptConnectShare {
+        account_id: String,
+        peer_account: String,
+        peer_name: String,
+        words: String,
+        fingerprint: String,
+    },
+    /// End a vault shared between accounts: the owner's `unshare` ("Stop Sharing with
+    /// <name>…", `leave` false) or a member's `leave` ("Leave This Shared Vault…").
+    EndConnectShare {
+        account_id: String,
+        peer_account: String,
+        peer_name: String,
+        team_id: String,
+        leave: bool,
+    },
     /// Turn the tailnet route of this Mac's node on or off (plan S2–S3, unit N7): the
     /// iPhone and the other Macs reach the approvals of this Mac directly, or no longer.
     SetTailnetRoute {
@@ -734,6 +766,10 @@ impl OwnerAction {
             Self::DeleteVaultStore { .. } => "Delete a relay copy at Apassy Connect",
             Self::AddStoreDevice { .. } => "Add a device to a relay copy",
             Self::ChangeConnectGroup { .. } => "Change your family or team",
+            Self::ShareConnectVault { .. } => "Share a vault",
+            Self::AcceptConnectShare { .. } => "Accept a shared vault",
+            Self::EndConnectShare { leave: false, .. } => "Stop sharing a vault",
+            Self::EndConnectShare { leave: true, .. } => "Leave a shared vault",
             Self::SetTailnetRoute { on: true } => {
                 concat!("Reach this ", crate::computer!(), " on your tailnet")
             }
@@ -983,6 +1019,42 @@ impl OwnerAction {
                     format!("change your Apassy Connect plan to {quantity} people or seats")
                 }
             },
+            Self::ShareConnectVault {
+                peer_name, words, ..
+            } if words.is_empty() => format!(
+                "share a vault with \"{}\" through Apassy Connect",
+                short_device_name(peer_name)
+            ),
+            Self::ShareConnectVault {
+                peer_name, words, ..
+            } => format!(
+                "share vaults with \"{}\" through Apassy Connect; both show: {}",
+                short_device_name(peer_name),
+                safe_words(words)
+            ),
+            Self::AcceptConnectShare {
+                peer_name, words, ..
+            } => format!(
+                "share vaults with \"{}\" through Apassy Connect; both show: {}",
+                short_device_name(peer_name),
+                safe_words(words)
+            ),
+            Self::EndConnectShare {
+                peer_name,
+                leave: false,
+                ..
+            } => format!(
+                "stop sharing a vault with \"{}\" through Apassy Connect",
+                short_device_name(peer_name)
+            ),
+            Self::EndConnectShare {
+                peer_name,
+                leave: true,
+                ..
+            } => format!(
+                "leave the vault that \"{}\" shares through Apassy Connect",
+                short_device_name(peer_name)
+            ),
             Self::SetTailnetRoute { on: true } => concat!(
                 "let your iPhone and ",
                 crate::computers!(),
@@ -1062,6 +1134,9 @@ impl OwnerAction {
                 | Self::DeleteVaultStore { .. }
                 | Self::AddStoreDevice { .. }
                 | Self::ChangeConnectGroup { .. }
+                | Self::ShareConnectVault { .. }
+                | Self::AcceptConnectShare { .. }
+                | Self::EndConnectShare { .. }
         )
     }
 
@@ -1204,6 +1279,16 @@ fn short_site(origin: &str) -> String {
     } else {
         site
     }
+}
+
+/// The six safety words as an owner check shows them: lowercase letters and spaces only,
+/// at most 80 characters.
+fn safe_words(words: &str) -> String {
+    words
+        .chars()
+        .filter(|c| c.is_ascii_lowercase() || *c == ' ')
+        .take(80)
+        .collect()
 }
 
 /// Device name or login title for the prompt: printable characters only, at most 40
@@ -2348,6 +2433,43 @@ mod evaluation_tests {
                 team_id: "t".repeat(32),
                 device_id: "dev_p4n6r2t7bc".into(),
                 account_id: "acc_m3n5p7q2rb".into(),
+            },
+            OwnerAction::ShareConnectVault {
+                account_id: "acc_k7m2q4x3ca".into(),
+                peer_account: "acc_m3n5p7q2rb".into(),
+                peer_name: long.clone(),
+                team_id: "t_7k2m5q4x3c".into(),
+                words: "blaze cable flute board seal tiger".into(),
+                fingerprint: "1a2b 3c4d 5e6f".into(),
+            },
+            OwnerAction::ShareConnectVault {
+                account_id: "acc_k7m2q4x3ca".into(),
+                peer_account: "acc_m3n5p7q2rb".into(),
+                peer_name: long.clone(),
+                team_id: "t_7k2m5q4x3c".into(),
+                words: String::new(),
+                fingerprint: "1a2b 3c4d 5e6f".into(),
+            },
+            OwnerAction::AcceptConnectShare {
+                account_id: "acc_m3n5p7q2rb".into(),
+                peer_account: "acc_k7m2q4x3ca".into(),
+                peer_name: long.clone(),
+                words: "blaze cable flute board seal tiger".into(),
+                fingerprint: "1a2b 3c4d 5e6f".into(),
+            },
+            OwnerAction::EndConnectShare {
+                account_id: "acc_k7m2q4x3ca".into(),
+                peer_account: "acc_m3n5p7q2rb".into(),
+                peer_name: long.clone(),
+                team_id: "t_7k2m5q4x3c".into(),
+                leave: false,
+            },
+            OwnerAction::EndConnectShare {
+                account_id: "acc_m3n5p7q2rb".into(),
+                peer_account: "acc_k7m2q4x3ca".into(),
+                peer_name: long.clone(),
+                team_id: "t_7k2m5q4x3c".into(),
+                leave: true,
             },
         ] {
             assert!(action.needs_fresh_local_check(), "{action:?}");

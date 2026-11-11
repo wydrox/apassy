@@ -91,6 +91,10 @@ ALTER TABLE team_code ADD COLUMN kind TEXT NOT NULL DEFAULT 'operator' CHECK (ki
 ///   account device is which device of which store), `account_store_removal` (removals
 ///   from a store file that wait for its open or a retry), `brain_event` (the I-4 outbox
 ///   of the bouncer brain).
+/// - `account_list` also holds the entries that name another account (section 16: `peer`
+///   with the pinned root, `share` and `join` with the store, and their ends), and
+///   `account_peer_link`, `account_peer_join` hold the hashes of share codes and their
+///   answers (pruned a day after they end).
 /// - `"group"`, `group_member`, `group_invite` (C3); `stripe_customer`,
 ///   `stripe_subscription`, `stripe_event`, `billing_problem` (Stripe objects Connect
 ///   could not apply, for the operator), `billing_clock` (the clock of the deletion
@@ -127,9 +131,14 @@ CREATE TABLE account_device (
 CREATE INDEX account_device_account ON account_device(account_id);
 CREATE TABLE account_list (
   account_id TEXT NOT NULL REFERENCES account(id) ON DELETE CASCADE,
-  version INTEGER NOT NULL, op TEXT NOT NULL CHECK (op IN ('root','add','remove')),
-  key BLOB NOT NULL, link_hash TEXT, name TEXT, by_key BLOB NOT NULL, signature BLOB NOT NULL,
-  hash TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (account_id, version));
+  version INTEGER NOT NULL,
+  op TEXT NOT NULL CHECK (op IN ('root','add','remove','peer','unpeer','share','unshare','join','leave')),
+  key BLOB, link_hash TEXT, name TEXT, by_key BLOB NOT NULL, signature BLOB NOT NULL,
+  hash TEXT NOT NULL, created_at INTEGER NOT NULL, peer_account TEXT, peer_root BLOB, team_id TEXT,
+  PRIMARY KEY (account_id, version),
+  CHECK ((op IN ('root','add','remove')) = (key IS NOT NULL AND peer_account IS NULL)));
+CREATE INDEX account_list_peer ON account_list(account_id, peer_account) WHERE peer_account IS NOT NULL;
+CREATE INDEX account_list_team ON account_list(team_id) WHERE team_id IS NOT NULL;
 CREATE TABLE account_key (
   key_hash BLOB PRIMARY KEY, created_at INTEGER NOT NULL, account_id TEXT);
 CREATE TABLE account_store_removal (
@@ -213,6 +222,19 @@ CREATE TABLE tunnel_usage (
 CREATE TABLE entitlement_key (
   kid TEXT PRIMARY KEY, public_key BLOB NOT NULL, created_at INTEGER NOT NULL,
   last_signed_at INTEGER);
+CREATE TABLE account_peer_link (
+  id INTEGER PRIMARY KEY, account_id TEXT NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+  device_id TEXT NOT NULL REFERENCES account_device(id) ON DELETE CASCADE,
+  peer_account TEXT NOT NULL, link_hash TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL, used_at INTEGER);
+CREATE INDEX account_peer_link_device ON account_peer_link(device_id);
+CREATE TABLE account_peer_join (
+  id INTEGER PRIMARY KEY, link_id INTEGER NOT NULL REFERENCES account_peer_link(id) ON DELETE CASCADE,
+  account_id TEXT NOT NULL, device_id TEXT NOT NULL, public_key BLOB NOT NULL,
+  signature BLOB NOT NULL, body_hash BLOB NOT NULL UNIQUE,
+  state TEXT NOT NULL CHECK (state IN ('pending','confirmed','refused','cancelled','expired')),
+  created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, decided_at INTEGER);
+CREATE INDEX account_peer_join_account ON account_peer_join(account_id);
 ";
 
 /// The SQL of a new directory: `SCHEMA_1005`, then `MIGRATE_ACCOUNTS`, then the version.
@@ -353,14 +375,17 @@ fn migrate_accounts(conn: &Connection) -> RelayResult<()> {
 }
 
 /// The tables of the accounts step from an earlier, unreleased build of it (no
-/// `account_list.name`: the device lists whose entries sign no device name): this build
-/// does not read them, and does not change them.
+/// `account_list.name`: the device lists whose entries sign no device name; no
+/// `account_list.team_id`: the lists without the entries of section 16): this build does
+/// not read them, and does not change them.
 fn refuse_earlier_accounts_step(conn: &Connection) -> RelayResult<()> {
-    if crate::server::store::has_column(conn, "account_list", "name")? {
+    if crate::server::store::has_column(conn, "account_list", "name")?
+        && crate::server::store::has_column(conn, "account_list", "team_id")?
+    {
         return Ok(());
     }
     Err(RelayError::internal(
-        "relay.db holds the accounts tables of an earlier, unreleased build of directory 1006 (no account_list.name). This build cannot open it: restore relay.db from the backup taken before that build, or start that build's image again.",
+        "relay.db holds the accounts tables of an earlier, unreleased build of directory 1006 (no account_list.name or account_list.team_id). This build cannot open it: restore relay.db from the backup taken before that build, or start that build's image again.",
     ))
 }
 

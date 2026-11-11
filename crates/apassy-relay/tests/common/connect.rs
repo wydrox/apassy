@@ -471,6 +471,71 @@ impl Connect {
         )
     }
 
+    /// The version and the hash of the head of `account`'s device list.
+    pub fn list_head(&self, account: &str) -> (u64, String) {
+        let row = self.rows(&format!(
+            "SELECT version || ' ' || hash FROM account_list WHERE account_id = '{account}' \
+             ORDER BY version DESC LIMIT 1"
+        ));
+        let (version, hash) = row[0].split_once(' ').unwrap();
+        (version.parse().unwrap(), hash.to_string())
+    }
+
+    /// The entry `op` of section 16 for `peer` (with `root` for a `peer`, `team` for a
+    /// store op), signed by `by` at the next version: the status and the answer.
+    pub fn list_entry(
+        &self,
+        by: &Dev,
+        op: &str,
+        peer: &str,
+        root: Option<&str>,
+        team: Option<&str>,
+    ) -> (u16, Value) {
+        let (version, previous) = self.list_head(&by.account);
+        let message = device::share_list_message(
+            self.origin(),
+            &by.account,
+            version + 1,
+            &previous,
+            op,
+            peer,
+            root.unwrap_or(device::LIST_NONE),
+            team.unwrap_or(device::LIST_NONE),
+            &by.key.public_key_b64(),
+        );
+        let statement = encode_b64(&by.key.sign(&message).unwrap());
+        self.call(
+            "POST",
+            "/v1/account/list",
+            Some(&by.token),
+            Some(
+                &json!({"version": version + 1, "op": op, "account_id": peer, "root": root,
+                         "team_id": team, "statement": statement}),
+            ),
+        )
+    }
+
+    /// The entries of the store's owner before a device of another account is in it
+    /// (section 16): its `peer` of `member`'s root (`member`'s first device), unless it
+    /// has one, and its `share` of `team` with `member`.
+    pub fn share_store(&self, owner: &Dev, member: &Dev, team: &str) {
+        let peered = !self
+            .rows(&format!(
+                "SELECT op FROM account_list WHERE account_id = '{}' AND op = 'peer' \
+                 AND peer_account = '{}'",
+                owner.account, member.account
+            ))
+            .is_empty();
+        if !peered {
+            let root = member.key.public_key_b64();
+            let (status, answer) =
+                self.list_entry(owner, "peer", &member.account, Some(&root), None);
+            assert_eq!(status, 200, "{answer}");
+        }
+        let (status, answer) = self.list_entry(owner, "share", &member.account, None, Some(team));
+        assert_eq!(status, 200, "{answer}");
+    }
+
     /// A raw request with extra headers.
     pub fn raw(
         &self,

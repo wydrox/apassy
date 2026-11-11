@@ -3279,10 +3279,10 @@ fn add_at_head(c: &Connect, by: &Dev, token: &str) -> (u16, Value) {
 #[test]
 fn the_end_of_a_device_list_keeps_room_to_remove_every_device_and_recover() {
     use apassy_relay::server::account::{LAST_ADD_VERSION, MAX_DEVICES, MAX_LIST_ENTRIES};
-    assert_eq!(LAST_ADD_VERSION, 246);
+    assert_eq!(LAST_ADD_VERSION, 822);
     const { assert!(MAX_LIST_ENTRIES - LAST_ADD_VERSION >= MAX_DEVICES) };
     let c = start();
-    // 1. An add at 246 works; an add at 247 is refused and adds nothing; a remove at 247
+    // 1. An add at 822 works; an add at 823 is refused and adds nothing; a remove at 823
     // still works.
     let a = create(&c);
     let token = sign_in(&c, &a);
@@ -3345,8 +3345,8 @@ fn the_end_of_a_device_list_keeps_room_to_remove_every_device_and_recover() {
         Some(&json!({"version": head + 1, "statement": statement})),
     );
 
-    // 2. A list at 254: a remove at 255 and the last device's own remove at 256 work; the
-    // account then recovers with a new list.
+    // 2. A list at 1022: a remove at 1023 and the last device's own remove at 1024 work;
+    // the account then recovers with a new list.
     let code: [u8; 16] = [7u8; 16];
     let r = create(&c);
     let r_token = sign_in(&c, &r);

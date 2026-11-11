@@ -12,6 +12,13 @@
 //!   that left later stays a device: its `add` precedes the `remove`. A key that was in the
 //!   list is never added again, and an `add` comes only while every device can still be
 //!   removed before the list is full ([`MAX_ADD_VERSION`]).
+//! - The same list holds the entries that name another account (section 16,
+//!   `super::share`): `peer` and `unpeer` (the pinned root of another account), `share`
+//!   and `unshare` (a vault store of this account and that account), `join` and `leave` (a
+//!   store of that account that this account syncs). They share the version and the
+//!   `previous` hash of the device entries, so a removed device signs none of them, and
+//!   every entry that adds something (`add`, `peer`, `share`, `join`) leaves room to end
+//!   every device, peer, share, and join before the list is full.
 //! - The **pin** of this device (in the account file): the root, and the highest version
 //!   and the hash of the list that it verified. [`verify_list`] takes a list only when it
 //!   starts at the pinned root and every entry verifies; [`Pin::accepts`] takes it only when
@@ -24,15 +31,18 @@
 use serde::Deserialize;
 
 use super::device_key::{LIST_NONE, list_hash, list_message};
+use super::share::{self, ListShares, MAX_PEERS, MAX_SHARED};
 use crate::sync::{decode_b64u, encode_b64u, verify_signature};
 
 /// The most entries of a device list (the relay's limit).
-pub const MAX_LIST: usize = 256;
+pub const MAX_LIST: usize = 1024;
 /// The most live devices of an account (contract section 13).
 pub const MAX_LIVE: usize = 10;
-/// The highest version of an `add`: the list keeps room to remove every live device
-/// (also the last one, by itself) before it is full, and a recovery starts a new list.
-pub const MAX_ADD_VERSION: u64 = (MAX_LIST - MAX_LIVE) as u64;
+/// The highest version of an entry that adds something (`add`, `peer`, `share`, `join`):
+/// the list keeps room to end every live device (also the last one, by itself), every
+/// peer, and every share and join before it is full (1024 − 10 − 64 − 128 = 822), and a
+/// recovery starts a new list.
+pub const MAX_ADD_VERSION: u64 = (MAX_LIST - MAX_LIVE - MAX_PEERS - MAX_SHARED) as u64;
 /// The list is nearly full when this many versions or fewer are left for an `add`: the
 /// app says so ahead of time.
 pub const ADDS_LEFT_WARNING: u64 = 20;
@@ -48,10 +58,13 @@ pub const MAX_LEFT: usize = 128;
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ListEntry {
     pub version: u64,
-    /// `root`, `add`, or `remove`.
+    /// `root`, `add`, or `remove`; or one of section 16: `peer`, `unpeer`, `share`,
+    /// `unshare`, `join`, `leave`.
     pub op: String,
-    /// b64u of the key that the entry adds or removes (the root key for `root`).
-    pub key: String,
+    /// b64u of the key that the entry adds or removes (the root key for `root`); `None`
+    /// for an entry of section 16.
+    #[serde(default)]
+    pub key: Option<String>,
     /// The link of an `add`, else `None`.
     #[serde(default)]
     pub link_hash: Option<String>,
@@ -63,6 +76,15 @@ pub struct ListEntry {
     /// b64u of the DER signature.
     #[serde(default)]
     pub signature: Option<String>,
+    /// The other account of an entry of section 16, else `None`.
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// b64u of the root that a `peer` pins, else `None`.
+    #[serde(default)]
+    pub root: Option<String>,
+    /// The vault store of a `share`, `unshare`, `join`, or `leave`, else `None`.
+    #[serde(default)]
+    pub team_id: Option<String>,
 }
 
 /// A device name of section 2: 1 to 64 bytes of UTF-8, trimmed, no control character.
@@ -113,6 +135,9 @@ pub struct Verified {
     /// The keys that the list removed, in the order of their removal: each was a device of
     /// the account before.
     pub removed: Vec<Vec<u8>>,
+    /// What the list says of other accounts at its head (section 16): the active peers,
+    /// shares, and joins.
+    pub shares: ListShares,
 }
 
 impl Verified {
@@ -163,6 +188,7 @@ pub fn verify_list(
         added_by: Vec::new(),
         links: Vec::new(),
         removed: Vec::new(),
+        shares: ListShares::default(),
     };
     // Every key that was in the list: none is added again.
     let mut ever: Vec<Vec<u8>> = Vec::new();
@@ -171,9 +197,31 @@ pub fn verify_list(
         if entry.version != version {
             return None;
         }
-        let key = point(&entry.key)?;
-        let by = point(&entry.by)?;
         let previous = hashes.last().map_or(LIST_NONE, String::as_str);
+        if share::is_share_op(&entry.op) {
+            // An entry that names another account: signed by a device of the list at the
+            // version before, and valid for what the list says of other accounts so far.
+            let by = point(&entry.by)?;
+            if version == 1 || !list.live.contains(&by) {
+                return None;
+            }
+            let message = share::entry_message(origin, account_id, version, previous, entry)?;
+            let signature = decode_b64u(entry.signature.as_deref()?)?;
+            if !verify_signature(&by, &message, &signature)
+                || (share::adds(&entry.op) && version > MAX_ADD_VERSION)
+            {
+                return None;
+            }
+            list.shares.apply(account_id, entry)?;
+            hashes.push(list_hash(&message));
+            continue;
+        }
+        if entry.account_id.is_some() || entry.root.is_some() || entry.team_id.is_some() {
+            return None;
+        }
+        let key_text = entry.key.as_deref()?;
+        let key = point(key_text)?;
+        let by = point(&entry.by)?;
         let link_hash = entry.link_hash.as_deref();
         let name = entry.name.as_deref();
         let message = list_message(
@@ -182,7 +230,7 @@ pub fn verify_list(
             version,
             previous,
             &entry.op,
-            &entry.key,
+            key_text,
             link_hash.unwrap_or(LIST_NONE),
             name.unwrap_or(LIST_NONE),
             &entry.by,
@@ -362,11 +410,14 @@ mod tests {
             self.entries.push(ListEntry {
                 version,
                 op: op.into(),
-                key: b64(key),
+                key: Some(b64(key)),
                 link_hash,
                 name: name.map(str::to_owned),
                 by: b64(by),
                 signature: Some(encode_b64u(&by.sign(&message).unwrap())),
+                account_id: None,
+                root: None,
+                team_id: None,
             });
             self.hashes.push(list_hash(&message));
         }
@@ -514,45 +565,50 @@ mod tests {
         );
     }
 
-    /// An `add` may come only while every device of the list can still be removed before
-    /// the list is full: at most version 246 (256 entries, 10 devices); a `remove` may come
-    /// up to version 256, also the last device's own.
+    /// An `add` may come only while every device, peer, share, and join of the list can
+    /// still be ended before the list is full: at most version 822 (1024 entries, 10
+    /// devices, 64 peers, 128 shares and joins); a `remove` may come up to version 1024,
+    /// also the last device's own.
     #[test]
     fn an_add_leaves_room_to_remove_every_device() {
+        assert_eq!(MAX_ADD_VERSION, 822);
         let root = key();
         let mut list = List::new(&root);
         let mut seed = 0u8;
-        // Adds and removes of a passing device up to version 237.
-        while list.entries.len() < 237 {
+        // Adds and removes of a passing device up to version 813.
+        while list.entries.len() < 813 {
             let passing = key();
             seed = seed.wrapping_add(1);
             list.add(&root, &passing, seed);
             list.remove(&root, &passing);
         }
-        // Nine more devices: ten live devices at version 246.
+        // Nine more devices: ten live devices at version 822.
         let others: Vec<DeviceKey> = (0..9).map(|_| key()).collect();
         for (index, other) in others.iter().enumerate() {
             list.add(&root, other, 200 + index as u8);
         }
-        assert_eq!(list.entries.len(), 246);
-        let at_246 = verify_list(ORIGIN, ACCOUNT, root.public_key(), &list.entries).unwrap();
-        assert_eq!(at_246.live.len(), 10);
-        // An add at 247 is past the room.
+        assert_eq!(list.entries.len(), 822);
+        let at_822 = verify_list(ORIGIN, ACCOUNT, root.public_key(), &list.entries).unwrap();
+        assert_eq!(at_822.live.len(), 10);
+        // An add at 823 is past the room.
         let mut late = List {
             entries: list.entries.clone(),
             hashes: list.hashes.clone(),
         };
         late.add(&root, &key(), 251);
         assert!(verify_list(ORIGIN, ACCOUNT, root.public_key(), &late.entries).is_none());
-        // Every device is removed up to version 256, the root last, by itself.
+        // Every device is removed after it, the root last, by itself; removals of passing
+        // devices fill the list up to version 1024 (a remove is never refused for room).
         for other in &others {
             list.remove(&root, other);
         }
-        assert_eq!(list.entries.len(), 255);
+        assert_eq!(list.entries.len(), 831);
         list.remove(&root, &root);
-        assert_eq!(list.entries.len(), 256);
         let full = verify_list(ORIGIN, ACCOUNT, root.public_key(), &list.entries).unwrap();
         assert!(full.live.is_empty());
+        // A list longer than 1024 entries is refused.
+        let long = vec![list.entries[0].clone(); MAX_LIST + 1];
+        assert!(verify_list(ORIGIN, ACCOUNT, root.public_key(), &long).is_none());
     }
 
     #[test]

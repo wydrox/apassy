@@ -29,8 +29,9 @@
 //! The account file ([`account_file`], `connect/account.json` in the data directory,
 //! mode 0600 in a 0700 directory) is [`AccountState`]: the origin, the ids, the names, the
 //! public key, the creation time, and the trust store (the pinned root, the pinned version
-//! and hash of the device list, the known keys, the keys that left the account). It holds
-//! no private key, no token, no email, no link code, and no recovery code.
+//! and hash of the device list, the known keys, the keys that left the account, and the
+//! peers and shared stores of section 16, [`super::share`]). It holds no private key, no
+//! token, no email, no link code, no share code, and no recovery code.
 
 use std::fmt;
 use std::fs::{self, OpenOptions};
@@ -51,6 +52,7 @@ use super::client::{
 };
 use super::device_key::{AccountSigner, DeviceKeyStore, recover_message};
 use super::entitlement::Entitlement;
+use super::share::{self, PeerPin, StoreShare};
 use super::trust::{self, MAX_KNOWN, MAX_LEFT, Pin, point, valid_list_hash};
 use super::words::{
     LinkCode, RecoveryCode, key_fingerprint, link_fingerprint, new_account_id, safety_words,
@@ -65,11 +67,16 @@ use crate::vault::{Vault, VaultResult};
 pub const TOKEN_SECONDS: u64 = 900;
 /// A token is renewed when it has less than this left.
 const TOKEN_MARGIN: u64 = 60;
-/// The version of the account file: 3 pins the signed device list. A file of an earlier
-/// version is refused.
-const STATE_VERSION: u8 = 3;
-/// The longest account file that is read.
-const MAX_STATE_BYTES: u64 = 64 * 1024;
+/// The version of the account file: 4 adds the peers and the shared stores of section 16
+/// to the pinned device list of 3. A file of version 3 is read as a file of version 4
+/// without peers and shared stores, and written as version 4 at its next change; a file
+/// of an earlier version is refused.
+const STATE_VERSION: u8 = 4;
+/// The version before the peers: read and moved in place.
+const STATE_VERSION_3: u8 = 3;
+/// The longest account file that is read: the peers and the shared stores at their
+/// bounds (`super::share`) fit with room.
+const MAX_STATE_BYTES: u64 = 4 * 1024 * 1024;
 /// A sign-in tries at most this many rounds, each with a fresh challenge.
 const SIGN_IN_ROUNDS: usize = 3;
 /// The waits before the second and the third round.
@@ -142,6 +149,16 @@ pub struct AccountState {
     /// signs only the versions of a vault store that this Mac had merged already, and below
     /// a head of a device of the list any (`crate::sync::SignerPolicy`).
     pub left: Vec<String>,
+    /// The other accounts whose root this account pinned (its own `peer` entries) or took
+    /// from the `peer` entry of the account that made a store it joined (at most 64,
+    /// section 16, [`PeerPin`]).
+    #[serde(default)]
+    pub peers: Vec<PeerPin>,
+    /// The vault stores shared between accounts that this device knows: its own stores
+    /// with shares and the stores it joined, with their members and the keys that ended
+    /// ([`StoreShare`]).
+    #[serde(default)]
+    pub stores: Vec<StoreShare>,
 }
 
 impl AccountState {
@@ -173,10 +190,12 @@ impl AccountState {
             list_head,
             known: vec![public_key.to_owned()],
             left: Vec::new(),
+            peers: Vec::new(),
+            stores: Vec::new(),
         }
     }
 
-    fn keys(texts: &[String]) -> Vec<Vec<u8>> {
+    pub(super) fn keys(texts: &[String]) -> Vec<Vec<u8>> {
         texts.iter().filter_map(|text| point(text)).collect()
     }
 
@@ -209,6 +228,7 @@ impl AccountState {
                 .iter()
                 .chain(&self.left)
                 .all(|key| point(key).is_some())
+            && share::valid_state(&self.account_id, &self.peers, &self.stores)
     }
 
     /// The account file at `path`, or `None` when there is none. A file of a bad shape,
@@ -229,29 +249,34 @@ impl AccountState {
         if text.len() as u64 > MAX_STATE_BYTES {
             return Err(ConnectError::Local);
         }
-        let state: Self = match serde_json::from_slice(&text) {
+        let mut state: Self = match serde_json::from_slice(&text) {
             Ok(state) => state,
             // A file of an earlier version (no signed device list): this device joins its
             // account again after the owner forgets it here (`forget_old_account_file`).
             Err(_) if Self::earlier_version(&text) => return Err(ConnectError::OldAccountFile),
             Err(_) => return Err(ConnectError::Local),
         };
+        // Version 3 is version 4 without peers and shared stores: it moves in place, and
+        // the next write keeps version 4. This device does not join its account again.
+        if state.v == STATE_VERSION_3 && state.peers.is_empty() && state.stores.is_empty() {
+            state.v = STATE_VERSION;
+        }
         if state.is_valid() {
             Ok(Some(state))
-        } else if state.v < STATE_VERSION {
+        } else if state.v < STATE_VERSION_3 {
             Err(ConnectError::OldAccountFile)
         } else {
             Err(ConnectError::Local)
         }
     }
 
-    /// Whether `text` is an account file of an earlier version: a JSON object whose `v` is
-    /// a number below [`STATE_VERSION`].
+    /// Whether `text` is an account file of an earlier version that does not move in
+    /// place: a JSON object whose `v` is a number below 3.
     fn earlier_version(text: &[u8]) -> bool {
         serde_json::from_slice::<serde_json::Value>(text)
             .ok()
             .and_then(|value| value.get("v").and_then(serde_json::Value::as_u64))
-            .is_some_and(|v| v < u64::from(STATE_VERSION))
+            .is_some_and(|v| v < u64::from(STATE_VERSION_3))
     }
 
     /// Write the file at `path` with mode 0600, in a 0700 directory, through a temporary
@@ -368,14 +393,17 @@ pub fn drop_stale_account_rows(vault: &mut Vault, state: &AccountState) -> Vault
 /// Which keys may sign the heads of a vault store of the account of `state`: the devices
 /// of the signed device list that this Mac verified, and the keys that left that list (as
 /// the current head only for the versions that this Mac had merged of that store, and
-/// below a head of a device of the list; `crate::sync::SignerPolicy`). The trust store of the account file
-/// decides alone: no answer of Connect (a group, a store marked shared, a device it
-/// lists) adds a key. A key of another account signs nothing: no step of this version pins
-/// the root of another account.
+/// below a head of a device of the list; `crate::sync::SignerPolicy`). A store shared
+/// between accounts (section 16) has signers of its own
+/// ([`share::store_signer_policy`]): the devices of the accounts that its signed `share`
+/// entries name, through the roots that this account pinned. The trust store of the
+/// account file decides alone: no answer of Connect (a group, a store marked shared, a
+/// device it lists) adds a key.
 pub fn signer_policy(state: &AccountState) -> crate::sync::SignerPolicy {
     crate::sync::SignerPolicy {
         accepted: AccountState::keys(&state.known),
         left: AccountState::keys(&state.left),
+        stores: share::shared_signers(state),
     }
 }
 
@@ -771,7 +799,7 @@ impl ConnectAccount {
         self.revoked
     }
 
-    fn now(&self) -> u64 {
+    pub(super) fn now(&self) -> u64 {
         (self.clock)()
     }
 
@@ -820,7 +848,7 @@ impl ConnectAccount {
 
     /// The public key of this Mac's account key, X9.63, from the account file (checked
     /// when it loaded). It needs no private key.
-    fn own_public_key(&self) -> Vec<u8> {
+    pub(super) fn own_public_key(&self) -> Vec<u8> {
         point(&self.state.public_key).unwrap_or_default()
     }
 
@@ -915,7 +943,7 @@ impl ConnectAccount {
     }
 
     /// The pinned root of the account file (X9.63).
-    fn root_key(&self) -> Vec<u8> {
+    pub(super) fn root_key(&self) -> Vec<u8> {
         point(&self.state.root).unwrap_or_default()
     }
 
@@ -959,8 +987,29 @@ impl ConnectAccount {
             }
         }
         self.advance(list.version, list.head(), &list.live, &list.removed)?;
+        // What the list says of other accounts: its own peers and the members of its own
+        // shared stores (section 16). The stores it joined learn their members from the
+        // lists of the accounts that made them ([`Self::refresh_shares`]).
+        if share::learn_own(&mut self.state, &list.shares) {
+            self.state.save(&self.path)?;
+        }
         self.list = Some(list);
         Ok(())
+    }
+
+    /// The account file, to change it (`super::share`); [`Self::save_state`] writes it.
+    pub(super) fn state_mut(&mut self) -> &mut AccountState {
+        &mut self.state
+    }
+
+    /// Write the account file.
+    pub(super) fn save_state(&self) -> Result<(), ConnectError> {
+        self.state.save(&self.path)
+    }
+
+    /// Forget the device list of the last view: the next view gives it again.
+    pub(super) fn forget_list(&mut self) {
+        self.list = None;
     }
 
     /// The device list of the last view that counted, when this Mac has one.
@@ -971,7 +1020,7 @@ impl ConnectAccount {
     /// Move the trust store to the list version `version` with the hash `head`, the
     /// devices `live`, and the keys that the list removed `removed`, and write the account
     /// file when anything changed.
-    fn advance(
+    pub(super) fn advance(
         &mut self,
         version: u64,
         head: &str,
@@ -994,7 +1043,7 @@ impl ConnectAccount {
     /// A fresh [`Self::view`] whose device list verified: the head that the next entry of
     /// this Mac names. A list that does not verify is [`ConnectError::BadAnswer`], and
     /// nothing is signed.
-    fn verified_view(&mut self) -> Result<AccountView, ConnectError> {
+    pub(super) fn verified_view(&mut self) -> Result<AccountView, ConnectError> {
         let view = self.view()?;
         if !view.list_verified {
             return Err(ConnectError::BadAnswer);
@@ -1818,7 +1867,8 @@ impl JoinRequest {
         let checked = answer
             .device_list
             .first()
-            .and_then(|entry| point(&entry.key))
+            .and_then(|entry| entry.key.as_deref())
+            .and_then(point)
             .filter(|root| link_fingerprint(root, &confirmer_key) == code.fingerprint())
             .and_then(|root| {
                 trust::verify_list(client.origin(), &account_id, &root, &answer.device_list)
@@ -1964,7 +2014,13 @@ impl JoinRequest {
                 .filter(|key| !list.live.contains(key))
                 .map(|key| encode_b64u(key))
                 .collect(),
+            peers: Vec::new(),
+            stores: Vec::new(),
         };
+        // The peers and shared stores of the list that this device pinned (section 16):
+        // a second device of a person needs no ceremony.
+        let mut state = state;
+        share::learn_own(&mut state, &list.shares);
         state.save(&self.path)?;
         let mut account = ConnectAccount::build(
             self.client.clone(),
@@ -1996,7 +2052,7 @@ mod tests {
 
     fn state() -> AccountState {
         AccountState {
-            v: 3,
+            v: 4,
             origin: "https://connect.example.test".to_owned(),
             account_id: "acc_k7m2q4x3ca".to_owned(),
             device_id: "dev_m2k7q3x4ab".to_owned(),
@@ -2014,6 +2070,8 @@ mod tests {
             ),
             known: vec![KEY.to_owned()],
             left: Vec::new(),
+            peers: Vec::new(),
+            stores: Vec::new(),
         }
     }
 
@@ -2040,7 +2098,7 @@ mod tests {
         );
         assert!(is_old_account_file(&path));
         // A file of this version with a bad shape is no old file.
-        fs::write(&path, b"{\"v\":3}").unwrap();
+        fs::write(&path, b"{\"v\":4}").unwrap();
         assert_eq!(AccountState::load(&path).unwrap_err(), ConnectError::Local);
         assert!(!is_old_account_file(&path));
         // A key of the trust store that is not a point of the curve is refused too.
