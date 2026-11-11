@@ -38,6 +38,13 @@ pub const SIGNATURE_HEADER: &str = "Stripe-Signature";
 pub const IDEMPOTENCY_HEADER: &str = "Idempotency-Key";
 /// How long resolved prices are kept before the next lookup.
 pub const PRICE_TTL: u64 = 3600;
+/// After a failed price lookup, the next one waits this long: `GET /v1/plans` answers
+/// from the last prices, or `503 busy`, without asking Stripe on every request.
+pub const PRICE_RETRY_SECS: u64 = 60;
+/// The only origin of a Checkout Session URL that Connect returns.
+pub const CHECKOUT_ORIGIN: &str = "https://checkout.stripe.com/";
+/// The only origin of a Customer Portal URL that Connect returns.
+pub const PORTAL_ORIGIN: &str = "https://billing.stripe.com/";
 /// The largest answer from Stripe that the relay reads.
 const MAX_ANSWER_BYTES: u64 = 1024 * 1024;
 /// The largest `Stripe-Signature` header the relay parses, and its most `v1` values.
@@ -276,12 +283,61 @@ struct PriceCache {
     prices: HashMap<String, StripePrice>,
 }
 
+/// The price cache and the time of the last failed lookup.
+#[derive(Default)]
+struct Prices {
+    cache: Option<PriceCache>,
+    failed_at: Option<u64>,
+}
+
+impl Prices {
+    fn for_keys(&self, keys: &[&str]) -> Option<&PriceCache> {
+        self.cache.as_ref().filter(|cache| {
+            cache
+                .keys
+                .iter()
+                .map(String::as_str)
+                .eq(keys.iter().copied())
+        })
+    }
+}
+
 /// A Checkout Session as Connect uses it.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct CheckoutSession {
     pub id: String,
     pub url: String,
     pub expires_at: u64,
+}
+
+/// A Checkout Session read back: `status` is `open`, `complete`, or `expired`; `url` is
+/// `null` once it is not open.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct CheckoutSessionState {
+    pub id: String,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    pub expires_at: u64,
+}
+
+/// A subscription read from Stripe: the object, and Stripe's time from the answer's
+/// `Date` header.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubscriptionRead {
+    pub object: Value,
+    pub date: Option<u64>,
+}
+
+/// True for a URL that Connect may hand to a browser for this Stripe origin: the origin
+/// itself, a path, at most 4096 bytes, no space or control character.
+pub fn is_stripe_page(url: &str, origin: &str) -> bool {
+    url.len() <= 4096
+        && url
+            .strip_prefix(origin)
+            .is_some_and(|path| !path.is_empty())
+        && !url.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
 /// A Customer Portal session as Connect uses it.
@@ -352,7 +408,7 @@ impl StripeConfig {
 pub struct StripeClient {
     config: StripeConfig,
     agent: ureq::Agent,
-    prices: Mutex<Option<PriceCache>>,
+    prices: Mutex<Prices>,
     log: LogSink,
 }
 
@@ -385,7 +441,7 @@ impl StripeClient {
         Self {
             config,
             agent,
-            prices: Mutex::new(None),
+            prices: Mutex::new(Prices::default()),
             log: stderr_log(),
         }
     }
@@ -401,44 +457,49 @@ impl StripeClient {
     }
 
     /// The active prices of these lookup keys, from the cache when it is younger than
-    /// `PRICE_TTL` and has the same keys. A failed lookup keeps the cached prices, if any.
+    /// `PRICE_TTL` and has the same keys. A failed lookup keeps the cached prices, if any,
+    /// and the next lookup waits `PRICE_RETRY_SECS`: until then the cached prices answer,
+    /// or `503 busy` without a call.
     pub fn prices(&self, keys: &[&str], now: u64) -> RelayResult<HashMap<String, StripePrice>> {
         {
-            let cache = self.prices.lock().unwrap_or_else(PoisonError::into_inner);
-            if let Some(cache) = &*cache
+            let prices = self.prices.lock().unwrap_or_else(PoisonError::into_inner);
+            let cached = prices.for_keys(keys);
+            if let Some(cache) = cached
                 && now.saturating_sub(cache.fetched_at) < PRICE_TTL
                 && now >= cache.fetched_at
-                && cache
-                    .keys
-                    .iter()
-                    .map(String::as_str)
-                    .eq(keys.iter().copied())
             {
                 return Ok(cache.prices.clone());
             }
+            if prices
+                .failed_at
+                .is_some_and(|at| now >= at && now < at.saturating_add(PRICE_RETRY_SECS))
+            {
+                return match cached {
+                    Some(cache) => Ok(cache.prices.clone()),
+                    None => Err(RelayError::new(
+                        codes::BUSY,
+                        "Stripe cannot be reached. Try again later.",
+                    )),
+                };
+            }
         }
         match self.fetch_prices(keys) {
-            Ok(prices) => {
-                *self.prices.lock().unwrap_or_else(PoisonError::into_inner) = Some(PriceCache {
+            Ok(fetched) => {
+                let mut prices = self.prices.lock().unwrap_or_else(PoisonError::into_inner);
+                prices.cache = Some(PriceCache {
                     fetched_at: now,
                     keys: keys.iter().map(|key| (*key).to_owned()).collect(),
-                    prices: prices.clone(),
+                    prices: fetched.clone(),
                 });
-                Ok(prices)
+                prices.failed_at = None;
+                Ok(fetched)
             }
             Err(error) => {
-                let cache = self.prices.lock().unwrap_or_else(PoisonError::into_inner);
-                match &*cache {
-                    Some(cache)
-                        if cache
-                            .keys
-                            .iter()
-                            .map(String::as_str)
-                            .eq(keys.iter().copied()) =>
-                    {
-                        Ok(cache.prices.clone())
-                    }
-                    _ => Err(error),
+                let mut prices = self.prices.lock().unwrap_or_else(PoisonError::into_inner);
+                prices.failed_at = Some(now);
+                match prices.for_keys(keys) {
+                    Some(cache) => Ok(cache.prices.clone()),
+                    None => Err(error),
                 }
             }
         }
@@ -446,7 +507,7 @@ impl StripeClient {
 
     /// Drops the cached prices: the next `prices` call asks Stripe.
     pub fn forget_prices(&self) {
-        *self.prices.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        *self.prices.lock().unwrap_or_else(PoisonError::into_inner) = Prices::default();
     }
 
     /// `GET /v1/prices?lookup_keys[]=…&active=true&expand[]=data.tiers` (at most 10 keys).
@@ -497,10 +558,90 @@ impl StripeClient {
         )?;
         let session: CheckoutSession =
             serde_json::from_value(value).map_err(|_| self.bad_answer("/v1/checkout/sessions"))?;
-        if !is_stripe_id("cs_", &session.id) || !session.url.starts_with("https://") {
+        if !is_stripe_id("cs_", &session.id) || !is_stripe_page(&session.url, CHECKOUT_ORIGIN) {
             return Err(self.bad_answer("/v1/checkout/sessions"));
         }
         Ok(session)
+    }
+
+    /// `GET /v1/checkout/sessions/{id}`: whether a session is still open.
+    pub fn checkout_session(&self, id: &str) -> RelayResult<CheckoutSessionState> {
+        if !is_stripe_id("cs_", id) {
+            return Err(RelayError::internal(
+                "The stored checkout session id is not valid.",
+            ));
+        }
+        let path = format!("/v1/checkout/sessions/{id}");
+        let value = self.call(Method::Get, &path, None, None, None)?;
+        let mut session: CheckoutSessionState =
+            serde_json::from_value(value).map_err(|_| self.bad_answer("/v1/checkout/sessions"))?;
+        if session.id != id {
+            return Err(self.bad_answer("/v1/checkout/sessions"));
+        }
+        if session
+            .url
+            .as_deref()
+            .is_some_and(|url| !is_stripe_page(url, CHECKOUT_ORIGIN))
+        {
+            session.url = None;
+        }
+        Ok(session)
+    }
+
+    /// `POST /v1/checkout/sessions/{id}/expire`: an open session ends, so it cannot make
+    /// a subscription later.
+    pub fn expire_checkout_session(&self, id: &str, idempotency_key: &str) -> RelayResult<()> {
+        if !is_stripe_id("cs_", id) {
+            return Err(RelayError::internal(
+                "The stored checkout session id is not valid.",
+            ));
+        }
+        self.call(
+            Method::Post,
+            &format!("/v1/checkout/sessions/{id}/expire"),
+            None,
+            Some(&Form::new()),
+            Some(idempotency_key),
+        )?;
+        Ok(())
+    }
+
+    /// `POST /v1/customers` with `metadata[account_id]`: the Stripe customer of an
+    /// account, made before its first checkout. Answers the customer id.
+    pub fn create_customer(&self, account: &str, idempotency_key: &str) -> RelayResult<String> {
+        let mut form = Form::new();
+        form.push("metadata[account_id]", account);
+        let value = self.call(
+            Method::Post,
+            "/v1/customers",
+            None,
+            Some(&form),
+            Some(idempotency_key),
+        )?;
+        match value.pointer("/id").and_then(Value::as_str) {
+            Some(id) if is_stripe_id("cus_", id) => Ok(id.to_owned()),
+            _ => Err(self.bad_answer("/v1/customers")),
+        }
+    }
+
+    /// `GET /v1/subscriptions/{id}`: Stripe's state of a subscription, with Stripe's time.
+    pub fn subscription(&self, id: &str) -> RelayResult<SubscriptionRead> {
+        if !is_stripe_id("sub_", id) {
+            return Err(RelayError::internal(
+                "The stored subscription id is not valid.",
+            ));
+        }
+        let (object, date) = self.call_dated(
+            Method::Get,
+            &format!("/v1/subscriptions/{id}"),
+            None,
+            None,
+            None,
+        )?;
+        if object.pointer("/id").and_then(Value::as_str) != Some(id) {
+            return Err(self.bad_answer("/v1/subscriptions"));
+        }
+        Ok(SubscriptionRead { object, date })
     }
 
     /// `POST /v1/billing_portal/sessions` with `customer` and `return_url`.
@@ -527,7 +668,7 @@ impl StripeClient {
         )?;
         let session: PortalSession = serde_json::from_value(value)
             .map_err(|_| self.bad_answer("/v1/billing_portal/sessions"))?;
-        if !session.url.starts_with("https://") {
+        if !is_stripe_page(&session.url, PORTAL_ORIGIN) {
             return Err(self.bad_answer("/v1/billing_portal/sessions"));
         }
         Ok(session)
@@ -598,6 +739,19 @@ impl StripeClient {
         form: Option<&Form>,
         idempotency_key: Option<&str>,
     ) -> RelayResult<Value> {
+        self.call_dated(method, path, query, form, idempotency_key)
+            .map(|(value, _)| value)
+    }
+
+    /// `call`, with Stripe's time from the `Date` header of the answer.
+    fn call_dated(
+        &self,
+        method: Method,
+        path: &str,
+        query: Option<&str>,
+        form: Option<&Form>,
+        idempotency_key: Option<&str>,
+    ) -> RelayResult<(Value, Option<u64>)> {
         if method == Method::Post && idempotency_key.is_none_or(str::is_empty) {
             return Err(RelayError::internal(
                 "A Stripe POST needs an idempotency key.",
@@ -609,10 +763,12 @@ impl StripeClient {
                 std::thread::sleep(Duration::from_millis(250));
             }
             match self.call_once(method, path, query, form, idempotency_key) {
-                Ok((status, body)) if (200..300).contains(&status) => {
-                    return serde_json::from_slice(&body).map_err(|_| self.bad_answer(path));
+                Ok((status, body, date)) if (200..300).contains(&status) => {
+                    return serde_json::from_slice(&body)
+                        .map(|value| (value, date))
+                        .map_err(|_| self.bad_answer(path));
                 }
-                Ok((status, body)) => {
+                Ok((status, body, _)) => {
                     let (kind, code) = stripe_error_words(&body);
                     (self.log)(&format!(
                         "stripe: {} {path} answered {status} ({kind}/{code})",
@@ -657,7 +813,7 @@ impl StripeClient {
         query: Option<&str>,
         form: Option<&Form>,
         idempotency_key: Option<&str>,
-    ) -> Result<(u16, Vec<u8>), String> {
+    ) -> Result<(u16, Vec<u8>, Option<u64>), String> {
         let mut url = format!("{}{path}", self.config.base_url);
         if let Some(query) = query {
             url.push('?');
@@ -688,14 +844,58 @@ impl StripeClient {
         };
         let mut response = result?;
         let status = response.status().as_u16();
+        let date = response
+            .headers()
+            .get("date")
+            .and_then(|value| value.to_str().ok())
+            .and_then(parse_http_date);
         let body = response
             .body_mut()
             .with_config()
             .limit(MAX_ANSWER_BYTES)
             .read_to_vec()
             .map_err(transport_words)?;
-        Ok((status, body))
+        Ok((status, body, date))
     }
+}
+
+/// Seconds since 1970 of an HTTP date in the IMF-fixdate form (`Tue, 10 Nov 2026 21:58:00
+/// GMT`), the form Stripe sends. Any other form is `None`.
+pub fn parse_http_date(text: &str) -> Option<u64> {
+    let parts: Vec<&str> = text.trim().split(' ').collect();
+    let [_, day, month, year, time, "GMT"] = parts.as_slice() else {
+        return None;
+    };
+    let day: u64 = day.parse().ok().filter(|d| (1..=31).contains(d))?;
+    let month = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ]
+    .iter()
+    .position(|m| m == month)? as u64
+        + 1;
+    let year: u64 = year.parse().ok().filter(|y| (1970..=9999).contains(y))?;
+    let clock: Vec<u64> = time
+        .split(':')
+        .map(|part| part.parse().ok())
+        .collect::<Option<_>>()?;
+    let [hour, minute, second] = clock.as_slice() else {
+        return None;
+    };
+    if *hour > 23 || *minute > 59 || *second > 60 {
+        return None;
+    }
+    // Days from 1970-01-01 of a civil date (Howard Hinnant's algorithm).
+    let (y, m) = if month <= 2 {
+        (year - 1, month + 9)
+    } else {
+        (year, month - 3)
+    };
+    let era = y / 400;
+    let year_of_era = y - era * 400;
+    let day_of_year = (153 * m + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = (era * 146_097 + day_of_era).checked_sub(719_468)?;
+    Some(days * 86_400 + hour * 3600 + minute * 60 + second)
 }
 
 fn transport_words(error: ureq::Error) -> String {
@@ -741,17 +941,13 @@ pub enum SignatureError {
     Mismatch,
 }
 
-/// Checks `Stripe-Signature: t=<unix seconds>,v1=<hex>[,v1=<hex>…]` against the exact
-/// body bytes (contract section 7). The expected value is HMAC-SHA256 with the endpoint
-/// secret (the whole `whsec_…` string) over `<t>.<body>`; any `v1` may match, compared in
-/// constant time by `ring::hmac::verify`; other schemes such as `v0` are ignored. The
-/// timestamp must be within 300 seconds of `now`, either way. Answers `t`.
-pub fn verify_signature(
+/// The parts of a `Stripe-Signature` header: `t` as text and as a number, and the `v1`
+/// values. A header without `t` or without `v1`, or one that does not parse, is
+/// `Header`; a `t` more than 300 seconds from `now`, either way, is `Timestamp`.
+fn parse_signature_header(
     header: Option<&str>,
-    body: &[u8],
-    secret: &SecretString,
     now: u64,
-) -> Result<u64, SignatureError> {
+) -> Result<(&str, u64, Vec<&str>), SignatureError> {
     let header = header.ok_or(SignatureError::Header)?;
     if header.len() > MAX_SIGNATURE_HEADER {
         return Err(SignatureError::Header);
@@ -790,6 +986,27 @@ pub fn verify_signature(
     if t.abs_diff(now) > SIGNATURE_TOLERANCE {
         return Err(SignatureError::Timestamp);
     }
+    Ok((text, t, signatures))
+}
+
+/// The checks of a `Stripe-Signature` header that need no body (its form and `t`), so the
+/// route can refuse a request before it reads the body. Answers `t`.
+pub fn check_signature_header(header: Option<&str>, now: u64) -> Result<u64, SignatureError> {
+    parse_signature_header(header, now).map(|(_, t, _)| t)
+}
+
+/// Checks `Stripe-Signature: t=<unix seconds>,v1=<hex>[,v1=<hex>…]` against the exact
+/// body bytes (contract section 7). The expected value is HMAC-SHA256 with the endpoint
+/// secret (the whole `whsec_…` string) over `<t>.<body>`; any `v1` may match, compared in
+/// constant time by `ring::hmac::verify`; other schemes such as `v0` are ignored. The
+/// timestamp must be within 300 seconds of `now`, either way. Answers `t`.
+pub fn verify_signature(
+    header: Option<&str>,
+    body: &[u8],
+    secret: &SecretString,
+    now: u64,
+) -> Result<u64, SignatureError> {
+    let (text, t, signatures) = parse_signature_header(header, now)?;
     let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, secret.expose().as_bytes());
     let mut message = Vec::with_capacity(text.len() + 1 + body.len());
     message.extend_from_slice(text.as_bytes());
@@ -909,6 +1126,53 @@ mod tests {
         assert!(StripeConfig::new("http://127.0.0.1:4242", key()).is_ok());
         assert!(StripeConfig::new("http://api.stripe.com", key()).is_err());
         assert!(StripeConfig::new("http://127.0.0.1.evil.example", key()).is_err());
+    }
+
+    #[test]
+    fn http_dates_and_stripe_pages() {
+        assert_eq!(parse_http_date("Thu, 01 Jan 1970 00:00:00 GMT"), Some(0));
+        assert_eq!(
+            parse_http_date("Tue, 10 Nov 2026 21:58:00 GMT"),
+            Some(1_794_347_880)
+        );
+        assert_eq!(parse_http_date("Tue, 10 Nov 2026 21:58:00 CET"), None);
+        assert_eq!(parse_http_date("1794347880"), None);
+        assert!(is_stripe_page(
+            "https://checkout.stripe.com/c/pay/cs_test_1",
+            CHECKOUT_ORIGIN
+        ));
+        for bad in [
+            "https://checkout.stripe.com/",
+            "https://checkout.stripe.com.evil.example/c/pay/cs_1",
+            "https://evil.example/https://checkout.stripe.com/",
+            "http://checkout.stripe.com/c/pay/cs_1",
+            "https://billing.stripe.com/p/session/x",
+            "https://checkout.stripe.com/c/pay/cs 1",
+        ] {
+            assert!(!is_stripe_page(bad, CHECKOUT_ORIGIN), "{bad}");
+        }
+        assert!(is_stripe_page(
+            "https://billing.stripe.com/p/session/test_1",
+            PORTAL_ORIGIN
+        ));
+    }
+
+    #[test]
+    fn the_header_is_checked_before_the_body() {
+        let header = signature_header(&secret(), 1000, b"{}");
+        assert_eq!(check_signature_header(Some(&header), 1000), Ok(1000));
+        assert_eq!(
+            check_signature_header(Some(&header), 1301),
+            Err(SignatureError::Timestamp)
+        );
+        assert_eq!(
+            check_signature_header(None, 1000),
+            Err(SignatureError::Header)
+        );
+        assert_eq!(
+            check_signature_header(Some("t=1000"), 1000),
+            Err(SignatureError::Header)
+        );
     }
 
     #[test]

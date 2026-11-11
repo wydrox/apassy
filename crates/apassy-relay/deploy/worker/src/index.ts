@@ -179,6 +179,35 @@ function lengthError(request: Request, path: string, connectMode: boolean): Resp
   return undefined;
 }
 
+/** The largest distance between `t` of a Stripe signature and the edge's clock (connect-billing-v1 section 7). */
+const STRIPE_SIGNATURE_TOLERANCE = 300;
+
+// The Stripe webhook has no per-address limiter, so the edge refuses, before it forwards a
+// byte of the body, a request whose `Stripe-Signature` cannot verify at the relay: none,
+// longer than 4 KiB, without a `t` of digits (once) or without a `v1`, or a `t` more than
+// 300 seconds from the edge's clock. The relay checks the HMAC itself.
+function stripeSignatureError(request: Request, nowSeconds: number): Response | undefined {
+  const refused = () => jsonError(400, "invalid_request", "The Stripe signature does not verify.");
+  const header = request.headers.get("stripe-signature");
+  if (header === null || header.length > 4096) return refused();
+  let t: number | undefined;
+  let v1 = false;
+  for (const part of header.split(",")) {
+    const at = part.indexOf("=");
+    if (at < 0) return refused();
+    const key = part.slice(0, at).trim();
+    const value = part.slice(at + 1).trim();
+    if (key === "t") {
+      if (t !== undefined || !/^[0-9]{1,12}$/.test(value)) return refused();
+      t = Number(value);
+    } else if (key === "v1") {
+      v1 = true;
+    }
+  }
+  if (t === undefined || !v1 || Math.abs(nowSeconds - t) > STRIPE_SIGNATURE_TOLERANCE) return refused();
+  return undefined;
+}
+
 // The eight groups of an IPv6 address (lowercase, `::` expanded), or undefined when the
 // text is not a plain IPv6 address (an IPv4 form, a double `::`, a bad group, a wrong count).
 function ipv6Groups(address: string): string[] | undefined {
@@ -338,6 +367,10 @@ export default {
     const hasBody = request.method !== "GET" && request.method !== "HEAD";
     if (hasBody) {
       const refused = lengthError(request, url.pathname, connectMode);
+      if (refused) return refused;
+    }
+    if (request.method === "POST" && url.pathname === STRIPE_WEBHOOK_PATH) {
+      const refused = stripeSignatureError(request, Math.floor(Date.now() / 1000));
       if (refused) return refused;
     }
 

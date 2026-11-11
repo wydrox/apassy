@@ -1,11 +1,16 @@
 //! A fake Stripe API for the billing tests: an in-process HTTP server on a free loopback
-//! port. It answers the price list (`GET /v1/prices`), Checkout and Customer Portal
-//! sessions, subscription item updates, and subscription cancels, and it records every
-//! call so a test can check what the relay sent. Like Stripe, a POST with an
-//! `Idempotency-Key` seen before gets the first answer again.
+//! port. It answers the price list (`GET /v1/prices`), customers, Checkout Sessions (made,
+//! read back, expired) and Customer Portal sessions, subscription item updates,
+//! subscription reads and cancels, and it records every call so a test can check what the
+//! relay sent. Like Stripe, a POST with an `Idempotency-Key` seen before gets the first
+//! answer again.
 //!
-//! Hooks: `fail_next(status, n)` answers the next `n` calls with that status, and
-//! `set_prices` replaces the price list.
+//! Hooks: `fail_next(status, n)` answers the next `n` calls with that status;
+//! `fail_path(prefix, status, n)` does it for one path only; `delay_next(prefix, ms)`
+//! holds the next call of a path; `set_prices` replaces the price list;
+//! `put_subscription` stores the object `GET /v1/subscriptions/{id}` answers;
+//! `set_session_status` changes a session; `set_checkout_origin` makes sessions on another
+//! origin; `set_date` sends a chosen `Date` header (Stripe's clock).
 #![allow(dead_code)]
 
 use std::collections::HashMap;
@@ -54,7 +59,14 @@ struct State {
     calls: Vec<Call>,
     prices: Vec<Value>,
     failures: Vec<u16>,
+    path_failures: Vec<(String, u16)>,
+    delays: Vec<(String, u64)>,
     replays: HashMap<String, (u16, String)>,
+    /// Checkout Sessions by id: (status, url, expires_at).
+    sessions: HashMap<String, (String, String, u64)>,
+    subscriptions: HashMap<String, Value>,
+    checkout_origin: Option<String>,
+    date: Option<u64>,
 }
 
 pub struct FakeStripe {
@@ -186,6 +198,89 @@ impl FakeStripe {
             .failures
             .extend(std::iter::repeat_n(status, n));
     }
+
+    /// The next `n` calls whose path starts with `prefix` answer `status`.
+    pub fn fail_path(&self, prefix: &str, status: u16, n: usize) {
+        self.state
+            .lock()
+            .unwrap()
+            .path_failures
+            .extend(std::iter::repeat_n((prefix.to_owned(), status), n));
+    }
+
+    /// The next call whose path starts with `prefix` waits `ms` before its answer.
+    pub fn delay_next(&self, prefix: &str, ms: u64) {
+        self.state
+            .lock()
+            .unwrap()
+            .delays
+            .push((prefix.to_owned(), ms));
+    }
+
+    /// Stores the subscription that `GET /v1/subscriptions/{id}` answers (Stripe's state).
+    pub fn put_subscription(&self, object: Value) {
+        let id = object["id"].as_str().expect("a subscription id").to_owned();
+        self.state.lock().unwrap().subscriptions.insert(id, object);
+    }
+
+    /// The stored subscription, as `GET /v1/subscriptions/{id}` answers it.
+    pub fn subscription(&self, id: &str) -> Option<Value> {
+        self.state.lock().unwrap().subscriptions.get(id).cloned()
+    }
+
+    /// `open`, `complete`, or `expired`.
+    pub fn set_session_status(&self, id: &str, status: &str) {
+        if let Some(session) = self.state.lock().unwrap().sessions.get_mut(id) {
+            session.0 = status.to_owned();
+        }
+    }
+
+    pub fn session_status(&self, id: &str) -> Option<String> {
+        self.state
+            .lock()
+            .unwrap()
+            .sessions
+            .get(id)
+            .map(|session| session.0.clone())
+    }
+
+    /// New Checkout Sessions get URLs on this origin (with the trailing `/`).
+    pub fn set_checkout_origin(&self, origin: &str) {
+        self.state.lock().unwrap().checkout_origin = Some(origin.to_owned());
+    }
+
+    /// Every answer carries `Date` of this time (Stripe's clock); `None` is the real clock.
+    pub fn set_date(&self, time: Option<u64>) {
+        self.state.lock().unwrap().date = time;
+    }
+}
+
+/// An HTTP date (IMF-fixdate) of `secs`.
+pub fn http_date(secs: u64) -> String {
+    let days = secs / 86_400;
+    let rest = secs % 86_400;
+    // Civil date from days since 1970 (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let mp = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = year_of_era + era * 400 + u64::from(month <= 2);
+    let weekday = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"][(days % 7) as usize];
+    let months = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    format!(
+        "{weekday}, {day:02} {} {year} {:02}:{:02}:{:02} GMT",
+        months[(month - 1) as usize],
+        rest / 3600,
+        rest % 3600 / 60,
+        rest % 60
+    )
 }
 
 impl Drop for FakeStripe {
@@ -227,11 +322,27 @@ fn handle(mut request: tiny_http::Request, state: &Mutex<State>, counter: &Atomi
         body,
         form,
     };
+    let delay = {
+        let mut guard = state.lock().unwrap();
+        guard
+            .delays
+            .iter()
+            .position(|(prefix, _)| call.path.starts_with(prefix.as_str()))
+            .map(|index| guard.delays.remove(index).1)
+    };
+    if let Some(ms) = delay {
+        std::thread::sleep(Duration::from_millis(ms));
+    }
     let (status, answer) = answer(&call, state, counter);
+    let date = state.lock().unwrap().date;
     state.lock().unwrap().calls.push(call);
-    let response = tiny_http::Response::from_string(answer)
+    let mut response = tiny_http::Response::from_string(answer)
         .with_status_code(status)
         .with_header(tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap());
+    if let Some(time) = date {
+        response =
+            response.with_header(tiny_http::Header::from_bytes("Date", http_date(time)).unwrap());
+    }
     let _ = request.respond(response);
 }
 
@@ -242,6 +353,14 @@ fn answer(call: &Call, state: &Mutex<State>, counter: &AtomicU32) -> (u16, Strin
     }
     if !guard.failures.is_empty() {
         let status = guard.failures.remove(0);
+        return (status, error_body("api_error", "fake_failure"));
+    }
+    if let Some(index) = guard
+        .path_failures
+        .iter()
+        .position(|(prefix, _)| call.path.starts_with(prefix.as_str()))
+    {
+        let status = guard.path_failures.remove(index).1;
         return (status, error_body("api_error", "fake_failure"));
     }
     let replay_key = call
@@ -278,17 +397,75 @@ fn answer(call: &Call, state: &Mutex<State>, counter: &AtomicU32) -> (u16, Strin
                 json!({"object": "list", "data": data, "has_more": false}).to_string(),
             )
         }
+        ("POST", "/v1/customers") => {
+            let id = format!("cus_SynthMade{n:04}");
+            (
+                200,
+                json!({"id": id, "object": "customer",
+                       "metadata": {"account_id": call.field("metadata[account_id]")}})
+                .to_string(),
+            )
+        }
         ("POST", "/v1/checkout/sessions") => {
             let id = format!("cs_test_SynthSession{n:04}");
+            let origin = guard
+                .checkout_origin
+                .clone()
+                .unwrap_or_else(|| "https://checkout.stripe.com/".to_owned());
+            let url = format!("{origin}c/pay/{id}");
+            guard.sessions.insert(
+                id.clone(),
+                ("open".to_owned(), url.clone(), SESSION_EXPIRES_AT),
+            );
             (
                 200,
                 json!({
-                    "id": id, "object": "checkout.session",
-                    "url": format!("https://checkout.stripe.com/c/pay/{id}"),
-                    "expires_at": SESSION_EXPIRES_AT
+                    "id": id, "object": "checkout.session", "status": "open",
+                    "url": url, "expires_at": SESSION_EXPIRES_AT
                 })
                 .to_string(),
             )
+        }
+        ("POST", path)
+            if path.starts_with("/v1/checkout/sessions/") && path.ends_with("/expire") =>
+        {
+            let id = &path["/v1/checkout/sessions/".len()..path.len() - "/expire".len()];
+            match guard.sessions.get_mut(id) {
+                Some(session) if session.0 == "open" => {
+                    session.0 = "expired".to_owned();
+                    (
+                        200,
+                        json!({"id": id, "object": "checkout.session", "status": "expired",
+                               "url": null, "expires_at": session.2})
+                        .to_string(),
+                    )
+                }
+                Some(_) => (
+                    400,
+                    error_body("invalid_request_error", "checkout_session_not_open"),
+                ),
+                None => (404, error_body("invalid_request_error", "resource_missing")),
+            }
+        }
+        ("GET", path) if path.starts_with("/v1/checkout/sessions/") => {
+            let id = &path["/v1/checkout/sessions/".len()..];
+            match guard.sessions.get(id) {
+                Some((status, url, expires_at)) => (
+                    200,
+                    json!({"id": id, "object": "checkout.session", "status": status,
+                           "url": if status == "open" { json!(url) } else { Value::Null },
+                           "expires_at": expires_at})
+                    .to_string(),
+                ),
+                None => (404, error_body("invalid_request_error", "resource_missing")),
+            }
+        }
+        ("GET", path) if path.starts_with("/v1/subscriptions/") => {
+            let id = &path["/v1/subscriptions/".len()..];
+            match guard.subscriptions.get(id) {
+                Some(object) => (200, object.to_string()),
+                None => (404, error_body("invalid_request_error", "resource_missing")),
+            }
         }
         ("POST", "/v1/billing_portal/sessions") => (
             200,
@@ -304,6 +481,11 @@ fn answer(call: &Call, state: &Mutex<State>, counter: &AtomicU32) -> (u16, Strin
                 .field("quantity")
                 .and_then(|q| q.parse().ok())
                 .unwrap_or(0);
+            for object in guard.subscriptions.values_mut() {
+                if object.pointer("/items/data/0/id").and_then(Value::as_str) == Some(item) {
+                    object["items"]["data"][0]["quantity"] = json!(quantity);
+                }
+            }
             (
                 200,
                 json!({"id": item, "object": "subscription_item", "quantity": quantity})
@@ -312,6 +494,9 @@ fn answer(call: &Call, state: &Mutex<State>, counter: &AtomicU32) -> (u16, Strin
         }
         ("DELETE", path) if path.starts_with("/v1/subscriptions/") => {
             let id = &path["/v1/subscriptions/".len()..];
+            if let Some(object) = guard.subscriptions.get_mut(id) {
+                object["status"] = json!("canceled");
+            }
             (
                 200,
                 json!({"id": id, "object": "subscription", "status": "canceled"}).to_string(),

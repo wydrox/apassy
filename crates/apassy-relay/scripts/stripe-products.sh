@@ -2,7 +2,10 @@
 # Makes the Apassy Connect products and prices in Stripe (docs/contracts/connect-billing-v1.md
 # section 2; docs/OPERATIONS.md, "Billing"). Idempotent by lookup key: a price whose lookup key
 # exists with the same amounts is kept; one with other amounts gets a new price that takes the
-# lookup key over (`transfer_lookup_key=true`), and the old price is archived.
+# lookup key over (`transfer_lookup_key=true`), and the old price is archived. Every price
+# carries `metadata[apassy_plan]` (personal, family, team): the subscriptions that stay on an
+# old price send events without a lookup key, and the relay reads the plan from that metadata
+# and the price's interval (or keeps the plan it stored).
 #
 #   stripe-products.sh [--dry-run]          the sandbox of the logged-in Stripe CLI
 #   CONFIRM_LIVE=yes stripe-products.sh --live [--dry-run]
@@ -27,7 +30,7 @@ for arg in "$@"; do
         --live) live=1 ;;
         --dry-run) dry=1 ;;
         -h | --help)
-            sed -n '2,20p' "$0"
+            sed -n '2,23p' "$0"
             exit 0
             ;;
         *)
@@ -138,11 +141,31 @@ price_of() {
         jq -c '.data[0] // empty'
 }
 
+# The plan of a lookup key (connect_<plan>_<interval>).
+plan_of_key() {
+    local key=${1#connect_}
+    printf '%s' "${key%_*}"
+}
+
+# Gives a price `metadata[apassy_plan]` when it lacks it (a price of an earlier run).
+ensure_plan_metadata() {
+    local current=$1 plan=$2 id
+    [[ -z $current ]] && return
+    if jq -e --arg p "$plan" '(.metadata.apassy_plan // "") == $p' <<< "$current" > /dev/null; then
+        return
+    fi
+    id=$(jq -r '.id' <<< "$current")
+    echo "price $id: set metadata[apassy_plan]=$plan" >&2
+    stripe_post "/v1/prices/$id" -d "metadata[apassy_plan]=$plan" > /dev/null
+}
+
 # A per-unit price (Personal, Team).
 ensure_unit_price() {
     local product=$1 key=$2 interval=$3 amount=$4
-    local current
+    local current plan
+    plan=$(plan_of_key "$key")
     current=$(price_of "$key")
+    ensure_plan_metadata "$current" "$plan"
     if [[ -n $current ]] && jq -e --argjson a "$amount" --arg i "$interval" \
         '.currency == "eur" and .tax_behavior == "inclusive" and .billing_scheme == "per_unit"
          and .unit_amount == $a and .recurring.interval == $i' <<< "$current" > /dev/null; then
@@ -152,7 +175,7 @@ ensure_unit_price() {
     echo "price $key: create $amount a $interval" >&2
     stripe_post /v1/prices -d "product=$product" -d currency=eur -d tax_behavior=inclusive \
         -d "recurring[interval]=$interval" -d billing_scheme=per_unit -d "unit_amount=$amount" \
-        -d "lookup_key=$key" -d transfer_lookup_key=true > /dev/null
+        -d "metadata[apassy_plan]=$plan" -d "lookup_key=$key" -d transfer_lookup_key=true > /dev/null
     archive_replaced "$current"
 }
 
@@ -162,6 +185,7 @@ ensure_family_price() {
     local product=$1 key=$2 interval=$3 flat=$4 extra=$5
     local current
     current=$(price_of "$key")
+    ensure_plan_metadata "$current" family
     if [[ -n $current ]] && jq -e --argjson f "$flat" --argjson e "$extra" --arg i "$interval" \
         '.currency == "eur" and .tax_behavior == "inclusive" and .billing_scheme == "tiered"
          and .tiers_mode == "graduated" and (.tiers | length) == 2
@@ -176,12 +200,14 @@ ensure_family_price() {
         -d "recurring[interval]=$interval" -d billing_scheme=tiered -d tiers_mode=graduated \
         -d "tiers[0][up_to]=4" -d "tiers[0][flat_amount]=$flat" -d "tiers[0][unit_amount]=0" \
         -d "tiers[1][up_to]=inf" -d "tiers[1][unit_amount]=$extra" \
-        -d "lookup_key=$key" -d transfer_lookup_key=true > /dev/null
+        -d "metadata[apassy_plan]=family" -d "lookup_key=$key" -d transfer_lookup_key=true > /dev/null
     archive_replaced "$current"
 }
 
 # After a new price took the lookup key over, the replaced one is archived. Subscriptions on
-# it keep it until they change plan in the portal.
+# it keep it until they change plan in the portal; their events carry no lookup key, and the
+# relay maps them by `metadata[apassy_plan]` (set above) or keeps the plan it stored. Their
+# statuses, cancellations included, always apply.
 archive_replaced() {
     local current=$1 old
     [[ -z $current ]] && return

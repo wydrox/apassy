@@ -2082,6 +2082,22 @@ fn respond_billing(hub: &Hub, mut request: Request, method: &str, path: &str, no
         return;
     }
     let signature = header_value(&request, crate::server::stripe::SIGNATURE_HEADER);
+    // The declared size, then the signature header and its time, before a byte of the
+    // body is read: a refusal here reads and drains nothing.
+    let declared = request.body_length();
+    let early = if declared.is_some_and(|len| len > crate::server::stripe::MAX_WEBHOOK_BODY) {
+        Some(RelayError::new(
+            codes::PAYLOAD_TOO_LARGE,
+            "The webhook body is larger than 256 KiB.",
+        ))
+    } else {
+        billing.webhook_precheck(signature.as_deref(), now).err()
+    };
+    if let Some(error) = early {
+        request.abort_input();
+        respond_error(request, &error);
+        return;
+    }
     let body = match read_body_max(
         &mut request,
         "POST",

@@ -85,7 +85,9 @@ ALTER TABLE team_code ADD COLUMN kind TEXT NOT NULL DEFAULT 'operator' CHECK (ki
 ///   `account_link`, `account_join`, `account_store_device` (which account device is
 ///   which device of which store), `brain_event` (the I-4 outbox of the bouncer brain).
 /// - `"group"`, `group_member`, `group_invite` (C3); `stripe_customer`,
-///   `stripe_subscription`, `stripe_event` (C2); `tunnel_node`, `tunnel_grant`,
+///   `stripe_subscription`, `stripe_event`, `billing_problem` (Stripe objects Connect
+///   could not apply, for the operator), `billing_clock` (the clock of the deletion
+///   pass) (C2); `tunnel_node`, `tunnel_grant`,
 ///   `tunnel_usage` (C4); `entitlement_key` (kids and public keys only).
 ///
 /// Nothing here is secret: public keys, names, ids, hashes, and Stripe ids. Tokens, link
@@ -154,19 +156,28 @@ CREATE TABLE group_invite (
   created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, used_at INTEGER, used_by TEXT);
 CREATE TABLE stripe_customer (
   customer_id TEXT PRIMARY KEY, account_id TEXT NOT NULL UNIQUE, email TEXT,
-  created_at INTEGER NOT NULL);
+  created_at INTEGER NOT NULL, checkout_session TEXT, checkout_request TEXT,
+  checkout_expires_at INTEGER);
 CREATE TABLE stripe_subscription (
   subscription_id TEXT PRIMARY KEY, customer_id TEXT NOT NULL, item_id TEXT,
   account_id TEXT, group_id TEXT, lookup_key TEXT, quantity INTEGER, status TEXT NOT NULL,
   current_period_end INTEGER, cancel_at_period_end INTEGER NOT NULL DEFAULT 0,
   first_failure_at INTEGER, ended_at INTEGER, event_created INTEGER NOT NULL DEFAULT 0,
   updated_at INTEGER NOT NULL, last_invoice_created INTEGER NOT NULL DEFAULT 0,
-  stores_deleted_at INTEGER);
+  stores_deleted_at INTEGER, requested_quantity INTEGER, requested_at INTEGER,
+  kind_left_at INTEGER, checked_at INTEGER);
 CREATE INDEX stripe_subscription_account ON stripe_subscription(account_id);
 CREATE INDEX stripe_subscription_group ON stripe_subscription(group_id);
 CREATE TABLE stripe_event (
   id TEXT PRIMARY KEY, type TEXT NOT NULL, received_at INTEGER NOT NULL);
 CREATE INDEX stripe_event_received ON stripe_event(received_at);
+CREATE TABLE billing_problem (
+  id INTEGER PRIMARY KEY, object_id TEXT NOT NULL UNIQUE, account_id TEXT, customer_id TEXT,
+  event_id TEXT, reason TEXT NOT NULL, first_at INTEGER NOT NULL, last_at INTEGER NOT NULL,
+  events INTEGER NOT NULL DEFAULT 1, resolved_at INTEGER);
+CREATE TABLE billing_clock (
+  id INTEGER PRIMARY KEY CHECK (id = 1), last_pass_at INTEGER, stripe_time INTEGER,
+  held_since INTEGER);
 CREATE TABLE tunnel_node (
   id TEXT PRIMARY KEY, account_id TEXT NOT NULL, device_id TEXT NOT NULL UNIQUE,
   name TEXT NOT NULL, pin TEXT NOT NULL, created_at INTEGER NOT NULL);
