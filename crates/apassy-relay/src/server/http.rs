@@ -1302,7 +1302,8 @@ pub fn serve(serving: Serving) -> RelayResult<()> {
                     std::thread::sleep(Duration::from_millis(200));
                     if last.elapsed() >= Duration::from_secs(MAINTENANCE_SECS) {
                         last = Instant::now();
-                        maintain_billing(&hub, now_unix());
+                        // The pass stops between accounts when the relay stops.
+                        maintain_billing_until(&hub, now_unix(), &|| stop.load(Ordering::Relaxed));
                     }
                 }
             })
@@ -1493,11 +1494,16 @@ pub fn maintain_teams(hub: &Hub, now: u64) {
 /// Connect billing: event ids older than 30 days, the reads of Stripe, and the stores of
 /// plans at their deletion day (docs/SPEC.md section 34.6), at most once an hour.
 pub fn maintain_billing(hub: &Hub, now: u64) {
+    maintain_billing_until(hub, now, &|| false);
+}
+
+/// `maintain_billing` that stops between accounts once `stop` answers true.
+pub fn maintain_billing_until(hub: &Hub, now: u64, stop: &dyn Fn() -> bool) {
     if let Some(billing) = hub.billing.as_deref() {
         let last = hub.billing_maintained_at.load(Ordering::Relaxed);
         if last == 0 || now >= last.saturating_add(billing_store::MAINTENANCE_SECS) {
             hub.billing_maintained_at.store(now, Ordering::Relaxed);
-            if billing_store::maintain(hub, billing, now).is_err() {
+            if billing_store::maintain_until(hub, billing, now, stop).is_err() {
                 eprintln!("apassy-relay: the billing maintenance pass failed");
             }
         }

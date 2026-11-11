@@ -946,3 +946,102 @@ fn the_deletion_waits_while_stripe_has_another_subscription_of_the_account() {
     assert_eq!(maintain(&hub, &billing, later).unwrap(), 1);
     assert_eq!(store_count(&c, &a), 0);
 }
+
+#[test]
+fn a_checkout_stored_while_the_deletion_asks_stripe_keeps_the_data() {
+    let c = start();
+    let a = c.account("Rafal");
+    c.subscribe(&a, "connect_personal_month", 1);
+    c.store(&a, VAULT);
+    c.update(&a, "connect_personal_month", 1, "canceled");
+    ended_days_ago(&c, &a, 91);
+    c.stripe.set_session_expires_at(now() + DAY);
+    // The read of the subscription answers at once; the list of the deletion's last
+    // question waits, and a checkout runs meanwhile.
+    c.stripe.delay_next("/v1/subscriptions", 0);
+    c.stripe.delay_next("/v1/subscriptions", 1500);
+    let hub = c.relay.hub();
+    let billing = hub.billing().expect("billing").clone();
+    std::thread::scope(|scope| {
+        let pass = scope.spawn(|| maintain(&hub, &billing, now()).unwrap());
+        std::thread::sleep(Duration::from_millis(400));
+        c.ok(
+            "POST",
+            "/v1/account/checkout",
+            Some(&a.token),
+            Some(&json!({"plan": "personal", "interval": "month"})),
+        );
+        assert_eq!(pass.join().unwrap(), 0);
+    });
+    assert_eq!(store_count(&c, &a), 1);
+}
+
+#[test]
+fn a_problem_row_that_opens_again_takes_the_new_reason_and_the_audit_keeps_both() {
+    use apassy_relay::server::billing::{BillingStore, Problem};
+    let c = start();
+    let hub = c.relay.hub();
+    let billing = hub.billing().expect("billing").clone();
+    let record = |reason: &'static str| {
+        billing
+            .store
+            .transaction(|tx| {
+                tx.record_problem(&Problem {
+                    object: "sub_SynthReopen001".to_owned(),
+                    account: None,
+                    customer: Some("cus_SynthReopen001".to_owned()),
+                    event: None,
+                    reason,
+                    at: now(),
+                })
+            })
+            .unwrap()
+    };
+    assert!(record("personal_quantity"));
+    let id = billing.problems().unwrap()[0].id;
+    billing.resolve_problem(id, now()).unwrap();
+    assert!(record("raise_refused"));
+    let open = billing.problems().unwrap();
+    assert_eq!(
+        (open.len(), open[0].id, open[0].reason.as_str()),
+        (1, id, "raise_refused")
+    );
+    // Open with another reason: the row takes it too.
+    assert!(record("deleted_account"));
+    assert_eq!(billing.problems().unwrap()[0].reason, "deleted_account");
+    let reasons: Vec<String> = c
+        .rows("SELECT detail FROM audit WHERE action = 'billing_problem_recorded' ORDER BY id")
+        .iter()
+        .map(|detail| {
+            serde_json::from_str::<Value>(detail).unwrap()["reason"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(
+        reasons,
+        ["personal_quantity", "raise_refused", "deleted_account"]
+    );
+    // Connect closes a problem it resolved itself, with a record of how.
+    assert!(
+        billing
+            .store
+            .transaction(|tx| tx.close_problem(
+                "sub_SynthReopen001",
+                "deleted_account",
+                "test",
+                now()
+            ))
+            .unwrap()
+    );
+    assert!(billing.problems().unwrap().is_empty());
+    let closed = c.rows(
+        "SELECT actor || ' ' || detail FROM audit WHERE action = 'billing_problem_resolved' ORDER BY id",
+    );
+    assert!(closed.last().unwrap().starts_with("billing "), "{closed:?}");
+    assert!(
+        closed.last().unwrap().contains("\"how\":\"test\""),
+        "{closed:?}"
+    );
+}
