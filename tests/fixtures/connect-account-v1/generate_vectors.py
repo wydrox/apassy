@@ -161,7 +161,13 @@ def main():
         sign_in = join("apassy-connect sign-in v1", ORIGIN, ACCOUNT, a64, nonce)
         join_msg = join("apassy-connect join v1", ORIGIN, ACCOUNT, link_hash, b64)
         cancel = join("apassy-connect join-cancel v1", ORIGIN, ACCOUNT, link_hash, b64)
-        device = join("apassy-connect device v1", ORIGIN, ACCOUNT, link_hash, b64)
+        # The signed device list: A is the root (version 1), A adds B (2), A removes B (3).
+        root = join("apassy-connect device-list v1", ORIGIN, ACCOUNT, "1", "-", "root", a64, "-", a64)
+        root_hash = b64u(hashlib.sha256(root).digest())
+        add = join("apassy-connect device-list v1", ORIGIN, ACCOUNT, "2", root_hash, "add", b64, link_hash, a64)
+        add_hash = b64u(hashlib.sha256(add).digest())
+        remove = join("apassy-connect device-list v1", ORIGIN, ACCOUNT, "3", add_hash, "remove", b64, "-", a64)
+        remove_hash = b64u(hashlib.sha256(remove).digest())
         recover = join("apassy-connect recover v1", ORIGIN, ACCOUNT, b64, new64)
         brain = join("apassy-bouncer sign-in v1", BRAIN_ORIGIN, ACCOUNT, a64, nonce)
         _, recover_signature = ed25519(seed, recover, tmp)
@@ -171,11 +177,13 @@ def main():
             message("sign_in", "apassy-connect sign-in v1", "device_a", sign_in, pem_a, pub_a, tmp),
             message("join", "apassy-connect join v1", "device_b", join_msg, pem_b, pub_b, tmp),
             message("join_cancel", "apassy-connect join-cancel v1", "device_b", cancel, pem_b, pub_b, tmp),
-            message("device", "apassy-connect device v1", "device_a", device, pem_a, pub_a, tmp),
+            message("device_list_add", "apassy-connect device-list v1", "device_a", add, pem_a, pub_a, tmp),
+            message("device_list_remove", "apassy-connect device-list v1", "device_a", remove, pem_a, pub_a, tmp),
             message("recover", "apassy-connect recover v1", "device_b", recover, pem_b, pub_b, tmp),
             message("brain_sign_in", "apassy-bouncer sign-in v1", "device_a", brain, pem_a, pub_a, tmp),
         ]
-        statement = next(m for m in messages if m["name"] == "device")["signature_b64u"]
+        add_signature = next(m for m in messages if m["name"] == "device_list_add")["signature_b64u"]
+        remove_signature = next(m for m in messages if m["name"] == "device_list_remove")["signature_b64u"]
 
         personal = {
             "v": 1,
@@ -218,9 +226,16 @@ def main():
                 "confirmer": "device_a",
                 "fingerprint": fingerprint,
             },
-            "device_b_chain": [
-                {"link_hash": link_hash, "confirmer_key": a64, "statement": statement},
-            ],
+            "device_list": {
+                "root_message_b64u": b64u(root),
+                "entries": [
+                    {"version": 1, "op": "root", "key": a64, "link_hash": None, "by": a64, "signature": None},
+                    {"version": 2, "op": "add", "key": b64, "link_hash": link_hash, "by": a64, "signature": add_signature},
+                    {"version": 3, "op": "remove", "key": b64, "link_hash": None, "by": a64, "signature": remove_signature},
+                ],
+                "hashes": [root_hash, add_hash, remove_hash],
+                "live_at": {"1": ["device_a"], "2": ["device_a", "device_b"], "3": ["device_a"]},
+            },
             "safety": {
                 "sha256": safety.hex(),
                 "words": " ".join(wl[b] for b in safety[:6]),

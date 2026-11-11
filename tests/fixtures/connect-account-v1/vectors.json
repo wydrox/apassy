@@ -24,7 +24,7 @@
       "signer": "device_a",
       "message_b64u": "YXBhc3N5LWNvbm5lY3QgYWNjb3VudCB2MQBodHRwczovL2Nvbm5lY3QuZXhhbXBsZS50ZXN0AEJPcEhrQjVWdlRIWGF3cFVYWnhndTQ0UTk3STJienE5R191STZ0Rk05bWo4RGUwNDdlMWZOV0k4TUlFUkRzYXhoQkMwaWgxRFBmWGFNNG1kQmJFeGpyQQBQM1ZaZ1FrS3dyVTAxSUtpYVNzbmJDa0REQW5GbU00UXV6bzhzMXBNX3cw",
       "sha256": "0a0ee9f13c6c1546a436d0be0b17c65e43bf089e2b05b1389edff6f3f2f07c64",
-      "signature_b64u": "MEQCIAYAZa1iXdLffMIosDVrC-CW2Hb5HTvpsOvNEnDcPdnDAiACYvCjxAmi5ZwQZEo8Ot5Om3-pcxXatoZKc6UTRrDHZw"
+      "signature_b64u": "MEUCIAcrk5ATuGEzQh856q7dIwy0Dn5g6m13ZMUI5jiHRtmFAiEA_lWA7MFdx6QCrFgjD1gCUtoxv-q3uvk5H24k33ctP_0"
     },
     {
       "name": "sign_in",
@@ -32,7 +32,7 @@
       "signer": "device_a",
       "message_b64u": "YXBhc3N5LWNvbm5lY3Qgc2lnbi1pbiB2MQBodHRwczovL2Nvbm5lY3QuZXhhbXBsZS50ZXN0AGFjY19rN20ycTR4M2NhAEJPcEhrQjVWdlRIWGF3cFVYWnhndTQ0UTk3STJienE5R191STZ0Rk05bWo4RGUwNDdlMWZOV0k4TUlFUkRzYXhoQkMwaWgxRFBmWGFNNG1kQmJFeGpyQQBBQUVDQXdRRkJnY0lDUW9MREEwT0R4QVJFaE1VRlJZWEdCa2FHeHdkSGg4",
       "sha256": "d3f0b4542809fd46fb8e43e311818189e1c3105db90fd2251baa6b6fdf061f78",
-      "signature_b64u": "MEYCIQDJs8U_ma0RlWJd6DqItHfw9lfxZoF5eXiNLbXmtzRKsgIhAPSnHvueBxP0grlP845ONQymwhQCzFA9UusBuVvNGTgU"
+      "signature_b64u": "MEUCIQCSpx6Xich3OUgd_sys4AKP0a1OIVJQY3RSakunxUVpGAIgbKorMNGX8NhL8FJ4LqQ-xVBe_wQ5PAMrICGDrZZGUOQ"
     },
     {
       "name": "join",
@@ -40,7 +40,7 @@
       "signer": "device_b",
       "message_b64u": "YXBhc3N5LWNvbm5lY3Qgam9pbiB2MQBodHRwczovL2Nvbm5lY3QuZXhhbXBsZS50ZXN0AGFjY19rN20ycTR4M2NhAFA2eURHdng1ZVprd3psZEd4aHVYMWdLY2FpZ043ZEZIdzItcTI2RWI5VG8AQkhUMG40Rm01OUowM1pzaVc5MG05UWR1WUJlbFd0UlYzVUNXblZhdC00dmhNVndyRzZZYjFONDlkTWRBb01qeWJxN0VGOFZIaUt2dzJZQURYYWwwVjhV",
       "sha256": "4b65718b680100e085e55bc67781acc0bc802cb561baa2e624eea9bdbc885f7c",
-      "signature_b64u": "MEQCIA12emKdHUUZL7TyBoVOlND8W9JoEKV053DbZlrTYWZjAiBgI1PAerUFmK_4JEnJup_0XSmAls58Fh7iNKRk5Pp0Ew"
+      "signature_b64u": "MEYCIQDs8KTce-uvokgssmSy8Kx51AdrJ9adR-tKwcnCJ8a27wIhANs1psOS-x4fPjKfbqUKC3jvZtnvfhYfe5dDyJ8O80lD"
     },
     {
       "name": "join_cancel",
@@ -48,15 +48,23 @@
       "signer": "device_b",
       "message_b64u": "YXBhc3N5LWNvbm5lY3Qgam9pbi1jYW5jZWwgdjEAaHR0cHM6Ly9jb25uZWN0LmV4YW1wbGUudGVzdABhY2NfazdtMnE0eDNjYQBQNnlER3Z4NWVaa3d6bGRHeGh1WDFnS2NhaWdON2RGSHcyLXEyNkViOVRvAEJIVDBuNEZtNTlKMDNac2lXOTBtOVFkdVlCZWxXdFJWM1VDV25WYXQtNHZoTVZ3ckc2WWIxTjQ5ZE1kQW9NanlicTdFRjhWSGlLdncyWUFEWGFsMFY4VQ",
       "sha256": "51ab538f00f6178100125b0dcbd27ae52dab7feb2211243d4c13f2c35a4a0fc7",
-      "signature_b64u": "MEUCIQCNOAuES0hlGDyCqkKDOHZ3JR70Bni8puM3sdrmOv-JNAIgbS0qivzl9tCVyJOWatnonj1JT8dncSpc-9sbgH6xEZo"
+      "signature_b64u": "MEYCIQDtQ0J03F-lGTkvO0uQ3c2IoMK0lqyk9CsuMaALr6prPAIhAJ-ps_PBMFTz2yN2l9CUA2nPV1EQm8W7UeUocRCM2rNG"
     },
     {
-      "name": "device",
-      "tag": "apassy-connect device v1",
+      "name": "device_list_add",
+      "tag": "apassy-connect device-list v1",
       "signer": "device_a",
-      "message_b64u": "YXBhc3N5LWNvbm5lY3QgZGV2aWNlIHYxAGh0dHBzOi8vY29ubmVjdC5leGFtcGxlLnRlc3QAYWNjX2s3bTJxNHgzY2EAUDZ5REd2eDVlWmt3emxkR3hodVgxZ0tjYWlnTjdkRkh3Mi1xMjZFYjlUbwBCSFQwbjRGbTU5SjAzWnNpVzkwbTlRZHVZQmVsV3RSVjNVQ1duVmF0LTR2aE1Wd3JHNlliMU40OWRNZEFvTWp5YnE3RUY4VkhpS3Z3MllBRFhhbDBWOFU",
-      "sha256": "4c7ea9d612b1135e3ebb5d386cfb3e441ffe057ea38ea6da497dc9c8bd733179",
-      "signature_b64u": "MEUCIHkGrw3d46MSPTzRiZdtZuxHc96FukSS9-Npj7XoflfTAiEAt4_5fO-4p59iiw4Y63kK3RHMQLrluEPK1k7020fQiDQ"
+      "message_b64u": "YXBhc3N5LWNvbm5lY3QgZGV2aWNlLWxpc3QgdjEAaHR0cHM6Ly9jb25uZWN0LmV4YW1wbGUudGVzdABhY2NfazdtMnE0eDNjYQAyADdoVGRVWTdmUlg1NXBfMG5FblhDRUVsVUJSUDRSVkx3N05BdFBad2p3N3cAYWRkAEJIVDBuNEZtNTlKMDNac2lXOTBtOVFkdVlCZWxXdFJWM1VDV25WYXQtNHZoTVZ3ckc2WWIxTjQ5ZE1kQW9NanlicTdFRjhWSGlLdncyWUFEWGFsMFY4VQBQNnlER3Z4NWVaa3d6bGRHeGh1WDFnS2NhaWdON2RGSHcyLXEyNkViOVRvAEJPcEhrQjVWdlRIWGF3cFVYWnhndTQ0UTk3STJienE5R191STZ0Rk05bWo4RGUwNDdlMWZOV0k4TUlFUkRzYXhoQkMwaWgxRFBmWGFNNG1kQmJFeGpyQQ",
+      "sha256": "b3a44e33f57f19e0e4c56f44f64259a6510673b47ebdb9721382eebc78224749",
+      "signature_b64u": "MEUCIHaCnQ2_wfgzxuiFwvk6KsHSY01VNqX2cvhErERsJ7jVAiEApngcUAhl_knygZpBVfiMDAhe0p9v0iMAOE-dMC0s88s"
+    },
+    {
+      "name": "device_list_remove",
+      "tag": "apassy-connect device-list v1",
+      "signer": "device_a",
+      "message_b64u": "YXBhc3N5LWNvbm5lY3QgZGV2aWNlLWxpc3QgdjEAaHR0cHM6Ly9jb25uZWN0LmV4YW1wbGUudGVzdABhY2NfazdtMnE0eDNjYQAzAHM2Uk9NX1ZfR2VEa3hXOUU5a0pacGxFR2M3Ui12Ymx5RTRMdXZIZ2lSMGsAcmVtb3ZlAEJIVDBuNEZtNTlKMDNac2lXOTBtOVFkdVlCZWxXdFJWM1VDV25WYXQtNHZoTVZ3ckc2WWIxTjQ5ZE1kQW9NanlicTdFRjhWSGlLdncyWUFEWGFsMFY4VQAtAEJPcEhrQjVWdlRIWGF3cFVYWnhndTQ0UTk3STJienE5R191STZ0Rk05bWo4RGUwNDdlMWZOV0k4TUlFUkRzYXhoQkMwaWgxRFBmWGFNNG1kQmJFeGpyQQ",
+      "sha256": "70b92e13b34d804c9377e76bb145ab797527a4b0508e3afe99b79a4ce199a20f",
+      "signature_b64u": "MEUCIQCVNk7z6pwG3qnRSSxZ-alvYVsHGzbPH6ZWhEgg6RJ-mwIgKHe4JrTYLbByKvBK_s_cDCcFG5V_mIydzlOzTAqfI6M"
     },
     {
       "name": "recover",
@@ -64,7 +72,7 @@
       "signer": "device_b",
       "message_b64u": "YXBhc3N5LWNvbm5lY3QgcmVjb3ZlciB2MQBodHRwczovL2Nvbm5lY3QuZXhhbXBsZS50ZXN0AGFjY19rN20ycTR4M2NhAEJIVDBuNEZtNTlKMDNac2lXOTBtOVFkdVlCZWxXdFJWM1VDV25WYXQtNHZoTVZ3ckc2WWIxTjQ5ZE1kQW9NanlicTdFRjhWSGlLdncyWUFEWGFsMFY4VQBSbTYzaThrMGFWWTFVZTdzNlItQjZ2ZWlIc1l5eFJ6aE5pSl8wdms4dE8w",
       "sha256": "364b915ac513c763b646523bd24a1bfdee13935aca175d471644efa0c76001aa",
-      "signature_b64u": "MEUCIQDKNnhDum6vDg12VsLDRtXZUFOgrfL94gvsIPRNP6GruAIgYvNHa-LTV1ZRoIsYELRHuE7PTCa06CSEWbz3c2xGNog"
+      "signature_b64u": "MEUCIQDHqBPJBqdQSkRDM58xfGcbjbu0qG8jGM8JMo4UITqD3gIgYhbfmzz2ZbMPZl4OdXIM9feDGn1j2C3ejFiqdmyA7sw"
     },
     {
       "name": "brain_sign_in",
@@ -72,7 +80,7 @@
       "signer": "device_a",
       "message_b64u": "YXBhc3N5LWJvdW5jZXIgc2lnbi1pbiB2MQBodHRwczovL2JyYWluLmV4YW1wbGUudGVzdABhY2NfazdtMnE0eDNjYQBCT3BIa0I1VnZUSFhhd3BVWFp4Z3U0NFE5N0kyYnpxOUdfdUk2dEZNOW1qOERlMDQ3ZTFmTldJOE1JRVJEc2F4aEJDMGloMURQZlhhTTRtZEJiRXhqckEAQUFFQ0F3UUZCZ2NJQ1FvTERBME9EeEFSRWhNVUZSWVhHQmthR3h3ZEhoOA",
       "sha256": "00300bab39c17bf919f9413f075a20f1ff8f4b29d9bb7f12408c71889fca3ce7",
-      "signature_b64u": "MEYCIQDJ9nJlljK3d5DjiuHdMsGxi-JfvRUPwvTSzR5zu214hgIhAOxtU0TjuQSd7sONt7aB6j2UHvyezB2XkWlhRopzeFi9"
+      "signature_b64u": "MEQCIEhKMlL79JIXuZ7sBDhhp3ytgQDjV8E9fZbBg-QMcr_fAiAGHpCDuR9xXpsXcZu94M6S9n3aSTlvi__MHUqKNkGOgg"
     }
   ],
   "link": {
@@ -82,13 +90,52 @@
     "confirmer": "device_a",
     "fingerprint": "61adeed8ed45fd1a91d16e31d1f9acfe"
   },
-  "device_b_chain": [
-    {
-      "link_hash": "P6yDGvx5eZkwzldGxhuX1gKcaigN7dFHw2-q26Eb9To",
-      "confirmer_key": "BOpHkB5VvTHXawpUXZxgu44Q97I2bzq9G_uI6tFM9mj8De047e1fNWI8MIERDsaxhBC0ih1DPfXaM4mdBbExjrA",
-      "statement": "MEUCIHkGrw3d46MSPTzRiZdtZuxHc96FukSS9-Npj7XoflfTAiEAt4_5fO-4p59iiw4Y63kK3RHMQLrluEPK1k7020fQiDQ"
+  "device_list": {
+    "root_message_b64u": "YXBhc3N5LWNvbm5lY3QgZGV2aWNlLWxpc3QgdjEAaHR0cHM6Ly9jb25uZWN0LmV4YW1wbGUudGVzdABhY2NfazdtMnE0eDNjYQAxAC0Acm9vdABCT3BIa0I1VnZUSFhhd3BVWFp4Z3U0NFE5N0kyYnpxOUdfdUk2dEZNOW1qOERlMDQ3ZTFmTldJOE1JRVJEc2F4aEJDMGloMURQZlhhTTRtZEJiRXhqckEALQBCT3BIa0I1VnZUSFhhd3BVWFp4Z3U0NFE5N0kyYnpxOUdfdUk2dEZNOW1qOERlMDQ3ZTFmTldJOE1JRVJEc2F4aEJDMGloMURQZlhhTTRtZEJiRXhqckE",
+    "entries": [
+      {
+        "version": 1,
+        "op": "root",
+        "key": "BOpHkB5VvTHXawpUXZxgu44Q97I2bzq9G_uI6tFM9mj8De047e1fNWI8MIERDsaxhBC0ih1DPfXaM4mdBbExjrA",
+        "link_hash": null,
+        "by": "BOpHkB5VvTHXawpUXZxgu44Q97I2bzq9G_uI6tFM9mj8De047e1fNWI8MIERDsaxhBC0ih1DPfXaM4mdBbExjrA",
+        "signature": null
+      },
+      {
+        "version": 2,
+        "op": "add",
+        "key": "BHT0n4Fm59J03ZsiW90m9QduYBelWtRV3UCWnVat-4vhMVwrG6Yb1N49dMdAoMjybq7EF8VHiKvw2YADXal0V8U",
+        "link_hash": "P6yDGvx5eZkwzldGxhuX1gKcaigN7dFHw2-q26Eb9To",
+        "by": "BOpHkB5VvTHXawpUXZxgu44Q97I2bzq9G_uI6tFM9mj8De047e1fNWI8MIERDsaxhBC0ih1DPfXaM4mdBbExjrA",
+        "signature": "MEUCIHaCnQ2_wfgzxuiFwvk6KsHSY01VNqX2cvhErERsJ7jVAiEApngcUAhl_knygZpBVfiMDAhe0p9v0iMAOE-dMC0s88s"
+      },
+      {
+        "version": 3,
+        "op": "remove",
+        "key": "BHT0n4Fm59J03ZsiW90m9QduYBelWtRV3UCWnVat-4vhMVwrG6Yb1N49dMdAoMjybq7EF8VHiKvw2YADXal0V8U",
+        "link_hash": null,
+        "by": "BOpHkB5VvTHXawpUXZxgu44Q97I2bzq9G_uI6tFM9mj8De047e1fNWI8MIERDsaxhBC0ih1DPfXaM4mdBbExjrA",
+        "signature": "MEUCIQCVNk7z6pwG3qnRSSxZ-alvYVsHGzbPH6ZWhEgg6RJ-mwIgKHe4JrTYLbByKvBK_s_cDCcFG5V_mIydzlOzTAqfI6M"
+      }
+    ],
+    "hashes": [
+      "7hTdUY7fRX55p_0nEnXCEElUBRP4RVLw7NAtPZwjw7w",
+      "s6ROM_V_GeDkxW9E9kJZplEGc7R-vblyE4LuvHgiR0k",
+      "cLkuE7NNgEyTd-drsUWreXUnpLBQjjr-mbeaTOGZog8"
+    ],
+    "live_at": {
+      "1": [
+        "device_a"
+      ],
+      "2": [
+        "device_a",
+        "device_b"
+      ],
+      "3": [
+        "device_a"
+      ]
     }
-  ],
+  },
   "safety": {
     "sha256": "12587ab2ab0b5fab4a2e3c2bac67fde9316427214c1fe4eac876b12492433607",
     "words": "audio coyote forest mint magnet apple"

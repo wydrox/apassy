@@ -438,7 +438,7 @@ pub(crate) struct Device {
     pub(crate) last_seen_at: Option<u64>,
     /// This Mac.
     pub(crate) this: bool,
-    /// This Mac verified the device's chain of statements to the account root. A device
+    /// The signed device list that this Mac verified holds the device's key. A device
     /// that is not verified shows "Not verified" and is no device of the account for any
     /// step.
     pub(crate) verified: bool,

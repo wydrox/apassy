@@ -896,19 +896,14 @@ mod connect_note_tests {
         assert!(!connect_account_here(dir.path()));
         let key = DeviceKey::generate().expect("key");
         let public_key = encode_b64u(key.public_key());
-        let state = AccountState {
-            v: 2,
-            origin: "https://connect.example.test".to_owned(),
-            account_id: "acc_k7m2q4x3ca".to_owned(),
-            device_id: "dev_k7m2q4x3ca".to_owned(),
-            name: None,
-            device_name: "Synthetic".to_owned(),
-            public_key: public_key.clone(),
-            created_at: 1_790_000_000,
-            root: public_key.clone(),
-            known: vec![public_key],
-            revoked: Vec::new(),
-        };
+        let state = AccountState::for_root(
+            "https://connect.example.test",
+            "acc_k7m2q4x3ca",
+            "dev_k7m2q4x3ca",
+            "Synthetic",
+            &public_key,
+            1_790_000_000,
+        );
         let path = account_file(dir.path());
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();

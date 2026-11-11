@@ -82,6 +82,9 @@ pub(crate) enum Guarded {
 struct Snapshot {
     view: AccountView,
     group: Option<GroupDetail>,
+    /// Which keys may sign the heads of a vault store: from the trust store of the account
+    /// after this view (`crate::connect::signer_policy`), never from the view itself.
+    signers: crate::sync::SignerPolicy,
 }
 
 /// The result of one worker step.
@@ -270,7 +273,7 @@ impl Live {
             origin: file.origin.clone(),
             plan: StorePlan::from_view(&snapshot.view.plan),
             signer: self.session.signer(),
-            signers: crate::connect::signer_policy(&snapshot.view, file),
+            signers: snapshot.signers.clone(),
         })
     }
 
@@ -688,7 +691,11 @@ fn refresh(app: &mut DesktopApp, ctx: &egui::Context) {
             } else {
                 None
             };
-            Ok(Snapshot { view, group })
+            Ok(Snapshot {
+                view,
+                group,
+                signers: crate::connect::signer_policy(account.state()),
+            })
         });
         match snapshot {
             Ok(snapshot) => {

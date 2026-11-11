@@ -6,8 +6,9 @@
 //! the strict request bodies, the signatures of section 5 over its own origin, the
 //! one-use nonces (a challenge never ends another challenge), `403 device_removed` only
 //! after a valid sign-in signature of a key that was a device of the account, the links
-//! and joins of section 7 with the signed cancel, the device statements and the chains
-//! of every `DeviceView`, the vault store devices with the key the caller verified, the
+//! and joins of section 7 with the signed cancel, the signed device list (each `add` and
+//! `remove` signed by a device of the list over the hash of the entry before, a stale
+//! version `409`), the vault store devices with the key the caller verified, the
 //! recovery key and the Ed25519 recovery signature of section 9 (a repeat of the same
 //! body answers the same result), and the entitlement token of section 10 (signed with
 //! the Ed25519 seed of the test vectors, kid `ek_test_1`). It is not the relay crate
@@ -16,9 +17,10 @@
 //! Hooks act as a broken or hostile Connect: report another origin in the challenge,
 //! shorten the token lifetime, lose the next answers after doing the step, drop every
 //! open nonce (a restart), refuse the next token calls with `401` or `503`, name another
-//! confirmer in a join answer, insert a device row without a valid chain, bring a
-//! revoked device back, swap the key of a device, entitle an account, revoke a device
-//! behind the app's back, and read what the app sent.
+//! confirmer in a join answer, insert a device row that the list does not hold, bring a
+//! revoked device back, swap the key of a device, entitle an account, hide a device
+//! behind the app's back (no list entry), serve an older or another device list, and read
+//! what the app sent.
 //!
 //! Billing and groups (contract connect-billing-v1, plan s7 unit M2): `GET /v1/plans`
 //! answers `tests/fixtures/connect-billing-v1/plans.json`; the checkout, the portal, the
@@ -108,11 +110,8 @@ struct Device {
     public_key: Vec<u8>,
     created_at: u64,
     live: bool,
-    /// The device that confirmed this one, the link hash, and the statement (DER). `None`
-    /// for a root.
+    /// The device that confirmed this one. `None` for a root.
     added_by: Option<String>,
-    link_hash: String,
-    statement: Vec<u8>,
 }
 
 #[derive(Clone)]
@@ -128,6 +127,92 @@ struct Account {
     plan: Option<Value>,
     /// A Stripe customer is bound (a checkout completed): the portal works.
     customer: bool,
+    /// The signed device list (section 7.5): the entries as Connect answers them, and the
+    /// list hash of each.
+    list: Vec<Value>,
+    hashes: Vec<String>,
+}
+
+/// The message of the entry `version` of a device list.
+#[allow(clippy::too_many_arguments)]
+fn list_message(
+    origin: &str,
+    account: &str,
+    version: u64,
+    previous: &str,
+    op: &str,
+    key: &str,
+    link_hash: &str,
+    by: &str,
+) -> Vec<u8> {
+    joined(&[
+        "apassy-connect device-list v1",
+        origin,
+        account,
+        &version.to_string(),
+        previous,
+        op,
+        key,
+        link_hash,
+        by,
+    ])
+}
+
+/// The list hash of a message: b64u of its SHA-256.
+fn list_hash(message: &[u8]) -> String {
+    encode_b64u(ring::digest::digest(&ring::digest::SHA256, message).as_ref())
+}
+
+impl Account {
+    /// A new list with `root` as version 1.
+    fn start_list(&mut self, origin: &str, account: &str, root: &[u8]) {
+        let key = encode_b64u(root);
+        self.list = vec![
+            json!({"version": 1, "op": "root", "key": key, "link_hash": null,
+                                "by": key, "signature": null}),
+        ];
+        self.hashes = vec![list_hash(&list_message(
+            origin, account, 1, "-", "root", &key, "-", &key,
+        ))];
+    }
+
+    /// Append the entry `op` of `key` signed by `by` with `statement` at `version`: `409`
+    /// for a version that is not the next one, `400` for a statement that does not verify.
+    #[allow(clippy::too_many_arguments)]
+    fn append(
+        &mut self,
+        origin: &str,
+        account: &str,
+        version: u64,
+        op: &str,
+        key: &[u8],
+        link_hash: Option<&str>,
+        by: &[u8],
+        statement: &[u8],
+    ) -> Result<(), Outgoing> {
+        if version != self.list.len() as u64 + 1 {
+            return Err(fail(409, "conflict"));
+        }
+        let message = list_message(
+            origin,
+            account,
+            version,
+            self.hashes.last().expect("a list"),
+            op,
+            &encode_b64u(key),
+            link_hash.unwrap_or("-"),
+            &encode_b64u(by),
+        );
+        if !verify(by, &message, statement) {
+            return Err(fail(400, "invalid_request"));
+        }
+        self.list.push(
+            json!({"version": version, "op": op, "key": encode_b64u(key),
+            "link_hash": link_hash, "by": encode_b64u(by), "signature": encode_b64u(statement)}),
+        );
+        self.hashes.push(list_hash(&message));
+        Ok(())
+    }
 }
 
 /// A checkout session that the app asked for.
@@ -216,6 +301,8 @@ struct State {
     /// The bodies of `POST /v1/account` by key, for a retry after a lost answer.
     created: BTreeMap<Vec<u8>, (Value, Value)>,
     lost_answers: Vec<(String, usize)>,
+    /// Requests that start with the prefix answer this status and error code instead.
+    route_errors: Vec<(String, u16, String)>,
     log: Vec<String>,
     bodies: Vec<String>,
     /// Each request line with its `Authorization` header.
@@ -285,6 +372,18 @@ fn strict(body: &Value, keys: &[&str]) -> bool {
         return false;
     };
     map.len() == keys.len()
+        && keys
+            .iter()
+            .all(|key| map.get(*key).is_some_and(Value::is_string))
+}
+
+/// A strict body with the text fields `keys` and the number `version`.
+fn strict_versioned(body: &Value, keys: &[&str]) -> bool {
+    let Some(map) = body.as_object() else {
+        return false;
+    };
+    map.len() == keys.len() + 1
+        && map.get("version").is_some_and(Value::is_u64)
         && keys
             .iter()
             .all(|key| map.get(*key).is_some_and(Value::is_string))
@@ -425,14 +524,14 @@ impl FakeConnect {
         lock(&self.shared).token_busy = count;
     }
 
-    /// The next join answers name `confirmer` (`{"device_id","name","public_key","chain"}`)
+    /// The next join answers name `confirmer` (`{"device_id","name","public_key"}`)
     /// instead of the device that made the link; `None` ends it.
     pub fn answer_confirmer(&self, confirmer: Option<Value>) {
         lock(&self.shared).confirmer = confirmer;
     }
 
-    /// A device row of `account` that no live device confirmed: its chain names the first
-    /// device of the account with a statement that does not verify. Returns its id.
+    /// A device row of `account` that no device of the list confirmed: the list does not
+    /// hold it. Returns its id.
     pub fn insert_device(&self, account: &str, name: &str, public_key: &[u8]) -> String {
         let mut state = lock(&self.shared);
         let first = state
@@ -440,21 +539,49 @@ impl FakeConnect {
             .iter()
             .find(|device| device.account == account)
             .map(|device| device.id.clone());
-        let hash = encode_b64u(&[7u8; 32]);
-        new_device(
-            &mut state,
-            account,
-            name,
-            "mac",
-            public_key.to_vec(),
-            first,
-            &hash,
-            vec![0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01],
-        )
-        .id
+        new_device(&mut state, account, name, "mac", public_key.to_vec(), first).id
     }
 
-    /// A revoked device is live again, with its old chain.
+    /// A hostile Connect lists the device `device` (of any account) in the store
+    /// `team_id`, in its store view and in the relay team. Returns its store device id.
+    pub fn list_in_store(&self, team_id: &str, device: &str) -> u64 {
+        let mut state = lock(&self.shared);
+        let (name, key) = state
+            .devices
+            .iter()
+            .find(|entry| entry.id == device)
+            .map(|entry| (entry.name.clone(), entry.public_key.clone()))
+            .expect("device");
+        let relay = state.relay.clone().expect("a relay");
+        let number = relay.add_store_device(team_id, &name, &key);
+        state
+            .stores
+            .iter_mut()
+            .find(|store| store.team_id == team_id)
+            .expect("store")
+            .devices
+            .push((number, device.to_owned()));
+        number
+    }
+
+    /// The signed device list of `account`, as Connect answers it.
+    pub fn device_list(&self, account: &str) -> Vec<Value> {
+        lock(&self.shared)
+            .accounts
+            .get(account)
+            .map(|entry| entry.list.clone())
+            .unwrap_or_default()
+    }
+
+    /// Connect answers `list` as the device list of `account` from now on (an older list,
+    /// another history, a changed entry). The hashes are not checked here.
+    pub fn set_device_list(&self, account: &str, list: Vec<Value>) {
+        if let Some(entry) = lock(&self.shared).accounts.get_mut(account) {
+            entry.list = list;
+        }
+    }
+
+    /// A revoked device is live again; the device list stays as it is.
     pub fn unrevoke(&self, device: &str) {
         for entry in &mut lock(&self.shared).devices {
             if entry.id == device {
@@ -463,7 +590,7 @@ impl FakeConnect {
         }
     }
 
-    /// The device `device` gets the key `public_key`; its chain stays.
+    /// The device `device` gets the key `public_key`; the device list stays as it is.
     pub fn swap_key(&self, device: &str, public_key: &[u8]) {
         for entry in &mut lock(&self.shared).devices {
             if entry.id == device {
@@ -472,7 +599,7 @@ impl FakeConnect {
         }
     }
 
-    /// The `DeviceView` of `device`, with its chain, as Connect answers it.
+    /// The `DeviceView` of `device`, as Connect answers it.
     pub fn device_view(&self, device: &str) -> Option<Value> {
         let state = lock(&self.shared);
         state
@@ -518,6 +645,13 @@ impl FakeConnect {
             .push((prefix.to_owned(), count));
     }
 
+    /// Every request that starts with `prefix` answers `status` with the error `code`.
+    pub fn answer_route_error(&self, prefix: &str, status: u16, code: &str) {
+        lock(&self.shared)
+            .route_errors
+            .push((prefix.to_owned(), status, code.to_owned()));
+    }
+
     /// The account gets an entitled plan (Personal).
     pub fn entitle(&self, account: &str) {
         if let Some(account) = lock(&self.shared).accounts.get_mut(account) {
@@ -525,7 +659,8 @@ impl FakeConnect {
         }
     }
 
-    /// Revoke a device as another device of the account would.
+    /// Hide a device behind the app's back: its row is not live any more, and the device
+    /// list (which no device signed for this) still holds it.
     pub fn revoke(&self, device: &str) {
         let mut state = lock(&self.shared);
         for entry in &mut state.devices {
@@ -833,7 +968,12 @@ fn handle(shared: &Arc<Mutex<State>>, mut stream: TcpStream) {
             .map(|(_, left)| *left -= 1)
             .is_some()
     };
-    let answer = route(shared, &request);
+    let forced = lock(shared)
+        .route_errors
+        .iter()
+        .find(|(prefix, _, _)| line.starts_with(prefix.as_str()))
+        .map(|(_, status, code)| fail(*status, code));
+    let answer = forced.unwrap_or_else(|| route(shared, &request));
     if lost {
         return;
     }
@@ -929,39 +1069,30 @@ fn caller(state: &State, request: &Incoming) -> Option<(String, String)> {
         .then_some((account, device))
 }
 
-/// The statements from `device` to its root, following `added_by` through every row
-/// (revoked ones too), at most 64.
-fn chain(state: &State, device: &Device) -> Vec<Value> {
-    let mut entries = Vec::new();
-    let mut current = device;
-    while let Some(parent) = current.added_by.as_deref() {
-        let Some(confirmer) = state.devices.iter().find(|entry| entry.id == parent) else {
-            break;
-        };
-        if entries.len() == 64 {
-            break;
-        }
-        entries.push(json!({"link_hash": current.link_hash,
-                            "confirmer_key": encode_b64u(&confirmer.public_key),
-                            "statement": encode_b64u(&current.statement)}));
-        current = confirmer;
-    }
-    entries
-}
-
-fn device_view(state: &State, device: &Device) -> Value {
+fn device_view(_state: &State, device: &Device) -> Value {
     json!({"device_id": device.id, "name": device.name, "platform": device.platform,
            "public_key": encode_b64u(&device.public_key), "created_at": device.created_at,
-           "last_seen_at": null, "chain": chain(state, device)})
+           "last_seen_at": null})
 }
 
-/// The confirmer of a join answer: the device that made the link, with its chain.
+/// The confirmer of a join answer: the device that made the link.
 fn confirmer_view(state: &State, device: &Device) -> Value {
     if let Some(confirmer) = &state.confirmer {
         return confirmer.clone();
     }
     json!({"device_id": device.id, "name": device.name,
-           "public_key": encode_b64u(&device.public_key), "chain": chain(state, device)})
+           "public_key": encode_b64u(&device.public_key)})
+}
+
+/// The device list of `account` in an answer.
+fn list_of(state: &State, account: &str) -> Value {
+    json!(
+        state
+            .accounts
+            .get(account)
+            .map(|entry| entry.list.clone())
+            .unwrap_or_default()
+    )
 }
 
 /// The plans of the default configuration (connect-billing-v1 section 2).
@@ -1085,7 +1216,6 @@ fn store_view(store: &Store, state: &State) -> Value {
            "created_at": store.created_at, "shared": shared, "devices": devices})
 }
 
-#[allow(clippy::too_many_arguments)]
 fn new_device(
     state: &mut State,
     account: &str,
@@ -1093,8 +1223,6 @@ fn new_device(
     platform: &str,
     public_key: Vec<u8>,
     added_by: Option<String>,
-    link_hash: &str,
-    statement: Vec<u8>,
 ) -> Device {
     state.next += 1;
     let device = Device {
@@ -1106,8 +1234,6 @@ fn new_device(
         created_at: now(),
         live: true,
         added_by,
-        link_hash: link_hash.to_owned(),
-        statement,
     };
     state.devices.push(device.clone());
     device
@@ -1186,8 +1312,13 @@ fn route(shared: &Arc<Mutex<State>>, request: &Incoming) -> Outgoing {
                     entitled: false,
                     plan: None,
                     customer: false,
+                    list: Vec::new(),
+                    hashes: Vec::new(),
                 },
             );
+            if let Some(entry) = state.accounts.get_mut(&account_id) {
+                entry.start_list(&origin, &account_id, &public_key);
+            }
             let device = new_device(
                 &mut state,
                 &account_id,
@@ -1195,8 +1326,6 @@ fn route(shared: &Arc<Mutex<State>>, request: &Incoming) -> Outgoing {
                 text(&body, "platform"),
                 public_key.clone(),
                 None,
-                "",
-                Vec::new(),
             );
             let answer = json!({"account_id": account_id, "device_id": device.id,
                                 "created_at": device.created_at});
@@ -1354,7 +1483,7 @@ fn route(shared: &Arc<Mutex<State>>, request: &Incoming) -> Outgoing {
                     .expect("confirmer");
                 return ok(json!({"join_id": join_id, "account_id": account,
                     "confirmer": confirmer_view(&state, confirmer),
-                    "expires_at": link.expires_at}));
+                    "expires_at": link.expires_at, "device_list": list_of(&state, &account)}));
             }
             let at = now();
             let Some(link) = state.links.iter_mut().find(|link| {
@@ -1386,7 +1515,7 @@ fn route(shared: &Arc<Mutex<State>>, request: &Incoming) -> Outgoing {
                 .expect("confirmer");
             ok(json!({"join_id": join_id, "account_id": account,
                 "confirmer": confirmer_view(&state, confirmer),
-                "expires_at": expires_at}))
+                "expires_at": expires_at, "device_list": list_of(&state, &account)}))
         }
         ("POST", ["v1", "account", "devices", "join", "cancel"]) => {
             if !strict(
@@ -1493,6 +1622,9 @@ fn route(shared: &Arc<Mutex<State>>, request: &Incoming) -> Outgoing {
                 .filter(|store| store.account == account)
                 .count();
             state.stores.retain(|store| store.account != account);
+            if let Some(entry) = state.accounts.get_mut(&account) {
+                entry.start_list(&origin, &account, &public_key);
+            }
             let device = new_device(
                 &mut state,
                 &account,
@@ -1500,8 +1632,6 @@ fn route(shared: &Arc<Mutex<State>>, request: &Incoming) -> Outgoing {
                 text(&body, "platform"),
                 public_key,
                 None,
-                "",
-                Vec::new(),
             );
             let answer = json!({"account_id": account, "device_id": device.id,
                                 "deleted_stores": deleted});
@@ -1550,7 +1680,8 @@ fn authenticated(
                 json!({"account_id": account, "name": entry.name, "email": null,
                       "created_at": entry.created_at,
                       "plan": account_plan(state, account),
-                      "devices": devices, "group": account_group(state, account)}),
+                      "devices": devices, "group": account_group(state, account),
+                      "device_list": entry.list}),
             )
         }
         ("DELETE", []) => {
@@ -1659,7 +1790,7 @@ fn authenticated(
                 state.joins[index].state = JoinState::Refused;
                 return ok(json!({"join_id": join_id}));
             }
-            if !strict(body, &["public_key", "statement"]) {
+            if !strict_versioned(body, &["public_key", "statement"]) {
                 return fail(400, "invalid_request");
             }
             if point(text(body, "public_key")).as_deref()
@@ -1667,20 +1798,13 @@ fn authenticated(
             {
                 return fail(409, "conflict");
             }
-            // The statement of the caller over the joining key and the link of the join.
+            // The `add` entry of the caller for the joining key and the link of the join.
             let link_hash = state
                 .links
                 .iter()
                 .find(|link| link.id == link_id)
                 .map(|link| link.hash.clone())
                 .unwrap_or_default();
-            let message = joined(&[
-                "apassy-connect device v1",
-                origin,
-                account,
-                &link_hash,
-                &encode_b64u(&state.joins[index].public_key),
-            ]);
             let statement = decode_b64u(text(body, "statement")).unwrap_or_default();
             let caller_key = state
                 .devices
@@ -1688,8 +1812,20 @@ fn authenticated(
                 .find(|entry| entry.id == device)
                 .map(|entry| entry.public_key.clone())
                 .unwrap_or_default();
-            if !verify(&caller_key, &message, &statement) {
-                return fail(400, "invalid_request");
+            let joining = state.joins[index].public_key.clone();
+            let version = body["version"].as_u64().unwrap_or(0);
+            let appended = state.accounts.get_mut(account).expect("account").append(
+                origin,
+                account,
+                version,
+                "add",
+                &joining,
+                Some(&link_hash),
+                &caller_key,
+                &statement,
+            );
+            if let Err(refused) = appended {
+                return refused;
             }
             state.joins[index].state = JoinState::Confirmed;
             let join = &state.joins[index];
@@ -1705,20 +1841,50 @@ fn authenticated(
                 &platform,
                 key,
                 Some(device.to_owned()),
-                &link_hash,
-                statement,
             );
             ok(device_view(state, &added))
         }
         ("DELETE", ["devices", target]) => {
-            let Some(entry) = state
+            if !strict_versioned(body, &["statement"]) {
+                return fail(400, "invalid_request");
+            }
+            let Some(target_key) = state
                 .devices
-                .iter_mut()
+                .iter()
                 .find(|entry| entry.id == *target && entry.account == account && entry.live)
+                .map(|entry| entry.public_key.clone())
             else {
                 return fail(404, "not_found");
             };
-            entry.live = false;
+            // The `remove` entry of the caller for the device's key.
+            let caller_key = state
+                .devices
+                .iter()
+                .find(|entry| entry.id == device)
+                .map(|entry| entry.public_key.clone())
+                .unwrap_or_default();
+            let statement = decode_b64u(text(body, "statement")).unwrap_or_default();
+            let version = body["version"].as_u64().unwrap_or(0);
+            let appended = state.accounts.get_mut(account).expect("account").append(
+                origin,
+                account,
+                version,
+                "remove",
+                &target_key,
+                None,
+                &caller_key,
+                &statement,
+            );
+            if let Err(refused) = appended {
+                return refused;
+            }
+            if let Some(entry) = state
+                .devices
+                .iter_mut()
+                .find(|entry| entry.id == *target && entry.account == account)
+            {
+                entry.live = false;
+            }
             let target = (*target).to_owned();
             state.tokens.retain(|_, (_, owner, _)| *owner != target);
             let mut removed = 0;

@@ -119,8 +119,8 @@ public struct ConnectDevice: Codable, Sendable, Equatable {
     public var platform: String
     /// True for this iPhone.
     public var isThisDevice: Bool
-    /// True when the core verified the chain of statements of this device. When false, the app
-    /// shows "Not verified".
+    /// True when the signed device list that the core verified holds this device. When
+    /// false, the app shows "Not verified".
     public var verified: Bool
 
     public init(deviceID: String, name: String, platform: String, isThisDevice: Bool, verified: Bool) {

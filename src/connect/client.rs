@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::ConnectError;
-use super::trust::ChainEntry;
+use super::trust::ListEntry;
 use crate::sync::relay::{ApiError, call, call_without_busy_retries, json_request};
 use crate::sync::relay_http::Request;
 use crate::sync::{RelayUrl, SyncError};
@@ -68,7 +68,9 @@ pub(super) fn connect_error(error: ApiError) -> ConnectError {
             retry_after,
         } => match (status, code.as_str()) {
             (401, _) => ConnectError::Unauthenticated,
-            (403, "device_removed") => ConnectError::Revoked,
+            // `403 device_removed` is a removal only as the answer of the token call to a
+            // signature of this device ([`ConnectClient::token`]): from any other route it is
+            // a refusal like any other.
             (403, "join_pending") => ConnectError::JoinPending,
             (403, "join_refused") => ConnectError::JoinRefused,
             (403, "plan_required") => ConnectError::PlanRequired,
@@ -142,6 +144,16 @@ struct LinkRequest<'a> {
 #[derive(Serialize)]
 struct ConfirmRequest<'a> {
     public_key: &'a str,
+    /// The version of the `add` entry of the device list.
+    version: u64,
+    statement: &'a str,
+}
+
+/// The body of `DELETE /v1/account/devices/{device_id}`: the `remove` entry of the device
+/// list.
+#[derive(Serialize)]
+struct RevokeRequest<'a> {
+    version: u64,
     statement: &'a str,
 }
 
@@ -305,13 +317,9 @@ pub struct DeviceView {
     /// Rounded down to the hour, or `None`.
     #[serde(default)]
     pub last_seen_at: Option<u64>,
-    /// The statements that added this device, from its own key to the account root
-    /// ([`super::trust`]). Empty for the root.
-    #[serde(default)]
-    pub chain: Vec<ChainEntry>,
-    /// Set by this device, never by Connect: the chain of the device verified against the
-    /// trust store of this device ([`super::ConnectAccount::view`]). An unverified device
-    /// is not an account device for any decision.
+    /// Set by this device, never by Connect: the key is a device of the signed device list
+    /// that this device verified ([`super::ConnectAccount::view`]). An unverified device is
+    /// not an account device for any decision.
     #[serde(skip)]
     pub verified: bool,
 }
@@ -341,6 +349,14 @@ pub struct AccountView {
     pub devices: Vec<DeviceView>,
     #[serde(default)]
     pub group: Option<GroupView>,
+    /// The signed device list, from version 1 ([`super::trust`]).
+    #[serde(default)]
+    pub device_list: Vec<ListEntry>,
+    /// Set by this device, never by Connect: `device_list` verified from the pinned root and
+    /// went on from the pinned version. When it is false, no device of the view is
+    /// verified, and the trust store keeps what it had.
+    #[serde(skip)]
+    pub list_verified: bool,
 }
 
 /// `DELETE /v1/account`.
@@ -370,14 +386,12 @@ pub(super) struct PendingView {
     pub expires_at: u64,
 }
 
-/// The device that confirms a join, with its chain.
+/// The device that confirms a join.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub(super) struct Confirmer {
     pub device_id: String,
     pub name: String,
     pub public_key: String,
-    #[serde(default)]
-    pub chain: Vec<ChainEntry>,
 }
 
 /// `POST /v1/account/devices/join`.
@@ -387,6 +401,9 @@ pub(super) struct JoinAnswer {
     pub account_id: String,
     pub confirmer: Confirmer,
     pub expires_at: u64,
+    /// The signed device list of the account, from version 1.
+    #[serde(default)]
+    pub device_list: Vec<ListEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -685,11 +702,18 @@ impl ConnectClient {
     }
 
     /// The token call never repeats a body after `503 busy`: the nonce of a refused body
-    /// stays unused, and the sign-in takes a fresh challenge instead.
+    /// stays unused, and the sign-in takes a fresh challenge instead. It is the only call
+    /// whose `403 device_removed` is [`ConnectError::Revoked`]: Connect gives it to a valid
+    /// signature of this device.
     pub(super) fn token(&self, body: &TokenRequest<'_>) -> Result<TokenAnswer, ConnectError> {
         let mut request = json_request("POST", "/v1/account/token", None, body);
         request.deadline = Some(Instant::now() + CALL_DEADLINE);
-        call_without_busy_retries(&self.url, &request).map_err(connect_error)
+        call_without_busy_retries(&self.url, &request).map_err(|error| match error {
+            ApiError::Relay {
+                status: 403, code, ..
+            } if code == "device_removed" => ConnectError::Revoked,
+            other => connect_error(other),
+        })
     }
 
     pub(super) fn join(&self, body: &JoinBody<'_>) -> Result<JoinAnswer, ConnectError> {
@@ -770,13 +794,14 @@ impl ConnectClient {
         token: &str,
         join_id: u64,
         public_key: &str,
-        statement: &str,
+        (version, statement): (u64, &str),
     ) -> Result<DeviceView, ConnectError> {
         self.post(
             &format!("/v1/account/devices/pending/{join_id}/confirm"),
             Some(token),
             &ConfirmRequest {
                 public_key,
+                version,
                 statement,
             },
         )
@@ -794,14 +819,16 @@ impl ConnectClient {
         &self,
         token: &str,
         device_id: &str,
+        (version, statement): (u64, &str),
     ) -> Result<RevokeAnswer, ConnectError> {
         if !super::words::valid_device_id(device_id) {
             return Err(ConnectError::Invalid);
         }
-        self.send(Request::new(
+        self.send(json_request(
             "DELETE",
-            format!("/v1/account/devices/{device_id}"),
+            &format!("/v1/account/devices/{device_id}"),
             Some(token),
+            &RevokeRequest { version, statement },
         ))
     }
 

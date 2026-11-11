@@ -584,19 +584,16 @@ mod tests {
     /// An account file of `signer` in `dir`, as a creation writes it.
     fn account_file_of(dir: &Path, signer: &AccountSigner) {
         let public_key = signer.public_key_b64u();
-        let (root, known) = AccountState::new_trust(&public_key, signer.public_key(), &[]);
         let state = AccountState {
-            v: 2,
-            origin: "http://127.0.0.1:9".to_owned(),
-            account_id: "acc_k7m2q4x3ca".to_owned(),
-            device_id: "dev_k7m2q4x3ca".to_owned(),
             name: Some("Synthetic".to_owned()),
-            device_name: "Test".to_owned(),
-            public_key,
-            created_at: 1_790_000_000,
-            root,
-            known,
-            revoked: Vec::new(),
+            ..AccountState::for_root(
+                "http://127.0.0.1:9",
+                "acc_k7m2q4x3ca",
+                "dev_k7m2q4x3ca",
+                "Test",
+                &public_key,
+                1_790_000_000,
+            )
         };
         state.save(&account_file(dir)).expect("account file");
     }

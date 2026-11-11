@@ -1356,8 +1356,8 @@ fn a_removal_that_the_tunnel_meets_reaches_settings_and_the_sync() {
     assert!(dir.path().join("data/connect/account.json").exists());
 }
 
-/// A device that this Mac cannot verify is refused by the sync's signer policy of the
-/// shared session, as the section shows it "Not verified".
+/// A device that this Mac cannot verify is not among the signers of the sync's policy of
+/// the shared session, as the section shows it "Not verified".
 #[test]
 fn an_unverified_device_is_refused_by_the_sync_of_the_session() {
     let dir = TempDir::new().expect("temp dir");
@@ -1372,12 +1372,7 @@ fn an_unverified_device_is_refused_by_the_sync_of_the_session() {
         shown(app).is_some_and(|account| account.devices.len() == 2)
     });
     let sync = app.ui.connect.live.sync_account().expect("sync account");
-    assert!(
-        sync.signers
-            .refused
-            .iter()
-            .any(|key| key == stranger.public_key())
-    );
+    assert!(!sync.signers.allows(stranger.public_key(), 1, 9));
     assert!(
         !sync
             .signers

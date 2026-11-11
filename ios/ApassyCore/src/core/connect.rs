@@ -33,13 +33,15 @@
 //! is shown the same way. A `401` is never a removal.
 //!
 //! **Devices.** `connect_status` lists the devices of the account with `verified`: the
-//! core checks the chain of statements of each device against the trust store of the
-//! state file (`apassy::connect::trust`), and the app shows "Not verified" for the others.
+//! core verifies the signed device list of the account from the pinned root and the
+//! pinned version of the state file (`apassy::connect::trust`), and the app shows "Not
+//! verified" for the others.
 //!
 //! **The state file** is the Mac's account file, `connect/account.json` in the data
 //! directory (mode 0600): the origin, the ids, the names, the public key, and the trust
-//! store (the pinned account root and the known and departed device keys). No private
-//! key, no token, no email, no code, no plan.
+//! store (the pinned account root, the pinned version and hash of the device list, and
+//! the known and departed device keys). No private key, no token, no email, no code, no
+//! plan.
 //!
 //! The account token stays inside the core: [`Accounts::with_token`] gives it to a call
 //! of the Connect client of the account's origin only. The dials of `transport.rs` (unit
@@ -133,7 +135,7 @@ pub struct DeviceOut {
     pub platform: String,
     /// This iPhone.
     pub this: bool,
-    /// The core verified the device's chain of statements to the account root. The app
+    /// The signed device list that the core verified holds the device's key. The app
     /// shows "Not verified" when it is false.
     pub verified: bool,
 }

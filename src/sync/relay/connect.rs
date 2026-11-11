@@ -237,8 +237,9 @@ impl RelaySync {
     }
 
     /// Which keys may sign the heads of a vault store (`ConnectAccount::signer_policy`),
-    /// set with the account key, or `None` at a sign-out. A session that runs keeps the
-    /// policy it took.
+    /// set with the account key after each refresh of the account, or `None` at a
+    /// sign-out. A session that runs reads it at each check of a head, so a device that
+    /// left the account signs no later version from the next check on.
     pub fn set_account_signers(&self, policy: Option<super::SignerPolicy>) {
         *lock(&self.account_keys) = policy;
     }
@@ -356,7 +357,7 @@ impl RelaySync {
             return Err(ConnectError::BadAnswer.into());
         }
         let policy = account.signer_policy()?;
-        self.set_account_signers(Some(policy.clone()));
+        self.set_account_signers(Some(policy));
         self.set_account_signer(Some(Arc::clone(&signer)));
         let session = Arc::new(
             Session::new(
@@ -366,7 +367,7 @@ impl RelaySync {
                 Some(store_device),
             )
             .sharing_removed(&self.removed)
-            .with_signer_policy(policy),
+            .with_shared_signers(Arc::clone(&self.account_keys)),
         );
         Ok((session, store))
     }

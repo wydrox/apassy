@@ -11,7 +11,7 @@
         "platform": "mac",
         "public_key": "BOpHkB5VvTHXawpUXZxgu44Q97I2bzq9G_uI6tFM9mj8De047e1fNWI8MIERDsaxhBC0ih1DPfXaM4mdBbExjrA",
         "recovery_key": "P3VZgQkKwrU01IKiaSsnbCkDDAnFmM4Quzo8s1pM_w0",
-        "signature": "MEQCIAYAZa1iXdLffMIosDVrC-CW2Hb5HTvpsOvNEnDcPdnDAiACYvCjxAmi5ZwQZEo8Ot5Om3-pcxXatoZKc6UTRrDHZw"
+        "signature": "MEUCIAcrk5ATuGEzQh856q7dIwy0Dn5g6m13ZMUI5jiHRtmFAiEA_lWA7MFdx6QCrFgjD1gCUtoxv-q3uvk5H24k33ctP_0"
       }
     },
     {
@@ -51,7 +51,7 @@
         "account_id": "acc_k7m2q4x3ca",
         "public_key": "BOpHkB5VvTHXawpUXZxgu44Q97I2bzq9G_uI6tFM9mj8De047e1fNWI8MIERDsaxhBC0ih1DPfXaM4mdBbExjrA",
         "nonce": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
-        "signature": "MEYCIQDJs8U_ma0RlWJd6DqItHfw9lfxZoF5eXiNLbXmtzRKsgIhAPSnHvueBxP0grlP845ONQymwhQCzFA9UusBuVvNGTgU"
+        "signature": "MEUCIQCSpx6Xich3OUgd_sys4AKP0a1OIVJQY3RSakunxUVpGAIgbKorMNGX8NhL8FJ4LqQ-xVBe_wQ5PAMrICGDrZZGUOQ"
       }
     },
     {
@@ -94,8 +94,7 @@
             "platform": "mac",
             "public_key": "BOpHkB5VvTHXawpUXZxgu44Q97I2bzq9G_uI6tFM9mj8De047e1fNWI8MIERDsaxhBC0ih1DPfXaM4mdBbExjrA",
             "created_at": 1790000000,
-            "last_seen_at": 1790002800,
-            "chain": []
+            "last_seen_at": 1790002800
           },
           {
             "device_id": "dev_p4n6r2t7bc",
@@ -103,17 +102,28 @@
             "platform": "iphone",
             "public_key": "BHT0n4Fm59J03ZsiW90m9QduYBelWtRV3UCWnVat-4vhMVwrG6Yb1N49dMdAoMjybq7EF8VHiKvw2YADXal0V8U",
             "created_at": 1790000200,
-            "last_seen_at": null,
-            "chain": [
-              {
-                "link_hash": "P6yDGvx5eZkwzldGxhuX1gKcaigN7dFHw2-q26Eb9To",
-                "confirmer_key": "BOpHkB5VvTHXawpUXZxgu44Q97I2bzq9G_uI6tFM9mj8De047e1fNWI8MIERDsaxhBC0ih1DPfXaM4mdBbExjrA",
-                "statement": "MEUCIHkGrw3d46MSPTzRiZdtZuxHc96FukSS9-Npj7XoflfTAiEAt4_5fO-4p59iiw4Y63kK3RHMQLrluEPK1k7020fQiDQ"
-              }
-            ]
+            "last_seen_at": null
           }
         ],
-        "group": null
+        "group": null,
+        "device_list": [
+          {
+            "version": 1,
+            "op": "root",
+            "key": "BOpHkB5VvTHXawpUXZxgu44Q97I2bzq9G_uI6tFM9mj8De047e1fNWI8MIERDsaxhBC0ih1DPfXaM4mdBbExjrA",
+            "link_hash": null,
+            "by": "BOpHkB5VvTHXawpUXZxgu44Q97I2bzq9G_uI6tFM9mj8De047e1fNWI8MIERDsaxhBC0ih1DPfXaM4mdBbExjrA",
+            "signature": null
+          },
+          {
+            "version": 2,
+            "op": "add",
+            "key": "BHT0n4Fm59J03ZsiW90m9QduYBelWtRV3UCWnVat-4vhMVwrG6Yb1N49dMdAoMjybq7EF8VHiKvw2YADXal0V8U",
+            "link_hash": "P6yDGvx5eZkwzldGxhuX1gKcaigN7dFHw2-q26Eb9To",
+            "by": "BOpHkB5VvTHXawpUXZxgu44Q97I2bzq9G_uI6tFM9mj8De047e1fNWI8MIERDsaxhBC0ih1DPfXaM4mdBbExjrA",
+            "signature": "MEUCIHaCnQ2_wfgzxuiFwvk6KsHSY01VNqX2cvhErERsJ7jVAiEApngcUAhl_knygZpBVfiMDAhe0p9v0iMAOE-dMC0s88s"
+          }
+        ]
       }
     },
     {
@@ -138,13 +148,32 @@
           "delete_at": null,
           "group_id": "grp_f4m6n2p7qa"
         },
-        "devices": [],
+        "devices": [
+          {
+            "device_id": "dev_q5r7s3t6cd",
+            "name": "iPhone",
+            "platform": "iphone",
+            "public_key": "BHT0n4Fm59J03ZsiW90m9QduYBelWtRV3UCWnVat-4vhMVwrG6Yb1N49dMdAoMjybq7EF8VHiKvw2YADXal0V8U",
+            "created_at": 1790000300,
+            "last_seen_at": null
+          }
+        ],
         "group": {
           "group_id": "grp_f4m6n2p7qa",
           "kind": "family",
           "role": "member",
           "state": "active"
-        }
+        },
+        "device_list": [
+          {
+            "version": 1,
+            "op": "root",
+            "key": "BHT0n4Fm59J03ZsiW90m9QduYBelWtRV3UCWnVat-4vhMVwrG6Yb1N49dMdAoMjybq7EF8VHiKvw2YADXal0V8U",
+            "link_hash": null,
+            "by": "BHT0n4Fm59J03ZsiW90m9QduYBelWtRV3UCWnVat-4vhMVwrG6Yb1N49dMdAoMjybq7EF8VHiKvw2YADXal0V8U",
+            "signature": null
+          }
+        ]
       }
     },
     {
@@ -190,7 +219,7 @@
         "device_name": "iPhone",
         "platform": "iphone",
         "public_key": "BHT0n4Fm59J03ZsiW90m9QduYBelWtRV3UCWnVat-4vhMVwrG6Yb1N49dMdAoMjybq7EF8VHiKvw2YADXal0V8U",
-        "signature": "MEQCIA12emKdHUUZL7TyBoVOlND8W9JoEKV053DbZlrTYWZjAiBgI1PAerUFmK_4JEnJup_0XSmAls58Fh7iNKRk5Pp0Ew"
+        "signature": "MEYCIQDs8KTce-uvokgssmSy8Kx51AdrJ9adR-tKwcnCJ8a27wIhANs1psOS-x4fPjKfbqUKC3jvZtnvfhYfe5dDyJ8O80lD"
       }
     },
     {
@@ -203,10 +232,19 @@
         "confirmer": {
           "device_id": "dev_m2k7q3x4ab",
           "name": "MacBook Pro",
-          "public_key": "BOpHkB5VvTHXawpUXZxgu44Q97I2bzq9G_uI6tFM9mj8De047e1fNWI8MIERDsaxhBC0ih1DPfXaM4mdBbExjrA",
-          "chain": []
+          "public_key": "BOpHkB5VvTHXawpUXZxgu44Q97I2bzq9G_uI6tFM9mj8De047e1fNWI8MIERDsaxhBC0ih1DPfXaM4mdBbExjrA"
         },
-        "expires_at": 1790000600
+        "expires_at": 1790000600,
+        "device_list": [
+          {
+            "version": 1,
+            "op": "root",
+            "key": "BOpHkB5VvTHXawpUXZxgu44Q97I2bzq9G_uI6tFM9mj8De047e1fNWI8MIERDsaxhBC0ih1DPfXaM4mdBbExjrA",
+            "link_hash": null,
+            "by": "BOpHkB5VvTHXawpUXZxgu44Q97I2bzq9G_uI6tFM9mj8De047e1fNWI8MIERDsaxhBC0ih1DPfXaM4mdBbExjrA",
+            "signature": null
+          }
+        ]
       }
     },
     {
@@ -217,7 +255,7 @@
         "account_id": "acc_k7m2q4x3ca",
         "link_hash": "P6yDGvx5eZkwzldGxhuX1gKcaigN7dFHw2-q26Eb9To",
         "public_key": "BHT0n4Fm59J03ZsiW90m9QduYBelWtRV3UCWnVat-4vhMVwrG6Yb1N49dMdAoMjybq7EF8VHiKvw2YADXal0V8U",
-        "signature": "MEUCIQCNOAuES0hlGDyCqkKDOHZ3JR70Bni8puM3sdrmOv-JNAIgbS0qivzl9tCVyJOWatnonj1JT8dncSpc-9sbgH6xEZo"
+        "signature": "MEYCIQDtQ0J03F-lGTkvO0uQ3c2IoMK0lqyk9CsuMaALr6prPAIhAJ-ps_PBMFTz2yN2l9CUA2nPV1EQm8W7UeUocRCM2rNG"
       }
     },
     {
@@ -250,7 +288,8 @@
       "part": "request",
       "body": {
         "public_key": "BHT0n4Fm59J03ZsiW90m9QduYBelWtRV3UCWnVat-4vhMVwrG6Yb1N49dMdAoMjybq7EF8VHiKvw2YADXal0V8U",
-        "statement": "MEUCIHkGrw3d46MSPTzRiZdtZuxHc96FukSS9-Npj7XoflfTAiEAt4_5fO-4p59iiw4Y63kK3RHMQLrluEPK1k7020fQiDQ"
+        "version": 2,
+        "statement": "MEUCIHaCnQ2_wfgzxuiFwvk6KsHSY01VNqX2cvhErERsJ7jVAiEApngcUAhl_knygZpBVfiMDAhe0p9v0iMAOE-dMC0s88s"
       }
     },
     {
@@ -263,14 +302,7 @@
         "platform": "iphone",
         "public_key": "BHT0n4Fm59J03ZsiW90m9QduYBelWtRV3UCWnVat-4vhMVwrG6Yb1N49dMdAoMjybq7EF8VHiKvw2YADXal0V8U",
         "created_at": 1790000200,
-        "last_seen_at": null,
-        "chain": [
-          {
-            "link_hash": "P6yDGvx5eZkwzldGxhuX1gKcaigN7dFHw2-q26Eb9To",
-            "confirmer_key": "BOpHkB5VvTHXawpUXZxgu44Q97I2bzq9G_uI6tFM9mj8De047e1fNWI8MIERDsaxhBC0ih1DPfXaM4mdBbExjrA",
-            "statement": "MEUCIHkGrw3d46MSPTzRiZdtZuxHc96FukSS9-Npj7XoflfTAiEAt4_5fO-4p59iiw4Y63kK3RHMQLrluEPK1k7020fQiDQ"
-          }
-        ]
+        "last_seen_at": null
       }
     },
     {
@@ -285,6 +317,15 @@
       "part": "result",
       "body": {
         "join_id": 4
+      }
+    },
+    {
+      "name": "revoke",
+      "route": "DELETE /v1/account/devices/{device_id}",
+      "part": "request",
+      "body": {
+        "version": 3,
+        "statement": "MEUCIQCVNk7z6pwG3qnRSSxZ-alvYVsHGzbPH6ZWhEgg6RJ-mwIgKHe4JrTYLbByKvBK_s_cDCcFG5V_mIydzlOzTAqfI6M"
       }
     },
     {
@@ -387,7 +428,7 @@
         "platform": "mac",
         "public_key": "BHT0n4Fm59J03ZsiW90m9QduYBelWtRV3UCWnVat-4vhMVwrG6Yb1N49dMdAoMjybq7EF8VHiKvw2YADXal0V8U",
         "recovery_key": "Rm63i8k0aVY1Ue7s6R-B6veiHsYyxRzhNiJ_0vk8tO0",
-        "signature": "MEUCIQDKNnhDum6vDg12VsLDRtXZUFOgrfL94gvsIPRNP6GruAIgYvNHa-LTV1ZRoIsYELRHuE7PTCa06CSEWbz3c2xGNog",
+        "signature": "MEUCIQDHqBPJBqdQSkRDM58xfGcbjbu0qG8jGM8JMo4UITqD3gIgYhbfmzz2ZbMPZl4OdXIM9feDGn1j2C3ejFiqdmyA7sw",
         "recovery_signature": "9wL6-LQByIGG-1Asx18qK5yt1z9se3lc8ovubXsEclOm91FEwUhPQ7aR2ZeOdgqoqRjtLUr5DyRk7gNEFuTTAQ"
       }
     },
