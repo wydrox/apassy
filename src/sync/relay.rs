@@ -650,13 +650,6 @@ impl Session {
         self
     }
 
-    /// The session whose transports accept heads only as `policy` allows: the vault
-    /// store of a Connect account.
-    pub(crate) fn with_signer_policy(mut self, policy: SignerPolicy) -> Self {
-        self.signer_keys = Some(SignerSource::Fixed(Arc::new(policy)));
-        self
-    }
-
     /// The session whose transports accept heads as the policy in `slot` allows at the
     /// moment of each check: the slot of the vault's relay sync, which the window sets from
     /// the account file at each hand-over of the account session and after each refresh of

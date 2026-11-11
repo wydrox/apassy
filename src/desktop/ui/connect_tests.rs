@@ -1572,7 +1572,11 @@ fn a_removal_reaches_the_running_store_session_through_the_window() {
         kind: crate::contracts::CredentialKind::ApiKey,
         notes: String::new(),
         tags: Vec::new(),
-        fields: Vec::new(),
+        fields: vec![crate::vault::Field {
+            name: "token".to_owned(),
+            value: crate::vault::SecretValue::new("SYNTH-revoked".to_owned()),
+            secret: true,
+        }],
     })
     .expect("add");
     let synced = dir.path().join("imac-copy.sync");
