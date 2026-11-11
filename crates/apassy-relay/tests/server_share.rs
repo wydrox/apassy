@@ -49,7 +49,7 @@ fn store(c: &Connect, owner: &Dev, vault: &str) -> String {
         "POST",
         "/v1/account/vaults",
         Some(&owner.token),
-        Some(&c.vault_body(&owner, vault, "Family", &connect::new_team_id())),
+        Some(&c.vault_body(owner, vault, "Family", &connect::new_team_id())),
     )["team_id"]
         .as_str()
         .unwrap()
@@ -1684,7 +1684,7 @@ fn a_vault_store_comes_with_one_store_entry_of_its_own_id() {
         assert_eq!(c.list_head(&by.account).0, before, "no entry for {taken}");
     }
     assert_eq!(std::fs::read(&squatted_path).unwrap(), b"not a store");
-    assert_eq!(teams(), [team.clone()]);
+    assert_eq!(teams(), std::slice::from_ref(&team));
     let gone = store(&c, &owner, THIRD_VAULT);
     assert_eq!(
         c.call(
@@ -1716,7 +1716,7 @@ fn a_vault_store_comes_with_one_store_entry_of_its_own_id() {
     let mut late = c.vault_body(&owner, OTHER_VAULT, "Late", &connect::new_team_id());
     late["version"] = json!(late["version"].as_u64().unwrap() + 1);
     assert_eq!(code(&post(&owner, &late)), (409, Some("conflict")));
-    assert_eq!(teams(), [team.clone()]);
+    assert_eq!(teams(), std::slice::from_ref(&team));
     // The rules of the entry: no `join` of an own store, no `share` of another account's.
     assert_eq!(peer(&c, &owner, &member).0, 200);
     assert_eq!(peer(&c, &member, &owner).0, 200);
@@ -2228,9 +2228,9 @@ fn the_share_marks_go_with_their_store_and_their_account() {
             member.account
         ))
     };
-    assert_eq!(joins(), [member.account.clone()]);
+    assert_eq!(joins(), std::slice::from_ref(&member.account));
     remove_member(c, owner, member);
-    assert_eq!(voids(), [owner.account.clone()]);
+    assert_eq!(voids(), std::slice::from_ref(&owner.account));
     assert_eq!(
         c.call(
             "DELETE",
