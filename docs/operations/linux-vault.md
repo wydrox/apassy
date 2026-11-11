@@ -220,14 +220,15 @@ gives it the ID `bbnpgnjnfjlbgggmpnhejpmfjhmmhiih`. Browser limits:
   example `--password-store=basic`, `--user-data-dir=…` or `--proxy-server=…`, and
   any comma outside the extension list (so `--enable-features=A,B` too) make
   Apassy refuse the browser. Then the browser shows its own security-key dialog,
-  and the extension shows "Apassy cannot verify this browser, so the browser
-  handles this request itself." Start Chromium without the extra switch, or set it
-  in the browser's settings instead. Without a system extension (and in Google
-  Chrome) those switches are fine.
+  and the Apassy button in the toolbar gets a red "!"; its tooltip says "Apassy:
+  Apassy cannot verify this browser, so the browser handles this request itself."
+  Start Chromium without the extra switch, or set it in the browser's settings
+  instead. In Google Chrome those switches are fine.
 - A browser that runs in a sandbox (another mount or user namespace than Apassy:
   a snap, a Flatpak, firejail, bubblewrap, `unshare`, or a browser in another
-  container) is not supported, even with the packaged executable. The extension
-  shows "This browser runs in a sandbox, so the browser handles this request
+  container) is not supported, even with the packaged executable. The browser
+  shows its own security-key dialog, and the tooltip of the Apassy button says
+  "Apassy: This browser runs in a sandbox, so the browser handles this request
   itself. Apassy works only with a browser that runs outside any sandbox and sees
   the files of this computer as Apassy sees them. Use Google Chrome, or Chromium
   from a .deb." Settings > Tools and `apassy setup browser` give a snap or Flatpak
