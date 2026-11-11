@@ -5,7 +5,9 @@
 //! (`NativeHelper::keychain_store`: this device only, not synchronizable, and behind
 //! Touch ID). When the helper says `keychain_unavailable` (a development build without
 //! a provisioning profile), the key is the file [`KEY_FILE`] in the node directory, mode
-//! 0600, and [`KeySource::File`] tells the owner.
+//! 0600, and [`KeySource::File`] tells the owner. That file sits beside the files that
+//! the key seals, so it protects them only by the file modes (`crate::net::sealed_key`,
+//! "What the seal protects").
 //!
 //! The node holds metadata only, never a value (decision 2). So a lost key costs nothing
 //! secret: the old node directory moves aside (`node-lost-<time>`), a new empty node

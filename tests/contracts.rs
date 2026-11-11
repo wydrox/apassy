@@ -6334,7 +6334,10 @@ mod connect_v1 {
         pub const OPEN: u8 = 0x01;
         pub const CLOSE: u8 = 0x02;
         pub const RESET: u8 = 0x04;
+        pub const WINDOW: u8 = 0x08;
         pub const MAX_PAYLOAD: usize = 16_384;
+        pub const INITIAL_WINDOW: u64 = 65_536;
+        pub const MAX_WINDOW: u64 = 16 * 1024 * 1024;
 
         #[derive(Debug, PartialEq)]
         pub struct Frame {
@@ -6364,11 +6367,14 @@ mod connect_v1 {
             if !(1..=3).contains(&kind) {
                 return Err("unknown_kind");
             }
-            if flags & !(OPEN | CLOSE | RESET) != 0 {
+            if flags & !(OPEN | CLOSE | RESET | WINDOW) != 0 {
                 return Err("unknown_flags");
             }
             if flags & RESET != 0 && (flags != RESET || len != 0) {
                 return Err("bad_reset");
+            }
+            if flags & WINDOW != 0 && (flags != WINDOW || len != 4 || bytes[8..] == [0, 0, 0, 0]) {
+                return Err("bad_window");
             }
             if flags == 0 && len == 0 {
                 return Err("empty_frame");
@@ -6396,6 +6402,9 @@ mod connect_v1 {
             kind: u8,
             closed_to_node: bool,
             closed_to_connect: bool,
+            /// The payload bytes that each direction's sender may still send.
+            window_to_node: u64,
+            window_to_connect: u64,
         }
 
         /// The stream rules of section 4 on one node WebSocket.
@@ -6417,15 +6426,22 @@ mod connect_v1 {
                     if frame.stream <= self.max_opened {
                         return Err("reused");
                     }
+                    let first = frame.payload.len() as u64;
+                    if first > INITIAL_WINDOW {
+                        return Err("over_window");
+                    }
                     self.max_opened = frame.stream;
                     self.live.insert(
                         frame.stream,
                         Live {
                             kind: frame.kind,
-                            closed_to_node: false,
+                            closed_to_node: frame.flags & CLOSE != 0,
                             closed_to_connect: false,
+                            window_to_node: INITIAL_WINDOW - first,
+                            window_to_connect: INITIAL_WINDOW,
                         },
                     );
+                    return Ok(());
                 } else if !self.live.contains_key(&frame.stream) {
                     // A frame for an ended stream is dropped; one above every id is an error.
                     return if frame.stream > self.max_opened {
@@ -6442,14 +6458,35 @@ mod connect_v1 {
                     self.live.remove(&frame.stream);
                     return Ok(());
                 }
-                let closed = if to_node {
-                    &mut live.closed_to_node
+                if frame.flags & WINDOW != 0 {
+                    // The receiver of the other direction lets its sender send more.
+                    let added = u64::from(u32::from_be_bytes(
+                        frame.payload[..4].try_into().expect("four bytes"),
+                    ));
+                    let window = if to_node {
+                        &mut live.window_to_connect
+                    } else {
+                        &mut live.window_to_node
+                    };
+                    if *window + added > MAX_WINDOW {
+                        return Err("over_window");
+                    }
+                    *window += added;
+                    return Ok(());
+                }
+                let (closed, window) = if to_node {
+                    (&mut live.closed_to_node, &mut live.window_to_node)
                 } else {
-                    &mut live.closed_to_connect
+                    (&mut live.closed_to_connect, &mut live.window_to_connect)
                 };
                 if *closed {
                     return Err("closed");
                 }
+                let len = frame.payload.len() as u64;
+                if len > *window {
+                    return Err("over_window");
+                }
+                *window -= len;
                 if frame.flags & CLOSE != 0 {
                     *closed = true;
                 }
@@ -6466,6 +6503,7 @@ mod connect_v1 {
             open: u8,
             close: u8,
             reset: u8,
+            window: u8,
         }
 
         #[derive(Debug, Deserialize)]
@@ -6509,6 +6547,8 @@ mod connect_v1 {
             header_bytes: usize,
             max_payload: usize,
             flags: Flags,
+            initial_window: u64,
+            max_window: u64,
             kinds: Kinds,
             frames: Vec<ValidFrame>,
             invalid: Vec<InvalidFrame>,
@@ -6524,14 +6564,28 @@ mod connect_v1 {
             assert_eq!(file.header_bytes, 8);
             assert_eq!(file.max_payload, MAX_PAYLOAD);
             assert_eq!(
-                (file.flags.open, file.flags.close, file.flags.reset),
-                (OPEN, CLOSE, RESET)
+                (
+                    file.flags.open,
+                    file.flags.close,
+                    file.flags.reset,
+                    file.flags.window
+                ),
+                (OPEN, CLOSE, RESET, WINDOW)
+            );
+            assert_eq!(
+                (file.initial_window, file.max_window),
+                (INITIAL_WINDOW, MAX_WINDOW)
             );
             assert_eq!(
                 (file.kinds.device, file.kinds.public, file.kinds.acme),
                 (1, 2, 3)
             );
-            for (name, code) in [("open", "0x01"), ("close", "0x02"), ("reset", "0x04")] {
+            for (name, code) in [
+                ("open", "0x01"),
+                ("close", "0x02"),
+                ("reset", "0x04"),
+                ("window", "0x08"),
+            ] {
                 assert!(
                     TUNNEL_CONTRACT.contains(&format!("`{name}` ({code})")),
                     "{name}"

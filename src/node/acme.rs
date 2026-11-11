@@ -18,18 +18,26 @@
 //! - The key authorization is `<token>.<b64u(SHA-256 of the JWK thumbprint input)>`
 //!   (RFC 7638 with the members `crv`, `kty`, `x`, `y` in that order).
 //! - The certificate key is a new ECDSA P-256 key for each order (`rcgen`), the CSR names
-//!   the public name only. The chain and the key go into the node directory through
-//!   `super::public_cert::store_public`, mode 0600.
+//!   the public name only. The chain and the key go into the node directory together,
+//!   in one sealed file (`super::public_cert::store_public`, mode 0600). When storing or
+//!   installing an issued certificate fails, the certificate thread keeps it in memory
+//!   and stores it again with the backoff, without a new order, while it is usable
+//!   ([`renew_step`]).
 //! - Renewal: when 30 days or less are left ([`renewal_due`]).
 //! - The directory URL is configuration ([`AcmeOptions::directory`]): the product uses
-//!   Let's Encrypt (or `APASSY_CONNECT_ACME_DIRECTORY`, `https://` only), tests a fake CA
-//!   on the loopback. Every URL that the CA's answers name must be `https://`; a plain
-//!   loopback URL is taken only when the configured directory is itself one (the test CA),
-//!   so a CA's answer never points the node at a service of this Mac.
+//!   Let's Encrypt (or `APASSY_CONNECT_ACME_DIRECTORY`, `https://` only). Every URL that
+//!   the CA's answers name (the URLs of the directory, the `Location` of the account and
+//!   of the order, the authorizations, the challenges, `finalize`, and the certificate)
+//!   must be `https://` on the same host and port as the directory, with a host name and
+//!   not an IP address. A URL that is not is refused before any request goes to it, so
+//!   the node talks to its CA and nothing else. Tests run a fake CA on the loopback with
+//!   plain `http://`, which only [`AcmeOptions::loopback_test_ca`] allows, and then only
+//!   on the directory's own address and port.
 //!
 //! No value of this module is a secret of the vault. The account key and the certificate
 //! key are secrets of the node and stay in its directory.
 
+use std::net::IpAddr;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -84,8 +92,13 @@ fn system_now() -> u64 {
 /// How the node talks to its ACME CA.
 #[derive(Clone)]
 pub struct AcmeOptions {
-    /// The directory URL: `https://…`, or `http://` on the loopback (tests).
+    /// The directory URL: `https://` with a host name; a plain `http://` URL on the
+    /// loopback only with `loopback_test_ca`.
     pub directory: String,
+    /// Tests only: the CA is a plain `http://` server on the loopback (the fake CA of the
+    /// tests). Its URLs must still be on the directory's own address and port. `false`
+    /// in the product.
+    pub loopback_test_ca: bool,
     /// The TLS client of the CA; `None`: the platform roots.
     pub tls: Option<TlsClient>,
     pub renew_before: Duration,
@@ -112,6 +125,7 @@ impl AcmeOptions {
     pub fn new(directory: &str) -> Self {
         Self {
             directory: directory.to_owned(),
+            loopback_test_ca: false,
             tls: None,
             renew_before: RENEW_BEFORE,
             check_every: Duration::from_secs(3600),
@@ -376,18 +390,35 @@ impl AccountKey {
 
 // ---- The HTTP side. ----
 
-/// `https://host[:port]/path` → the destination and the path (`/` at least). A plain
-/// loopback URL only with `loopback` (the configured directory is the test CA on the
-/// loopback); else only `https://`.
-fn split_url(url: &str, loopback: bool) -> Result<(DestinationUrl, String), AcmeError> {
-    let bad = || AcmeError::BadAnswer(format!("not a URL of the CA: {url}"));
+/// A URL as an error text shows it: at most 100 characters, no control characters.
+fn shown(url: &str) -> String {
+    url.chars().filter(|c| !c.is_control()).take(100).collect()
+}
+
+/// A host that is an IP address (IPv4 in any form, IPv6) or looks like one: its last
+/// label is digits only or starts with `0x`.
+fn ip_literal(host: &str) -> bool {
+    let last = host.rsplit('.').next().unwrap_or(host);
+    host.contains(':')
+        || host.parse::<IpAddr>().is_ok()
+        || last.bytes().all(|b| b.is_ascii_digit())
+        || last.starts_with("0x")
+}
+
+/// `scheme://host[:port]/path` → the destination and the path (`/` at least). An
+/// `https://` URL must name a host name, not an IP address. A plain `http://` URL parses
+/// only on the loopback; [`CaOrigin`] decides whether it is taken.
+fn split_url(url: &str) -> Result<(DestinationUrl, String), AcmeError> {
+    let bad = || AcmeError::BadAnswer(format!("not a URL of the CA: {}", shown(url)));
     let (scheme, rest) = url.split_once("://").ok_or_else(bad)?;
     let (authority, path) = match rest.find('/') {
         Some(at) => (&rest[..at], &rest[at..]),
         None => (rest, "/"),
     };
     let destination = parse_destination(&format!("{scheme}://{authority}")).map_err(|_| bad())?;
-    if matches!(destination, DestinationUrl::Loopback { .. }) && !loopback {
+    if let DestinationUrl::Https { host, .. } = &destination
+        && ip_literal(host)
+    {
         return Err(bad());
     }
     if !path.bytes().all(|b| (0x21..0x7f).contains(&b)) {
@@ -396,12 +427,43 @@ fn split_url(url: &str, loopback: bool) -> Result<(DestinationUrl, String), Acme
     Ok((destination, path.to_owned()))
 }
 
-/// The configured directory is a plain URL on the loopback (the test CA).
-fn loopback_directory(directory: &str) -> bool {
-    matches!(
-        split_url(directory, true),
-        Ok((DestinationUrl::Loopback { .. }, _))
-    )
+/// The scheme, host, and port of the configured directory. Every URL that the CA's
+/// answers name must have exactly these, so the node sends its requests to the CA and
+/// nowhere else.
+#[derive(Debug, Clone)]
+struct CaOrigin {
+    destination: DestinationUrl,
+}
+
+impl CaOrigin {
+    /// The origin of `directory`: `https://` with a host name; a plain `http://` URL on
+    /// the loopback only with `loopback_test_ca` (the fake CA of the tests).
+    fn of(directory: &str, loopback_test_ca: bool) -> Result<Self, AcmeError> {
+        let refused = || AcmeError::Local("the ACME directory is not an https:// URL".to_owned());
+        let (destination, _) = split_url(directory).map_err(|_| refused())?;
+        if matches!(destination, DestinationUrl::Loopback { .. }) && !loopback_test_ca {
+            return Err(refused());
+        }
+        Ok(Self { destination })
+    }
+
+    /// `url` → the destination and the path, when `url` is on this origin.
+    fn split(&self, url: &str) -> Result<(DestinationUrl, String), AcmeError> {
+        let (destination, path) = split_url(url)?;
+        if destination != self.destination {
+            return Err(AcmeError::BadAnswer(format!(
+                "a URL that is not on the CA's own host: {}",
+                shown(url)
+            )));
+        }
+        Ok((destination, path))
+    }
+
+    /// Every URL of `urls` is on this origin.
+    fn check<'a>(&self, urls: impl IntoIterator<Item = &'a String>) -> Result<(), AcmeError> {
+        urls.into_iter()
+            .try_for_each(|url| self.split(url).map(drop))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -451,8 +513,8 @@ struct Challenge {
 struct Session<'a> {
     options: &'a AcmeOptions,
     tls: TlsClient,
-    /// The configured directory is the test CA on the loopback.
-    loopback: bool,
+    /// The origin of the configured directory: the only one that requests go to.
+    origin: CaOrigin,
     key: AccountKey,
     kid: Option<String>,
     nonce: Option<String>,
@@ -465,15 +527,17 @@ fn json_of<T: serde::de::DeserializeOwned>(response: &HttpResponse) -> Result<T,
         .map_err(|error| AcmeError::BadAnswer(format!("{} {error}", response.status)))
 }
 
+/// One request to `url`, which must be on `origin`; a URL that is not is refused before
+/// anything is sent.
 fn exchange(
     tls: &TlsClient,
-    loopback: bool,
+    origin: &CaOrigin,
     url: &str,
     method: Method,
     body: Option<&[u8]>,
     accept: Option<&str>,
 ) -> Result<HttpResponse, AcmeError> {
-    let (destination, path) = split_url(url, loopback)?;
+    let (destination, path) = origin.split(url)?;
     let accept_header;
     let headers: &[(&str, &str)] = match accept {
         Some(accept) => {
@@ -510,8 +574,8 @@ impl Session<'_> {
             None => TlsClient::platform()
                 .map_err(|error| AcmeError::Local(format!("TLS is not available: {error}")))?,
         };
-        let loopback = loopback_directory(&options.directory);
-        let response = exchange(&tls, loopback, &options.directory, Method::Get, None, None)?;
+        let origin = CaOrigin::of(&options.directory, options.loopback_test_ca)?;
+        let response = exchange(&tls, &origin, &options.directory, Method::Get, None, None)?;
         if response.status != 200 {
             return Err(AcmeError::Unreachable(format!(
                 "the directory answered {}",
@@ -519,10 +583,15 @@ impl Session<'_> {
             )));
         }
         let directory: Directory = json_of(&response)?;
+        origin.check([
+            &directory.new_nonce,
+            &directory.new_account,
+            &directory.new_order,
+        ])?;
         Ok(Session {
             options,
             tls,
-            loopback,
+            origin,
             key: AccountKey::load_or_make(node_dir, seal)?,
             kid: None,
             nonce: None,
@@ -542,7 +611,7 @@ impl Session<'_> {
     fn fresh_nonce(&self) -> Result<String, AcmeError> {
         let response = exchange(
             &self.tls,
-            self.loopback,
+            &self.origin,
             &self.directory.new_nonce,
             Method::Get,
             None,
@@ -570,7 +639,7 @@ impl Session<'_> {
             let body = self.key.sign(url, &nonce, self.kid.as_deref(), payload)?;
             let response = exchange(
                 &self.tls,
-                self.loopback,
+                &self.origin,
                 url,
                 Method::Post,
                 Some(&body),
@@ -602,6 +671,7 @@ impl Session<'_> {
         let kid = response
             .header("location")
             .ok_or_else(|| AcmeError::BadAnswer("no account Location".to_owned()))?;
+        self.origin.split(kid)?;
         self.kid = Some(kid.to_owned());
         Ok(())
     }
@@ -631,6 +701,7 @@ impl Session<'_> {
             ));
         }
         let challenge_url = challenge.url.clone();
+        self.origin.split(&challenge_url)?;
         challenges.set(
             &challenge.token,
             &self.key.key_authorization(&challenge.token),
@@ -661,6 +732,7 @@ impl Session<'_> {
     fn poll_order(&mut self, url: &str) -> Result<Order, AcmeError> {
         for _ in 0..self.options.poll_tries {
             let order: Order = json_of(&self.post(url, None, None)?)?;
+            self.origin.check(&order.certificate)?;
             match order.status.as_str() {
                 "valid" => return Ok(order),
                 "pending" | "ready" | "processing" => self.wait()?,
@@ -740,6 +812,8 @@ fn obtain_inner(
         .ok_or_else(|| AcmeError::BadAnswer("no order Location".to_owned()))?
         .to_owned();
     let order: Order = json_of(&response)?;
+    session.origin.check([&order_url, &order.finalize])?;
+    session.origin.check(&order.authorizations)?;
     for authorization in &order.authorizations {
         session.authorize(authorization, challenges)?;
     }
@@ -780,6 +854,43 @@ fn obtain_inner(
 /// Whether a certificate that ends at `not_after` is due for renewal at `now`.
 pub fn renewal_due(not_after: u64, now: u64, renew_before: Duration) -> bool {
     not_after.saturating_sub(now) <= renew_before.as_secs()
+}
+
+/// What the certificate thread does next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenewStep {
+    /// The installed certificate has time left: look again later.
+    Wait,
+    /// Store and install the certificate that an earlier order gave and that could not be
+    /// kept then; no new order.
+    KeepIssued,
+    /// Order a new certificate.
+    Order,
+}
+
+/// Whether an issued certificate can still be kept for `name` at `now`: it has not
+/// ended and its leaf names `name`.
+pub fn issued_usable(issued: &Issued, name: &str, now: u64) -> bool {
+    issued.not_after > now && issued.chain.first().is_some_and(|leaf| covers(leaf, name))
+}
+
+/// The next step for `name`: keep `pending` (an issued certificate that was not kept yet)
+/// while it is usable; else order when the installed certificate (its end,
+/// `installed_not_after`) is missing or due for renewal; else wait.
+pub fn renew_step(
+    pending: Option<&Issued>,
+    name: &str,
+    installed_not_after: Option<u64>,
+    now: u64,
+    renew_before: Duration,
+) -> RenewStep {
+    if pending.is_some_and(|issued| issued_usable(issued, name, now)) {
+        return RenewStep::KeepIssued;
+    }
+    match installed_not_after {
+        Some(not_after) if !renewal_due(not_after, now, renew_before) => RenewStep::Wait,
+        _ => RenewStep::Order,
+    }
 }
 
 // ---- A small DER reader: the end date and the DNS names of a certificate. ----
@@ -985,18 +1096,404 @@ mod tests {
     }
 
     #[test]
-    fn the_urls_of_the_ca_are_https_unless_the_directory_is_the_test_ca() {
-        assert!(split_url("https://ca.example.test/acme/order/1", false).is_ok());
+    fn the_urls_of_the_ca_are_on_the_directory_host_with_https() {
+        let origin = CaOrigin::of("https://acme.example.test/directory", false).unwrap();
         for url in [
+            "https://acme.example.test/acme/new-order",
+            "https://ACME.example.test:443/acme/order/1",
+            "https://acme.example.test",
+        ] {
+            assert!(origin.split(url).is_ok(), "{url}");
+        }
+        for url in [
+            "https://other.example.test/acme/new-order",
+            "https://acme.example.test.other.test/x",
+            "https://acme.example.test:8443/x",
+            "http://acme.example.test/x",
             "http://127.0.0.1:8080/acme/new-order",
             "http://localhost:8080/x",
             "http://[::1]:8080/x",
+            "https://10.0.0.7/x",
+            "https://192.168.1.1:443/x",
+            "https://127.0.0.1/x",
+            "https://[::1]/x",
+            "https://[fd00::1]:443/x",
+            "https://127.1/x",
+            "https://0x7f000001/x",
+            "https://acme.example.test/a b",
+            "acme.example.test/x",
         ] {
-            assert!(split_url(url, false).is_err(), "{url}");
-            assert!(split_url(url, true).is_ok(), "{url}");
+            assert!(origin.split(url).is_err(), "{url}");
         }
-        assert!(loopback_directory("http://127.0.0.1:14000/dir"));
-        assert!(!loopback_directory(LETS_ENCRYPT));
+        // The directory itself: https:// with a host name.
+        for directory in [
+            "https://10.0.0.7/directory",
+            "https://[fd00::1]/directory",
+            "http://acme.example.test/directory",
+            "http://127.0.0.1:14000/directory",
+        ] {
+            assert!(CaOrigin::of(directory, false).is_err(), "{directory}");
+        }
+        assert!(CaOrigin::of("https://[::1]/directory", true).is_err());
+        assert!(CaOrigin::of(LETS_ENCRYPT, false).is_ok());
+        assert!(!AcmeOptions::new(LETS_ENCRYPT).loopback_test_ca);
+    }
+
+    #[test]
+    fn the_test_ca_on_the_loopback_is_held_to_its_own_address_and_port() {
+        let origin = CaOrigin::of("http://127.0.0.1:14000/directory", true).unwrap();
+        assert!(origin.split("http://127.0.0.1:14000/acme/nonce").is_ok());
+        for url in [
+            "http://127.0.0.1:14001/acme/nonce",
+            "http://localhost:14000/acme/nonce",
+            "http://[::1]:14000/acme/nonce",
+            "https://acme.example.test/acme/nonce",
+        ] {
+            assert!(origin.split(url).is_err(), "{url}");
+        }
+    }
+
+    #[test]
+    fn urls_split_into_destination_and_path() {
+        let (destination, path) = split_url("https://ca.test/acme/new-order").unwrap();
+        assert_eq!(destination.host_header(), "ca.test");
+        assert_eq!(path, "/acme/new-order");
+        let (destination, path) = split_url("http://127.0.0.1:4000/dir").unwrap();
+        assert_eq!(destination.host_header(), "127.0.0.1:4000");
+        assert_eq!(path, "/dir");
+        assert!(split_url("http://ca.test/dir").is_err());
+        assert!(split_url("ca.test/dir").is_err());
+    }
+
+    /// What the scripted CA answers: the status, extra headers, and the body.
+    type Answer = (u16, Vec<(&'static str, String)>, String);
+
+    /// A scripted CA on the loopback: it answers by method and path, records each
+    /// request, and checks no signature. A second listener (`another`) counts the
+    /// connections that reach it.
+    struct ScriptedCa {
+        base: String,
+        requests: Arc<Mutex<Vec<String>>>,
+        another_hits: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl ScriptedCa {
+        /// `answer(base, another, "METHOD /path")` gives each answer.
+        fn start(answer: impl Fn(&str, &str, &str) -> Answer + Send + 'static) -> Self {
+            use std::io::{Read, Write};
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let elsewhere = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let another = format!("http://{}", elsewhere.local_addr().unwrap());
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let another_hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let hits = Arc::clone(&another_hits);
+            std::thread::spawn(move || {
+                for stream in elsewhere.incoming() {
+                    drop(stream);
+                    hits.fetch_add(1, Ordering::SeqCst);
+                }
+            });
+            let (thread_base, log) = (base.clone(), Arc::clone(&requests));
+            std::thread::spawn(move || {
+                for mut stream in listener.incoming().flatten() {
+                    let mut head = Vec::new();
+                    let mut byte = [0u8; 1];
+                    while !head.ends_with(b"\r\n\r\n") {
+                        match stream.read(&mut byte) {
+                            Ok(1) => head.push(byte[0]),
+                            _ => break,
+                        }
+                    }
+                    let text = String::from_utf8_lossy(&head).into_owned();
+                    let length = text
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            if name.eq_ignore_ascii_case("content-length") {
+                                value.trim().parse::<usize>().ok()
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or(0);
+                    let mut request_body = vec![0u8; length];
+                    let _ = stream.read_exact(&mut request_body);
+                    let line = text.lines().next().unwrap_or_default();
+                    let mut parts = line.split(' ');
+                    let request = format!(
+                        "{} {}",
+                        parts.next().unwrap_or_default(),
+                        parts.next().unwrap_or_default()
+                    );
+                    let count = {
+                        let mut log = log.lock().unwrap();
+                        log.push(request.clone());
+                        log.len()
+                    };
+                    let (status, headers, body) =
+                        answer(thread_base.as_str(), another.as_str(), request.as_str());
+                    let mut out = format!(
+                        "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\
+                         Replay-Nonce: n-{count}\r\nContent-Type: application/json\r\n",
+                        body.len()
+                    );
+                    for (name, value) in headers {
+                        out.push_str(&format!("{name}: {value}\r\n"));
+                    }
+                    out.push_str("\r\n");
+                    out.push_str(&body);
+                    let _ = stream.write_all(out.as_bytes());
+                }
+            });
+            Self {
+                base,
+                requests,
+                another_hits,
+            }
+        }
+
+        /// An order for the public name against this CA, with a new node directory.
+        fn obtain(&self) -> Result<Issued, AcmeError> {
+            use crate::net::sealed_key::CONNECT_INFO;
+            let dir = tempfile::tempdir().unwrap();
+            let seal = SealKey::derive(&[9u8; 32], CONNECT_INFO).unwrap();
+            let mut options = AcmeOptions::new(&format!("{}/directory", self.base));
+            options.loopback_test_ca = true;
+            options.poll_every = Duration::from_millis(10);
+            options.poll_tries = 3;
+            obtain(
+                &options,
+                dir.path(),
+                &seal,
+                "aaaaaaaaaa.node.example.test",
+                &Challenges::default(),
+                &AtomicBool::new(false),
+            )
+        }
+
+        fn requests(&self) -> Vec<String> {
+            self.requests.lock().unwrap().clone()
+        }
+
+        /// The order was refused as an answer of the CA, and nothing reached `another`.
+        fn assert_refused(&self, result: Result<Issued, AcmeError>) {
+            match result {
+                Err(AcmeError::BadAnswer(why)) => assert!(
+                    why.contains("not on the CA's own host") || why.contains("not a URL of the CA"),
+                    "{why}"
+                ),
+                other => panic!("not refused: {other:?}"),
+            }
+            assert_eq!(self.another_hits.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    /// The answers of a CA that names its own URLs; the order has no authorization, and
+    /// `finalize` is not there (404).
+    fn own_urls(base: &str, request: &str) -> Answer {
+        match request {
+            "GET /directory" => (
+                200,
+                vec![],
+                json!({
+                    "newNonce": format!("{base}/nonce"),
+                    "newAccount": format!("{base}/acct"),
+                    "newOrder": format!("{base}/order"),
+                })
+                .to_string(),
+            ),
+            "GET /nonce" => (200, vec![], String::new()),
+            "POST /acct" => (
+                201,
+                vec![("Location", format!("{base}/acct/1"))],
+                "{}".to_owned(),
+            ),
+            "POST /order" => (
+                201,
+                vec![("Location", format!("{base}/order/1"))],
+                json!({
+                    "status": "pending",
+                    "authorizations": [],
+                    "finalize": format!("{base}/finalize"),
+                })
+                .to_string(),
+            ),
+            _ => (404, vec![], String::new()),
+        }
+    }
+
+    /// The directory of [`own_urls`] with `newOrder` set to `new_order(base, another)`.
+    fn directory_naming(base: &str, new_order: &str) -> Answer {
+        (
+            200,
+            vec![],
+            json!({
+                "newNonce": format!("{base}/nonce"),
+                "newAccount": format!("{base}/acct"),
+                "newOrder": new_order,
+            })
+            .to_string(),
+        )
+    }
+
+    #[test]
+    fn a_ca_that_names_its_own_urls_is_followed_to_finalize() {
+        let ca = ScriptedCa::start(|base, _, request| own_urls(base, request));
+        assert!(matches!(
+            ca.obtain(),
+            Err(AcmeError::Refused { status: 404, .. })
+        ));
+        assert_eq!(
+            ca.requests(),
+            [
+                "GET /directory",
+                "GET /nonce",
+                "POST /acct",
+                "POST /order",
+                "POST /finalize"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_directory_that_names_another_host_is_refused_before_any_request_goes_there() {
+        let ca = ScriptedCa::start(|base, another, request| match request {
+            "GET /directory" => directory_naming(base, &format!("{another}/order")),
+            _ => own_urls(base, request),
+        });
+        ca.assert_refused(ca.obtain());
+        assert_eq!(ca.requests(), ["GET /directory"]);
+    }
+
+    #[test]
+    fn a_directory_that_names_an_ip_address_or_plain_http_is_refused() {
+        for named in [
+            "https://10.0.0.7/acme/new-order",
+            "https://192.168.1.1:443/acme/new-order",
+            "https://[fd00::1]/acme/new-order",
+            "https://[::ffff:127.0.0.1]/acme/new-order",
+            "http://acme.example.test/acme/new-order",
+        ] {
+            let ca = ScriptedCa::start(move |base, _, request| match request {
+                "GET /directory" => directory_naming(base, named),
+                _ => own_urls(base, request),
+            });
+            ca.assert_refused(ca.obtain());
+            assert_eq!(ca.requests(), ["GET /directory"], "{named}");
+        }
+    }
+
+    #[test]
+    fn a_location_on_another_host_is_refused_before_any_request_goes_there() {
+        // The account's Location (the kid).
+        let ca = ScriptedCa::start(|base, another, request| match request {
+            "POST /acct" => (
+                201,
+                vec![("Location", format!("{another}/acct/1"))],
+                "{}".to_owned(),
+            ),
+            _ => own_urls(base, request),
+        });
+        ca.assert_refused(ca.obtain());
+        assert_eq!(
+            ca.requests(),
+            ["GET /directory", "GET /nonce", "POST /acct"]
+        );
+        // The order's Location, and its finalize URL.
+        for (location, finalize) in [(true, false), (false, true)] {
+            let ca = ScriptedCa::start(move |base, another, request| match request {
+                "POST /order" => (
+                    201,
+                    vec![(
+                        "Location",
+                        format!("{}/order/1", if location { another } else { base }),
+                    )],
+                    json!({
+                        "status": "pending",
+                        "authorizations": [],
+                        "finalize": format!("{}/finalize", if finalize { another } else { base }),
+                    })
+                    .to_string(),
+                ),
+                _ => own_urls(base, request),
+            });
+            ca.assert_refused(ca.obtain());
+            assert_eq!(
+                ca.requests(),
+                ["GET /directory", "GET /nonce", "POST /acct", "POST /order"]
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_store_is_retried_with_the_issued_certificate_without_a_new_order() {
+        use crate::net::sealed_key::CONNECT_INFO;
+        let name = "aaaaaaaaaa.node.example.test";
+        let mut params = CertificateParams::new(vec![name.to_owned()]).unwrap();
+        params.not_after = rcgen::date_time_ymd(2027, 2, 8);
+        let key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let cert = params.self_signed(&key).unwrap();
+        let der = cert.der().to_vec();
+        let issued = Issued {
+            chain_pem: cert.pem(),
+            chain: vec![der.clone()],
+            key: Zeroizing::new(key.serialize_der()),
+            not_after: not_after(&der).unwrap(),
+        };
+        let end = issued.not_after;
+        let now = end - 60 * 86_400;
+        let seal = SealKey::derive(&[9u8; 32], CONNECT_INFO).unwrap();
+        // The store fails: the node directory is a file.
+        let dir = tempfile::tempdir().unwrap();
+        let blocked = dir.path().join("node");
+        std::fs::write(&blocked, b"not a directory").unwrap();
+        assert!(
+            public_cert::store_public(&blocked, &issued.chain_pem, &issued.key, &seal).is_err()
+        );
+        // The next step keeps the issued certificate: no new order, with or without an
+        // installed one, and also when that one is due.
+        for installed in [None, Some(end), Some(now + 86_400)] {
+            assert_eq!(
+                renew_step(Some(&issued), name, installed, now, RENEW_BEFORE),
+                RenewStep::KeepIssued,
+                "{installed:?}"
+            );
+        }
+        // The retry stores it.
+        let node = dir.path().join("fixed");
+        public_cert::store_public(&node, &issued.chain_pem, &issued.key, &seal).unwrap();
+        let stored = public_cert::load_public(&node, &seal).unwrap().unwrap();
+        assert_eq!(stored.chain, issued.chain);
+        // An issued certificate that has ended, or that is for another name, is not kept:
+        // a new order.
+        assert_eq!(
+            renew_step(Some(&issued), name, None, end, RENEW_BEFORE),
+            RenewStep::Order
+        );
+        assert_eq!(
+            renew_step(
+                Some(&issued),
+                "bbbbbbbbbb.node.example.test",
+                None,
+                now,
+                RENEW_BEFORE
+            ),
+            RenewStep::Order
+        );
+        // Without one: wait while the installed certificate has time left, else order.
+        assert_eq!(
+            renew_step(None, name, Some(end), now, RENEW_BEFORE),
+            RenewStep::Wait
+        );
+        assert_eq!(
+            renew_step(None, name, Some(now + 86_400), now, RENEW_BEFORE),
+            RenewStep::Order
+        );
+        assert_eq!(
+            renew_step(None, name, None, now, RENEW_BEFORE),
+            RenewStep::Order
+        );
     }
 
     #[test]
@@ -1139,17 +1636,5 @@ mod tests {
         let text = String::from_utf8_lossy(&der);
         assert!(text.contains("k7m2q4x3ca.node.example.test"));
         assert!(!text.contains("rcgen"));
-    }
-
-    #[test]
-    fn urls_split_into_destination_and_path() {
-        let (destination, path) = split_url("https://ca.test/acme/new-order", false).unwrap();
-        assert_eq!(destination.host_header(), "ca.test");
-        assert_eq!(path, "/acme/new-order");
-        let (destination, path) = split_url("http://127.0.0.1:4000/dir", true).unwrap();
-        assert_eq!(destination.host_header(), "127.0.0.1:4000");
-        assert_eq!(path, "/dir");
-        assert!(split_url("http://ca.test/dir", true).is_err());
-        assert!(split_url("ca.test/dir", true).is_err());
     }
 }

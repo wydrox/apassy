@@ -19,12 +19,19 @@
 //! hand the other kind's key out. A new public certificate (a renewal) takes effect at
 //! the next handshake; open streams keep theirs.
 //!
-//! The public certificate and its key are in the node directory (`connect/`, mode
-//! 0700): `public-chain.pem` and `public-key.sealed`, each mode 0600, written through a
-//! temporary file and a rename. The PKCS#8 key is sealed under the node master key as the
-//! node certificate's key is (`crate::net::sealed_key`, info `apassy-node-connect-v1`,
-//! the SHA-256 of the leaf DER in the associated data), so it opens only with this node's
-//! key and next to its own certificate. The key never leaves this Mac.
+//! The public certificate and its key are one file of the node directory (`connect/`,
+//! mode 0700): `public-cert.sealed`, mode 0600. The chain (PEM, as ACME gave it) and the
+//! PKCS#8 key are sealed together under the node master key (`crate::net::sealed_key`,
+//! info `apassy-node-connect-v1`), so they open only with this node's key and only as
+//! the pair that was written. The file is written to a temporary file in the same
+//! directory, synced, and renamed over the old one: a reader sees the old pair or the new
+//! one, never half of each. A file that is cut or changed does not open, and the node
+//! orders a new certificate. Before storing, the key is checked against the leaf. The
+//! key never leaves this Mac.
+//!
+//! Earlier builds kept the chain and the key in two files (`public-chain.pem`,
+//! `public-key.sealed`, before that `public-key.der`); they are removed when found, and
+//! the node orders a new certificate.
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, ErrorKind, Read, Write};
@@ -46,12 +53,13 @@ use crate::net::sealed_key::SealKey;
 
 /// The directory of the Connect files in the node directory.
 pub const CONNECT_DIR: &str = "connect";
-/// The certificate chain of the public name, PEM, leaf first.
-pub const CHAIN_FILE: &str = "public-chain.pem";
-/// The private key of the public certificate, PKCS#8 DER sealed under the node key.
-pub const KEY_FILE: &str = "public-key.sealed";
-/// The plain key file of earlier builds; removed when it is found.
-const OLD_KEY_FILE: &str = "public-key.der";
+/// The public certificate: its PEM chain (leaf first) and its PKCS#8 key, sealed
+/// together under the node key.
+pub const PUBLIC_FILE: &str = "public-cert.sealed";
+/// The files of earlier builds (the chain and the key apart); removed when found.
+const OLD_FILES: [&str; 3] = ["public-chain.pem", "public-key.sealed", "public-key.der"];
+/// The associated data of the sealed public certificate.
+const PUBLIC_CONTEXT: &[u8] = b"apassy-public-cert-v1";
 /// A file of the public certificate is at most this long.
 const MAX_FILE_BYTES: u64 = 64 * 1024;
 
@@ -236,7 +244,9 @@ pub(crate) fn ensure_private_dir(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Write `bytes` to `path` with mode 0600 through a temporary file and a rename.
+/// Write `bytes` to `path` with mode 0600 through a temporary file in the same
+/// directory, synced before it is renamed over `path`. The directory is synced after the
+/// rename where the system allows it.
 pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let temporary = path.with_extension("new");
     let _ = fs::remove_file(&temporary);
@@ -248,7 +258,13 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     file.write_all(bytes)?;
     file.sync_all()?;
     drop(file);
-    fs::rename(&temporary, path)
+    fs::rename(&temporary, path)?;
+    if let Some(dir) = path.parent()
+        && let Ok(dir) = fs::File::open(dir)
+    {
+        let _ = dir.sync_all();
+    }
+    Ok(())
 }
 
 /// Read a private file: `None` when it is missing; an error when it is a link, not a
@@ -298,69 +314,99 @@ pub fn pem_certificates(pem: &str) -> io::Result<Vec<Vec<u8>>> {
 }
 
 /// The public certificate of the node directory: the chain (DER, leaf first) and the
-/// PKCS#8 key, when both files are there.
+/// PKCS#8 key, which were stored together.
 #[derive(Debug)]
 pub struct StoredPublic {
     pub chain: Vec<Vec<u8>>,
     pub key: Zeroizing<Vec<u8>>,
 }
 
-/// The associated data of the sealed public key: it binds the key to its leaf.
-fn key_context(leaf: &[u8]) -> Vec<u8> {
-    let mut context = b"apassy-public-key\0".to_vec();
-    context.extend_from_slice(ring::digest::digest(&ring::digest::SHA256, leaf).as_ref());
-    context
-}
-
-/// Remove a plain key file that an earlier build wrote, if there is one.
+/// Remove a file that an earlier build wrote, if there is one.
 pub(crate) fn remove_plain(path: &Path) {
     if fs::symlink_metadata(path).is_ok() {
         let _ = fs::remove_file(path);
     }
 }
 
-/// Read the public certificate of `node_dir`. `None` when a file is missing or does not
-/// make a chain; an error when the key does not open with `seal` next to this chain.
-pub fn load_public(node_dir: &Path, seal: &SealKey) -> io::Result<Option<StoredPublic>> {
-    let dir = connect_dir(node_dir);
-    remove_plain(&dir.join(OLD_KEY_FILE));
-    let (Some(chain), Some(sealed)) = (
-        read_private(&dir.join(CHAIN_FILE))?,
-        read_private(&dir.join(KEY_FILE))?,
-    ) else {
-        return Ok(None);
-    };
-    let text = String::from_utf8_lossy(&chain).into_owned();
-    let chain = pem_certificates(&text)?;
-    let Some(leaf) = chain.first() else {
-        return Ok(None);
-    };
-    let key = seal
-        .open(&key_context(leaf), &sealed)
-        .map_err(|error| io::Error::new(ErrorKind::InvalidData, error.to_string()))?;
-    Ok(Some(StoredPublic { chain, key }))
+/// The sealed content of [`PUBLIC_FILE`]: the length of the PEM chain (4 bytes, big
+/// endian), the PEM chain, and the PKCS#8 key.
+fn public_plaintext(chain_pem: &str, key_pkcs8: &[u8]) -> io::Result<Zeroizing<Vec<u8>>> {
+    let length = u32::try_from(chain_pem.len())
+        .map_err(|_| io::Error::new(ErrorKind::InvalidData, "the chain is too long"))?;
+    let mut plaintext = Zeroizing::new(Vec::with_capacity(4 + chain_pem.len() + key_pkcs8.len()));
+    plaintext.extend_from_slice(&length.to_be_bytes());
+    plaintext.extend_from_slice(chain_pem.as_bytes());
+    plaintext.extend_from_slice(key_pkcs8);
+    Ok(plaintext)
 }
 
-/// Write the public certificate (the PEM chain as ACME gave it) and its key, sealed with
-/// `seal`, into `node_dir`, mode 0600 each.
+/// The chain (DER) and the key of an opened [`PUBLIC_FILE`]; an error unless both are
+/// there whole.
+fn split_public(plaintext: &[u8]) -> io::Result<StoredPublic> {
+    let bad = || io::Error::new(ErrorKind::InvalidData, "not a public certificate");
+    let (length, rest) = plaintext.split_first_chunk::<4>().ok_or_else(bad)?;
+    let length = usize::try_from(u32::from_be_bytes(*length)).map_err(|_| bad())?;
+    if length > rest.len() {
+        return Err(bad());
+    }
+    let (chain_pem, key) = rest.split_at(length);
+    let chain_pem = std::str::from_utf8(chain_pem).map_err(|_| bad())?;
+    let chain = pem_certificates(chain_pem)?;
+    if chain.is_empty() || key.is_empty() {
+        return Err(bad());
+    }
+    Ok(StoredPublic {
+        chain,
+        key: Zeroizing::new(key.to_vec()),
+    })
+}
+
+/// Read the public certificate of `node_dir`. `None` when there is none; an error when
+/// the file does not open with `seal` (another node key, a cut or changed file) or does
+/// not hold a chain and a key. The files of earlier builds are removed.
+pub fn load_public(node_dir: &Path, seal: &SealKey) -> io::Result<Option<StoredPublic>> {
+    let dir = connect_dir(node_dir);
+    for old in OLD_FILES {
+        remove_plain(&dir.join(old));
+    }
+    let Some(sealed) = read_private(&dir.join(PUBLIC_FILE))? else {
+        return Ok(None);
+    };
+    let plaintext = seal
+        .open(PUBLIC_CONTEXT, &sealed)
+        .map_err(|error| io::Error::new(ErrorKind::InvalidData, error.to_string()))?;
+    split_public(&plaintext).map(Some)
+}
+
+/// Write the public certificate (the PEM chain as ACME gave it) and its key, sealed
+/// together with `seal`, into `node_dir`: one file, mode 0600, replaced in one rename.
+/// The key must belong to the leaf. The files of earlier builds are removed.
 pub fn store_public(
     node_dir: &Path,
     chain_pem: &str,
     key_pkcs8: &[u8],
     seal: &SealKey,
 ) -> io::Result<()> {
+    let chain = pem_certificates(chain_pem)?;
+    if chain.is_empty() {
+        return Err(io::Error::new(ErrorKind::InvalidData, "an empty chain"));
+    }
+    certified(
+        chain.into_iter().map(CertificateDer::from).collect(),
+        key_pkcs8,
+    )?;
+    let sealed = seal
+        .seal(PUBLIC_CONTEXT, &public_plaintext(chain_pem, key_pkcs8)?)
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    if sealed.len() as u64 > MAX_FILE_BYTES {
+        return Err(io::Error::new(ErrorKind::InvalidData, "too long"));
+    }
     let dir = connect_dir(node_dir);
     ensure_private_dir(&dir)?;
-    let chain = pem_certificates(chain_pem)?;
-    let leaf = chain
-        .first()
-        .ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "an empty chain"))?;
-    let sealed = seal
-        .seal(&key_context(leaf), key_pkcs8)
-        .map_err(|error| io::Error::other(error.to_string()))?;
-    write_private(&dir.join(KEY_FILE), &sealed)?;
-    write_private(&dir.join(CHAIN_FILE), chain_pem.as_bytes())?;
-    remove_plain(&dir.join(OLD_KEY_FILE));
+    write_private(&dir.join(PUBLIC_FILE), &sealed)?;
+    for old in OLD_FILES {
+        remove_plain(&dir.join(old));
+    }
     Ok(())
 }
 
@@ -386,50 +432,128 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_public_key_is_sealed_and_opens_only_with_its_chain_and_node_key() {
-        use crate::net::sealed_key::CONNECT_INFO;
-        let dir = tempfile::tempdir().unwrap();
-        let seal = SealKey::derive(&[7u8; 32], CONNECT_INFO).unwrap();
-        let name = "aaaaaaaaaa.node.example.test";
+    const NAME: &str = "aaaaaaaaaa.node.example.test";
+
+    /// A self-signed certificate of [`NAME`]: its PEM and its PKCS#8 key.
+    fn certificate() -> (String, Vec<u8>, Vec<u8>) {
         let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
-        let cert = rcgen::CertificateParams::new(vec![name.to_owned()])
+        let cert = rcgen::CertificateParams::new(vec![NAME.to_owned()])
             .unwrap()
             .self_signed(&key)
             .unwrap();
-        let pkcs8 = key.serialize_der();
-        // A plain key file of an earlier build goes.
+        (cert.pem(), cert.der().to_vec(), key.serialize_der())
+    }
+
+    fn seal_key(byte: u8) -> SealKey {
+        SealKey::derive(&[byte; 32], crate::net::sealed_key::CONNECT_INFO).unwrap()
+    }
+
+    #[test]
+    fn the_chain_and_the_key_are_one_sealed_file_that_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let seal = seal_key(7);
+        let (pem, der, pkcs8) = certificate();
+        // The files of an earlier build go.
         let connect = dir.path().join(CONNECT_DIR);
         ensure_private_dir(&connect).unwrap();
-        write_private(&connect.join(OLD_KEY_FILE), &pkcs8).unwrap();
-        store_public(dir.path(), &cert.pem(), &pkcs8, &seal).unwrap();
-        assert!(!connect.join(OLD_KEY_FILE).exists());
-        let stored = fs::read(connect.join(KEY_FILE)).unwrap();
+        for old in OLD_FILES {
+            write_private(&connect.join(old), &pkcs8).unwrap();
+        }
+        store_public(dir.path(), &pem, &pkcs8, &seal).unwrap();
+        let mut names: Vec<String> = fs::read_dir(&connect)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, [PUBLIC_FILE], "one file, no temporary file left");
+        let stored = fs::read(connect.join(PUBLIC_FILE)).unwrap();
+        assert_eq!(stored.first(), Some(&crate::net::sealed_key::VERSION));
         assert!(
             !stored
                 .windows(pkcs8.len())
                 .any(|window| window == pkcs8.as_slice()),
             "the key is not in the file in the clear"
         );
-        let mode = fs::metadata(connect.join(KEY_FILE))
+        assert!(
+            !stored
+                .windows(27)
+                .any(|window| window == b"-----BEGIN CERTIFICATE-----"),
+            "the chain is sealed with the key"
+        );
+        let mode = fs::metadata(connect.join(PUBLIC_FILE))
             .unwrap()
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o600);
         let loaded = load_public(dir.path(), &seal).unwrap().unwrap();
         assert_eq!(&loaded.key[..], &pkcs8[..]);
-        assert_eq!(loaded.chain[0], cert.der().to_vec());
+        assert_eq!(loaded.chain, [der]);
         // Another node key does not open it.
-        let other = SealKey::derive(&[8u8; 32], CONNECT_INFO).unwrap();
-        assert!(load_public(dir.path(), &other).is_err());
-        // Nor does another chain next to it.
-        let key2 = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
-        let cert2 = rcgen::CertificateParams::new(vec![name.to_owned()])
-            .unwrap()
-            .self_signed(&key2)
-            .unwrap();
-        write_private(&connect.join(CHAIN_FILE), cert2.pem().as_bytes()).unwrap();
+        assert!(load_public(dir.path(), &seal_key(8)).is_err());
+        // A new certificate replaces the pair as a whole.
+        let (pem2, der2, pkcs8_2) = certificate();
+        store_public(dir.path(), &pem2, &pkcs8_2, &seal).unwrap();
+        let loaded = load_public(dir.path(), &seal).unwrap().unwrap();
+        assert_eq!((loaded.chain, &loaded.key[..]), (vec![der2], &pkcs8_2[..]));
+    }
+
+    #[test]
+    fn a_cut_or_changed_file_is_refused_not_half_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let seal = seal_key(7);
+        let (pem, _, pkcs8) = certificate();
+        store_public(dir.path(), &pem, &pkcs8, &seal).unwrap();
+        let path = dir.path().join(CONNECT_DIR).join(PUBLIC_FILE);
+        let whole = fs::read(&path).unwrap();
+        for length in [0, 1, 13, whole.len() / 2, whole.len() - 17, whole.len() - 1] {
+            write_private(&path, &whole[..length]).unwrap();
+            assert!(load_public(dir.path(), &seal).is_err(), "cut at {length}");
+        }
+        for index in [0, 5, whole.len() / 2, whole.len() - 1] {
+            let mut changed = whole.clone();
+            changed[index] ^= 0x01;
+            write_private(&path, &changed).unwrap();
+            assert!(load_public(dir.path(), &seal).is_err(), "byte {index}");
+        }
+        let mut longer = whole.clone();
+        longer.push(0);
+        write_private(&path, &longer).unwrap();
         assert!(load_public(dir.path(), &seal).is_err());
+        // A sealed content that is not a chain and a key is refused too.
+        let contents: [&[u8]; 4] = [b"", b"\0\0", b"\0\0\0\x09short", b"\0\0\0\0key"];
+        for content in contents {
+            write_private(&path, &seal.seal(PUBLIC_CONTEXT, content).unwrap()).unwrap();
+            assert!(load_public(dir.path(), &seal).is_err(), "{content:?}");
+        }
+        let without_key = public_plaintext(&pem, b"").unwrap();
+        write_private(&path, &seal.seal(PUBLIC_CONTEXT, &without_key).unwrap()).unwrap();
+        assert!(load_public(dir.path(), &seal).is_err());
+        write_private(&path, &whole).unwrap();
+        assert!(load_public(dir.path(), &seal).unwrap().is_some());
+    }
+
+    #[test]
+    fn the_two_files_of_earlier_builds_are_removed_and_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let seal = seal_key(7);
+        let (pem, _, pkcs8) = certificate();
+        let connect = dir.path().join(CONNECT_DIR);
+        ensure_private_dir(&connect).unwrap();
+        write_private(&connect.join("public-chain.pem"), pem.as_bytes()).unwrap();
+        write_private(&connect.join("public-key.sealed"), &pkcs8).unwrap();
+        assert!(load_public(dir.path(), &seal).unwrap().is_none());
+        assert_eq!(fs::read_dir(&connect).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_key_of_another_certificate_is_not_stored() {
+        let dir = tempfile::tempdir().unwrap();
+        let seal = seal_key(7);
+        let (pem, _, _) = certificate();
+        let (_, _, other_key) = certificate();
+        assert!(store_public(dir.path(), &pem, &other_key, &seal).is_err());
+        assert!(store_public(dir.path(), "no chain", &other_key, &seal).is_err());
+        assert!(!dir.path().join(CONNECT_DIR).join(PUBLIC_FILE).exists());
     }
 
     #[test]

@@ -562,8 +562,15 @@ fn join(
         })?;
         // A checkout the account opened before it joined ends at Stripe: a plan bought
         // now could not bind to a group of its own.
-        if let Ok(billing) = crate::server::account::billing(hub) {
-            billing.end_open_checkout(&caller.account, now);
+        // The join is made: a session that cannot be ended now is logged, and a
+        // subscription it makes later is recorded for the operator when it cannot bind.
+        if let Ok(billing) = crate::server::account::billing(hub)
+            && billing.end_open_checkout(&caller.account, now).is_err()
+        {
+            billing.log(&format!(
+                "the open checkout of {} could not be ended after its join",
+                caller.account
+            ));
         }
     }
     hub.directory.store.with(|conn| {

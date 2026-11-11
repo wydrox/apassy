@@ -15,18 +15,28 @@ mod upstream;
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::thread;
 use std::time::Duration;
 
+use apassy::net::certificate::NodeCertificate;
 use apassy::net::front_peers;
+use apassy::net::pin::Pin;
+use apassy::net::tls_front::{self, FrontLimits};
 use apassy::node::backend::{
     CatalogItem, ConnectDecision, NewCloudAgent, NodeAgentId, NodeBackend, NodeConfig, NodeRunId,
     NodeSecret, NodeTeamId, RunStatus, RunningNode, TokenIssue,
 };
 use apassy_relay::embedded::EmbeddedRelay;
 use apassy_relay::hostkeys;
-use apassy_relay::server::oauth::{decode_form, percent_encode};
+use apassy_relay::server::oauth::{CLIENT_FAILURES_MAX, decode_form, percent_encode};
 use relay::CANARY;
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::crypto::{CryptoProvider, verify_tls12_signature, verify_tls13_signature};
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::{ClientConfig, ClientConnection, DigitallySignedStruct, SignatureScheme, StreamOwned};
 use serde_json::{Value, json};
 use upstream::MockUpstream;
 
@@ -774,6 +784,41 @@ fn a_connection_works_only_on_the_origin_its_client_registered_at() {
     }
 }
 
+/// Bad codes and refresh tokens that arrive through a `public` stream of the Connect
+/// tunnel count in no client's window, and no window refuses such a request (docs/SPEC.md
+/// section 31.5): every caller there shares the node's public name, and Connect bounds the
+/// streams of a node. The client keeps refreshing. A connection without the front
+/// (Funnel's) still counts for its client, which is 429 after `CLIENT_FAILURES_MAX`.
+#[test]
+fn bad_grants_through_the_tunnel_count_for_no_client() {
+    let node = Node::start(&[CONNECT]);
+    let tunnel = Via::Tunnel(Some(CONNECT_NAME));
+    let connected = node.connect(tunnel, CONNECT);
+    for n in 0..CLIENT_FAILURES_MAX + 5 {
+        let answer = node.token_refresh(tunnel, &connected.client_id, "not-a-refresh-token");
+        assert_eq!(answer.status, 400, "{n}: {}", answer.text);
+        assert_eq!(answer.json()["error"], "invalid_grant", "{n}");
+    }
+    let answer = node.token_refresh(tunnel, &connected.client_id, &connected.refresh);
+    assert_eq!(answer.status, 200, "{}", answer.text);
+    let refresh = answer.json()["refresh_token"]
+        .as_str()
+        .expect("refresh")
+        .to_string();
+
+    let funnel = node.connect(Via::Funnel, FUNNEL);
+    for n in 0..CLIENT_FAILURES_MAX {
+        let answer = node.token_refresh(Via::Funnel, &funnel.client_id, "not-a-refresh-token");
+        assert_eq!(answer.status, 400, "{n}: {}", answer.text);
+    }
+    let answer = node.token_refresh(Via::Funnel, &funnel.client_id, &funnel.refresh);
+    assert_eq!(answer.status, 429, "{}", answer.text);
+    assert_eq!(answer.header("retry-after"), Some("60"));
+    // The window of the Funnel client is its own: the tunnel client still refreshes.
+    let answer = node.token_refresh(tunnel, &connected.client_id, &refresh);
+    assert_eq!(answer.status, 200, "{}", answer.text);
+}
+
 /// The base URLs of a session start with the origin of its agent, and the proxy serves
 /// its key only there. The bearer token of `TokenIssue::Now` works on every origin, and
 /// its sessions are on the first.
@@ -854,4 +899,150 @@ fn a_session_is_made_for_the_origin_of_its_agent() {
     );
     assert_eq!(answer.status, 403, "{}", answer.text);
     assert_eq!(answer.json()["error"]["code"], "session_invalid");
+}
+
+// ---------------------------------------------------------------------------
+// Through the node's own TLS front, as a `public` stream of the tunnel arrives.
+
+#[derive(Debug)]
+struct PinVerifier {
+    pin: Pin,
+    provider: Arc<CryptoProvider>,
+}
+
+impl ServerCertVerifier for PinVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        if intermediates.is_empty() && self.pin.matches(end_entity.as_ref()) {
+            Ok(ServerCertVerified::assertion())
+        } else {
+            Err(rustls::Error::General("pin mismatch".to_owned()))
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+/// One `GET` through the front's own `serve_connection` to the public listener, with the
+/// server name `sni` in the TLS handshake and the given headers. The status and the body.
+fn front_get(public: SocketAddr, sni: &str, path: &str, headers: &[(&str, &str)]) -> (u16, Value) {
+    let certificate = NodeCertificate::generate("Synthetic Test Mac").expect("certificate");
+    let config = tls_front::server_config(&certificate.der, &certificate.key).expect("config");
+    let pin = certificate.pin;
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("address");
+    let front = thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accept");
+        let stop = Arc::new(AtomicBool::new(false));
+        tls_front::serve_connection(stream, config, public, FrontLimits::default(), &stop);
+    });
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut config = ClientConfig::builder_with_provider(Arc::clone(&provider))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .expect("versions")
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(PinVerifier { pin, provider }))
+        .with_no_client_auth();
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    let socket = TcpStream::connect(addr).expect("connect");
+    socket
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .expect("timeout");
+    let name = ServerName::try_from(sni.to_owned()).expect("name");
+    let connection = ClientConnection::new(Arc::new(config), name).expect("client");
+    let mut tls = StreamOwned::new(connection, socket);
+    let mut head = format!("GET {path} HTTP/1.1\r\n");
+    for (name, value) in headers {
+        head.push_str(&format!("{name}: {value}\r\n"));
+    }
+    head.push_str("Connection: close\r\n\r\n");
+    tls.write_all(head.as_bytes()).expect("request");
+    let mut raw = Vec::new();
+    let _ = tls.read_to_end(&mut raw);
+    front.join().expect("the front ends");
+    let split = raw
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .unwrap_or_else(|| panic!("no head in {:?}", String::from_utf8_lossy(&raw)));
+    let head = String::from_utf8_lossy(&raw[..split]).to_ascii_lowercase();
+    let status = head
+        .split(' ')
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .expect("a status");
+    let mut body = raw[split + 4..].to_vec();
+    if head.contains("transfer-encoding: chunked") {
+        body = dechunk(&body);
+    }
+    (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
+}
+
+#[test]
+fn a_public_stream_through_the_front_answers_with_the_origin_of_its_server_name() {
+    let node = Node::start(&[CONNECT]);
+    let public = node.public();
+    let forged = [
+        ("Host", FUNNEL_HOST),
+        ("X-Forwarded-Host", FUNNEL_HOST),
+        ("X-Forwarded-Proto", "https"),
+        ("X-Forwarded-For", "203.0.113.9"),
+        ("Forwarded", "host=node.example.ts.net;proto=https"),
+    ];
+    // The front writes the stream down with the server name of its handshake: the answer
+    // names the Connect origin, whatever the headers say.
+    let (status, meta) = front_get(
+        public,
+        CONNECT_NAME,
+        "/.well-known/oauth-authorization-server",
+        &forged,
+    );
+    assert_eq!(status, 200, "{meta}");
+    assert_eq!(meta["issuer"], CONNECT);
+    // A server name that is not one of the node's: not served, whatever the `Host`.
+    let (status, error) = front_get(
+        public,
+        "other0node.node.example.test",
+        "/.well-known/oauth-authorization-server",
+        &[("Host", CONNECT_NAME)],
+    );
+    assert_eq!(status, 404, "{error}");
+    assert_eq!(error["error"]["code"], "not_found");
 }

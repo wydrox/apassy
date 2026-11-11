@@ -1302,7 +1302,8 @@ pub fn serve(serving: Serving) -> RelayResult<()> {
                     std::thread::sleep(Duration::from_millis(200));
                     if last.elapsed() >= Duration::from_secs(MAINTENANCE_SECS) {
                         last = Instant::now();
-                        maintain_billing(&hub, now_unix());
+                        // The pass stops between accounts when the relay stops.
+                        maintain_billing_until(&hub, now_unix(), &|| stop.load(Ordering::Relaxed));
                     }
                 }
             })
@@ -1493,11 +1494,16 @@ pub fn maintain_teams(hub: &Hub, now: u64) {
 /// Connect billing: event ids older than 30 days, the reads of Stripe, and the stores of
 /// plans at their deletion day (docs/SPEC.md section 34.6), at most once an hour.
 pub fn maintain_billing(hub: &Hub, now: u64) {
+    maintain_billing_until(hub, now, &|| false);
+}
+
+/// `maintain_billing` that stops between accounts once `stop` answers true.
+pub fn maintain_billing_until(hub: &Hub, now: u64, stop: &dyn Fn() -> bool) {
     if let Some(billing) = hub.billing.as_deref() {
         let last = hub.billing_maintained_at.load(Ordering::Relaxed);
         if last == 0 || now >= last.saturating_add(billing_store::MAINTENANCE_SECS) {
             hub.billing_maintained_at.store(now, Ordering::Relaxed);
-            if billing_store::maintain(hub, billing, now).is_err() {
+            if billing_store::maintain_until(hub, billing, now, stop).is_err() {
                 eprintln!("apassy-relay: the billing maintenance pass failed");
             }
         }
@@ -1742,7 +1748,10 @@ fn handle(hub: &Hub, proxy: Option<&Proxy>, listener: &Listener, mut request: Re
     // The flow has its own count for each client (31.5): a stranger's bad tokens on
     // `/mcp` never hold the owner's client away from its metadata, page, or refresh.
     if let Some(route) = oauth_route {
-        respond_oauth(hub, request, route, &method, &path, &query, arrival, now);
+        let via_tunnel = listener.via_tunnel(&request);
+        respond_oauth(
+            hub, request, route, &method, &path, &query, arrival, via_tunnel, now,
+        );
         return;
     }
     let counted = listener.counted(&request, &path);
@@ -2906,7 +2915,8 @@ fn respond_auth_error(
 
 /// One request of the MCP authorization flow (`oauth::handle`): its body (at most
 /// `oauth::MAX_BODY`) and its answer. A bad code or refresh token counts for its client
-/// (`oauth::ClientFailures`), not in the listener's failed-auth limiter.
+/// (`oauth::ClientFailures`), not in the listener's failed-auth limiter; through a `public`
+/// stream of the Connect tunnel (`via_tunnel`), for no client.
 #[allow(clippy::too_many_arguments)]
 fn respond_oauth(
     hub: &Hub,
@@ -2916,6 +2926,7 @@ fn respond_oauth(
     path: &str,
     query: &str,
     arrival: &str,
+    via_tunnel: bool,
     now: u64,
 ) {
     let body = if oauth::has_body(route) {
@@ -2946,6 +2957,7 @@ fn respond_oauth(
         &body,
         content_type.as_deref(),
         arrival,
+        via_tunnel,
         now,
     );
     write_oauth(request, reply, false);

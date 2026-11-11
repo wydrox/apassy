@@ -34,7 +34,9 @@
 //! open for [`STABLE_LINK`]. A WebSocket that Connect replaced (another process of this
 //! node, close 4005) waits [`REPLACED_WAIT`]; a tunnel limit or byte budget of the account
 //! (close 4002, `429 tunnel_limit`, `403 account_limit`) waits [`LIMIT_WAIT`]; an account
-//! without the tunnel waits [`NOT_ON_CONNECT_WAIT`]. An end of the WebSocket resets every
+//! without the tunnel waits [`NOT_ON_CONNECT_WAIT`]. Any other refusal, the edge's `429
+//! rate_limited` too (a limit of the address, shared with other clients behind it), takes
+//! the next step of the backoff. An end of the WebSocket resets every
 //! open stream: the front ends its connections to the relay, so no stream survives.
 //! [`TunnelHandle::stop`] (a lock, a quit, a node stop) closes the WebSocket with 1000,
 //! ends every stream at once, and joins its threads (at most [`STOP_WAIT`] for one inside
@@ -43,14 +45,20 @@
 //! A stream ends on the node in one of two ways, and the node forgets it at once either
 //! way: the front's connection ended cleanly (`Conn::finish`: the node's `close` follows
 //! its last bytes, and Connect ends the stream after them), or it ended otherwise
-//! (`shutdown(Both)`: a `reset`). A stream whose own side is closed is reset when Connect
-//! stays silent on it for [`CLOSE_GRACE`], so no half-closed stream outlives its use.
+//! (`shutdown(Both)`: a `reset`). The node never keeps a stream whose own side is closed,
+//! so it has no half-closed stream to time out (Connect keeps the close grace of its
+//! clients, contract 4).
 //!
-//! Limits of the node: at most [`MAX_DEVICE_STREAMS`] open `device` streams and
-//! [`MAX_INGRESS_STREAMS`] `public` and `acme` streams (the dial and ingress slots of
-//! contract 8; a stream over them is reset), at most [`STREAM_BUFFER`] bytes buffered
-//! toward the front for one stream (over it, a reset, contract 4), and the front's own
-//! limits for each connection.
+//! Each direction of a stream has a window (contract 4): the node sends the front's
+//! bytes only within the window that Connect granted (a write waits for more, up to the
+//! front's write timeout), and it grants Connect more as the front reads, so at most
+//! [`STREAM_BUFFER`] bytes wait toward the front for one stream. Connect sending over
+//! the window breaks the stream rule `over_window`, and the node resets the stream.
+//!
+//! Limits of the node: at most [`MAX_DEVICE_STREAMS`] open `device` streams,
+//! [`MAX_PUBLIC_STREAMS`] `public` streams, and [`MAX_ACME_STREAMS`] `acme` streams, each
+//! kind in slots of its own as at Connect (contract 8; a stream over them is reset), the
+//! window of each stream, and the front's own limits for each connection.
 //!
 //! No stream content is logged. The account token stays in the account seam: it goes
 //! only into the `Authorization` header of the requests to the Connect origin.
@@ -74,7 +82,7 @@ use rustls::pki_types::ServerName;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-use self::frame::{Applied, CLOSE, Dir, Kind, OPEN, RESET, Sequencer};
+use self::frame::{Applied, CLOSE, Dir, Kind, OPEN, RESET, Sequencer, WINDOW};
 use self::ws::{Message, client, close};
 use super::acme::{self, AcmeOptions, Challenges};
 use super::public_cert::{self, CertPicker};
@@ -100,22 +108,23 @@ pub const NOT_ON_CONNECT_WAIT: Duration = Duration::from_secs(15 * 60);
 /// 4005: another process with this node's account device).
 pub const REPLACED_WAIT: Duration = Duration::from_secs(5 * 60);
 /// The wait after a tunnel limit or the byte budget of the account (close 4002, `429
-/// tunnel_limit`, `403 account_limit`).
+/// tunnel_limit`, `403 account_limit`). Not after the edge's `429 rate_limited`: the
+/// backoff.
 pub const LIMIT_WAIT: Duration = Duration::from_secs(15 * 60);
 /// A WebSocket that stayed open this long starts the backoff again at 1 s.
 pub const STABLE_LINK: Duration = Duration::from_secs(60);
-/// A stream whose own side is closed is reset when Connect sends nothing on it for this
-/// long (Connect's own close grace, contract 4).
-pub const CLOSE_GRACE: Duration = Duration::from_secs(10);
-/// Bytes buffered toward the front for one stream (contract 4: 256 KiB).
+/// Bytes buffered toward the front for one stream (contract 4: 256 KiB): the window that
+/// the node grants Connect for each stream.
 pub const STREAM_BUFFER: usize = 256 * 1024;
 /// Open `device` streams of this node at once (the dial slots of contract 8).
 pub const MAX_DEVICE_STREAMS: usize = 64;
-/// Open `public` and `acme` streams of this node at once (the ingress slots of contract
-/// 8).
-pub const MAX_INGRESS_STREAMS: usize = 16;
+/// Open `public` streams of this node at once (the public slots of contract 8).
+pub const MAX_PUBLIC_STREAMS: usize = 16;
+/// Open `acme` streams of this node at once: slots of their own, as at Connect (contract
+/// 8), so open `public` streams never keep the certificate renewal out.
+pub const MAX_ACME_STREAMS: usize = 4;
 /// Open streams of this node at once.
-pub const MAX_STREAMS: usize = MAX_DEVICE_STREAMS + MAX_INGRESS_STREAMS;
+pub const MAX_STREAMS: usize = MAX_DEVICE_STREAMS + MAX_PUBLIC_STREAMS + MAX_ACME_STREAMS;
 /// The zone of the public names when `APASSY_CONNECT_NODE_ZONE` is not set (contract 2).
 pub const DEFAULT_NODE_ZONE: &str = "node.apassy.wyderka.cc";
 /// The setting of the zone of the public names (a sandbox Connect).
@@ -273,6 +282,10 @@ pub enum Failure {
     NodeUnknown,
     /// Another refusal of Connect, with its status and code.
     Refused { status: u16, code: String },
+    /// Connect's registration answer is not this node's: another node id than the one
+    /// kept for this device, another device, another pin, or a public name that is not
+    /// the node's own in the configured zone.
+    WrongNode,
     /// Connect could not be reached, or the connection broke.
     Offline(String),
 }
@@ -295,6 +308,11 @@ impl std::fmt::Display for Failure {
             Self::Refused { status, code } => {
                 write!(f, "Apassy Connect refused the tunnel ({status} {code})")
             }
+            Self::WrongNode => f.write_str(concat!(
+                "Apassy Connect answered with a registration that is not this ",
+                crate::computer!(),
+                "'s node"
+            )),
             Self::Offline(why) => write!(f, "Apassy Connect could not be reached: {why}"),
         }
     }
@@ -432,6 +450,10 @@ pub struct NodeFile {
     pub node_id: String,
     pub public_name: String,
     pub pin: String,
+    /// The account device of the registration: while this device stays, Connect's
+    /// answers must name this node id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
 }
 
 fn node_file(node_dir: &Path) -> PathBuf {
@@ -466,20 +488,34 @@ pub fn register_now(
     zone: &str,
 ) -> Result<NodeView, Failure> {
     auth.entitled()?;
-    let view = register(auth, name, pin, zone)?;
+    let origin = auth.origin();
+    let device = auth.device_id();
+    // The node id of an earlier registration of this device at this origin: the node of
+    // an account device is stable (contract 2), so a later answer must name it.
+    let kept = load_node_file(node_dir, &origin, zone)
+        .filter(|file| file.device_id.is_some() && file.device_id == device)
+        .map(|file| file.node_id);
+    let view = register(auth, name, pin, zone, kept.as_deref())?;
     let _ = save_node_file(
         node_dir,
         &NodeFile {
-            origin: auth.origin(),
+            origin,
             node_id: view.node_id.clone(),
             public_name: view.public_name.clone(),
             pin: pin.to_owned(),
+            device_id: device,
         },
     );
     Ok(view)
 }
 
-fn register(auth: &dyn TunnelAuth, name: &str, pin: &str, zone: &str) -> Result<NodeView, Failure> {
+fn register(
+    auth: &dyn TunnelAuth,
+    name: &str,
+    pin: &str,
+    zone: &str,
+    kept_node: Option<&str>,
+) -> Result<NodeView, Failure> {
     let client = ConnectClient::new(&auth.origin()).map_err(from_connect)?;
     let mut view = None;
     auth.with_token(&mut |token| {
@@ -498,15 +534,30 @@ fn register(auth: &dyn TunnelAuth, name: &str, pin: &str, zone: &str) -> Result<
         Ok(())
     })?;
     let view = view.ok_or(Failure::Offline("no answer".to_owned()))?;
-    // The public name must be this node's own: its id's label in the configured zone. A
-    // certificate is ordered for it and agents are sent to it.
-    let own = expected_public_name(&view.node_id, zone);
-    if own.as_deref() != Some(view.public_name.as_str()) || view.pin != pin {
-        return Err(Failure::Offline(
-            "the registration answer does not match this node".to_owned(),
-        ));
-    }
+    check_registration(&view, pin, zone, auth.device_id().as_deref(), kept_node)?;
     Ok(view)
+}
+
+/// Connect's answer must be this node's registration: the node id kept for this device
+/// (when one is kept), this device, this pin, and the public name of that node id in the
+/// configured zone. A certificate is ordered for the name and agents are sent to it.
+pub fn check_registration(
+    view: &NodeView,
+    pin: &str,
+    zone: &str,
+    device: Option<&str>,
+    kept_node: Option<&str>,
+) -> Result<(), Failure> {
+    let node_id = kept_node.unwrap_or(&view.node_id);
+    let own = expected_public_name(node_id, zone);
+    if view.node_id != node_id
+        || device.is_some_and(|device| device != view.device_id)
+        || view.pin != pin
+        || own.as_deref() != Some(view.public_name.as_str())
+    {
+        return Err(Failure::WrongNode);
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -864,26 +915,6 @@ impl Link {
             stream.abort();
         }
     }
-
-    /// Reset each stream whose own side is closed and on which Connect sent nothing for
-    /// `grace` since then.
-    fn expire(&self, grace: Duration) {
-        let now = self.millis();
-        let grace = u64::try_from(grace.as_millis()).unwrap_or(u64::MAX);
-        let stale: Vec<(u32, Kind)> = lock(&self.seq)
-            .values()
-            .filter(|(_, stream)| {
-                let closed_at = stream.closed_at.load(Ordering::Relaxed);
-                closed_at != 0
-                    && now.saturating_sub(closed_at.max(stream.last_in.load(Ordering::Relaxed)))
-                        >= grace
-            })
-            .map(|(id, stream)| (id, stream.kind))
-            .collect();
-        for (id, kind) in stale {
-            self.reset_live(id, kind);
-        }
-    }
 }
 
 #[derive(Default)]
@@ -906,16 +937,18 @@ struct StreamShared {
     inbox: Mutex<Inbox>,
     ready: Condvar,
     read_timeout: Mutex<Option<Duration>>,
-    /// Milliseconds after the link's start of the last frame from Connect on this stream.
-    last_in: AtomicU64,
-    /// Milliseconds after the link's start when this side closed its direction (0: open;
-    /// at least 1).
-    closed_at: AtomicU64,
+    /// How long a write waits for window (the front's write timeout).
+    write_timeout: Mutex<Option<Duration>>,
+    /// Counts Connect's `window` frames on this stream (and its end); a write that waits
+    /// for window waits for it to change.
+    window_seen: Mutex<u64>,
+    window_cond: Condvar,
+    /// Bytes that the front read since the node last granted Connect more.
+    drained: AtomicU64,
 }
 
 impl StreamShared {
     fn new(id: u32, kind: Kind, link: Arc<Link>) -> Arc<Self> {
-        let now = link.millis();
         Arc::new(Self {
             id,
             kind,
@@ -923,14 +956,59 @@ impl StreamShared {
             inbox: Mutex::new(Inbox::default()),
             ready: Condvar::new(),
             read_timeout: Mutex::new(None),
-            last_in: AtomicU64::new(now),
-            closed_at: AtomicU64::new(0),
+            write_timeout: Mutex::new(None),
+            window_seen: Mutex::new(0),
+            window_cond: Condvar::new(),
+            drained: AtomicU64::new(0),
         })
+    }
+
+    /// Wakes a write that waits for window.
+    fn window_changed(&self) {
+        *lock(&self.window_seen) += 1;
+        self.window_cond.notify_all();
+    }
+
+    /// Grants Connect `added` more bytes of window (a `window` frame), if the stream is
+    /// live.
+    fn grant(&self, added: u32) {
+        if added == 0 {
+            return;
+        }
+        let granted = {
+            let mut seq = lock(&self.link.seq);
+            matches!(
+                seq.apply_parts(
+                    Dir::ToConnect,
+                    self.id,
+                    self.kind,
+                    WINDOW,
+                    &added.to_be_bytes(),
+                    || unreachable!("a window never opens a stream"),
+                ),
+                Ok(Applied::Frame { .. })
+            )
+        };
+        if granted {
+            let _ = self
+                .link
+                .send(ws::OP_BINARY, &frame::window(self.id, self.kind, added));
+        }
+    }
+
+    /// The front read `bytes`: once a quarter of the window is read, the node grants
+    /// Connect that much more.
+    fn drained(&self, bytes: usize) {
+        let step = (STREAM_BUFFER / 4) as u64;
+        let total = self.drained.fetch_add(bytes as u64, Ordering::SeqCst) + bytes as u64;
+        if total >= step {
+            let total = self.drained.swap(0, Ordering::SeqCst);
+            self.grant(u32::try_from(total).unwrap_or(u32::MAX));
+        }
     }
 
     /// Bytes from Connect. False when the buffer is over its cap (the caller resets).
     fn push(&self, payload: &[u8], eof: bool) -> bool {
-        self.last_in.store(self.link.millis(), Ordering::Relaxed);
         let mut inbox = lock(&self.inbox);
         if !inbox.aborted {
             if inbox.bytes.len() + payload.len() > STREAM_BUFFER {
@@ -950,6 +1028,7 @@ impl StreamShared {
         inbox.bytes.clear();
         drop(inbox);
         self.ready.notify_all();
+        self.window_changed();
     }
 
     fn is_aborted(&self) -> bool {
@@ -968,6 +1047,27 @@ impl StreamShared {
         )
     }
 
+    /// Spends window for up to `wanted` bytes of data, under the lock of the sequencer;
+    /// the data frame goes out after it. `Some(0)`: no window now. `None`: the stream is
+    /// gone or this side is closed.
+    fn take_window(self: &Arc<Self>, data: &[u8]) -> Option<usize> {
+        let mut seq = lock(&self.link.seq);
+        let credit = seq.credit(self.id, Dir::ToConnect)?;
+        let take = data
+            .len()
+            .min(frame::MAX_PAYLOAD)
+            .min(usize::try_from(credit).unwrap_or(usize::MAX));
+        if take == 0 {
+            return Some(0);
+        }
+        match seq.apply_parts(Dir::ToConnect, self.id, self.kind, 0, &data[..take], || {
+            Arc::clone(self)
+        }) {
+            Ok(Applied::Frame { .. }) => Some(take),
+            _ => None,
+        }
+    }
+
     fn close_out(self: &Arc<Self>) {
         {
             let mut inbox = lock(&self.inbox);
@@ -976,8 +1076,6 @@ impl StreamShared {
             }
             inbox.closed_out = true;
         }
-        self.closed_at
-            .store(self.link.millis().max(1), Ordering::Relaxed);
         if self.admit_out(CLOSE) {
             let _ = self.link.send_frame(self.id, self.kind, CLOSE, &[]);
         }
@@ -1024,6 +1122,8 @@ impl Read for TunnelStream {
                 for (slot, byte) in buf.iter_mut().zip(inbox.bytes.drain(..n)) {
                     *slot = byte;
                 }
+                drop(inbox);
+                self.0.drained(n);
                 return Ok(n);
             }
             if inbox.aborted {
@@ -1068,15 +1168,45 @@ impl Write for TunnelStream {
                 return Err(io::ErrorKind::BrokenPipe.into());
             }
         }
-        let chunk = &buf[..buf.len().min(frame::MAX_PAYLOAD)];
-        if !self.0.admit_out(0) {
-            return Err(io::ErrorKind::BrokenPipe.into());
-        }
+        // Within the window that Connect granted: wait for more, at most the write
+        // timeout.
+        let until = lock(&self.0.write_timeout).map(|timeout| Instant::now() + timeout);
+        let take = loop {
+            let seen = *lock(&self.0.window_seen);
+            match self.0.take_window(buf) {
+                None => return Err(io::ErrorKind::BrokenPipe.into()),
+                Some(0) => {}
+                Some(take) => break take,
+            }
+            if self.0.is_aborted() {
+                return Err(io::ErrorKind::BrokenPipe.into());
+            }
+            let mut current = lock(&self.0.window_seen);
+            if *current == seen {
+                let wait = match until {
+                    Some(until) => {
+                        let left = until.saturating_duration_since(Instant::now());
+                        if left.is_zero() {
+                            return Err(io::ErrorKind::TimedOut.into());
+                        }
+                        left.min(Duration::from_secs(1))
+                    }
+                    None => Duration::from_secs(1),
+                };
+                current = self
+                    .0
+                    .window_cond
+                    .wait_timeout(current, wait)
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .0;
+            }
+            drop(current);
+        };
         self.0
             .link
-            .send_frame(self.0.id, self.0.kind, 0, chunk)
+            .send_frame(self.0.id, self.0.kind, 0, &buf[..take])
             .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))?;
-        Ok(chunk.len())
+        Ok(take)
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -1111,8 +1241,10 @@ impl Conn for TunnelStream {
         Ok(())
     }
 
-    /// Writes go into the WebSocket, whose socket has its own write timeout.
-    fn set_write_timeout(&self, _timeout: Option<Duration>) -> io::Result<()> {
+    /// The longest wait of a write for window; the WebSocket's socket has its own write
+    /// timeout.
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        *lock(&self.0.write_timeout) = timeout;
         Ok(())
     }
 }
@@ -1228,11 +1360,10 @@ fn read_link(
     code
 }
 
-/// The open streams of `kind`'s slots: `device`, or `public` and `acme` together.
+/// The open streams of `kind`: each kind has slots of its own.
 fn live_of(seq: &Sequencer<Arc<StreamShared>>, kind: Kind) -> usize {
-    let ingress = |kind: Kind| kind != Kind::Device;
     seq.values()
-        .filter(|(_, stream)| ingress(stream.kind) == ingress(kind))
+        .filter(|(_, stream)| stream.kind == kind)
         .count()
 }
 
@@ -1247,7 +1378,8 @@ fn apply(
         let mut seq = lock(&link.seq);
         let cap = match kind {
             Kind::Device => MAX_DEVICE_STREAMS,
-            Kind::Public | Kind::Acme => MAX_INGRESS_STREAMS,
+            Kind::Public => MAX_PUBLIC_STREAMS,
+            Kind::Acme => MAX_ACME_STREAMS,
         };
         if frame.flags & OPEN != 0 && live_of(&seq, kind) >= cap {
             // Over the node's cap: the id is used up, the stream is refused.
@@ -1270,6 +1402,9 @@ fn apply(
                 link.reset(id, kind);
                 return;
             }
+            // Connect may send the initial window; the node grants the rest of its buffer
+            // at once.
+            stream.grant(u32::try_from(STREAM_BUFFER as u64 - frame::INITIAL_WINDOW).unwrap_or(0));
             let handle = TunnelStream(stream);
             let serving = Arc::clone(serving);
             let spawned = thread::Builder::new()
@@ -1289,6 +1424,11 @@ fn apply(
                 value.abort();
                 return;
             }
+            if frame.is_window() {
+                // Connect lets the node send more of the front's bytes.
+                value.window_changed();
+                return;
+            }
             if !value.push(&frame.payload, frame.flags & CLOSE != 0) {
                 link.reset(id, kind);
                 return;
@@ -1300,11 +1440,9 @@ fn apply(
     }
 }
 
-/// Ping every `interval`; end the WebSocket after `idle` without a message; reset the
-/// streams whose own side is closed and on which Connect stayed silent for `grace`.
-fn ping_link(link: &Link, interval: Duration, idle: Duration, grace: Duration, stop: &AtomicBool) {
+/// Ping every `interval`; end the WebSocket after `idle` without a message.
+fn ping_link(link: &Link, interval: Duration, idle: Duration, stop: &AtomicBool) {
     let mut next = Instant::now() + interval;
-    let mut swept = Instant::now();
     while !link.closed.load(Ordering::SeqCst) {
         if stop.load(Ordering::SeqCst) {
             return;
@@ -1318,10 +1456,6 @@ fn ping_link(link: &Link, interval: Duration, idle: Duration, grace: Duration, s
             if link.send(ws::OP_PING, b"apassy").is_err() {
                 return;
             }
-        }
-        if swept.elapsed() >= (grace / 4).clamp(STEP, Duration::from_secs(1)) {
-            swept = Instant::now();
-            link.expire(grace);
         }
         thread::sleep(STEP);
     }
@@ -1402,8 +1536,6 @@ pub struct ConnectSetup {
     pub clock: Arc<dyn Clock>,
     pub ping_interval: Duration,
     pub idle_limit: Duration,
-    /// A stream whose own side is closed is reset after this much silence of Connect.
-    pub close_grace: Duration,
     /// The limits of each stream's connection to the relay (the front's).
     pub limits: FrontLimits,
     /// The zone of the public names (contract 2): Connect's answer must name this node's
@@ -1431,7 +1563,6 @@ impl ConnectSetup {
             clock: Arc::new(SystemClock::default()),
             ping_interval: PING_INTERVAL,
             idle_limit: IDLE_LIMIT,
-            close_grace: CLOSE_GRACE,
             limits: FrontLimits::default(),
             zone: configured_zone(),
         }
@@ -1696,7 +1827,11 @@ pub fn after_link(end: LinkEnd) -> NextTry {
 pub fn after_refusal(failure: &Failure) -> NextTry {
     match failure {
         Failure::NotEntitled | Failure::NoAccount => NextTry::Wait(NOT_ON_CONNECT_WAIT),
-        Failure::Refused { status: 429, .. } => NextTry::Wait(LIMIT_WAIT),
+        // Only the relay's own limit of the account waits long; the edge's per-address
+        // `rate_limited` (other clients behind the same address) takes the backoff.
+        Failure::Refused { status: 429, code } if code == "tunnel_limit" => {
+            NextTry::Wait(LIMIT_WAIT)
+        }
         Failure::Refused { status: 403, code } if code == "account_limit" => {
             NextTry::Wait(LIMIT_WAIT)
         }
@@ -1878,10 +2013,10 @@ fn serve_link(
     let pinger = {
         let link = Arc::clone(&link);
         let stop = Arc::clone(&shared.stop);
-        let (interval, idle, grace) = (setup.ping_interval, setup.idle_limit, setup.close_grace);
+        let (interval, idle) = (setup.ping_interval, setup.idle_limit);
         thread::Builder::new()
             .name("apassy-tunnel-ping".to_owned())
-            .spawn(move || ping_link(&link, interval, idle, grace, &stop))
+            .spawn(move || ping_link(&link, interval, idle, &stop))
     };
     let code = read_link(&link, reader, &serving, &shared.workers);
     if let Ok(pinger) = pinger {
@@ -1894,8 +2029,43 @@ fn serve_link(
     }
 }
 
+/// What [`keep_issued`] did with an issued certificate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Kept {
+    /// The certificate state of the node after it.
+    pub state: CertState,
+    /// Stored and installed: nothing is left to retry.
+    pub done: bool,
+}
+
+/// Keeps an issued certificate: the picker installs it for the `public` streams at once,
+/// then `store` writes it to the node directory. A store that fails leaves it serving
+/// from memory, and the caller stores it again later (`done: false`).
+pub fn keep_issued(
+    picker: &CertPicker,
+    issued: &acme::Issued,
+    store: impl FnOnce() -> io::Result<()>,
+) -> Kept {
+    if let Err(error) = picker.install_public(&issued.chain, &issued.key) {
+        return Kept {
+            state: CertState::Missing(format!("the certificate cannot be used: {error}")),
+            done: false,
+        };
+    }
+    let state = CertState::Valid {
+        not_after: issued.not_after,
+    };
+    Kept {
+        state,
+        done: store().is_ok(),
+    }
+}
+
 /// The certificate thread: order a certificate when there is none or it ends within the
-/// renewal window, through the tunnel once it is open; then look again every hour.
+/// renewal window, through the tunnel once it is open; then look again every hour. An
+/// issued certificate is installed at once; one that could not be stored (or installed)
+/// is kept in memory and stored again with the backoff, without a new order, while it is
+/// usable.
 fn renew_loop(
     shared: &Arc<Shared>,
     options: &AcmeOptions,
@@ -1905,6 +2075,7 @@ fn renew_loop(
 ) {
     let stop = &shared.stop;
     let mut failures: u32 = 0;
+    let mut pending: Option<acme::Issued> = None;
     while !stop.load(Ordering::SeqCst) {
         let ready = lock(&shared.status).state == TunnelState::On;
         let picker = lock(&shared.picker).clone();
@@ -1914,44 +2085,52 @@ fn renew_loop(
             }
             continue;
         };
-        let due = match lock(&shared.status).certificate.clone() {
-            CertState::Valid { not_after } => {
-                acme::renewal_due(not_after, (options.now)(), options.renew_before)
-            }
-            _ => true,
-        };
-        if !due {
-            if !clock.wait(options.check_every, stop) {
-                return;
-            }
-            continue;
-        }
-        shared.set_cert(CertState::Requesting);
         let name = picker.public_name().to_owned();
-        match acme::obtain(options, node_dir, seal, &name, &shared.challenges, stop) {
-            Ok(issued) => {
-                let installed =
-                    public_cert::store_public(node_dir, &issued.chain_pem, &issued.key, seal)
-                        .and_then(|()| picker.install_public(&issued.chain, &issued.key));
-                match installed {
-                    Ok(()) => {
-                        failures = 0;
-                        shared.set_cert(CertState::Valid {
-                            not_after: issued.not_after,
-                        });
-                    }
+        let installed = match lock(&shared.status).certificate.clone() {
+            CertState::Valid { not_after } => Some(not_after),
+            _ => None,
+        };
+        let step = acme::renew_step(
+            pending.as_ref(),
+            &name,
+            installed,
+            (options.now)(),
+            options.renew_before,
+        );
+        let issued = match step {
+            acme::RenewStep::Wait => {
+                if !clock.wait(options.check_every, stop) {
+                    return;
+                }
+                continue;
+            }
+            acme::RenewStep::KeepIssued => pending.take(),
+            acme::RenewStep::Order => {
+                pending = None;
+                shared.set_cert(CertState::Requesting);
+                match acme::obtain(options, node_dir, seal, &name, &shared.challenges, stop) {
+                    Ok(issued) => Some(issued),
                     Err(error) => {
-                        failures += 1;
-                        shared.set_cert(CertState::Missing(format!(
-                            "the certificate cannot be kept: {error}"
-                        )));
+                        shared.set_cert(CertState::Missing(error.to_string()));
+                        None
                     }
                 }
             }
-            Err(error) => {
-                failures += 1;
-                shared.set_cert(CertState::Missing(error.to_string()));
+        };
+        match issued {
+            Some(issued) => {
+                let kept = keep_issued(&picker, &issued, || {
+                    public_cert::store_public(node_dir, &issued.chain_pem, &issued.key, seal)
+                });
+                shared.set_cert(kept.state);
+                if kept.done {
+                    failures = 0;
+                } else {
+                    failures += 1;
+                    pending = Some(issued);
+                }
             }
+            None => failures += 1,
         }
         if failures > 0 {
             // 1 min, doubling, at most the check interval.
@@ -1992,8 +2171,11 @@ mod tests {
         assert_eq!(PING_INTERVAL, Duration::from_secs(30));
         assert_eq!(IDLE_LIMIT, Duration::from_secs(90));
         assert_eq!(STREAM_BUFFER, 256 * 1024);
-        assert_eq!((MAX_DEVICE_STREAMS, MAX_INGRESS_STREAMS), (64, 16));
-        assert_eq!(CLOSE_GRACE, Duration::from_secs(10));
+        assert_eq!(
+            (MAX_DEVICE_STREAMS, MAX_PUBLIC_STREAMS, MAX_ACME_STREAMS),
+            (64, 16, 4)
+        );
+        assert_eq!(frame::INITIAL_WINDOW, 64 * 1024);
         assert_eq!(ws::SUBPROTOCOL, "apassy-tunnel-v1");
     }
 
@@ -2139,20 +2321,126 @@ mod tests {
     }
 
     #[test]
-    fn a_stream_whose_own_side_closed_is_reset_when_connect_stays_silent() {
+    fn a_write_waits_for_the_window_of_connect_and_a_read_grants_connect_more() {
         let (link, out) = test_link();
-        let quiet = opened(&link, 1);
-        let busy = opened(&link, 2);
-        quiet.close_out();
-        busy.close_out();
-        thread::sleep(Duration::from_millis(80));
-        // Connect still sends on stream 2.
-        assert!(busy.push(b"more", false));
-        link.expire(Duration::from_millis(50));
-        assert_eq!(sent(&out), [(1, CLOSE), (2, CLOSE), (1, RESET)]);
-        assert_eq!(link.live(), 1);
-        assert!(quiet.is_aborted());
-        assert!(!busy.is_aborted());
+        let stream = TunnelStream(opened(&link, 1));
+        let mut writer = stream.clone();
+        writer
+            .set_write_timeout(Some(Duration::from_millis(200)))
+            .expect("timeout");
+        // The initial window goes out in frames of at most 16 KiB, then a write waits
+        // and times out.
+        let data = vec![7u8; frame::INITIAL_WINDOW as usize];
+        let mut written = 0;
+        while written < data.len() {
+            written += writer.write(&data[written..]).expect("within the window");
+        }
+        let started = Instant::now();
+        let error = writer.write(b"x").expect_err("no window");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() >= Duration::from_millis(150));
+        // A window frame of Connect lets 10 more bytes go, from another thread.
+        let waiting = {
+            let mut writer = writer.clone();
+            writer
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .expect("timeout");
+            thread::spawn(move || writer.write(&[1u8; 64]))
+        };
+        thread::sleep(Duration::from_millis(50));
+        let grant = frame::decode(&frame::window(1, Kind::Public, 10)).expect("window");
+        lock(&link.seq)
+            .apply(Dir::ToNode, &grant, || unreachable!())
+            .expect("applied");
+        stream.0.window_changed();
+        assert_eq!(waiting.join().expect("joined").expect("written"), 10);
+        // Connect's bytes: reading a quarter of the buffer grants Connect that much more.
+        assert!(stream.0.push(&vec![0u8; STREAM_BUFFER / 4], false));
+        let mut reader = stream.clone();
+        let mut buffer = vec![0u8; STREAM_BUFFER];
+        let mut read = 0;
+        while read < STREAM_BUFFER / 4 {
+            read += reader.read(&mut buffer).expect("read");
+        }
+        let frames = sent(&out);
+        assert_eq!(frames.last(), Some(&(1, WINDOW)));
+        assert_eq!(
+            lock(&link.seq).credit(1, Dir::ToNode),
+            Some(frame::INITIAL_WINDOW + (STREAM_BUFFER / 4) as u64)
+        );
+        // A reset ends a waiting write at once.
+        let blocked = {
+            let mut writer = writer.clone();
+            thread::spawn(move || writer.write(b"y"))
+        };
+        thread::sleep(Duration::from_millis(50));
+        link.reset_live(1, Kind::Public);
+        assert_eq!(
+            blocked.join().expect("joined").expect_err("ended").kind(),
+            io::ErrorKind::BrokenPipe
+        );
+    }
+
+    fn view(node_id: &str, device_id: &str, pin: &str, public_name: &str) -> NodeView {
+        NodeView {
+            node_id: node_id.to_owned(),
+            account_id: "acc_aaaaaaaaaa".to_owned(),
+            device_id: device_id.to_owned(),
+            name: "Mac".to_owned(),
+            pin: pin.to_owned(),
+            public_name: public_name.to_owned(),
+            online: false,
+            created_at: 0,
+        }
+    }
+
+    #[test]
+    fn the_registration_must_name_the_node_kept_for_this_device() {
+        let zone = "node.example.test";
+        let own = view(
+            "node_aaaaaaaaaa",
+            "dev_1",
+            "pin",
+            "aaaaaaaaaa.node.example.test",
+        );
+        assert_eq!(
+            check_registration(&own, "pin", zone, Some("dev_1"), None),
+            Ok(())
+        );
+        assert_eq!(
+            check_registration(&own, "pin", zone, Some("dev_1"), Some("node_aaaaaaaaaa")),
+            Ok(())
+        );
+        // Another node id than the kept one, even with its own matching name.
+        let other = view(
+            "node_bbbbbbbbbb",
+            "dev_1",
+            "pin",
+            "bbbbbbbbbb.node.example.test",
+        );
+        assert_eq!(
+            check_registration(&other, "pin", zone, Some("dev_1"), Some("node_aaaaaaaaaa")),
+            Err(Failure::WrongNode)
+        );
+        // Another device, another pin, another name.
+        assert_eq!(
+            check_registration(&own, "pin", zone, Some("dev_2"), None),
+            Err(Failure::WrongNode)
+        );
+        assert_eq!(
+            check_registration(&own, "other", zone, Some("dev_1"), None),
+            Err(Failure::WrongNode)
+        );
+        let renamed = view("node_aaaaaaaaaa", "dev_1", "pin", "aaaaaaaaaa.other.test");
+        assert_eq!(
+            check_registration(&renamed, "pin", zone, Some("dev_1"), None),
+            Err(Failure::WrongNode)
+        );
+        assert!(
+            !Failure::WrongNode
+                .to_string()
+                .contains("could not be reached")
+        );
     }
 
     #[test]
@@ -2162,5 +2450,59 @@ mod tests {
             "plan_required"
         );
         assert_eq!(refusal_code(b"not json"), "");
+    }
+
+    #[test]
+    fn only_the_relays_tunnel_limit_waits_long_and_an_edge_rate_limit_backs_off() {
+        let limit = |status: u16, code: &str| Failure::Refused {
+            status,
+            code: code.to_owned(),
+        };
+        assert_eq!(
+            after_refusal(&limit(429, "tunnel_limit")),
+            NextTry::Wait(LIMIT_WAIT)
+        );
+        // The edge's per-address limit (other clients behind the same address): the
+        // short backoff, never the long wait.
+        for code in ["rate_limited", ""] {
+            assert_eq!(
+                after_refusal(&limit(429, code)),
+                NextTry::Backoff { reset: false },
+                "{code}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_certificate_that_cannot_be_stored_is_installed_at_once_and_stored_again() {
+        let name = "aaaaaaaaaa.node.example.test";
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("key");
+        let cert = rcgen::CertificateParams::new(vec![name.to_owned()])
+            .expect("params")
+            .self_signed(&key)
+            .expect("cert");
+        let issued = acme::Issued {
+            chain_pem: cert.pem(),
+            chain: vec![cert.der().to_vec()],
+            key: Zeroizing::new(key.serialize_der()),
+            not_after: 1_800_000_000,
+        };
+        let node = NodeCertificate::generate("Synthetic Mac").expect("node certificate");
+        let picker = CertPicker::new(&node, name).expect("picker");
+        let kept = keep_issued(&picker, &issued, || Err(io::Error::other("disk full")));
+        assert!(picker.has_public(), "the certificate serves at once");
+        assert_eq!(
+            kept.state,
+            CertState::Valid {
+                not_after: 1_800_000_000
+            }
+        );
+        assert!(!kept.done, "the store is tried again");
+        let mut stored = false;
+        let kept = keep_issued(&picker, &issued, || {
+            stored = true;
+            Ok(())
+        });
+        assert!(stored && kept.done);
     }
 }

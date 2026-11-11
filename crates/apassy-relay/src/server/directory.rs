@@ -374,8 +374,6 @@ fn open_directory_file(config: &RelayConfig) -> RelayResult<Store> {
     }
 }
 
-/// Removes the vault stores from `team` inside a downgrade's transaction and returns
-/// their ids; the caller deletes their files after the commit.
 /// The downgrades below directory 1006 delete the vault stores of the accounts (paid
 /// stores of Apassy Connect, with their snapshots). They do it only when the operator
 /// says so (`--delete-vault-stores`); otherwise a directory with vault stores is refused
@@ -403,6 +401,8 @@ fn refuse_vault_stores(store: &Store, delete_vault_stores: bool) -> RelayResult<
     Ok(())
 }
 
+/// Removes the vault stores from `team` inside a downgrade's transaction and returns
+/// their ids; the caller deletes their files after the commit.
 fn drop_vault_store_rows(conn: &Connection) -> RelayResult<Vec<TeamId>> {
     let mut statement = conn
         .prepare("SELECT id FROM team WHERE kind = 'account' ORDER BY id")

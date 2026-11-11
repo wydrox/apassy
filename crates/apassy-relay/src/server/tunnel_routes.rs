@@ -21,7 +21,7 @@
 //! The audit names accounts, devices, nodes, and grants by id, never a token, a pin, or an
 //! address.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{SocketAddr, TcpListener};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
@@ -46,7 +46,8 @@ use crate::server::hub::Hub;
 use crate::server::ingress::{self, IngressConfig, IngressHandle};
 use crate::server::store::{db, to_i, to_u};
 use crate::server::tunnel::{
-    self, Broker, Caller, Limits, NodeEntry, Refusal, SystemClock, TunnelDirectory, Usage, month_of,
+    self, Broker, Caller, Limits, NodeEntry, Refusal, SystemClock, TunnelDirectory, Unavailable,
+    Usage, month_of,
 };
 
 /// The node's WebSocket (contract 3.2).
@@ -139,58 +140,61 @@ fn grant_valid(hub: &Hub, node_id: &str, grantee: &str, now: u64) -> RelayResult
     }
 }
 
+/// Every lookup answers a definite "no" only from the store's own answer: a store error is
+/// [`Unavailable`] (`503 busy` on the routes, a skipped round in the recheck).
 impl TunnelDirectory for AccountDirectory {
     fn caller(&self, bearer: &str) -> Result<Caller, Refusal> {
-        let hub = self.hub.upgrade().ok_or(Refusal::Unauthenticated)?;
+        let hub = self.hub.upgrade().ok_or(Refusal::Unavailable)?;
         match account::authenticate(&hub, Some(bearer), crate::now_unix()) {
             Ok(caller) => Ok(Caller {
                 account_id: caller.account,
                 device_id: caller.device,
             }),
             Err(error) if error.code == codes::ACCOUNT_REQUIRED => Err(Refusal::AccountRequired),
-            Err(_) => Err(Refusal::Unauthenticated),
+            Err(error) if error.code == codes::UNAUTHENTICATED => Err(Refusal::Unauthenticated),
+            Err(_) => Err(Refusal::Unavailable),
         }
     }
 
-    fn device_node(&self, caller: &Caller) -> Option<NodeEntry> {
-        let hub = self.hub.upgrade()?;
-        hub.directory
+    fn device_node(&self, caller: &Caller) -> Result<Option<NodeEntry>, Unavailable> {
+        let hub = self.hub.upgrade().ok_or(Unavailable)?;
+        let entry = hub
+            .directory
             .store
             .with(|conn| node_of_device(conn, &caller.device_id))
-            .ok()
-            .flatten()
-            .filter(|entry| entry.account_id == caller.account_id)
+            .map_err(|_| Unavailable)?;
+        Ok(entry.filter(|entry| entry.account_id == caller.account_id))
     }
 
-    fn node(&self, node_id: &str) -> Option<NodeEntry> {
-        let hub = self.hub.upgrade()?;
+    fn node(&self, node_id: &str) -> Result<Option<NodeEntry>, Unavailable> {
+        let hub = self.hub.upgrade().ok_or(Unavailable)?;
         hub.directory
             .store
             .with(|conn| node_by_id(conn, node_id))
-            .ok()
-            .flatten()
+            .map_err(|_| Unavailable)
     }
 
-    fn has_grant(&self, node_id: &str, grantee_account: &str) -> bool {
-        self.hub.upgrade().is_some_and(|hub| {
-            grant_valid(&hub, node_id, grantee_account, crate::now_unix()).unwrap_or(false)
-        })
+    /// A store error is [`Unavailable`], never a "no": the recheck then skips a round
+    /// instead of ending the streams as if the grant had gone.
+    fn has_grant(&self, node_id: &str, grantee_account: &str) -> Result<bool, Unavailable> {
+        let hub = self.hub.upgrade().ok_or(Unavailable)?;
+        grant_valid(&hub, node_id, grantee_account, crate::now_unix()).map_err(|_| Unavailable)
     }
 
-    fn entitled(&self, account_id: &str) -> bool {
-        self.hub
-            .upgrade()
-            .is_some_and(|hub| entitled(&hub, account_id, crate::now_unix()).unwrap_or(false))
+    /// A store error is [`Unavailable`], never a "no" (see [`Self::has_grant`]).
+    fn entitled(&self, account_id: &str) -> Result<bool, Unavailable> {
+        let hub = self.hub.upgrade().ok_or(Unavailable)?;
+        entitled(&hub, account_id, crate::now_unix()).map_err(|_| Unavailable)
     }
 
-    fn budget_units(&self, account_id: &str) -> u64 {
-        self.hub.upgrade().map_or(1, |hub| {
-            hub.accounts
-                .plans()
-                .people(&hub.directory.store, account_id, crate::now_unix())
-                .unwrap_or(1)
-                .max(1)
-        })
+    /// A store error is [`Unavailable`]: the broker keeps the budget it knew.
+    fn budget_units(&self, account_id: &str) -> Result<u64, Unavailable> {
+        let hub = self.hub.upgrade().ok_or(Unavailable)?;
+        hub.accounts
+            .plans()
+            .people(&hub.directory.store, account_id, crate::now_unix())
+            .map(|units| units.max(1))
+            .map_err(|_| Unavailable)
     }
 }
 
@@ -301,6 +305,36 @@ fn new_id(prefix: &str) -> RelayResult<String> {
         text.push(char::from(ALPHABET[usize::from(byte & 31)]));
     }
     Ok(text)
+}
+
+/// The node id of an account device (contract 2: one node for each account device,
+/// stable): `node_` and 10 characters of `a-z2-7` from the first 50 bits of SHA-256 over
+/// a label, the account id, and the device id. A registration after Connect deleted the
+/// node's row (a removal, the data deletion of an ended plan) gives the same id again, so
+/// the node's check of the id that it kept for this device holds, and so does the public
+/// name of the id.
+pub fn node_id_of(account: &str, device: &str) -> String {
+    const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+    let mut context = ring::digest::Context::new(&ring::digest::SHA256);
+    for part in [
+        b"apassy-connect-tunnel-node-v1".as_slice(),
+        account.as_bytes(),
+    ] {
+        context.update(part);
+        context.update(&[0]);
+    }
+    context.update(device.as_bytes());
+    let digest = context.finish();
+    let mut first = [0u8; 8];
+    first.copy_from_slice(&digest.as_ref()[..8]);
+    let bits = u64::from_be_bytes(first);
+    let mut id = String::with_capacity(15);
+    id.push_str("node_");
+    for index in 0..10 {
+        let group = (bits >> (59 - 5 * index)) & 31;
+        id.push(char::from(ALPHABET[group as usize]));
+    }
+    id
 }
 
 /// A node name: 1 to 64 bytes of UTF-8 without a control character, trimmed.
@@ -415,8 +449,8 @@ fn node_view(broker: &Broker, row: NodeRow) -> TunnelNodeView {
 }
 
 /// `POST /v1/tunnel/nodes`: the node of the calling device, new or with a new name and
-/// pin. One stable node for each account device; at most `nodes_per_account` for the
-/// account (403 `account_limit`).
+/// pin. One stable node for each account device ([`node_id_of`], also after its row was
+/// deleted); at most `nodes_per_account` for the account (403 `account_limit`).
 fn register(
     hub: &Hub,
     broker: &Broker,
@@ -463,7 +497,18 @@ fn register(
                         format!("This account has {limit} nodes."),
                     ));
                 }
-                let node_id = free_id(tx, "tunnel_node", "node_")?;
+                let node_id = node_id_of(&caller.account, &caller.device);
+                let taken: bool = tx
+                    .query_row(
+                        "SELECT EXISTS (SELECT 1 FROM tunnel_node WHERE id = ?1)",
+                        params![node_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(db)?;
+                if taken {
+                    // Another device's id (a 50-bit collision): never give one node to two.
+                    return Err(RelayError::internal("No free node id."));
+                }
                 tx.execute(
                     "INSERT INTO tunnel_node (id, account_id, device_id, name, pin, created_at) \
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -751,11 +796,45 @@ pub fn device_revoked(hub: &Hub, device: &str) {
 }
 
 /// An account was deleted (`account::delete_account`, which deleted its nodes and the
-/// grants both ways): its node WebSockets close (4003) and its devices' dials end.
+/// grants both ways): its node WebSockets close (4003), its devices' dials end, and its
+/// tunnel counters go, in memory and in `tunnel_usage`: its own rows and their parts
+/// (`<account>`, `<account>/…`) and its rows in other accounts (`<other>/dial/<account>`).
 pub fn account_deleted(hub: &Hub, account: &str) {
     if let Some(broker) = hub.tunnel() {
         broker.end_account(account);
+        broker.forget_account(account);
     }
+    if forget_usage(hub, account).is_err() {
+        eprintln!("apassy-relay: the tunnel usage of a deleted account cannot be deleted");
+    }
+}
+
+/// Deletes the `tunnel_usage` rows of an account and its rows in other accounts. Returns
+/// how many.
+pub fn forget_usage(hub: &Hub, account: &str) -> RelayResult<usize> {
+    let own_parts = format!("{}/%", like_escaped(account));
+    let as_grantee = format!("%/dial/{}", like_escaped(account));
+    hub.directory.store.tx(|tx| {
+        tx.execute(
+            "DELETE FROM tunnel_usage WHERE account_id = ?1 \
+             OR account_id LIKE ?2 ESCAPE '\\' OR account_id LIKE ?3 ESCAPE '\\'",
+            params![account, own_parts, as_grantee],
+        )
+        .map_err(db)
+    })
+}
+
+/// `text` for a `LIKE` pattern with `\` as the escape: `%`, `_`, and `\` match only
+/// themselves.
+fn like_escaped(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if matches!(c, '%' | '_' | '\\') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// The plan of `account` ended (billing): the open streams of its nodes end with 4003.
@@ -883,7 +962,28 @@ pub fn flush_usage(
     broker: &Broker,
     written: &mut HashMap<String, Usage>,
 ) -> RelayResult<usize> {
-    let changed: Vec<(String, Usage)> = broker
+    // The deletions before this snapshot cannot be in it, nor in any later one.
+    let deleted = broker.forgotten();
+    let changed = usage_snapshot(broker, written);
+    let count = write_usage(hub, broker, changed, written)?;
+    broker.let_go(&deleted);
+    Ok(count)
+}
+
+/// Whether a stored key of [`Broker::usage_all`] names one of `accounts`: as the account
+/// (`<account>`, `<account>/…`) or as the other account of a dial (`…/dial/<account>`).
+fn names_any(key: &str, accounts: &HashSet<String>) -> bool {
+    let own = key.split('/').next().unwrap_or(key);
+    let grantee = key
+        .split_once(tunnel::GRANTEE_INFIX)
+        .map(|(_, grantee)| grantee);
+    accounts.contains(own) || grantee.is_some_and(|grantee| accounts.contains(grantee))
+}
+
+/// The counters of the broker that changed since `written`: the first half of
+/// [`flush_usage`].
+pub fn usage_snapshot(broker: &Broker, written: &HashMap<String, Usage>) -> Vec<(String, Usage)> {
+    broker
         .usage_all()
         .into_iter()
         .map(|(account, usage)| {
@@ -900,11 +1000,28 @@ pub fn flush_usage(
             (usage.bytes > 0 || usage.dials > 0 || usage.streams > 0)
                 && written.get(account) != Some(usage)
         })
-        .collect();
+        .collect()
+}
+
+/// Writes a snapshot of [`usage_snapshot`] to `tunnel_usage`: the second half of
+/// [`flush_usage`]. The rows of an account deleted since the snapshot are not written:
+/// the deletion is asked inside the write, and a deletion after it waits for the write and
+/// deletes the rows itself (`forget_usage`), so the deletion always wins.
+pub fn write_usage(
+    hub: &Hub,
+    broker: &Broker,
+    changed: Vec<(String, Usage)>,
+    written: &mut HashMap<String, Usage>,
+) -> RelayResult<usize> {
     if changed.is_empty() {
         return Ok(0);
     }
-    hub.directory.store.tx(|tx| {
+    let changed = hub.directory.store.tx(|tx| {
+        let deleted = broker.forgotten();
+        let changed: Vec<(String, Usage)> = changed
+            .into_iter()
+            .filter(|(key, _)| !names_any(key, &deleted))
+            .collect();
         for (account, usage) in &changed {
             tx.execute(
                 "INSERT INTO tunnel_usage (account_id, month, dials, streams, bytes) \
@@ -921,7 +1038,8 @@ pub fn flush_usage(
             )
             .map_err(db)?;
         }
-        Ok(())
+        written.retain(|key, _| !names_any(key, &deleted));
+        Ok(changed)
     })?;
     prune_usage(hub, crate::now_unix())?;
     let count = changed.len();
@@ -1077,6 +1195,17 @@ pub fn start(hub: &Arc<Hub>) -> RelayResult<Option<TunnelRuntime>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_node_id_of_an_account_device_is_stable_and_its_own() {
+        let id = node_id_of("acc_aaaaaaaaaa", "dev_aaaaaaaaaa");
+        assert!(tunnel::valid_node_id(&id), "{id}");
+        assert_eq!(id, node_id_of("acc_aaaaaaaaaa", "dev_aaaaaaaaaa"));
+        assert_ne!(id, node_id_of("acc_aaaaaaaaaa", "dev_bbbbbbbbbb"));
+        assert_ne!(id, node_id_of("acc_bbbbbbbbbb", "dev_aaaaaaaaaa"));
+        // The parts are kept apart: no other split of the same text gives the same id.
+        assert_ne!(node_id_of("acc_a", "adev_a"), node_id_of("acc_aa", "dev_a"));
+    }
 
     #[test]
     fn thirteen_months_of_usage_stay() {

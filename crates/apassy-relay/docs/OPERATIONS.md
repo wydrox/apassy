@@ -1835,10 +1835,15 @@ Settings › Billing › Customer portal, in the sandbox and the live account:
   intervals); **quantity changes off** (people and seats change through Connect, SPEC 34.4).
   A switch from Family to Personal ends the family's plan for its members (read-only, then
   suspended; their stores are never deleted for it); the owner pays Personal from the
-  switch. A switch back to Family restores the family. Stripe's documentation does not
-  say whether a switch keeps the quantity: if Personal arrives with the family's people,
-  the relay records the problem `personal_quantity` (27.8) and its next pass sets the
-  quantity to 1 at Stripe (27.7). Check the switch in the sandbox and the invoice it makes.
+  switch. Stripe's documentation does not say whether a switch in the portal keeps the
+  quantity or the subscription item: if Personal arrives with the family's people, the
+  relay records the problem `personal_quantity` (27.8) and its next pass sets the quantity
+  to 1 at Stripe (27.7). A switch back to Family restores the family's plan with the
+  quantity Stripe then has (1 after that change): Family pays for at least its 4 included
+  people, the owner first and then the earliest confirmed, and the other active members
+  are read-only (no deletion day) until the owner raises the people in the app. Check the
+  switch both ways in the sandbox, with the invoices it makes and the item id in the
+  `customer.subscription.updated` events.
 - Settings › Billing › Subscriptions and emails › Manage failed payments: after the last
   retry, **cancel the subscription** or **mark it as unpaid**. A subscription that Stripe
   leaves `past_due` keeps its stores: the relay deletes stores only when Stripe also shows
@@ -1912,10 +1917,13 @@ than `https://api.stripe.com`.
   period ended more than two days ago without an event is read from Stripe (once a day at
   most) and Stripe's state applies. A live Family or Team subscription without a group is
   bound again, or recorded as `no_group` (27.8). A live Connect Personal subscription with
-  a quantity above 1 gets quantity 1 at Stripe. Only with
+  a quantity above 1 is read from Stripe first, and gets quantity 1 there only when Stripe
+  shows the same item with a price of Connect Personal, more than one unit, and a status
+  that charges (a price that is not Connect's never changes a quantity). Only with
   `APASSY_CONNECT_AUTO_RAISE_SEATS=1`: a group with more active members than its quantity at
   Stripe gets the quantity raised to them, with prorations; a raise Stripe refuses is
-  recorded as `raise_refused` and not asked again until the operator resolves it. By
+  recorded as `raise_refused` and not asked again while that problem is open (the row keeps
+  that reason even when the subscription had an earlier problem of another reason). By
   default (`0`) the pass raises no quantity: members beyond the paid people or seats stay
   read-only until the owner raises the seats in the app (`POST /v1/account/group/seats`),
   so no higher charge happens without an action of the owner. Each ended plan at its
@@ -1925,46 +1933,74 @@ than `https://api.stripe.com`.
   over too (never for a plan that is not the group's own, and never while another
   subscription of the group gives a plan). Before anything goes, the relay asks Stripe for
   each such account: an open problem (27.8), a checkout session that Stripe shows open or
-  complete, or another subscription of its customer that is not over keeps its data, and
-  while the buying account is kept nothing of the plan goes; a Stripe error keeps it too.
+  complete (the stored one, or any that Stripe lists for its customer), or another
+  subscription of its customer that is not over keeps its data, and while the buying
+  account is kept nothing of the plan goes, its members' data neither; a Stripe error keeps
+  it too. An account without a Stripe customer has nothing at Stripe: its open problems
+  and its stored session decide. Just before the deletion, under the account's lock, a
+  checkout session stored meanwhile keeps the data too. Stripe's lists are read page after
+  page, at most ten pages of 100; a longer list keeps the data.
   One audit row `plan_stores_deleted` (actor `billing`, counts only, `failed` for accounts
   that could not be deleted, `waiting` for accounts kept) and an I-4 `forget` for each
   account whose data went are written when something went, an account failed, or the plan
   is done. A plan that waits or failed is read from Stripe again a day later; the pass goes
   on with the other plans. The accounts and their devices stay. The rows are in the relay
   audit of `relay.db` (`audit` table); a failed pass logs `the billing maintenance pass
-  failed`.
+  failed`. When the relay stops, the pass stops between accounts; the next pass does the
+  rest.
 - **After a gap:** when a pass runs more than two days after the last one (the relay was
   down, or the clock jumped), no store is deleted until the operator checks the clock
   (`timedatectl`) and runs `apassy-relay admin billing --resume-deletions` (audit row
   `billing_deletions_resumed`). `apassy-relay admin readiness` shows
   `billing.deletions_held_since` meanwhile.
-- **On `DELETE /v1/account`:** every subscription of the account that is not final
-  (`unpaid` and `paused` included, and those Stripe lists for its customer) is canceled at
-  Stripe first, and an open checkout session ends; if Stripe fails, nothing is deleted and
-  the app can ask again.
-- **On a join:** an account that joins a family or team has its open checkout session
-  ended at Stripe.
+- **On `DELETE /v1/account`:** first every open checkout session of the account ends at
+  Stripe (the stored one and those Stripe lists for its customer), then every subscription
+  of the account that is not final (`unpaid` and `paused` included, and those Stripe lists
+  for its customer) is canceled, then Stripe's list is read once more and a subscription
+  that appeared meanwhile is canceled too. If Stripe fails at any step, or a session stays
+  open, nothing is deleted and the app can ask again.
+- **On a join:** an account that joins a family or team has its open checkout sessions
+  ended at Stripe; one that cannot be ended is logged (`the open checkout of … could not be
+  ended after its join`), and a subscription it makes later that cannot bind is recorded
+  as `no_group`.
 
 ### 27.8 Problems for the operator
 
 When Stripe reports a subscription that charges, or a completed checkout, that the relay
-cannot apply for a known account or customer (an account bound to another customer, an
-account that was deleted, a price that is not Connect's), or a Family or Team subscription
-that has no group (`no_group`: its buyer is in another group), a Connect Personal
-subscription with a quantity above 1 (`personal_quantity`), or a raise of seats that
-Stripe refused (`raise_refused`), the relay answers Stripe 200 and records it: one row in
-`billing_problem`, the audit row `billing_problem_recorded` (ids only), and the count
-`billing.open_problems` in `apassy-relay admin readiness`. While a problem names an
-account, the relay deletes no data of that account for an ended plan.
+cannot apply for a known account or customer, or a Family or Team subscription without a
+group, a Connect Personal subscription with more than one unit, or a raise of seats that
+Stripe refused, the relay answers Stripe 200 and records it: one row in `billing_problem`
+for each Stripe object, the audit row `billing_problem_recorded` (ids only), and the count
+`billing.open_problems` in `apassy-relay admin readiness`. A row that opens again, or is
+recorded again with another reason, shows the newest reason; the audit rows keep the
+earlier ones.
+
+**An open problem keeps data:** while a problem names an account or its customer, the
+relay deletes no data of that account for an ended plan (27.7), however long the plan has
+ended. Check `billing.open_problems` in the readiness output regularly, and list the rows:
 
 ```sh
 apassy-relay admin billing                    # the open problems and the deletion clock
-apassy-relay admin billing --resolve <id>     # after the cancel or refund in the dashboard
+apassy-relay admin billing --resolve <id>     # after the action below
 ```
 
-Look the subscription up in the Stripe dashboard by its id, cancel it (and refund if it
-charged), then resolve the row. A later event of the same subscription reopens it.
+Each row names the Stripe object (a subscription or a checkout session), the account and
+the customer, the reason, the first and last time, and the count of events. Look the
+object up in the Stripe dashboard by its id, then, by reason:
+
+| Reason | What happened | What to do |
+| --- | --- | --- |
+| `bound_elsewhere` | the account is bound to another customer, or the customer or subscription to another account | find which account paid; cancel the subscription that cannot be served and refund what it charged; resolve |
+| `no_account`, `unknown_account` | the session or subscription names no account, or one that does not exist | cancel it and refund what it charged; resolve |
+| `deleted_account` | a subscription of a deleted account charges again | cancel it at once and refund what it charged after the deletion; resolve |
+| `unknown_price` | the price is not one of Connect's, so the subscription gives no plan | if it should be a Connect plan, give the price its lookup key or `metadata.apassy_plan` with the products script (27.4) and wait for the next event; else cancel and refund; resolve |
+| `no_group` | a Family or Team subscription has no group (its buyer is in another group, or owns one of the other kind with others in it) | the relay binds it each hour and closes the row itself once it binds; if the buyer stays in the other group, ask the customer, then cancel or refund it; resolve |
+| `personal_quantity` | Connect Personal with more than one unit (a portal switch kept the people) | the relay sets the quantity to 1 and closes the row itself; if it stays open, the log says why (`quantity 1 could not be set`, or Stripe shows a price that is not Connect's): set the quantity to 1 in the dashboard and refund the difference; resolve |
+| `raise_refused` | Stripe refused a raise of seats (only with `APASSY_CONNECT_AUTO_RAISE_SEATS=1`) | read Stripe's reason (the payment method, a limit), fix it or ask the owner to raise the seats in the app; resolve, and the next pass asks again |
+
+A row the relay closed itself has the audit row `billing_problem_resolved` with actor
+`billing` and how it was resolved; a row the operator resolved has actor `operator`. A
+later event of the same object opens the row again.
 
 ### 27.9 Groups
 
@@ -1983,16 +2019,17 @@ The broker and the ingress (docs/SPEC.md section 35) run on a relay with the acc
 
 - `APASSY_CONNECT_INGRESS_LISTEN` (hosted `0.0.0.0:443`) and `APASSY_CONNECT_ACME_LISTEN` (hosted `0.0.0.0:80`): raw TCP listeners on the Connect host, not through the Cloudflare Worker (it carries HTTP only). Open both in the host firewall and publish both ports of the container. Unset, that listener is off. A port that cannot be bound stops the start ("The tunnel ingress cannot listen on …").
 - `APASSY_CONNECT_NODE_ZONE` (default and hosted `node.apassy.wyderka.cc`): a DNS-only (grey cloud) wildcard record `*.node.apassy.wyderka.cc` to the Connect host's address. A proxied record would end TLS at Cloudflare and break the ingress.
-- The limits of the contract (section 8) are keys with the contract's defaults: `APASSY_CONNECT_TUNNEL_STREAMS` (64), `_NODES` (8), `_DIALS_PER_MINUTE` (60), `_GIB_PER_MONTH` (20 for each person or member), `_PING_SECS` (30), `_IDLE_SECS` (90), `_STREAM_IDLE_SECS` (900), `_STREAM_BUFFER_KIB` (256). The limits of the ingress and of other accounts' dials have keys too: `APASSY_CONNECT_TUNNEL_INGRESS_STREAMS` (16 open `public` and `acme` streams of an account), `_INGRESS_PER_MINUTE` (60 new streams of a node a minute), `_INGRESS_FIRST_BYTE_SECS` (10), `_INGRESS_GIB_PER_MONTH` (5 for each person or member), `_GRANTEE_STREAMS` (16 open dials of one other account), `_GRANTEE_STREAMS_TOTAL` (32 of all other accounts together; unset, at most half of `_STREAMS`), `_GRANTEE_BYTES_PERCENT` (50). The whole broker: `APASSY_CONNECT_TUNNEL_MAX_STREAMS` (4096 open streams of every account) and `_INGRESS_SHARE_PERCENT` (50: the `public` and `acme` streams of all nodes together hold at most this share of them, so the dials always keep the rest). docs/SPEC.md sections 35.4 and 35.11 have their bounds; a value out of bounds, or a grantee limit above the one it is part of, stops the start with a message that names the key. A change takes effect at the next start.
-- The tunnel routes stay behind the Worker. It forwards a WebSocket upgrade only on `GET /v1/tunnel/*`, unchanged, returns the relay's `101` as it is, refuses an upgrade anywhere else, and limits dials with `TUNNEL_LIMITER` (namespace 1007, 60 a minute for each address or IPv6 /64; `wrangler.jsonc`). **Not verified**: whether the Workers VPC binding (`RELAY`) carries WebSocket upgrades. Check it on a staging deploy with one dial before nodes use Connect; if it does not, the fallback is a Cloudflare Tunnel public hostname for `/v1/tunnel/*`, or the routes directly on the Connect host behind its own TLS.
+- The limits of the contract (section 8) are keys with the contract's defaults: `APASSY_CONNECT_TUNNEL_STREAMS` (64), `_NODES` (8), `_DIALS_PER_MINUTE` (60), `_GIB_PER_MONTH` (20 for each person or member), `_PING_SECS` (30), `_IDLE_SECS` (90), `_STREAM_IDLE_SECS` (900), `_STREAM_BUFFER_KIB` (256: the window that Connect grants a node for each stream, at least the 64 KiB of the initial window). The limits of the ingress and of other accounts' dials have keys too: `APASSY_CONNECT_TUNNEL_INGRESS_STREAMS` (16 open `public` streams of an account), `_INGRESS_PER_MINUTE` (60 new `public` streams of a node a minute), `_INGRESS_FIRST_BYTE_SECS` (10), `_INGRESS_GIB_PER_MONTH` (5 for each person or member), `_GRANTEE_STREAMS` (16 open dials of one other account), `_GRANTEE_STREAMS_TOTAL` (32 of all other accounts together; unset, at most half of `_STREAMS`), `_GRANTEE_BYTES_PERCENT` (50). The whole broker: `APASSY_CONNECT_TUNNEL_MAX_STREAMS` (4096 open streams of every account) and `_INGRESS_SHARE_PERCENT` (50: the `public` and `acme` streams of all nodes together hold at most this share of them, so the dials always keep the rest). docs/SPEC.md sections 35.4 and 35.11 have their bounds; a value out of bounds, or a grantee limit above the one it is part of, stops the start with a message that names the key. A change takes effect at the next start.
+- The tunnel routes stay behind the Worker. It forwards a WebSocket upgrade only on `GET /v1/tunnel/*`, unchanged, returns the relay's `101` as it is, refuses an upgrade anywhere else, and limits dials with `TUNNEL_LIMITER` (namespace 1007, 60 a minute for each address or IPv6 /64) and node WebSockets with `TUNNEL_NODE_LIMITER` (namespace 1008, 60 a minute, the same key, a budget of its own; `wrangler.jsonc`). The namespace 1008 must be free in the Cloudflare account before the deploy. **Not verified**: whether the Workers VPC binding (`RELAY`) carries WebSocket upgrades. Check it on a staging deploy with one dial before nodes use Connect; if it does not, the fallback is a Cloudflare Tunnel public hostname for `/v1/tunnel/*`, or the routes directly on the Connect host behind its own TLS.
 - Let's Encrypt allows 50 new certificates a week for one registered domain; every node is one. A dedicated registered domain for node names keeps the site's and the relay's certificates out of that count.
 
 ### 28.2 What to watch
 
-- `IngressHandle::stats` of both listeners (once exported): `rate_limited` and `busy` rising together is one or few addresses flooding; `timeouts` and `malformed` rising is scanning; `unrecognized` is names of no online node; `limited` is accounts at their ingress slots, a node at its open rate, or an ingress budget; `accept_errors` is the host out of descriptors (the loop waits up to 1 s between tries).
-- `tunnel_usage` in `relay.db` (`account_id`, `month`, `dials`, `streams`, `bytes`): the counters of each account and month, written every 60 seconds and at stop. A row whose `account_id` is an account id counts all of it; `<account>/ingress` counts its public and ACME streams, and `<account>/dial/<other account>` the dials of another account to its nodes. Accounts whose dial bytes (all bytes without the ingress row) near 20 GiB for each person or member are near their budget; compare the sum of the account rows with the host's own traffic allowance. Rows older than 13 months are deleted at the start and with each write.
+- `IngressHandle::stats` of both listeners (once exported): `rate_limited` and `busy` rising together is one or few addresses flooding; `timeouts` and `malformed` rising is scanning; `unrecognized` is names of no online node; `limited` is accounts at their public or ACME slots, a node at its open rate, or a public budget; `accept_errors` is the host out of descriptors (the loop waits up to 1 s between tries).
+- `tunnel_usage` in `relay.db` (`account_id`, `month`, `dials`, `streams`, `bytes`): the counters of each account and month, written every 60 seconds and at stop. A row whose `account_id` is an account id counts all of it; `<account>/ingress` counts its public streams, `<account>/acme` its ACME streams (4 slots of their own, in no budget), and `<account>/dial/<other account>` the dials of another account to its nodes. A deleted account's rows go with it, also its rows as a dialing account. Accounts whose dial bytes (all bytes without the ingress and ACME rows) near 20 GiB for each person or member are near their budget; compare the sum of the account rows with the host's own traffic allowance. Rows older than 13 months are deleted at the start and with each write.
 - The relay audit: `tunnel_node_registered`, `tunnel_node_updated`, `tunnel_node_removed`, `tunnel_grant_created`, `tunnel_grant_removed`, `tunnel_grants_ended` (ids only).
 - The thread count of the relay process: each open stream uses two threads and each node WebSocket two, bounded by `APASSY_CONNECT_TUNNEL_MAX_STREAMS` (4096) and `max_nodes` (4096). Raise `_MAX_STREAMS` only with the host's thread and memory room measured on the devbox. When ingress connections are refused while dials still open, the ingress share of the broker is full: many nodes have their `public` streams open at once (or strangers hold them, each bounded by its node's open rate and the first-frame deadline); dials keep their own part of the broker.
+- Dials that end with 1013 (devices dial again at once with their backoff) mean the recheck could not read plans or grants from `relay.db` for four rounds of 60 s in a row: look at the store first. New dials meanwhile get 503 `busy`.
 - Nothing in the logs names a client address or carries stream bytes. If a line ever does, it is a bug: stop and report it. The one tunnel line is "the tunnel usage cannot be written" (a `relay.db` write failed).
 
 ### 28.3 Rollback
