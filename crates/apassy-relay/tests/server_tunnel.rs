@@ -187,7 +187,17 @@ impl Peer {
         }
     }
 
+    /// The next frame that is not a `window` (flow control, section 4).
     fn next_frame(&mut self) -> frame::Frame {
+        loop {
+            let frame = self.next_any_frame();
+            if !frame.is_window() {
+                return frame;
+            }
+        }
+    }
+
+    fn next_any_frame(&mut self) -> frame::Frame {
         match self.next() {
             Message::Binary(bytes) => frame::decode(&bytes).unwrap(),
             other => panic!("expected a frame, got {other:?}"),
@@ -224,7 +234,8 @@ impl Peer {
 type Opens = mpsc::Receiver<(u32, Kind, u8, Vec<u8>)>;
 
 /// A node that echoes every stream back, in random pieces, and closes when Connect
-/// closes. It reports each `open` and each `reset` it receives.
+/// closes. It grants Connect the window of each byte it echoed. It reports each `open`
+/// and each `reset` it receives.
 struct EchoNode {
     opens: Opens,
     resets: mpsc::Receiver<u32>,
@@ -264,6 +275,9 @@ fn echo_node(h: &Harness, token: &str, seed: u64) -> EchoNode {
                 let _ = reset_tx.send(frame.stream);
                 continue;
             }
+            if frame.is_window() {
+                continue;
+            }
             if frame.is_open() {
                 kinds.insert(frame.stream, frame.kind);
                 let _ =
@@ -278,6 +292,13 @@ fn echo_node(h: &Harness, token: &str, seed: u64) -> EchoNode {
                 let (piece, after) = rest.split_at(take);
                 node.send_frame(frame.stream, kind, 0, piece);
                 rest = after;
+            }
+            if !frame.payload.is_empty() && !frame.is_close() {
+                node.send(&frame::window(
+                    frame.stream,
+                    kind,
+                    frame.payload.len() as u32,
+                ));
             }
             if frame.is_close() {
                 node.send_frame(frame.stream, kind, CLOSE, &[]);
@@ -879,7 +900,7 @@ fn a_dial_message_over_16384_bytes_closes_1009() {
 }
 
 #[test]
-fn a_slow_reader_resets_its_own_stream_and_no_other() {
+fn a_node_that_sends_over_its_window_is_reset_and_no_other_stream() {
     let h = Harness::with(
         Limits {
             stream_buffer: 64 * 1024,
@@ -892,8 +913,9 @@ fn a_slow_reader_resets_its_own_stream_and_no_other() {
     let slow_open = node.next_frame();
     let mut fast = h.dial("tok-a2", NODE_A).unwrap();
     let fast_open = node.next_frame();
-    // The node floods the slow stream: Connect buffers at most 64 KiB toward it (plus
-    // what the sockets hold), then resets it. The node's writes never block on it.
+    // The node floods the slow stream past the window that Connect granted (64 KiB,
+    // the stream buffer): Connect resets that stream (`over_window`). The node's writes
+    // never block on it, and the other stream goes on.
     let chunk = vec![0xEEu8; frame::MAX_PAYLOAD];
     let mut reset_seen = false;
     for _ in 0..1024 {
@@ -1571,4 +1593,301 @@ fn the_ingress_of_many_nodes_never_takes_the_streams_kept_for_dials() {
     let open = node_b.next_frame();
     assert_eq!((open.kind, open.flags), (Kind::Public, OPEN));
     drop(dials);
+}
+
+// ---------------------------------------------------------------------------
+// Windows, ACME slots, the recheck, and half-closed clients.
+
+/// A node that answers the first stream with `total` bytes (`i % 251`), only within the
+/// window that Connect grants, then closes. Every frame of Connect goes through a
+/// sequencer of its own, so Connect sending over the node's window fails the test.
+fn window_node(mut node: Peer, total: usize) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let mut seq: Sequencer<()> = Sequencer::new();
+        let open = node.next_any_frame();
+        seq.apply(Dir::ToNode, &open, || ()).expect("open");
+        let mut sent = 0usize;
+        while sent < total {
+            let credit = seq.credit(open.stream, Dir::ToConnect).expect("live") as usize;
+            if credit == 0 {
+                let frame = node.next_any_frame();
+                seq.apply(Dir::ToNode, &frame, || ()).expect("within the rules");
+                continue;
+            }
+            let take = credit.min(frame::MAX_PAYLOAD).min(total - sent);
+            let piece: Vec<u8> = (sent..sent + take).map(|i| (i % 251) as u8).collect();
+            seq.apply_parts(Dir::ToConnect, open.stream, open.kind, 0, &piece, || ())
+                .expect("within the window");
+            node.send_frame(open.stream, open.kind, 0, &piece);
+            sent += take;
+        }
+        node.send_frame(open.stream, open.kind, CLOSE, &[]);
+        // Keep the WebSocket until Connect closes its direction.
+        loop {
+            let frame = node.next_any_frame();
+            if frame.is_close() || frame.is_reset() {
+                return;
+            }
+        }
+    })
+}
+
+#[test]
+fn a_large_answer_reaches_a_slow_client_whole_and_the_buffer_stays_bounded() {
+    let h = Harness::new();
+    let node = window_node(h.node("tok-a1").unwrap(), 5 * 1024 * 1024);
+    let mut device = h.dial("tok-a2", NODE_A).unwrap();
+    // The client reads 64 KiB, then waits: twenty times slower than the node can send.
+    let mut answer = Vec::new();
+    while answer.len() < 5 * 1024 * 1024 {
+        let target = (answer.len() + 64 * 1024).min(5 * 1024 * 1024);
+        while answer.len() < target {
+            match device.next() {
+                Message::Binary(bytes) => answer.extend(bytes),
+                other => panic!("expected the answer, got {other:?}"),
+            }
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(answer.len(), 5 * 1024 * 1024);
+    assert!(
+        answer.iter().enumerate().all(|(i, byte)| *byte == (i % 251) as u8),
+        "every byte arrives, in order"
+    );
+    device.expect_close(close::NORMAL);
+    assert!(
+        h.broker.peak_stream_buffer() <= Limits::default().stream_buffer,
+        "at most the window waits for the client: {}",
+        h.broker.peak_stream_buffer()
+    );
+    node.join().unwrap();
+}
+
+#[test]
+fn connect_sends_a_clients_bytes_only_within_the_nodes_window() {
+    let h = Harness::new();
+    let mut node = h.node("tok-a1").unwrap();
+    let mut device = h.dial("tok-a2", NODE_A).unwrap();
+    let mut seq: Sequencer<()> = Sequencer::new();
+    let open = node.next_any_frame();
+    seq.apply(Dir::ToNode, &open, || ()).unwrap();
+    let total = 4 * frame::INITIAL_WINDOW as usize;
+    let sender = thread::spawn(move || {
+        for piece in vec![9u8; total].chunks(frame::MAX_PAYLOAD) {
+            device.send(piece);
+        }
+        device
+    });
+    // The node grants a little at a time, late; every frame of Connect stays within it.
+    let mut got = 0usize;
+    while got < total {
+        let frame = node.next_any_frame();
+        seq.apply(Dir::ToNode, &frame, || ())
+            .unwrap_or_else(|error| panic!("{}", error.code()));
+        got += if frame.is_window() { 0 } else { frame.payload.len() };
+        if seq.credit(open.stream, Dir::ToNode) == Some(0) && got < total {
+            thread::sleep(Duration::from_millis(100));
+            let grant = frame::window(open.stream, Kind::Device, 32 * 1024);
+            seq.apply(Dir::ToConnect, &frame::decode(&grant).unwrap(), || ())
+                .unwrap();
+            node.send(&grant);
+        }
+    }
+    assert_eq!(got, total);
+    let _device = sender.join().unwrap();
+}
+
+#[test]
+fn the_acme_challenge_gets_through_when_the_public_streams_are_full_and_spent() {
+    let hello = hello_a();
+    let h = Harness::with(
+        Limits {
+            ingress_streams: 1,
+            ingress_per_minute: 1,
+            ingress_bytes_per_month: 2 * hello.len() as u64 + 100,
+            ..test_limits()
+        },
+        Duration::from_secs(30),
+    );
+    let _node = echo_node(&h, "tok-a1", 41);
+    let sni = sni_listener(&h, IngressConfig::default());
+    let acme = ingress::serve_acme(
+        TcpListener::bind("127.0.0.1:0").unwrap(),
+        h.broker.clone(),
+        IngressConfig::default(),
+    )
+    .unwrap();
+    let challenge = || {
+        let request = acme_request(
+            "aaaaaaaaaa.node.example.test",
+            "/.well-known/acme-challenge/SynthToken_0123",
+        );
+        let mut client = agent(acme.addr);
+        client.write_all(&request).unwrap();
+        let mut answer = Vec::new();
+        client.read_to_end(&mut answer).unwrap();
+        assert_eq!(answer, request, "the challenge reaches the node and back");
+    };
+    // The one public slot is taken and the minute's public rate is used up.
+    let mut holder = agent(sni.addr);
+    holder.write_all(&hello).unwrap();
+    let mut echoed = vec![0u8; hello.len()];
+    holder.read_exact(&mut echoed).unwrap();
+    let mut refused = agent(sni.addr);
+    refused.write_all(&hello).unwrap();
+    let mut nothing = Vec::new();
+    let _ = refused.read_to_end(&mut nothing);
+    assert!(nothing.is_empty(), "the public class is full");
+    challenge();
+    // The public budget of the month is spent: public streams end and are refused.
+    holder.write_all(&[4u8; 100]).unwrap();
+    let mut rest = Vec::new();
+    let _ = holder.read_to_end(&mut rest);
+    assert!(h.broker.ingress_usage("acc_a").tripped);
+    h.clock.advance(60);
+    let mut late = agent(sni.addr);
+    late.write_all(&hello).unwrap();
+    let mut nothing = Vec::new();
+    let _ = late.read_to_end(&mut nothing);
+    assert!(nothing.is_empty(), "the public budget is spent");
+    challenge();
+    let acme_usage = h.broker.acme_usage("acc_a");
+    assert_eq!(acme_usage.streams, 2);
+    assert!(!acme_usage.tripped);
+    assert!(
+        h.broker.ingress_usage("acc_a").bytes <= 2 * hello.len() as u64 + 200,
+        "the challenges are not in the public budget"
+    );
+}
+
+#[test]
+fn the_acme_class_has_slots_of_its_own_inside_the_brokers_ingress_share() {
+    let h = Harness::with(
+        Limits {
+            acme_streams: 1,
+            ..test_limits()
+        },
+        Duration::from_secs(30),
+    );
+    // A node that never answers keeps the one ACME slot.
+    let mut node = h.node("tok-a1").unwrap();
+    let request = acme_request(
+        "aaaaaaaaaa.node.example.test",
+        "/.well-known/acme-challenge/SynthToken_0123",
+    );
+    let first = h
+        .broker
+        .open_ingress(
+            "aaaaaaaaaa.node.example.test",
+            Kind::Acme,
+            request.clone(),
+            CLOSE,
+        )
+        .expect("the first ACME stream");
+    assert_eq!(node.next_frame().kind, Kind::Acme);
+    assert!(
+        h.broker
+            .open_ingress("aaaaaaaaaa.node.example.test", Kind::Acme, request, CLOSE)
+            .is_err(),
+        "the ACME slots are full"
+    );
+    drop(first);
+}
+
+#[test]
+fn a_directory_that_cannot_answer_skips_rounds_and_then_ends_streams_with_1013() {
+    let h = Harness::with(
+        Limits {
+            recheck: Duration::from_millis(100),
+            recheck_skips: 5,
+            ..test_limits()
+        },
+        Duration::from_secs(30),
+    );
+    let _node = echo_node(&h, "tok-a1", 42);
+    h.directory.grant(NODE_A, "acc_b");
+    let mut own = h.dial("tok-a2", NODE_A).unwrap();
+    let mut granted = h.dial("tok-b", NODE_A).unwrap();
+    // A short failure of the store: a few rounds are skipped and the streams stay.
+    h.directory.set_failing(true);
+    thread::sleep(Duration::from_millis(250));
+    h.directory.set_failing(false);
+    thread::sleep(Duration::from_millis(250));
+    own.send(b"a");
+    assert_eq!(own.read_bytes(1), b"a");
+    granted.send(b"b");
+    assert_eq!(granted.read_bytes(1), b"b");
+    // A new dial while the store fails is 503 `busy`, never `plan_required`.
+    h.directory.set_failing(true);
+    assert_eq!(
+        h.dial("tok-a2", NODE_A).err(),
+        Some((503, "busy".into()))
+    );
+    // A long failure ends the open streams with 1013 (try again), never 4003.
+    own.expect_close(close::TRY_AGAIN);
+    granted.expect_close(close::TRY_AGAIN);
+    assert!(h.broker.online(NODE_A), "the node stays connected");
+    h.directory.set_failing(false);
+    let mut again = h.dial("tok-a2", NODE_A).expect("a dial again");
+    again.send(b"c");
+    assert_eq!(again.read_bytes(1), b"c");
+}
+
+#[test]
+fn one_other_account_spends_only_its_part_of_the_share_of_other_accounts() {
+    let h = Harness::with(
+        Limits {
+            bytes_per_month: 1000,
+            grantee_bytes_percent: 50,
+            streams_per_grantee: 16,
+            grantee_streams: 32,
+            ..test_limits()
+        },
+        Duration::from_secs(30),
+    );
+    h.directory.add_device("tok-c", "acc_c", "dev_c");
+    let _node = echo_node(&h, "tok-a1", 43);
+    h.directory.grant(NODE_A, "acc_b");
+    h.directory.grant(NODE_A, "acc_c");
+    // The share of other accounts is 500 bytes, of which one spends at most 250.
+    let mut b = h.dial("tok-b", NODE_A).unwrap();
+    b.send(&[6u8; 125]);
+    b.expect_close(close::TUNNEL_LIMIT);
+    assert!(h.broker.grantee_usage("acc_a", "acc_b").tripped);
+    assert_eq!(
+        h.dial("tok-b", NODE_A).err(),
+        Some((429, "tunnel_limit".into()))
+    );
+    // The other account still has its part.
+    let mut c = h.dial("tok-c", NODE_A).expect("its own part");
+    c.send(&[7u8; 100]);
+    assert_eq!(c.read_bytes(100), vec![7u8; 100]);
+    assert!(!h.broker.grantee_usage("acc_a", "acc_c").tripped);
+}
+
+#[test]
+fn an_agent_that_half_closes_gives_the_node_the_close_grace_of_silence() {
+    let h = Harness::new();
+    let mut node = h.node("tok-a1").unwrap();
+    let sni = sni_listener(&h, IngressConfig::default());
+    let mut agent = agent(sni.addr);
+    agent.write_all(&hello_a()).unwrap();
+    agent.shutdown(std::net::Shutdown::Write).unwrap();
+    let open = node.next_frame();
+    assert_eq!(open.kind, Kind::Public);
+    let close_frame = node.next_frame();
+    assert_eq!((close_frame.stream, close_frame.flags), (open.stream, CLOSE));
+    // The node may still answer the half-closed agent within the grace.
+    node.send_frame(open.stream, Kind::Public, 0, b"answer");
+    let mut answer = [0u8; 6];
+    agent.read_exact(&mut answer).unwrap();
+    assert_eq!(&answer, b"answer");
+    // Then it stays silent: Connect resets the stream and ends the agent's connection.
+    let started = Instant::now();
+    let reset = node.next_frame();
+    assert_eq!((reset.stream, reset.flags), (open.stream, RESET));
+    assert!(started.elapsed() >= Duration::from_millis(200));
+    let mut rest = Vec::new();
+    let _ = agent.read_to_end(&mut rest);
+    assert!(rest.is_empty());
 }

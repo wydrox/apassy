@@ -45,6 +45,9 @@ pub mod close {
     pub const BAD_DATA: u16 = 1007;
     pub const TOO_BIG: u16 = 1009;
     pub const INTERNAL: u16 = 1011;
+    /// Connect could not check the plan or the grant of an open stream for a few rounds
+    /// in a row: the client may dial again (RFC 6455 "try again later").
+    pub const TRY_AGAIN: u16 = 1013;
     pub const NODE_OFFLINE: u16 = 4001;
     pub const TUNNEL_LIMIT: u16 = 4002;
     pub const REVOKED: u16 = 4003;

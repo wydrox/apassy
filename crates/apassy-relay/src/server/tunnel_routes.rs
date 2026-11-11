@@ -46,7 +46,8 @@ use crate::server::hub::Hub;
 use crate::server::ingress::{self, IngressConfig, IngressHandle};
 use crate::server::store::{db, to_i, to_u};
 use crate::server::tunnel::{
-    self, Broker, Caller, Limits, NodeEntry, Refusal, SystemClock, TunnelDirectory, Usage, month_of,
+    self, Broker, Caller, Limits, NodeEntry, Refusal, SystemClock, TunnelDirectory, Unavailable,
+    Usage, month_of,
 };
 
 /// The node's WebSocket (contract 3.2).
@@ -171,16 +172,17 @@ impl TunnelDirectory for AccountDirectory {
             .flatten()
     }
 
-    fn has_grant(&self, node_id: &str, grantee_account: &str) -> bool {
-        self.hub.upgrade().is_some_and(|hub| {
-            grant_valid(&hub, node_id, grantee_account, crate::now_unix()).unwrap_or(false)
-        })
+    /// A store error is [`Unavailable`], never a "no": the recheck then skips a round
+    /// instead of ending the streams as if the grant had gone.
+    fn has_grant(&self, node_id: &str, grantee_account: &str) -> Result<bool, Unavailable> {
+        let hub = self.hub.upgrade().ok_or(Unavailable)?;
+        grant_valid(&hub, node_id, grantee_account, crate::now_unix()).map_err(|_| Unavailable)
     }
 
-    fn entitled(&self, account_id: &str) -> bool {
-        self.hub
-            .upgrade()
-            .is_some_and(|hub| entitled(&hub, account_id, crate::now_unix()).unwrap_or(false))
+    /// A store error is [`Unavailable`], never a "no" (see [`Self::has_grant`]).
+    fn entitled(&self, account_id: &str) -> Result<bool, Unavailable> {
+        let hub = self.hub.upgrade().ok_or(Unavailable)?;
+        entitled(&hub, account_id, crate::now_unix()).map_err(|_| Unavailable)
     }
 
     fn budget_units(&self, account_id: &str) -> u64 {
@@ -751,11 +753,45 @@ pub fn device_revoked(hub: &Hub, device: &str) {
 }
 
 /// An account was deleted (`account::delete_account`, which deleted its nodes and the
-/// grants both ways): its node WebSockets close (4003) and its devices' dials end.
+/// grants both ways): its node WebSockets close (4003), its devices' dials end, and its
+/// tunnel counters go, in memory and in `tunnel_usage`: its own rows and their parts
+/// (`<account>`, `<account>/…`) and its rows in other accounts (`<other>/dial/<account>`).
 pub fn account_deleted(hub: &Hub, account: &str) {
     if let Some(broker) = hub.tunnel() {
         broker.end_account(account);
+        broker.forget_account(account);
     }
+    if forget_usage(hub, account).is_err() {
+        eprintln!("apassy-relay: the tunnel usage of a deleted account cannot be deleted");
+    }
+}
+
+/// Deletes the `tunnel_usage` rows of an account and its rows in other accounts. Returns
+/// how many.
+pub fn forget_usage(hub: &Hub, account: &str) -> RelayResult<usize> {
+    let own_parts = format!("{}/%", like_escaped(account));
+    let as_grantee = format!("%/dial/{}", like_escaped(account));
+    hub.directory.store.tx(|tx| {
+        tx.execute(
+            "DELETE FROM tunnel_usage WHERE account_id = ?1 \
+             OR account_id LIKE ?2 ESCAPE '\\' OR account_id LIKE ?3 ESCAPE '\\'",
+            params![account, own_parts, as_grantee],
+        )
+        .map_err(db)
+    })
+}
+
+/// `text` for a `LIKE` pattern with `\` as the escape: `%`, `_`, and `\` match only
+/// themselves.
+fn like_escaped(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if matches!(c, '%' | '_' | '\\') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// The plan of `account` ended (billing): the open streams of its nodes end with 4003.

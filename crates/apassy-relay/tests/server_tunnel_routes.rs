@@ -542,7 +542,7 @@ fn echo_node(mut node: Peer) -> EchoNode {
                 }
                 _ => continue,
             };
-            if frame.is_reset() {
+            if frame.is_reset() || frame.is_window() {
                 continue;
             }
             if frame.is_open() {
@@ -550,6 +550,11 @@ fn echo_node(mut node: Peer) -> EchoNode {
             }
             if !frame.payload.is_empty() {
                 node.send(&frame::encode(frame.stream, frame.kind, 0, &frame.payload));
+                if !frame.is_close() {
+                    // The window of the echoed bytes (contract section 4).
+                    let added = u32::try_from(frame.payload.len()).unwrap();
+                    node.send(&frame::window(frame.stream, frame.kind, added));
+                }
             }
             if frame.is_close() {
                 node.send(&frame::encode(frame.stream, frame.kind, CLOSE, &[]));
@@ -1101,9 +1106,35 @@ fn deleting_the_account_ends_its_tunnel_and_its_grants() {
         Some(&b.mac_token),
         Some(&json!({"node_id": b_node, "account_id": a.mac.account})),
     );
-    // A's device dials B's node through B's grant.
+    // A's device dials B's node through B's grant, and A's own node.
     let mut across = c.dial(&a.phone_token, &b_node).expect("101");
     b_echo.open();
+    across.send(b"across");
+    assert_eq!(across.read_bytes(6), b"across");
+    let mut own = c.dial(&a.phone_token, &node_id).expect("101");
+    node.open();
+    own.send(b"own");
+    assert_eq!(own.read_bytes(3), b"own");
+    let hub = c.running().hub();
+    let broker = hub.tunnel().expect("the broker").clone();
+    let flush = || {
+        tunnel_routes::flush_usage(&hub, &broker, &mut HashMap::new()).expect("written");
+    };
+    flush();
+    let rows_of_a = || {
+        c.directory_rows(&format!(
+            "SELECT account_id FROM tunnel_usage WHERE account_id = '{a}' \
+             OR account_id LIKE '{a}/%' OR account_id LIKE '%/dial/{a}' ORDER BY account_id",
+            a = a.mac.account
+        ))
+    };
+    assert_eq!(
+        rows_of_a(),
+        vec![
+            a.mac.account.clone(),
+            format!("{}/dial/{}", b.mac.account, a.mac.account)
+        ]
+    );
     c.ok(
         "DELETE",
         "/v1/account",
@@ -1122,6 +1153,56 @@ fn deleting_the_account_ends_its_tunnel_and_its_grants() {
     assert_eq!(
         c.directory_rows("SELECT id FROM tunnel_node"),
         vec![b_node.clone()]
+    );
+    // Its tunnel counters went too, in memory and in `tunnel_usage`, also its row as a
+    // dialing account in B's; B's own row stays.
+    assert!(rows_of_a().is_empty(), "{:?}", rows_of_a());
+    flush();
+    assert!(rows_of_a().is_empty(), "nothing comes back from memory");
+    assert_eq!(broker.usage(&a.mac.account).bytes, 0);
+    assert_eq!(broker.grantee_usage(&b.mac.account, &a.mac.account).bytes, 0);
+    assert_eq!(
+        c.directory_rows(&format!(
+            "SELECT account_id FROM tunnel_usage WHERE account_id = '{}'",
+            b.mac.account
+        ))
+        .len(),
+        1
+    );
+}
+
+#[test]
+fn old_usage_rows_are_pruned_and_thirteen_months_stay() {
+    let c = start();
+    let hub = c.running().hub();
+    let now = apassy_relay::now_unix();
+    let first = tunnel_routes::first_kept_month(now);
+    let before = if first % 100 == 1 {
+        first - 100 + 11
+    } else {
+        first - 1
+    };
+    let conn = rusqlite::Connection::open(c.cfg.directory_path()).unwrap();
+    conn.execute_batch(&format!("PRAGMA key = '{}';", relay::VAULT_KEY))
+        .unwrap();
+    for (account, month) in [
+        ("acc_old", before),
+        ("acc_old/ingress", before),
+        ("acc_kept", first),
+        ("acc_now", apassy_relay::server::tunnel::month_of(now)),
+    ] {
+        conn.execute(
+            "INSERT INTO tunnel_usage (account_id, month, dials, streams, bytes) \
+             VALUES (?1, ?2, 1, 1, 1)",
+            rusqlite::params![account, month.to_string()],
+        )
+        .unwrap();
+    }
+    drop(conn);
+    assert_eq!(tunnel_routes::prune_usage(&hub, now).unwrap(), 2);
+    assert_eq!(
+        c.directory_rows("SELECT account_id FROM tunnel_usage ORDER BY account_id"),
+        vec!["acc_kept".to_string(), "acc_now".to_string()]
     );
 }
 
