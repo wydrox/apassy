@@ -1953,6 +1953,13 @@ impl<S: BillingStore> Billing<S> {
                 &price.price_id,
             ],
         );
+        // Stripe's list of subscriptions is the truth, also for one whose events have not
+        // arrived: a subscription that is not over (one beyond its grace, `unpaid`,
+        // `paused`, or still `incomplete`) can still charge, so the account pays it or ends
+        // it in the portal before it buys again, and never pays for two plans.
+        if let Some(customer) = customer.as_deref() {
+            self.refuse_live_subscription(account, customer)?;
+        }
         // A repeated click for the same request gets the session Stripe still shows open.
         if customer.is_some()
             && let Some(open) = open.as_ref().filter(|open| {
@@ -1970,38 +1977,15 @@ impl<S: BillingStore> Billing<S> {
                 });
             }
         }
-        if let Some(customer) = customer.as_deref() {
-            // Every open session of the account ends first, the stored one and those
-            // Stripe lists for its customer: the account never holds two open sessions.
-            // One that cannot be ended refuses the request (`503 busy`), so no new one is
-            // made beside it.
-            self.end_sessions_locked(account, Some(customer), now)?;
-            // Then Stripe's list of subscriptions is the truth, also for one whose events
-            // have not arrived, and for one a session made just before it ended: a
-            // subscription that is not over (one beyond its grace, `unpaid`, `paused`, or
-            // still `incomplete`) can still charge, so the account pays it or ends it in
-            // the portal before it buys again, and never pays for two plans.
-            let at_stripe = self.stripe.customer_subscriptions(customer)?;
-            self.note_stripe_time(at_stripe.date)?;
-            if !at_stripe.complete {
-                return Err(RelayError::new(
-                    codes::CONFLICT,
-                    "This account has subscriptions at Stripe. Manage them in the billing portal.",
-                ));
-            }
-            if let Some((id, status)) = at_stripe
-                .list
-                .iter()
-                .find(|(_, status)| !StripeStatus::parse(status).is_final())
-            {
-                self.log(&format!(
-                    "checkout refused for {account}: subscription {id} is {status} at Stripe"
-                ));
-                return Err(RelayError::new(
-                    codes::CONFLICT,
-                    "This account has a subscription that is not over. Pay or end it in the billing portal.",
-                ));
-            }
+        // Every open session of the account ends before a new one, the stored one and
+        // those Stripe lists for its customer: the account never holds two open sessions.
+        // One that cannot be ended refuses the request (`503 busy`), so no new one is made
+        // beside it. A session that completed just before it ended made a subscription:
+        // the list is read again.
+        if let Some(customer) = customer.as_deref()
+            && self.end_sessions_locked(account, Some(customer), now)? > 0
+        {
+            self.refuse_live_subscription(account, customer)?;
         }
         // Every session names the account's own Stripe customer, made before the first
         // one: two checkouts of one account are two subscriptions of one customer, never
@@ -2049,6 +2033,33 @@ impl<S: BillingStore> Billing<S> {
         })
     }
 
+    /// `409 conflict` when Stripe lists a subscription of the customer that is not over,
+    /// or more subscriptions than Connect reads.
+    fn refuse_live_subscription(&self, account: &str, customer: &str) -> RelayResult<()> {
+        let at_stripe = self.stripe.customer_subscriptions(customer)?;
+        self.note_stripe_time(at_stripe.date)?;
+        if !at_stripe.complete {
+            return Err(RelayError::new(
+                codes::CONFLICT,
+                "This account has subscriptions at Stripe. Manage them in the billing portal.",
+            ));
+        }
+        if let Some((id, status)) = at_stripe
+            .list
+            .iter()
+            .find(|(_, status)| !StripeStatus::parse(status).is_final())
+        {
+            self.log(&format!(
+                "checkout refused for {account}: subscription {id} is {status} at Stripe"
+            ));
+            return Err(RelayError::new(
+                codes::CONFLICT,
+                "This account has a subscription that is not over. Pay or end it in the billing portal.",
+            ));
+        }
+        Ok(())
+    }
+
     /// Ends one Checkout session at Stripe: done when Stripe expires it, or shows it is
     /// not open any more (it completed or expired before). Otherwise `503 busy`.
     fn end_session(&self, account: &str, id: &str) -> RelayResult<()> {
@@ -2076,13 +2087,14 @@ impl<S: BillingStore> Billing<S> {
     /// Ends every open Checkout session of `account` at Stripe, for a caller that holds
     /// its checkout lock: those Stripe lists for its customer (page after page, also the
     /// ones Connect no longer stores) and the stored one; then the stored one is
-    /// forgotten. Any failure is an error and the stored session stays.
+    /// forgotten. Any failure is an error and the stored session stays. Answers how many
+    /// sessions were ended.
     fn end_sessions_locked(
         &self,
         account: &str,
         customer: Option<&str>,
         now: u64,
-    ) -> RelayResult<()> {
+    ) -> RelayResult<usize> {
         let stored = self.store.transaction(|tx| tx.open_checkout(account))?;
         let mut sessions: BTreeSet<String> = BTreeSet::new();
         if let Some(customer) = customer {
@@ -2115,7 +2127,7 @@ impl<S: BillingStore> Billing<S> {
                 Ok(())
             })?;
         }
-        Ok(())
+        Ok(sessions.len())
     }
 
     /// Makes the Stripe customer of an account (`POST /v1/customers` with the account id
@@ -2404,6 +2416,7 @@ impl<S: BillingStore> Billing<S> {
                 .store
                 .transaction(|tx| Ok(tx.customer_of_account(account)?.map(|row| row.customer)))?;
             self.end_sessions_locked(account, customer.as_deref(), now)
+                .map(drop)
         })
     }
 
