@@ -83,6 +83,11 @@ pub struct State {
     /// Counts each start, cancel, end, and forget. A call that ran without the mutex puts
     /// its account or join back only when nothing changed in between.
     generation: u64,
+    /// The recovery key that Connect held at the last read of the account, with the
+    /// generation of that read. It stays here while a call holds the account, so a call
+    /// that opens the account file meanwhile still takes "OK" of the line that the read
+    /// showed (`connect_recovery_change_seen`).
+    held_recovery: Option<(u64, String)>,
 }
 
 /// A join as the app shows it: "Waiting for MacBook Pro… Both devices show: blaze cable
@@ -377,9 +382,14 @@ impl Accounts {
         &self,
         call: impl FnOnce(&mut ConnectAccount) -> Result<T, ConnectError>,
     ) -> Result<Option<T>, ConnectError> {
-        let (account, generation) = {
+        let (account, generation, held) = {
             let mut state = guard(&self.state);
-            (state.account.take(), state.generation)
+            let held = state
+                .held_recovery
+                .as_ref()
+                .filter(|(at, _)| *at == state.generation)
+                .map(|(_, key)| key.clone());
+            (state.account.take(), state.generation, held)
         };
         let mut account = match account {
             Some(account) => account,
@@ -394,11 +404,17 @@ impl Accounts {
                 }
             }
         };
+        account.keep_held_recovery_key(held);
         let result = call(&mut account);
         {
             let mut state = guard(&self.state);
-            if state.generation == generation && state.account.is_none() {
-                state.account = Some(account);
+            if state.generation == generation {
+                if let Some(key) = account.held_recovery_key() {
+                    state.held_recovery = Some((generation, key.to_owned()));
+                }
+                if state.account.is_none() {
+                    state.account = Some(account);
+                }
             }
         }
         result.map(Some)

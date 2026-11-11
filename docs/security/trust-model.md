@@ -327,10 +327,15 @@ owner chooses).
 recovery is a signature by that key over the new device key and the next recovery key, so the code
 never leaves the device where it is typed. A new code of a live device (connect-account-v1 section 9.1)
 is written first as a pending rotation of public values (the old and the new public key and the signed
-statement), so a lost answer or a quit never leaves the owner with a code that stopped working
-unannounced: the device shows the code only when Connect names its key, and keeps the mark of a code
-that nobody saw until the owner closes its sheet. Each device pins the public key that it saw last, so
-a new code of another device shows on every other device with the name of that device and its day.
+statement), so a lost answer, a `429`, or a quit never leaves the owner with a code that stopped
+working unannounced: the device shows the code only when Connect names its key; without an answer it
+says that it cannot tell yet, shows the mark of a code that nobody saw at once, and the next read of
+the account settles it in the same session (Connect took the key: the mark stays; it did not: the old
+code still works, and the device says so). A request of an earlier try that reaches Connect late is
+settled the same way: the key that names this device as its maker is a code that nobody saw. The mark
+goes only when the owner closes the sheet of a code. Each device pins the public key that it saw last,
+so a new code of another device shows on every other device with the name of that device and its day,
+also on a device whose account file is from a build before the pin.
 A Connect that lies about the key can make a device say that the code changed, or that it did not;
 it cannot learn or use a code.
 

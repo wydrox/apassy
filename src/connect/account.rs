@@ -466,7 +466,8 @@ impl AccountState {
         let meta = match fs::symlink_metadata(path) {
             Ok(meta) => meta,
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-            Err(_) => return Err(ConnectError::Local),
+            // It cannot be read now: nothing is decided on it.
+            Err(_) => return Err(ConnectError::AccountFileUnreadable),
         };
         if !meta.is_file() || meta.permissions().mode() & 0o077 != 0 {
             return Err(ConnectError::Local);
@@ -474,7 +475,7 @@ impl AccountState {
         let mut text = Vec::new();
         fs::File::open(path)
             .and_then(|file| file.take(MAX_STATE_BYTES + 1).read_to_end(&mut text))
-            .map_err(|_| ConnectError::Local)?;
+            .map_err(|_| ConnectError::AccountFileUnreadable)?;
         if text.len() as u64 > MAX_STATE_BYTES {
             return Err(ConnectError::Local);
         }
@@ -553,19 +554,26 @@ pub fn forget_this_device(
     Ok(Forgotten(()))
 }
 
-/// Whether the account file at `path` exists and this version of Apassy cannot read it: a
-/// file of an earlier version ([`ConnectError::OldAccountFile`]), or one of a shape or with
-/// a mode that it does not take. This device must join its account again, after the owner
-/// forgets the file here ([`forget_old_account_file`]).
+/// Whether the account file at `path` exists and this version of Apassy cannot take it: a
+/// file of an earlier version ([`ConnectError::OldAccountFile`]), or one that it read and
+/// that does not parse, is of another shape or size, or has a mode or a type that it does
+/// not take. This device must join its account again, after the owner forgets the file
+/// here ([`forget_old_account_file`]). A file that cannot be read now
+/// ([`ConnectError::AccountFileUnreadable`]: permissions, a busy disk) is not: the owner
+/// tries again.
 pub fn is_old_account_file(path: &Path) -> bool {
-    AccountState::load(path).is_err()
+    matches!(
+        AccountState::load(path),
+        Err(error) if error != ConnectError::AccountFileUnreadable
+    )
 }
 
 /// Forget an account file at `path` that this version cannot read ([`is_old_account_file`]),
 /// with the account key, after a fresh owner check for
 /// [`OwnerAction::ForgetOldConnectAccount`] in the vault session `epoch`; then a creation
 /// or a join works again on this device. A file that loads is not forgotten here
-/// ([`ConnectError::Invalid`]). The proof is used up.
+/// ([`ConnectError::Invalid`]), nor one that cannot be read now
+/// ([`ConnectError::AccountFileUnreadable`]: the owner tries again). The proof is used up.
 pub fn forget_old_account_file(
     store: &dyn DeviceKeyStore,
     path: &Path,
@@ -576,10 +584,11 @@ pub fn forget_old_account_file(
         .check(&OwnerAction::ForgetOldConnectAccount, epoch)
         .map_err(ConnectError::OwnerCheck)?;
     drop(proof);
-    if !is_old_account_file(path) {
-        return Err(ConnectError::Invalid);
+    match AccountState::load(path) {
+        Err(ConnectError::AccountFileUnreadable) => Err(ConnectError::AccountFileUnreadable),
+        Err(_) => forget_this_device(store, path),
+        Ok(_) => Err(ConnectError::Invalid),
     }
-    forget_this_device(store, path)
 }
 
 /// Remove the vault store rows of `vault` (schema 34, `key_source = 'account'`) of
@@ -827,6 +836,10 @@ pub struct ConnectAccount {
     verified_at: Option<std::time::Instant>,
     /// What the shared vaults keep in memory between two refreshes (section 16).
     shares: share::ShareMemory,
+    /// The creation or the recovery made a new account device key, because Connect counted
+    /// the earlier one as used ([`Self::made_new_key`]), and the account of an earlier join
+    /// that still lists that key ([`Self::left_in_other_account`]).
+    key_note: Option<Option<(String, String)>>,
 }
 
 impl fmt::Debug for ConnectAccount {
@@ -870,6 +883,7 @@ impl ConnectAccount {
             feed: None,
             verified_at: None,
             shares: share::ShareMemory::default(),
+            key_note: None,
         }
     }
 
@@ -915,8 +929,11 @@ impl ConnectAccount {
     /// that it made. Its recovery code is in memory until the creation is answered: after a
     /// restart the account is still made and its file written, and the call answers
     /// [`ConnectError::RecoveryCodeNotShown`]. An id that Connect holds or held (`409
-    /// account_id_taken`) gets a new id and a new body; a used key (`409 conflict`) and any
-    /// other refusal end the creation.
+    /// account_id_taken`) gets a new id and a new body. A used key (`409 conflict`: an
+    /// earlier join that a device confirmed after this device had left it) first leaves the
+    /// account of that join when this device can sign that ([`leave_earlier_join`]), then
+    /// gets a new key and a new body, once, and the account says so
+    /// ([`Self::made_new_key`]). Any other refusal ends the creation.
     pub fn create(
         client: ConnectClient,
         store: &dyn DeviceKeyStore,
@@ -929,11 +946,15 @@ impl ConnectAccount {
         }
         let name = clean_name(name)?;
         let device_name = clean_name(device_name)?;
-        let signer = AccountSigner::open_or_create(store)?;
-        // A join of this device that waits on disk ends first.
+        let mut signer = AccountSigner::open_or_create(store)?;
+        // A join of this device that waits on disk ends first. A device may have confirmed
+        // it after this device left it, so its account may list this key (below).
+        let mut earlier = PendingJoinFile::load(path)
+            .filter(|earlier| earlier.public_key == signer.public_key_b64u());
         end_pending_join(path, &signer);
-        let public_key = signer.public_key_b64u();
+        let mut public_key = signer.public_key_b64u();
         let mut pending = PendingCreation::load(path, client.origin(), &public_key);
+        let mut key_note = None;
         for _ in 0..CREATE_ID_ROUNDS {
             let creation = match pending.take() {
                 Some(creation) => creation,
@@ -973,7 +994,19 @@ impl ConnectAccount {
                 answer = client.create_account(&creation.body());
             }
             match answer {
-                Ok(created) => return Self::created(client, signer, path, &creation, &created),
+                Ok(created) => {
+                    let (mut account, code) =
+                        Self::created(client, signer, path, &creation, &created)?;
+                    account.key_note = key_note;
+                    return Ok((account, code));
+                }
+                Err(ConnectError::Conflict) if key_note.is_none() => {
+                    // Connect counts this key as used: a new key and a new body.
+                    PendingCreation::remove(path);
+                    drop(take_pending_code(path, &creation.account_id));
+                    signer = Self::renew_key(store, signer, earlier.take(), &mut key_note)?;
+                    public_key = signer.public_key_b64u();
+                }
                 Err(ConnectError::AccountIdTaken) => {
                     // A new id and a new body; the code of this one is of no account.
                     PendingCreation::remove(path);
@@ -1058,8 +1091,10 @@ impl ConnectAccount {
     /// device (the new root) with its account key, every vault store of the account is
     /// deleted at Connect, and a new recovery code replaces the old one. The old code
     /// never leaves this Mac: its key signs the request. A lost answer is sent once more
-    /// with the same body. The new code comes back once, with the number of deleted
-    /// stores.
+    /// with the same body. A used key (`409 conflict`) is handled as at
+    /// [`Self::create`]: the account of a late-confirmed earlier join is left first, then a
+    /// new key signs a new request, once. The new code comes back once, with the number of
+    /// deleted stores.
     pub fn recover(
         client: ConnectClient,
         store: &dyn DeviceKeyStore,
@@ -1077,30 +1112,45 @@ impl ConnectAccount {
         }
         let old = RecoveryCode::parse(recovery).ok_or(ConnectError::Invalid)?;
         let device_name = clean_name(device_name)?;
-        let signer = AccountSigner::open_or_create(store)?;
-        // A join of this device that waits on disk ends first.
+        let mut signer = AccountSigner::open_or_create(store)?;
+        // A join of this device that waits on disk ends first. A device may have confirmed
+        // it after this device left it, so its account may list this key (below).
+        let mut earlier = PendingJoinFile::load(path)
+            .filter(|earlier| earlier.public_key == signer.public_key_b64u());
         end_pending_join(path, &signer);
         let new = RecoveryCode::generate()?;
         let recovery_key = new.key()?.public_key_b64u();
-        let public_key = signer.public_key_b64u();
-        let message = recover_message(client.origin(), account_id, &public_key, &recovery_key);
-        let signature = encode_b64u(&signer.sign(&message)?);
-        let recovery_signature = encode_b64u(&old.key()?.sign_recover(&message)?);
-        drop(old);
-        // This device is the root of the new device list: its entry, signed over its name.
-        let (root, _) = signer.sign_root(client.origin(), account_id, &device_name)?;
-        let statement = encode_b64u(&root);
-        let body = RecoverBody {
-            account_id,
-            device_name: &device_name,
-            platform: PLATFORM,
-            public_key: &public_key,
-            recovery_key: &recovery_key,
-            signature: &signature,
-            recovery_signature: &recovery_signature,
-            statement: &statement,
+        let mut key_note = None;
+        let (answer, public_key) = loop {
+            let public_key = signer.public_key_b64u();
+            let message =
+                recover_message(client.origin(), account_id, &public_key, &recovery_key);
+            let signature = encode_b64u(&signer.sign(&message)?);
+            let recovery_signature = encode_b64u(&old.key()?.sign_recover(&message)?);
+            // This device is the root of the new device list: its entry, signed over its
+            // name.
+            let (root, _) = signer.sign_root(client.origin(), account_id, &device_name)?;
+            let statement = encode_b64u(&root);
+            let body = RecoverBody {
+                account_id,
+                device_name: &device_name,
+                platform: PLATFORM,
+                public_key: &public_key,
+                recovery_key: &recovery_key,
+                signature: &signature,
+                recovery_signature: &recovery_signature,
+                statement: &statement,
+            };
+            match twice(|| client.recover(&body)) {
+                Ok(answer) => break (answer, public_key),
+                // Connect counts this key as used: a new key and a new request.
+                Err(ConnectError::Conflict) if key_note.is_none() => {
+                    signer = Self::renew_key(store, signer, earlier.take(), &mut key_note)?;
+                }
+                Err(error) => return Err(error),
+            }
         };
-        let answer = twice(|| client.recover(&body))?;
+        drop(old);
         if answer.account_id != account_id || !valid_device_id(&answer.device_id) {
             return Err(ConnectError::BadAnswer);
         }
@@ -1117,7 +1167,45 @@ impl ConnectAccount {
         account.state.created_at = account.now();
         account.state.recovery_key = Some(recovery_key);
         account.state.save(path)?;
+        account.key_note = key_note;
         Ok((account, new, answer.deleted_stores))
+    }
+
+    /// Connect counts the key of `signer` as used at a creation or a recovery (`409
+    /// conflict`): before the key is forgotten, the account of the earlier join `earlier`,
+    /// which a device confirmed after this device had left it, drops this device when it
+    /// can sign that ([`leave_earlier_join`]); then this device makes a new key. `note`
+    /// records it for [`Self::made_new_key`] and [`Self::left_in_other_account`].
+    fn renew_key(
+        store: &dyn DeviceKeyStore,
+        signer: AccountSigner,
+        earlier: Option<PendingJoinFile>,
+        note: &mut Option<Option<(String, String)>>,
+    ) -> Result<AccountSigner, ConnectError> {
+        let left_behind = earlier.and_then(|earlier| leave_earlier_join(&earlier, &signer));
+        *note = Some(left_behind);
+        drop(signer);
+        AccountSigner::forget(store)?;
+        AccountSigner::open_or_create(store)
+    }
+
+    /// Whether the creation or the recovery of this account made a new account device key,
+    /// because Connect counted the earlier key of this device as used (a join that did not
+    /// finish here). The device of that key stays in its account until a device of the
+    /// account removes it.
+    pub fn made_new_key(&self) -> bool {
+        self.key_note.is_some()
+    }
+
+    /// The account of an earlier join of this device that a device confirmed after this
+    /// device had left the join, and that still lists this device under its earlier key:
+    /// this device could not remove itself there before it made a new key. The name of the
+    /// device that confirmed it and the name of this device in that account.
+    pub fn left_in_other_account(&self) -> Option<(&str, &str)> {
+        self.key_note
+            .as_ref()?
+            .as_ref()
+            .map(|(confirmer, device)| (confirmer.as_str(), device.as_str()))
     }
 
     /// Use `clock` for every time of this account (tests).
@@ -1641,7 +1729,10 @@ impl ConnectAccount {
     }
 
     /// `POST /v1/account/recovery` with `body`, and the same body again after a lost answer
-    /// (or a busy or failing Connect), until an answer comes or the repeats end.
+    /// (or a failing Connect), until an answer comes or the repeats end. A `429` ends the
+    /// repeats at once: this device sends nothing to Connect until its `Retry-After` has
+    /// passed, so a repeat before it would never reach Connect. The rotation then stays
+    /// pending, and the next read of the account settles it.
     fn send_rotation(
         &mut self,
         body: &super::client::RecoveryRotate<'_>,
@@ -1652,7 +1743,6 @@ impl ConnectAccount {
                 answer,
                 Err(ConnectError::Offline
                     | ConnectError::Broken
-                    | ConnectError::RateLimited(_)
                     | ConnectError::Refused {
                         status: 500..=599,
                         ..
@@ -1699,6 +1789,22 @@ impl ConnectAccount {
         self.write_state()
     }
 
+    /// The recovery key that Connect held at the last read of the account through this
+    /// handle ([`Self::recovery_change_seen`] pins only it). `None` before a read.
+    pub fn held_recovery_key(&self) -> Option<&str> {
+        self.held_recovery.as_deref()
+    }
+
+    /// Take `key`, the recovery key that Connect held at the last read of another handle of
+    /// this account in this process, when this handle has read none yet: a process that
+    /// opens the account file again while another call holds its account (the iPhone core)
+    /// keeps what that read saw, so "OK" of the line that it showed still works.
+    pub fn keep_held_recovery_key(&mut self, key: Option<String>) {
+        if self.held_recovery.is_none() {
+            self.held_recovery = key.filter(|key| valid_recovery_key(key));
+        }
+    }
+
     /// "OK" of the line about a new recovery code that another device made: this device
     /// pins `recovery_key`, the key that the line named ([`RecoveryChange::recovery_key`]),
     /// and stops saying so. Only the key that Connect held at the last view is pinned
@@ -1718,9 +1824,13 @@ impl ConnectAccount {
 
     /// The recovery key of `view` against what this device knows (section 9.1): a pending
     /// rotation of this device is settled (Connect holds its key: nobody saw the code, the
-    /// key is pinned; another key: it goes, and the mark is as before), a file without a pin
-    /// pins the key, and another key than the pin is a new code of another device
-    /// ([`AccountView::recovery_changed`]). Writes the account file when it changed.
+    /// key is pinned; another key: it goes, and the mark is as before). Another key than the
+    /// pin is a new code of another device ([`AccountView::recovery_changed`]); a new code
+    /// that names this device as its maker while nothing is pending (a request of an earlier
+    /// try that reached Connect late) is a code that nobody saw: the key is pinned with that
+    /// mark. A file without a pin (from a build before it) pins the key, except a key that
+    /// another device made: that shows as its change. Writes the account file when it
+    /// changed.
     fn settle_recovery(&mut self, view: &mut AccountView) -> Result<(), ConnectError> {
         view.recovery_changed = None;
         self.held_recovery = view
@@ -1740,12 +1850,23 @@ impl ConnectAccount {
             }
             changed = true;
         }
+        let by_this_device = view.recovery_rotated_by.as_deref() == Some(&*self.state.device_id);
+        let by_other_device = view
+            .recovery_rotated_by
+            .as_deref()
+            .is_some_and(|device_id| device_id != self.state.device_id);
         match self.state.recovery_key.as_deref() {
-            None => {
+            None if !by_other_device => {
                 self.state.recovery_key = Some(held.clone());
                 changed = true;
             }
-            Some(pin) if pin != held => {
+            // A code of this device that it never showed: nobody holds it.
+            Some(pin) if pin != held && by_this_device => {
+                self.state.recovery_key = Some(held.clone());
+                self.state.recovery_unseen = true;
+                changed = true;
+            }
+            pin if pin != Some(held.as_str()) => {
                 let device_id = view.recovery_rotated_by.clone();
                 let device_name = device_id.as_deref().and_then(|id| {
                     view.devices
@@ -1760,7 +1881,7 @@ impl ConnectAccount {
                     device_name,
                 });
             }
-            Some(_) => {}
+            _ => {}
         }
         if changed || self.unsaved {
             self.write_state()?;
