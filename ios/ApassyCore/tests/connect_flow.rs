@@ -749,6 +749,75 @@ fn a_key_that_the_keychain_lost_shows_removed_until_forget() {
     );
 }
 
+/// Write the account file of `phone` as an account file of an earlier version of Apassy
+/// (version 2: no pinned device list), mode 0600.
+fn make_earlier_account_file(phone: &Phone) {
+    use std::os::unix::fs::PermissionsExt;
+    let path = phone.state_file();
+    let mut value: Value = serde_json::from_slice(&std::fs::read(&path).expect("read")).unwrap();
+    let object = value.as_object_mut().expect("object");
+    object.insert("v".to_owned(), json!(2));
+    for field in ["list_version", "list_head", "left"] {
+        object.remove(field);
+    }
+    object.insert("revoked".to_owned(), json!([]));
+    std::fs::write(&path, serde_json::to_vec(&value).unwrap()).expect("write");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("mode");
+}
+
+#[test]
+fn an_account_file_of_an_earlier_version_asks_to_join_again_and_forget_clears_it() {
+    let connect = FakeConnect::start();
+    let owner = owner();
+    let mut mac = mac(&connect, "Rafal");
+    let phone = phone(&connect);
+    join(&mut mac, &owner, &phone);
+    // The app starts again after an update: the account is no longer in memory, and its
+    // file is of an earlier version.
+    call(&phone.core, json!({"op": "lock"}));
+    make_earlier_account_file(&phone);
+
+    // A status, not an error: this iPhone must join its account again.
+    let status = call(&phone.core, json!({"op": "connect_status"}));
+    assert_eq!(status["state"], "account", "{status}");
+    assert_eq!(status["join_again"], true, "{status}");
+    assert!(status.get("removed").is_none(), "{status}");
+    assert!(status["plan"].is_null(), "{status}");
+    assert!(status.get("devices").is_none(), "{status}");
+    assert!(status.get("list_verified").is_none(), "{status}");
+    assert_no_purchase_text(&status.to_string());
+    // Nothing was deleted, and nothing was asked of Connect for it.
+    assert!(phone.state_file().exists());
+    assert!(phone.keys.has_key());
+    // A join waits for the forget.
+    let link = mac.account.start_link().expect("link");
+    assert_eq!(
+        fail(
+            &phone.core,
+            json!({"op": "connect_join", "link": link.code()})
+        ),
+        "already_connected"
+    );
+
+    // "Forget This iPhone…": the file and the key go.
+    assert_eq!(
+        call(&phone.core, json!({"op": "connect_forget"}))["forgotten"],
+        true
+    );
+    assert!(!phone.state_file().exists());
+    assert!(!phone.keys.has_key());
+    let status = call(&phone.core, json!({"op": "connect_status"}));
+    assert_eq!(status["state"], "none");
+    assert!(status.get("join_again").is_none(), "{status}");
+
+    // Then this iPhone joins its account again, with a new key.
+    join(&mut mac, &owner, &phone);
+    let status = call(&phone.core, json!({"op": "connect_status"}));
+    assert_eq!(status["state"], "account");
+    assert!(status.get("join_again").is_none(), "{status}");
+    assert_eq!(status["list_verified"], true);
+}
+
 #[test]
 fn only_the_app_with_a_key_store_uses_connect() {
     let connect = FakeConnect::start();

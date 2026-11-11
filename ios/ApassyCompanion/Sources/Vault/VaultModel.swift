@@ -863,7 +863,8 @@ final class VaultModel {
     static func waitsForOwner(_ state: SyncStatus.State) -> Bool {
         switch state {
         case .needsPassphrase, .removed, .damaged, .staleCopy, .forkedCopy, .off: true
-        case .never, .ok, .offline, .busy, .pending, .error: false
+        // `waitsForDevice`: another device of the account syncs, then this iPhone goes on.
+        case .never, .ok, .offline, .busy, .pending, .waitsForDevice, .error: false
         }
     }
 
