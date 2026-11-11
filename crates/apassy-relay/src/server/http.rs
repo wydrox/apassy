@@ -1272,7 +1272,8 @@ pub fn serve(serving: Serving) -> RelayResult<()> {
         rejected: AtomicUsize::new(0),
     });
     // The maintenance of every team runs on its own thread, so many teams never slow the
-    // accept loop. One for the relay: the public listener has none.
+    // accept loop. One for the relay: the public listener has none. The billing part has
+    // a thread of its own: its Stripe calls never hold the teams' pass.
     let maintenance = (scope == Scope::Node).then(|| {
         let (hub, stop) = (hub.clone(), stop.clone());
         std::thread::Builder::new()
@@ -1283,13 +1284,31 @@ pub fn serve(serving: Serving) -> RelayResult<()> {
                     std::thread::sleep(Duration::from_millis(200));
                     if last.elapsed() >= Duration::from_secs(MAINTENANCE_SECS) {
                         last = Instant::now();
-                        maintain(&hub, now_unix());
+                        maintain_teams(&hub, now_unix());
                     }
                 }
             })
     });
     if maintenance.as_ref().is_some_and(Result::is_err) {
         eprintln!("apassy-relay: the maintenance thread cannot start");
+    }
+    let billing_maintenance = (scope == Scope::Node && hub.billing.is_some()).then(|| {
+        let (hub, stop) = (hub.clone(), stop.clone());
+        std::thread::Builder::new()
+            .name("relay-billing".to_string())
+            .spawn(move || {
+                let mut last = Instant::now();
+                while !stop.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(200));
+                    if last.elapsed() >= Duration::from_secs(MAINTENANCE_SECS) {
+                        last = Instant::now();
+                        maintain_billing(&hub, now_unix());
+                    }
+                }
+            })
+    });
+    if billing_maintenance.as_ref().is_some_and(Result::is_err) {
+        eprintln!("apassy-relay: the billing maintenance thread cannot start");
     }
     let mut probed = Instant::now();
     let mut failed_probes = 0;
@@ -1415,6 +1434,9 @@ pub fn serve(serving: Serving) -> RelayResult<()> {
     if let Some(Ok(handle)) = maintenance {
         let _ = handle.join();
     }
+    if let Some(Ok(handle)) = billing_maintenance {
+        let _ = handle.join();
+    }
     outcome
 }
 
@@ -1424,6 +1446,13 @@ pub fn serve(serving: Serving) -> RelayResult<()> {
 /// since its last pass is passed over until `IDLE_MAINTENANCE_SECS` went by: its expiries
 /// are read at request time too, so the pass only writes them down.
 pub fn maintain(hub: &Hub, now: u64) {
+    maintain_teams(hub, now);
+    maintain_billing(hub, now);
+}
+
+/// The teams and accounts part of `maintain`: the relay's maintenance thread runs it,
+/// and the billing part runs on a thread of its own, so a slow Stripe never holds it.
+pub fn maintain_teams(hub: &Hub, now: u64) {
     for core in hub.all() {
         let last_pass = core.maintained_at.load(Ordering::Relaxed);
         let idle = core.last_request.load(Ordering::Relaxed) < last_pass
@@ -1459,8 +1488,11 @@ pub fn maintain(hub: &Hub, now: u64) {
     if hub.config.connect.accounts {
         account::maintain(hub, now);
     }
-    // Connect billing: event ids older than 30 days, and the stores of plans at their
-    // deletion day (docs/SPEC.md section 34.6), at most once an hour.
+}
+
+/// Connect billing: event ids older than 30 days, the reads of Stripe, and the stores of
+/// plans at their deletion day (docs/SPEC.md section 34.6), at most once an hour.
+pub fn maintain_billing(hub: &Hub, now: u64) {
     if let Some(billing) = hub.billing.as_deref() {
         let last = hub.billing_maintained_at.load(Ordering::Relaxed);
         if last == 0 || now >= last.saturating_add(billing_store::MAINTENANCE_SECS) {
