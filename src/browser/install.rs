@@ -259,6 +259,20 @@ pub enum Unsupported {
 /// What to use instead of a browser that is not supported.
 pub const UNSUPPORTED_ALTERNATIVE: &str = "Use Google Chrome, or Chromium from a .deb.";
 
+/// Why a browser in a sandbox cannot use Apassy (Linux, ADR 0045). The one
+/// explanation of the "Not supported" state of a snap or a Flatpak and of the browser
+/// check's refusal of a browser in another mount or user namespace.
+pub const SANDBOX_REASON: &str = "Apassy works only with a browser that runs outside any sandbox and sees the files of this computer as Apassy sees them.";
+
+/// The answer of the browser check to a browser in another mount or user namespace
+/// than Apassy: a snap, a Flatpak, or a browser that a container or sandboxing tool
+/// started.
+pub fn sandboxed_browser() -> String {
+    format!(
+        "This browser runs in a sandbox, so the browser handles this request itself. {SANDBOX_REASON} {UNSUPPORTED_ALTERNATIVE}"
+    )
+}
+
 impl Unsupported {
     /// One sentence: why `browser` does not work with Apassy.
     pub fn reason(self, browser: &Browser) -> String {
@@ -279,8 +293,16 @@ impl Unsupported {
     }
 
     /// The reason and the alternative, for a row or a line of `apassy setup browser`.
+    /// A snap and a Flatpak also get [`SANDBOX_REASON`], the explanation that the
+    /// browser check gives a sandboxed browser ([`sandboxed_browser`]).
     pub fn explain(self, browser: &Browser) -> String {
-        format!("{} {UNSUPPORTED_ALTERNATIVE}", self.reason(browser))
+        match self {
+            Self::Snap | Self::Flatpak => format!(
+                "{} {SANDBOX_REASON} {UNSUPPORTED_ALTERNATIVE}",
+                self.reason(browser)
+            ),
+            Self::UnknownBuild => format!("{} {UNSUPPORTED_ALTERNATIVE}", self.reason(browser)),
+        }
     }
 
     /// The JSON name of the reason.

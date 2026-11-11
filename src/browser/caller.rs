@@ -162,6 +162,14 @@ fn refused() -> WireError {
     )
 }
 
+/// Linux: the browser runs in another mount or user namespace than Apassy. The
+/// explanation is the one of the "Not supported" state of a snap or Flatpak
+/// ([`super::install::Unsupported::explain`]).
+#[cfg(any(target_os = "linux", test))]
+fn sandboxed() -> WireError {
+    WireError::new("unsupported", super::install::sandboxed_browser())
+}
+
 #[cfg(not(target_os = "linux"))]
 fn missing() -> WireError {
     WireError::new(

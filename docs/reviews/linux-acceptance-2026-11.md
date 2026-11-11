@@ -447,3 +447,99 @@ Not covered by this section: Wayland sessions; arm64 headless owner checks; Secr
 Service and polkit on Debian 12 and Ubuntu 22.04; browsers on the release build (the
 browser matrix above is of debug builds); the release workflow itself (no `image-*`
 tag was pushed); the published `/dl/` download.
+
+## Browser check hardening, 2026-11-11 (unit L8)
+
+The hardened browser check of `feat/linux-caller-hardening` (stacked on PR #110): the
+refused switches of the current Chromium switch list, an allow list next to Debian's
+system extensions, the same mount and user namespace as Apassy, and ADR 0045's
+section "What the switch check sees". Same kit, run prefix `l8` (`~/work/l8`, accounts
+`l8owner` and `l8headless`).
+
+Result: everything that ran passed. Google Chrome and Debian's Chromium with a Debian
+system extension still create and use passkeys with their default start and with
+display, GPU and language switches; every newly refused switch that let Chrome start
+was refused on the real browser; a browser in another mount namespace was refused
+with the sandbox explanation. arm64 was not run.
+
+### Build under test
+
+| Build | Source | Files (SHA-256) |
+| --- | --- | --- |
+| 69a73575 | `69a73575`, exported with `git archive`; built on devbox-x86 in an `ubuntu:24.04` container with Rust 1.97.0 by the commands of `build-on-devbox.sh` (debug build, stripped, `build-vault.sh`) | `apassy-vault_0.5.19_amd64.deb` `13b2ecdae17706fbcafd01f911117a2ab308a15a30ec2a49e5292caf759e4d09`, `apassy-vault-0.5.19-linux-x86_64.tar.gz` `7cda9e0ea19f2d1844625c6f70e8946048a8258110707d7edd4f7923bd67f82e` |
+
+Later commits of the branch change documents only.
+
+### Environment
+
+- Host `devbox-x86`: Ubuntu 24.04.5 LTS, kernel 6.8.0-147-generic, x86_64, seat session
+  of `l8owner` on tty3, Xvfb at 1600x1000, Google Chrome 157.0.8103.50. Wayland: sway
+  1.9 (headless backend) in the owner's session, grim and wtype (installed for the run,
+  removed after).
+- Debian: `debian:trixie` container `l8-debian13`, Chromium 156.0.8078.79-1~deb13u1 with
+  `chromium-lwn4chrome` 1.0-3. Chromium 156 cannot load that Manifest V2 extension
+  ("Error Loading Extension" at each start); the wrapper still passes its folder, so the
+  title is the one the check sees on a real install.
+- RP: the kit's `rp/`, Node.js 22, `@simplewebauthn/server` 14.0.3.
+
+### Matrix
+
+PASS: a sign-in (or creation) reached the Apassy card, was approved with the passphrase
+and verified by the RP; for a refusal, the browser showed its own security-key dialog,
+no card appeared and no sign-in verified (each screenshot checked). Every title was
+read from `/proc/PID/cmdline` of the browser process.
+
+| Case | Ubuntu Chrome 157 | Debian Chromium 156 + system extension |
+| --- | --- | --- |
+| Default start: passkey create | PASS | PASS (title `… --enable-remote-extensions --load-extension=/usr/share/chromium/extensions/lwn4chrome`) |
+| Default start: sign-in | PASS (three times, also last) | PASS (also last) |
+| `--force-device-scale-factor=1.25` | PASS | PASS |
+| `--ozone-platform=x11` | PASS | PASS |
+| `--ozone-platform=wayland`, native on sway | PASS | NOT RUN |
+| `--lang=pl` | – | PASS |
+| `--enable-features=WaylandWindowDecorations` | – | PASS |
+| Outside the allow list: `--password-store=basic`, `--proxy-server=socks5://127.0.0.1:9`, `--disable-sync`, `--enable-features=UseOzonePlatform,WaylandWindowDecorations` (comma), `--enable-features=NotAboutTheDisplay` | – (accepted in Chrome by design) | REFUSED 5/5 |
+| Newly refused, next to the system extension: `--enable-automation`, `--renderer-cmd-prefix=/usr/bin/env` | – | REFUSED 2/2 |
+| Newly refused, each alone (31): `--allowlisted-extension-id`, `--extensions-on-chrome-urls`, `--extensions-on-extension-urls`, `--extension-test-api-on-web-pages`, `--install-isolated-web-app-from-file`, `--install-isolated-web-app-from-url`, `--custom-devtools-frontend`, `--load-webui-from-disk`, `--remote-allow-origins`, `--enable-automation`, `--dom-automation`, `--test-type`, `--silent-debugger-extension-api`, `--browser-subprocess-path`, `--renderer-cmd-prefix`, `--utility-cmd-prefix`, `--zygote-cmd-prefix`, `--gpu-launcher`, `--enable-service-binary-launcher`, `--disable-web-security`, `--allow-file-access-from-files`, `--allow-insecure-localhost`, `--use-mock-cert-verifier-for-testing`, `--mock-cert-verifier-default-result-for-testing`, `--ignore-certificate-errors`, `--ignore-certificate-errors-spki-list`, `--unsafely-treat-insecure-origin-as-secure`, `--ssl-key-log-file`, `--allow-running-insecure-content`, `--host-resolver-rules`, `--host-rules` | REFUSED 31/31 | NOT RUN |
+| `--load-apps=<empty folder>` | NOT RUN: Chrome 157 exits at once with it | NOT RUN |
+| Chrome started by `unshare --mount` (then `setpriv` to the owner): browser `mnt:[4026532447]`, Apassy `mnt:[4026531841]`, same user namespace | REFUSED, tooltip of the Apassy button: "Apassy: This browser runs in a sandbox, so the browser handles this request itself. Apassy works only with a browser that runs outside any sandbox and sees the files of this computer as Apassy sees them. Use Google Chrome, or Chromium from a .deb." | – |
+| Message of a refused switch (`--enable-automation`) | the tooltip says "Apassy: Apassy cannot verify this browser, so the browser handles this request itself." | – |
+
+Not counted: the first run of the Chrome cases (Chrome's search-engine choice dialog
+covered the page, as in the second run); the first `--host-resolver-rules` and
+`--host-rules` cases (the shell split the rule `MAP l8.example 127.0.0.1`, so Chrome
+opened `l8.example` as the active tab; rerun with the rule as one argument, title above
+unchanged); four Wayland attempts whose key press did not reach the page (`wtype` drops
+the first key of each call; a page that starts the ceremony itself is refused by the
+extension, which requires the browser's user activation).
+
+### `chrome://flags`, observed
+
+With `enable-quic@2` and `ignore-gpu-blocklist` in `browser.enabled_labs_experiments` of
+the profile's `Local State`, Chrome 157's browser process title stayed
+`/opt/google/chrome/chrome http://localhost:4174/passkey.html`: the flags reached the
+child processes (the network utility process carried the QUIC setting), never the
+browser's title. So the switch check does not see `chrome://flags`, as ADR 0045 now says.
+
+### Not run in this run
+
+arm64; Wayland Chromium on Debian; a user namespace on a real browser (unit tests
+only: Ubuntu 24.04 restricts unprivileged user namespaces, and Chrome's own sandbox
+needs them); real snap and Flatpak browsers against the new namespace check (their
+"Not supported" state is unchanged and shares the explanation); `--load-apps`; GNOME or
+KDE.
+
+### Host changes undone
+
+`cleanup-host.sh --packages` removed the automatic login on tty3, the accounts
+`l8owner` and `l8headless` with their homes and processes, and sway, grim, wtype,
+wlrctl and wl-clipboard; the run's files in `/tmp` and the container `l8-debian13` were
+deleted. The host keeps the Apassy package of this build and Chrome, as after the
+earlier runs.
+
+### Screenshots
+
+In `docs/reviews/linux-acceptance-2026-11/` (1600x1000, synthetic data):
+`l8-ubuntu-01-sandbox-refused-tooltip`, `l8-ubuntu-02-switch-refused-tooltip`,
+`l8-ubuntu-03-wayland-card`, `l8-ubuntu-04-wayland-verified`,
+`l8-debian13-01-system-extension-card`, `l8-debian13-02-extra-switch-refused`.
