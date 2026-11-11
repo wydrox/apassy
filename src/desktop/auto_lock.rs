@@ -38,7 +38,7 @@ impl LockPolicy {
             Self::Session if cfg!(target_os = "linux") => {
                 "When the screen locks or the computer sleeps"
             }
-            Self::Session => "When the Mac locks or sleeps",
+            Self::Session => concat!("When the ", crate::computer!(), " locks or sleeps"),
         }
     }
     pub(crate) fn code(self) -> &'static str {

@@ -3,7 +3,8 @@
 //!
 //! Each Mac publishes a sealed feed of the agents of a vault through the questions team of
 //! that vault. The iPhone reads the feeds of every vault that has a questions context
-//! (`questions.rs`), opens each with the question key of that vault, checks it (section
+//! (`questions.rs`, whose members take the transport of section 5.15: the tailnet, then
+//! the Connect dial), opens each with the question key of that vault, checks it (section
 //! 7.4), and shows the agents. It sends one kind of action back: remove an exception of an
 //! agent. An action that gives authority back (`never`, `always_ask`) is signed in Swift
 //! by the Secure Enclave answer key after Face ID; the core builds the exact string first

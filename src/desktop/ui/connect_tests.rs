@@ -19,8 +19,9 @@ use tempfile::TempDir;
 
 use super::connect::live::{self, Guarded};
 use super::connect::{
-    Account, Action, CONTINUE_BROWSER, ConnectView, DELETE_TITLE, MANAGE_BILLING, NOT_ON_CONNECT,
-    Plan, Plans, SELF_HOST, Sheet, SheetChoice, Shown, TEXTS, fallback_name, money, plan_note,
+    Account, Action, CONTINUE_BROWSER, ConnectView, DELETE_TITLE, LOADING_PRICES, MANAGE_BILLING,
+    NOT_ON_CONNECT, PRICES_FAILED, Plan, Plans, SELF_HOST, Sheet, SheetChoice, Shown, TEXTS,
+    TRY_AGAIN, fallback_name, money, plan_note,
 };
 use super::owner_tests::{PASS, collect, confirm_with, input, unlocked_app_with_item};
 use crate::connect::{
@@ -293,6 +294,78 @@ fn the_picker_shows_the_total_of_the_plans() {
     let text = draw(&mut loading, None);
     assert!(text.contains("Loading prices…"), "{text}");
     assert!(!text.contains('€'), "no price without the plans: {text}");
+}
+
+/// When `GET /v1/plans` fails, the picker says so with the error and offers "Try
+/// Again", which asks Connect again; then the prices show. Before the answer it shows no
+/// price, and Continue stays off.
+#[test]
+fn a_failed_price_load_offers_try_again_and_asks_again() {
+    let dir = TempDir::new().expect("dir");
+    let connect = FakeConnect::start();
+    let ctx = egui::Context::default();
+    let mut app = connect_app(&dir, &connect);
+    // The refresh after the creation loses the answer (it shows no error), then the
+    // picker loses it too.
+    connect.lose_next_answers("GET /v1/plans", 1);
+    create_account(&ctx, &mut app, "Rafal");
+    settle(&ctx, &mut app);
+    assert!(live::view(&app).plans.is_none());
+    connect.lose_next_answers("GET /v1/plans", 1);
+    act(&ctx, &mut app, Action::ChoosePlan);
+    settle(&ctx, &mut app);
+    let view = live::view(&app);
+    assert!(view.plans.is_none(), "no prices");
+    // The sheet shows the error of the step under its buttons.
+    let shown = text(&ctx, &mut app);
+    let failure = crate::connect::ConnectError::Broken.to_string();
+    let offline = crate::connect::ConnectError::Offline.to_string();
+    assert!(
+        shown.contains(&failure) || shown.contains(&offline),
+        "the error shows: {shown}"
+    );
+    assert!(shown.contains(PRICES_FAILED), "{shown}");
+    assert!(shown.contains(TRY_AGAIN), "{shown}");
+    assert!(!shown.contains(LOADING_PRICES), "{shown}");
+    assert!(!shown.contains('€'), "no price: {shown}");
+    let asked = connect.count("GET /v1/plans");
+    choose(&ctx, &mut app, SheetChoice::TryAgain);
+    until(&ctx, &mut app, "the plans", |app| {
+        live::view(app).plans.is_some()
+    });
+    assert!(
+        connect.count("GET /v1/plans") > asked,
+        "Try Again asked again"
+    );
+    assert!(matches!(app.ui.connect.sheet, Some(Sheet::Picker { .. })));
+    let shown = text(&ctx, &mut app);
+    assert!(
+        !shown.contains(&failure) && !shown.contains(&offline),
+        "{shown}"
+    );
+    assert!(shown.contains("Connect Personal"), "{shown}");
+    assert!(!shown.contains(TRY_AGAIN), "{shown}");
+}
+
+/// The relay sheet offers "Apassy Connect" only while this Mac's account is signed in
+/// with a plan that pushes (plan s7 unit M3): not for an account without a plan, then
+/// after the checkout; the account key goes to the sync then.
+#[test]
+fn the_sync_offers_apassy_connect_only_with_a_plan_that_pushes() {
+    let dir = TempDir::new().expect("dir");
+    let connect = FakeConnect::start();
+    let ctx = egui::Context::default();
+    let mut app = connect_app(&dir, &connect);
+    assert!(!app.connect_sync_available(), "no account");
+    create_account(&ctx, &mut app, "Rafal");
+    assert!(!app.connect_sync_available(), "no plan");
+    buy(&ctx, &mut app, &connect, "personal", 1);
+    until(&ctx, &mut app, "the refresh", |app| {
+        app.connect_sync_available()
+    });
+    let account = app.ui.connect.live.sync_account().expect("account");
+    assert!(account.signer.is_some(), "the key goes to the sync");
+    assert_eq!(account.origin, connect.url);
 }
 
 /// No amount is written in the code of the section: every price comes from
@@ -765,6 +838,87 @@ fn join_a_group_with_the_pasted_link() {
 }
 
 // ---- The plan row. ----
+
+/// The texts of the galleys of `shape` that egui cut with "…" (`Label::truncate`).
+fn elided(shape: &egui::Shape, out: &mut Vec<String>) {
+    match shape {
+        egui::Shape::Text(text) if text.galley.elided => out.push(text.galley.text().to_owned()),
+        egui::Shape::Vec(nested) => nested.iter().for_each(|inner| elided(inner, out)),
+        _ => {}
+    }
+}
+
+/// At the width of the Settings column, the plan row shows its whole status, also the
+/// longest ones beside two buttons: the status goes under the label and wraps, and no
+/// text of the row is cut with "…" (leftover of unit M2, frame 6 of the mockup).
+#[test]
+fn the_plan_row_shows_its_whole_status_at_the_settings_width() {
+    let ctx = egui::Context::default();
+    let plan = |status: &str, renews: Option<u64>, read_only: Option<u64>| Plan {
+        plan: Some("personal".to_owned()),
+        status: status.to_owned(),
+        entitled: status == "active",
+        interval: Some("month".to_owned()),
+        quantity: Some(1),
+        renews_at: renews,
+        ends_at: None,
+        grace_until: None,
+        read_only_until: read_only,
+        delete_at: read_only.map(|at| at + 5_184_000),
+    };
+    for (plan, expected) in [
+        (
+            plan("active", Some(1_796_860_800), None),
+            "Connect Personal · Renews 10 Dec 2026",
+        ),
+        (
+            plan("read_only", None, Some(1_799_020_800)),
+            "Read-only until 4 Jan 2027",
+        ),
+    ] {
+        let view = ConnectView {
+            shown: Shown::Account(Account {
+                account_id: "acc_k7m2q4x3ca".to_owned(),
+                name: "Rafal".to_owned(),
+                email: Some("synthetic@example.test".to_owned()),
+                plan,
+                devices: Vec::new(),
+                group: None,
+            }),
+            plans: Some(fixture_plans()),
+            locked: false,
+            busy: false,
+            error: None,
+            now: 1_795_000_000,
+        };
+        // The narrowest Settings detail column: the window at its smallest.
+        for width in [380.0, 460.0] {
+            let mut text = String::new();
+            let mut cut = Vec::new();
+            for _ in 0..2 {
+                let output = ctx.run_ui(input(0.0, Vec::new()), |ui| {
+                    ui.allocate_ui(egui::vec2(width, 900.0), |ui| {
+                        ui.set_max_width(width);
+                        super::connect::draw(ui, &view);
+                    });
+                });
+                text.clear();
+                cut.clear();
+                for clipped in &output.shapes {
+                    collect(&clipped.shape, &mut text);
+                    elided(&clipped.shape, &mut cut);
+                }
+                output.drop_without_applying_deltas();
+            }
+            assert!(text.contains(expected), "{width}: {text}");
+            assert!(
+                cut.iter().all(|line| !line.contains(expected)),
+                "{width}: the status is cut: {cut:?}"
+            );
+            assert!(text.contains(MANAGE_BILLING), "{width}: {text}");
+        }
+    }
+}
 
 /// Every case of `plan-states.json` shows its state: the plan row, the status line,
 /// the line under the row, and the buttons of the account that pays.

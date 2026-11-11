@@ -2139,7 +2139,7 @@ Apassy Connect accounts (ADR 0037 stage 7, plan s7 unit C1). The wire is the con
 | Variable | Effect |
 | --- | --- |
 | `APASSY_RELAY_CONNECT_ACCOUNTS` | `1`: the account routes beside every other route (the transition). `0` or unset: every route of the contract is 404 `not_found` (they fall through to the route table). |
-| `APASSY_RELAY_MODE` | `relay` (default) or `connect`. In `connect` mode the master key is refused at start (`APASSY_RELAY_KEY` and `APASSY_RELAY_KEY_FILE` must be unset), `relay.db` and the vault stores are plain SQLite files (33.8), shared team vaults are off, and the account routes are on (`APASSY_RELAY_CONNECT_ACCOUNTS=0` is refused there). The retired routes of contract section 14 are the cutover unit's (C5). |
+| `APASSY_RELAY_MODE` | `relay` (default) or `connect`. In `connect` mode the master key is refused at start (`APASSY_RELAY_KEY` and `APASSY_RELAY_KEY_FILE` must be unset), `relay.db` and the vault stores are plain SQLite files (33.8), shared team vaults are off, and the account routes are on (`APASSY_RELAY_CONNECT_ACCOUNTS=0` is refused there). The retired routes of contract section 14, the start checks, and the cutover are section 37. |
 | `APASSY_CONNECT_SIGNING_KEY_FILE` | The Ed25519 key of the entitlement token, PKCS#8 (DER or PEM). Without it the well-known document lists no key and `GET /v1/account/entitlement` is 503 `busy` for an entitled account. |
 | `APASSY_CONNECT_SITE_URL` | The `https://` site origin for billing and groups (default `https://apassy.wyderka.cc`). |
 
@@ -2186,7 +2186,7 @@ After `/healthz` and the edge secret, before the proxy and the route table: an a
 
 ### 33.8 Plain files
 
-`Store::create_plain`, `Store::open_plain`, `Store::create_team_plain`, and `Store::open_team_plain` open SQLite without a key, with the other checks of a keyed file (build options, defensive mode, secure delete, foreign keys, journal mode DELETE). They run only when `store::plain_allowed` passes: `APASSY_RELAY_MODE=connect`, an empty master key, and neither `APASSY_RELAY_KEY` nor `APASSY_RELAY_KEY_FILE` in the environment. An encrypted file does not open plain. In `connect` mode `Directory::create` and `open`, new team files, and `Hub::open_team` use them; a plain team file must be of the current schema (no migration). The cutover of existing files is C5's.
+`Store::create_plain`, `Store::open_plain`, `Store::create_team_plain`, and `Store::open_team_plain` open SQLite without a key, with the other checks of a keyed file (build options, defensive mode, secure delete, foreign keys, journal mode DELETE). They run only when `store::plain_allowed` passes: `APASSY_RELAY_MODE=connect`, an empty master key, and neither `APASSY_RELAY_KEY` nor `APASSY_RELAY_KEY_FILE` in the environment. An encrypted file does not open plain. In `connect` mode `Directory::create` and `open`, new team files, and `Hub::open_team` use them; a plain team file must be of the current schema (no migration). The cutover of existing files is `connect-cutover` (section 37.5).
 
 ### 33.9 The entitlement token
 
@@ -2473,3 +2473,81 @@ A removal, in this order: the devices of the removed account leave the vault sto
 ### 36.6 Tests
 
 `tests/server_group.rs`, one test for each bullet of the plan's C3 acceptance, with subscriptions from signed synthetic webhooks against the fake Stripe: the group made by the webhook; an invite is one use and 7 days, stored as a hash; a pending member has no entitlement until confirmed, and a member does not buy; the Family quantity follows the people (4 included, the fifth raises it with prorations, the change applied only on the webhook, `seat_limit` below the members and above 10) and the Team quantity its members; a removed member keeps a free account, loses the plan within one request, and leaves the shared store; a member's device joins a shared store and a stranger's or a pending member's does not; roles (a Family has no admins, only the owner invites or removes an admin, the owner cannot be removed, a member may leave); an owner with members cannot delete the account, a member can, and then the owner can (the subscription canceled at once).
+
+## 37. The end of the free paths, the Connect-only mode, and the cutover
+
+ADR 0037 stage 7, D8, D14; plan s7 unit C5, decision 1 and section 5 (releases R3); contract [connect-account-v1](../../../docs/contracts/connect-account-v1.md) section 14 (the contract wins where this section is shorter). Code: `src/config.rs` (`free_connect`, `free_sync_ended`, `check_mode`, `refuse_connect_mode`), `src/server/http.rs` (`retired_in_connect_mode`, `Endpoint::serves_in_connect_mode`, `Endpoint::is_free_connect_use`), `src/server/mod.rs` (`Core::sync_bytes`, no proxy in `connect` mode), `src/server/cutover.rs` (the backup of a stopped relay and the cutover), `src/bin/apassy-relay.rs` (`backup`, `connect-cutover`). The owner's runbook is [docs/operations/connect.md](../../../docs/operations/connect.md); the operator's section is docs/OPERATIONS.md section 29.
+
+### 37.1 The transition switches (before the cutover)
+
+Both are off by default: a relay that someone runs for themselves, and the hosted relay until the owner sets them, behave as before.
+
+| Setting | Effect |
+| --- | --- |
+| `APASSY_RELAY_FREE_CONNECT=0` | `POST /v1/connect` and `POST /v1/connect/challenge` answer 410 `free_connect_ended` before their body is read. A free Connect team (`TeamKind::Connect`) gets 410 `free_connect_ended` on its question, answer, settle, feed, feed action, push token, and push handle routes (`Endpoint::is_free_connect_use`), after its token is checked and before its body is read. Its sign-in, `GET /v1/me`, the device routes, `POST /v1/leave`, and relay sync stay, so the app can move its approvals and its vault and then delete the membership |
+| `APASSY_RELAY_FREE_CONNECT=0` with `APASSY_RELAY_CONNECT_SYNC_BYTES` 0 (or unset) | `RelayConfig::free_sync_ended`: `Core::sync_bytes` of every free Connect team is 0, whatever its stored `sync_bytes` (an operator's `admin limits --sync-bytes` included). A push and a receipt are 403 `plan_required` with the `sync_refused` audit row of section 24; a head long poll answers at once; a pull and a download still work |
+
+`APASSY_RELAY_CONNECT_SYNC_BYTES=0` alone keeps its meaning of section 26.4 (new teams only): the gap for existing teams closes only together with the end of the free path, so a self-run relay that raised one team's `sync_bytes` keeps it. Operator teams and vault stores never see either switch. In `connect` mode `free_connect` is always off.
+
+### 37.2 `APASSY_RELAY_MODE=connect`: what is served
+
+The relay serves Apassy Connect only. After `/healthz` and the edge secret, every request whose path the relay would serve otherwise is answered 410 `hosted_retired` **before its token is checked and before its body is read** (`retired_in_connect_mode`):
+
+| Served | Retired (410 `hosted_retired`) |
+| --- | --- |
+| `GET /healthz` (with `x-apassy-relay-mode: connect`) | `/mcp` (every method) and `/p/` and below: no proxy exists |
+| the account, device, vault store, entitlement, and group routes (`/v1/account` and below), `/.well-known/apassy-connect.json` | `POST /v1/connect`, `/v1/connect/challenge`, `POST /v1/teams`, `POST /v1/join` |
+| billing: `GET /v1/plans`, `POST /v1/stripe/webhook` | `/v1/questions` and below, `/v1/feed` and below, `/v1/push/token`, `/v1/push/handle` |
+| the tunnel: `/v1/tunnel/` and below (section 35), and the ingress listeners | invites, joins, device links, members, collections, items, grants, agents, approvals, audit, access, runs, the host routes, `POST /v1/leave`, `DELETE /v1/devices/{id}`, `POST /v1/devices/enroll`, key holders |
+| relay-sync-v1 of a vault store: `POST /v1/auth/challenge`, `POST /v1/auth/token`, `GET /v1/me`, `GET /v1/devices`, `GET /v1/sync/head`, `GET`/`PUT /v1/sync/snapshot`, `POST /v1/sync/receipt`, `DELETE /v1/sync` (`Endpoint::serves_in_connect_mode`; section 33.5 still applies) | |
+
+A path of the route table is retired whatever its method (a method that none of its routes has is 410 too, unless one of them is served, then 405). A path that the relay never had stays 404. The static downloads (`/dl/`, `/guide`, `/install.sh`) are the Worker's (37.6).
+
+### 37.3 `connect` mode: the start
+
+- From the environment (`RelayConfig::from_lookup`): the master key is refused (`APASSY_RELAY_KEY` and `APASSY_RELAY_KEY_FILE`, section 33.1), and so is any push value (`APASSY_RELAY_PUSH_URL`, `_TOPIC`, `_SECRET`, `_SECRET_FILE`): Connect sends no push; the nodes push through the push gateway (ADR 0037 D7). Shared team vaults and the free Connect paths are forced off; the account routes are on (`APASSY_RELAY_CONNECT_ACCOUNTS=0` is refused).
+- `Relay::start` checks a configuration made in code with `RelayConfig::check_mode`: in `connect` mode it refuses a master key, push, shared team vaults, the public or tailnet listener of a node, the MCP authorization flow, and the account routes off.
+- No `Proxy` is built (`RunningRelay::proxy_built` is false; `/p/` cannot reach one), and with no push configuration `push::Push::start` starts no sender thread (`RunningRelay::push_on` is false).
+- `relay.db` and the vault stores open plain (section 33.8). `Hub::open` serves only teams of kind `account`; a team of another kind in a plain `relay.db` is logged and not served (a cutover that did not finish).
+- `apassy-relay init` makes an empty plain relay (`init --team` is refused: Connect has no operator team), `admin team-code` and `admin node-code` are refused, and `migrate`, `rollback-check`, `downgrade-schema-6`, `downgrade-schema-7`, and `downgrade-directory-1003` to `-1005` refuse with a message that names the way back (37.7).
+- `/healthz` answers `ok` with `x-apassy-relay-version`, `x-apassy-relay-commit`, and `x-apassy-relay-mode` (`relay` or `connect`, in both modes).
+
+### 37.4 Backups
+
+- `admin backup` (a running relay) copies plain files to plain files in `connect` mode (`Store::snapshot_plain_on`, the SQLite backup API), reads a closed store read-only plain, checks the snapshots as before, and adds `"mode": "connect"` to `MANIFEST.json`. `snapshot-check` reads plain files in `connect` mode.
+- `apassy-relay backup` (the relay stopped; it takes `relay.lock`) copies every file of the data directory byte for byte: `relay.db`, every file under `teams/` (team files, `.pre-v*` copies, snapshot folders), `team.db` and `team.db.pre-teams`, and `audit-archive/`, into a new folder of `APASSY_RELAY_BACKUP_DIR` (mode 0700, files 0600). Each copy is hashed against its source, the data directory is listed again after the copies (it must not have changed), and `MANIFEST.json` names every file with its size and SHA-256, `"stopped": true`, the mode, the directory version, and the number of teams. It refuses while the relay runs, while a write journal remains (`-journal`: start and stop the relay once, it rolls the write back), and during a cutover (`relay.db.keyed`). It works in both modes and holds no key.
+
+### 37.5 `apassy-relay connect-cutover`
+
+`connect-cutover [--dry-run | --confirm-delete-teams] [--backup <folder>]` runs once, with the relay stopped and the configuration before the cutover (the master key). `--dry-run` is the default. The steps (`cutover::run`):
+
+1. Take `relay.lock` (a running relay: 409 `conflict`, "stop it first"). Refuse a write journal. Read `relay.db` read-only with the master key: it must be directory `DIRECTORY_VERSION`; every vault store (kind `account`) must open with its key at team schema `SCHEMA_VERSION`.
+2. **The backup check** (`backup_check`): the stopped backup named by `--backup`, or else the newest folder of `APASSY_RELAY_BACKUP_DIR` whose `MANIFEST.json` says `"stopped": true`, lists exactly the files of the data directory now (37.4, the cutover's side files left out) with the same sizes and SHA-256, and each of its files still matches its manifest. A backup of a running relay (`admin backup`) never passes: the relay writes `relay.db` after it. The dry run ends here and answers the plan (`state: dry_run`): the stores that stay, the teams that go, the counts and hashes before, the backup checked. It opens every file read-only and writes nothing.
+3. For each vault store, a plain copy `teams/<id>.db.plain`; then `relay.db.plain`. SQLCipher refuses the SQLite backup API between a keyed and a plain file ("backup is not supported with encrypted databases"), so the copies are made with `sqlcipher_export` and the source's `user_version` (`Store::export_plain`). Each copy is checked against its source: the version, the same tables with the same row counts, and `PRAGMA integrity_check`. In `relay.db.plain`, in one transaction: the teams of other kinds go, the team codes, free Connect keys, and OAuth state go (`team_code`, `connect_key`, `oauth_refresh`, `connect_request`, `oauth_client`), store device maps of no remaining store go, every `team.file_key` becomes empty, and one audit row `connect_cutover` (`{"kept", "deleted"}`) is written; then `VACUUM`, so no deleted row or key stays in a free page. It is checked again: version, exactly the kept stores, no key, the other tables' rows as the source, `integrity_check`.
+4. `cutover.json` (`state: committing`, the plan, the hashes before), a copy of the keyed `relay.db` as `relay.db.keyed`, and then the rename of `relay.db.plain` over `relay.db`: **the commit point**.
+5. Each store's plain copy replaces its file (one rename each). Every other entry of `teams/` whose name starts with a team id that is not a kept store goes: `<id>.db`, `-journal`, `.pre-v*`, `.pre-v*.tmp`, and the snapshot folder `<id>.sync`. An entry without a team id, or another folder, is left and named. Also `team.db`, `team.db.pre-teams`, `relay.db.migrating`, the audit archives (they open only with the master key), and a socket that a stopped relay left. Then the result is checked: only `relay.db` and the kept stores' files, `relay.db` and each store plain at the current schema with `integrity_check`, and every snapshot and other file of a kept store the bytes it was before.
+6. `cutover.json` again (`state: done`, the counts and the list of files with their hashes after, the files deleted, the entries left), and last the deletion of `relay.db.keyed`.
+
+**What is never deleted:** an entry of `teams/` whose team id is a kept store. The cutover only replaces a store's database by its checked plain copy; its snapshots and any other file of it stay byte for byte.
+
+**Interrupted runs** (`cutover::Interrupt`, the tests): before the commit point `relay.db` is keyed and whole, and a second run removes the side files (`*.plain`, `relay.db.keyed`, `cutover.json`) and starts again. After it, the plain `relay.db` names the stores, `cutover.json` holds the plan and the hashes before, and `relay.db.keyed` holds the keys: a second run with `--confirm-delete-teams` finishes steps 5 and 6; a store that is still keyed and has lost its plain copy is exported again with its key from `relay.db.keyed`. A dry run of a committed cutover changes nothing and says what is left. After step 6 a run answers the record of `cutover.json` and changes nothing, also in `connect` mode. At any point the stopped backup of step 2 restores the relay as it was.
+
+`cutover.json` holds ids, kinds, states, counts, sizes, file names, and SHA-256 values only: no name, key, token, or email.
+
+### 37.6 The edge Worker
+
+One build serves both phases (`deploy/worker/src/index.ts`): the var `RELAY_MODE` is `relay` (or unset) before the cutover and `connect` after it. In `connect` mode `/internal/push` answers 404 without reading the request (the APNs sender is off), `POST /v1/connect` has no guard of its own (`CONNECT_LIMITER` and `CONNECT_PREFIX_LIMITER` are not asked, and no client prefix or its proof is sent: the relay answers 410), and `/p/` has the 64 KiB JSON cap instead of the proxy's 8 MiB. `/dl/`, `/guide`, `/install.sh`, the account, billing, and tunnel guards, and everything else are the same in both. Another value of `RELAY_MODE` answers 503 "relay not configured" on every relay route and 404 on `/internal/`, and still serves the static files.
+
+### 37.7 The way back
+
+There is no in-place way back from `connect` mode: the plain files have no key, and no image before Connect opens them. The way back is the stopped backup of the cutover (step 2) restored into an empty data volume, the previous image and its compose settings, and the master key of that backup (docs/operations/connect.md, "Rollback").
+
+### 37.8 Tests
+
+`tests/server_connect_cutover.rs`, on free loopback ports and temporary directories with the fake Stripe: the switch's default and parsing; `POST /v1/connect` and its challenge 410 before the body; a free Connect team's questions, feed, and push 410 and its devices kept, while an operator team on the same relay keeps them; free sync ended for an existing free team (push and receipt `plan_required`, pulls and downloads work, the long poll answers at once) only with both switches, never for an operator team; a vault store unaffected; in `connect` mode every retired route 410 with a body that is not JSON and a bearer that is not a token, the served routes not 410, the mode on `/healthz`; no proxy and no push thread (checked against `/proc/self/task` under nextest, with a relay with push as the control); the push values, the master key, and the node settings refused at start; plain online and stopped backups, the restore check of a restored plain backup, and the keyed rollbacks refused without a change; the cutover's dry run changing no file (hash and time); its refusal while the relay runs, without a stopped backup, with only an online backup, with a stale or damaged one; the real run leaving exactly `relay.db`, `cutover.json`, and the stores, plain, without a key, with the snapshots unchanged, opened by `connect` mode (sign-in, pull, download, a new push) while the deleted teams are gone; each interruption point finished by a second run to the same result; the stopped backup restoring a run stopped halfway (every team signs in and pulls with the master key); no file of a store deleted; and the binary end to end (`init`, `backup`, `connect-cutover`, `connect-cutover --confirm-delete-teams`, `serve` in `connect` mode, a second run in `connect` mode). The Worker: `test/index.test.ts`, "relay mode", for both settings.
+
+### 37.9 What this does not protect
+
+- The plain files hold no secret but are not encrypted: public keys, device names, account and Stripe ids, vault ids, signed heads, hashes, and the email copied from Stripe (section 33.12). The snapshots stay ciphertext under each vault's passphrase. Disk encryption of the host is the owner's choice.
+- The stopped backup of the cutover and its master key open every deleted team's metadata (never an item value). Their retention is the owner's choice (docs/operations/connect.md); until both are destroyed, the deleted teams can come back.
+- The switches are read at start: a relay holds no long poll of a free team across a restart, but a request that started before the restart ends as it began.

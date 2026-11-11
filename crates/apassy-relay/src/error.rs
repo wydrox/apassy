@@ -115,6 +115,15 @@ pub mod codes {
     /// agent on a relay with `APASSY_RELAY_TEAM_VAULTS=0`. 410: the feature is gone here,
     /// and a retry does not help.
     pub const TEAM_VAULTS_RETIRED: &str = "team_vaults_retired";
+    // The end of the free hosted paths and the Connect-only mode (connect-account-v1
+    // section 14, ADR 0037 stage 7, D14).
+    /// `POST /v1/connect` and its recovery challenge, and the questions, feed, and push
+    /// routes of a free Connect team, on a relay with `APASSY_RELAY_FREE_CONNECT=0`. 410:
+    /// the free path is over here, and a retry does not help.
+    pub const FREE_CONNECT_ENDED: &str = "free_connect_ended";
+    /// A route of the relay that Apassy Connect does not serve, in `APASSY_RELAY_MODE=connect`:
+    /// answered before any body is read.
+    pub const HOSTED_RETIRED: &str = "hosted_retired";
     // Apassy Connect accounts (connect-account-v1 section 4, docs/SPEC.md "Connect accounts").
     /// A Connect route that needs a live account device, called with a relay-sync team
     /// token, or for a store that is not a vault store.
@@ -181,7 +190,7 @@ pub fn status_of(code: &str) -> u16 {
         CONFLICT | RUN_NOT_PENDING | QUESTION_SETTLED | QUESTION_EXPIRED | PUSH_UNAVAILABLE
         | PUSH_GATEWAY_REFUSED | CONNECT_KEY_USED | SEQ_NOT_NEWER | ACTION_SETTLED
         | ACTION_EXPIRED | SEAT_LIMIT => 409,
-        TEAM_VAULTS_RETIRED => 410,
+        TEAM_VAULTS_RETIRED | FREE_CONNECT_ENDED | HOSTED_RETIRED => 410,
         PRECONDITION_FAILED => 412,
         PAYLOAD_TOO_LARGE => 413,
         RATE_LIMITED | TUNNEL_LIMIT => 429,
@@ -299,6 +308,13 @@ mod tests {
         assert_eq!(RelayError::new(codes::NODE_UNKNOWN, "x").status(), 404);
         assert_eq!(RelayError::new(codes::TUNNEL_LIMIT, "x").status(), 429);
         assert_eq!(RelayError::new(codes::TUNNEL_OFFLINE, "x").status(), 503);
+        for code in [
+            codes::TEAM_VAULTS_RETIRED,
+            codes::FREE_CONNECT_ENDED,
+            codes::HOSTED_RETIRED,
+        ] {
+            assert_eq!(RelayError::new(code, "x").status(), 410);
+        }
         assert_eq!(RelayError::internal("x").status(), 500);
         assert_eq!(status_of("something_new"), 500);
     }

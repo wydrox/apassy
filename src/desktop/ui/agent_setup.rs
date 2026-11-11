@@ -181,13 +181,20 @@ fn setup(host: Host, token: Zeroizing<String>, cancel: Arc<AtomicBool>) -> Resul
     let exe = std::env::current_exe()
         .and_then(std::fs::canonicalize)
         .map_err(|_| "Cannot find Apassy. Use Advanced setup.".to_owned())?;
-    let directory = exe
-        .parent()
-        .ok_or("Cannot find the app tools. Reinstall Apassy.app.")?;
+    let directory = exe.parent().ok_or(concat!(
+        "Cannot find the app tools. Reinstall ",
+        crate::app_package!(),
+        "."
+    ))?;
     for tool in ["apassy-mcp", "apassy-hook"] {
         if !executable(&directory.join(tool)) {
             return Err(format!(
-                "The app package needs {tool}. Reinstall the complete Apassy.app package."
+                concat!(
+                    "The app package needs {}. Reinstall the complete ",
+                    crate::app_package!(),
+                    " package."
+                ),
+                tool
             ));
         }
     }
@@ -303,10 +310,18 @@ fn read_failure_status(path: &Path) -> &'static str {
 fn failure_message(code: &[u8]) -> &'static str {
     match code {
         b"missing_mcp" => {
-            "The app package needs apassy-mcp. Reinstall the complete Apassy.app package."
+            concat!(
+                "The app package needs apassy-mcp. Reinstall the complete ",
+                crate::app_package!(),
+                " package."
+            )
         }
         b"missing_hook" => {
-            "The app package needs apassy-hook. Reinstall the complete Apassy.app package."
+            concat!(
+                "The app package needs apassy-hook. Reinstall the complete ",
+                crate::app_package!(),
+                " package."
+            )
         }
         b"home_missing" => "Cannot find your home folder. Use Advanced setup.",
         b"config_read" => {

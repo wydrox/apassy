@@ -138,7 +138,11 @@ fn welcome(app: &mut DesktopApp, ui: &mut egui::Ui) {
     title(
         ui,
         "Welcome to Apassy",
-        "Credentials for you and your agents. Each vault is one encrypted file on this Mac. Agents use the secrets through Apassy and never see the values.",
+        concat!(
+            "Credentials for you and your agents. Each vault is one encrypted file on this ",
+            crate::computer!(),
+            ". Agents use the secrets through Apassy and never see the values."
+        ),
     );
     vaults::start_notices(app, ui);
     vaults::welcome_list(app, ui);
@@ -147,7 +151,13 @@ fn welcome(app: &mut DesktopApp, ui: &mut egui::Ui) {
     }
     if app.sync.offered {
         ui.add_space(8.0);
-        if kit::wide_button(ui, "Use a vault from another Mac", Style::Bordered).clicked() {
+        if kit::wide_button(
+            ui,
+            concat!("Use a vault from another ", crate::computer!()),
+            Style::Bordered,
+        )
+        .clicked()
+        {
             super::sync::begin_open(app);
         }
     }

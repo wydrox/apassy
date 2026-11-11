@@ -953,6 +953,7 @@ fn require_build_options(conn: &Connection) -> VaultResult<()> {
 /// SQLCipher cannot turn it off again. It must be on before the first key.
 fn harden_connection(conn: &Connection) -> VaultResult<()> {
     require_build_options(conn)?;
+    quiet_sqlcipher_log(conn)?;
     let defensive = conn
         .set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)
         .map_err(|_| err(VaultErrorKind::Storage))?;
@@ -965,6 +966,26 @@ fn harden_connection(conn: &Connection) -> VaultResult<()> {
         return Err(err(VaultErrorKind::Storage));
     }
     Ok(())
+}
+
+/// Turn off SQLCipher's own log for the process. Since SQLCipher 4.7 it writes WARN
+/// and ERROR lines to stderr on platforms without a device log (Linux), so a wrong
+/// passphrase printed `ERROR CORE sqlcipher_page_cipher: hmac check failed ...` lines
+/// in the owner's terminal before Apassy's own message. The vault error says what
+/// went wrong; the internal lines name pages and functions. Apple platforms log to
+/// the unified system log instead, so their behavior stays.
+fn quiet_sqlcipher_log(conn: &Connection) -> VaultResult<()> {
+    if cfg!(target_vendor = "apple") {
+        return Ok(());
+    }
+    let level: String = conn
+        .query_row("PRAGMA cipher_log_level = NONE", [], |row| row.get(0))
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+    if level.eq_ignore_ascii_case("NONE") {
+        Ok(())
+    } else {
+        Err(err(VaultErrorKind::Storage))
+    }
 }
 
 /// Build `PRAGMA <pragma> = '<passphrase>'` in a buffer that is erased on drop.
@@ -1996,6 +2017,47 @@ mod tests {
         let mut vault = Vault::create(&dir.path().join("harden.db"), passphrase).unwrap();
         vault.unlock(passphrase).unwrap();
         vault
+    }
+
+    /// Set by [`a_wrong_passphrase_prints_no_sqlcipher_lines`] for its child.
+    const WRONG_PASSPHRASE_CHILD: &str = "APASSY_TEST_WRONG_PASSPHRASE_CHILD";
+
+    /// Child mode of the test below: a wrong passphrase in a fresh process, where
+    /// SQLCipher sets up its default log. A no-op in a normal run.
+    #[test]
+    fn wrong_passphrase_child_process() {
+        let Some(dir) = std::env::var_os(WRONG_PASSPHRASE_CHILD) else {
+            return;
+        };
+        let path = Path::new(&dir).join("quiet.db");
+        Vault::create(&path, PASS).unwrap();
+        let mut vault = Vault::open(&path).unwrap();
+        let error = vault.unlock("synthetic-wrong-passphrase").unwrap_err();
+        assert_eq!(error.kind(), VaultErrorKind::WrongKeyOrCorrupt);
+        assert!(vault.is_locked());
+    }
+
+    /// A wrong passphrase printed SQLCipher's `ERROR CORE sqlcipher_page_cipher: hmac
+    /// check failed` lines to the terminal on Linux (Linux acceptance, 2026-11-10).
+    #[test]
+    fn a_wrong_passphrase_prints_no_sqlcipher_lines() {
+        let dir = TempDir::new().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "vault::tests::wrong_passphrase_child_process",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(WRONG_PASSPHRASE_CHILD, dir.path())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stderr}");
+        assert!(dir.path().join("quiet.db").is_file(), "the child ran");
+        for internal in ["sqlcipher", "hmac", "ERROR CORE"] {
+            assert!(!stderr.contains(internal), "{stderr}");
+        }
     }
 
     #[test]

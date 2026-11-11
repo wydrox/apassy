@@ -653,6 +653,94 @@ impl Endpoint {
     }
 }
 
+impl Endpoint {
+    /// The routes of the free questions-only Connect path of ADR 0032 that a free Connect
+    /// team loses with `APASSY_RELAY_FREE_CONNECT=0`: questions and their answers, the feed
+    /// and its actions, and the push token and handle.
+    pub fn is_free_connect_use(&self) -> bool {
+        use Endpoint::*;
+        matches!(
+            self,
+            QuestionPost
+                | QuestionList
+                | AnswerPost(_)
+                | AnswerList(_)
+                | Settle(_)
+                | PushTokenPut
+                | PushTokenDelete
+                | PushHandlePut
+                | PushHandleDelete
+                | FeedPut
+                | FeedList
+                | FeedDelete
+                | FeedActionPost
+                | FeedActionList
+                | FeedActionGet(_)
+                | FeedActionSettle(_)
+        )
+    }
+
+    /// The team routes that `connect` mode serves (docs/SPEC.md section 37): relay-sync-v1
+    /// of a vault store, its sign-in, `GET /v1/me`, and the device list. Every other team
+    /// route is 410 `hosted_retired` there.
+    pub fn serves_in_connect_mode(&self) -> bool {
+        use Endpoint::*;
+        matches!(
+            self,
+            Me | Challenge
+                | Token
+                | DeviceList
+                | SyncHead
+                | SyncSnapshot
+                | SyncPush
+                | SyncReceipt
+                | SyncDelete
+        )
+    }
+}
+
+/// The answer of `connect` mode to a route that Connect does not serve.
+fn hosted_retired() -> RelayError {
+    RelayError::new(
+        codes::HOSTED_RETIRED,
+        "This route is retired: this relay serves Apassy Connect only (accounts, vault stores, billing, groups, and the tunnel). Approvals and teams run on your own Apassy node (ADR 0037).",
+    )
+}
+
+/// The answer to the free Connect path after `APASSY_RELAY_FREE_CONNECT=0`.
+fn free_connect_ended() -> RelayError {
+    RelayError::new(
+        codes::FREE_CONNECT_ENDED,
+        "Free approvals through this relay have ended. Use this Mac as your node over Tailscale (free), or Apassy Connect.",
+    )
+}
+
+/// True when `connect` mode answers `method path` with 410 `hosted_retired` (docs/SPEC.md
+/// section 37): `/mcp`, `/p/` and below, and every path of the route table whose routes
+/// are not relay sync of a vault store (`Endpoint::serves_in_connect_mode`), whatever the
+/// method. The paths of accounts, billing, groups, and the tunnel are served, and a path
+/// that the relay never had stays 404.
+pub fn retired_in_connect_mode(method: &str, path: &str) -> bool {
+    if account::is_account_path(path)
+        || billing_store::is_billing_path(path)
+        || tunnel_routes::is_tunnel_path(path)
+    {
+        return false;
+    }
+    if path == paths::MCP || path.starts_with(paths::PROXY_PREFIX) {
+        return true;
+    }
+    match route(method, path) {
+        Ok((_, endpoint)) => !endpoint.serves_in_connect_mode(),
+        // Another method of a known path: retired unless one of its methods is served.
+        Err(error) if error.code == codes::METHOD_NOT_ALLOWED => ["GET", "POST", "PUT", "DELETE"]
+            .iter()
+            .filter_map(|other| route(other, path).ok())
+            .all(|(_, endpoint)| !endpoint.serves_in_connect_mode()),
+        Err(_) => false,
+    }
+}
+
 /// The answer of a relay with `team_vaults` off to a team-vault request or the proxy.
 fn team_vaults_retired() -> RelayError {
     RelayError::new(
@@ -848,7 +936,8 @@ pub fn route(method: &str, path: &str) -> RelayResult<Routed> {
 /// What the accept loop needs.
 pub struct Serving {
     pub hub: Arc<Hub>,
-    pub proxy: Arc<Proxy>,
+    /// The proxy of `/p/`; `None` in `connect` mode (docs/SPEC.md section 37).
+    pub proxy: Option<Arc<Proxy>>,
     pub server: tiny_http::Server,
     pub stop: Arc<AtomicBool>,
     /// What this listener serves. Only the `Node` listener runs the maintenance.
@@ -1194,7 +1283,7 @@ pub fn serve(serving: Serving) -> RelayResult<()> {
                         .name("relay-request".to_string())
                         .spawn(move || {
                             let _guard = guard;
-                            handle(&hub, &proxy, &listener, request, hold);
+                            handle(&hub, proxy.as_deref(), &listener, request, hold);
                         });
                 }
             }
@@ -1392,7 +1481,7 @@ fn respond_auth_limited(
 }
 
 /// Handles one request. `hold`: a question or feed long poll may wait (its own lane).
-fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, hold: bool) {
+fn handle(hub: &Hub, proxy: Option<&Proxy>, listener: &Listener, mut request: Request, hold: bool) {
     let now = now_unix();
     let method = request.method().as_str().to_string();
     let url = request.url().to_string();
@@ -1447,10 +1536,22 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
             option_env!("APASSY_RELEASE_COMMIT").unwrap_or("unknown"),
         )
         .expect("the build commit is a valid header");
+        // The mode beside the version and the commit: the read-back of the cutover
+        // (docs/operations/connect.md) checks `connect` here.
+        let mode = Header::from_bytes(
+            "x-apassy-relay-mode",
+            if hub.config.connect.plain_files() {
+                "connect"
+            } else {
+                "relay"
+            },
+        )
+        .expect("the mode is a valid header");
         let _ = request.respond(
             Response::from_string("ok\n")
                 .with_header(version)
-                .with_header(commit),
+                .with_header(commit)
+                .with_header(mode),
         );
         return;
     }
@@ -1471,6 +1572,13 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
                 "The request did not come through the edge.",
             ),
         );
+        return;
+    }
+    // `connect` mode (docs/SPEC.md section 37): every route of the relay that Connect does
+    // not serve is 410 before its body is read, before a token is checked, and before it
+    // could reach the proxy (none exists) or MCP.
+    if hub.config.connect.plain_files() && retired_in_connect_mode(&method, &path) {
+        respond_error(request, &hosted_retired());
         return;
     }
     // The flow has its own count for each client (31.5): a stranger's bad tokens on
@@ -1506,6 +1614,10 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
         return;
     }
     if path.starts_with(paths::PROXY_PREFIX) {
+        let Some(proxy) = proxy else {
+            respond_error(request, &hosted_retired());
+            return;
+        };
         let key = path
             .strip_prefix(paths::PROXY_PREFIX)
             .and_then(|rest| rest.split('/').next());
@@ -1541,6 +1653,14 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
             return;
         }
     };
+    // The end of the free Connect path (`APASSY_RELAY_FREE_CONNECT=0`): no new free Connect
+    // team and no recovery of one, before the body is read.
+    if !hub.config.free_connect
+        && matches!(endpoint, Endpoint::Connect | Endpoint::ConnectChallenge)
+    {
+        respond_error(request, &free_connect_ended());
+        return;
+    }
     // A relay-wide setting, the same for every caller: refuse before any token check.
     if !hub.config.team_vaults && endpoint.is_team_vault_use() {
         respond_error(request, &team_vaults_retired());
@@ -1709,6 +1829,15 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
         && let Err(error) = vault_store_allows(hub, &core, endpoint, now)
     {
         respond_error(request, &error);
+        return;
+    }
+    // A free Connect team after the end of the free path (`APASSY_RELAY_FREE_CONNECT=0`):
+    // no questions, feed, or push, before the body is read. Its devices, its sign-in,
+    // its leaving, and its relay sync stay (the sync has its own gate, `Core::sync_bytes`),
+    // so the app can move its approvals and its vault and delete the membership.
+    if core.kind == TeamKind::Connect && !hub.config.free_connect && endpoint.is_free_connect_use()
+    {
+        respond_error(request, &free_connect_ended());
         return;
     }
     // A Connect team has a request rate (section 26); an operator team has none.

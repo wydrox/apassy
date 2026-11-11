@@ -5,6 +5,11 @@
 # - macOS (arm64): the team CLI apassy-team. On a Mac the node runs inside the app.
 # APASSY_COMPONENT: node (default) or vault. Vault installs the desktop, owner CLI
 #   and browser host into fixed root-owned /usr paths; requires explicit root opt-in.
+#   It supports Debian 12 or later and Ubuntu 22.04 or later, x86_64 and aarch64.
+# APASSY_VAULT_FORMAT: deb (default where apt-get and dpkg-deb exist; apt installs the
+#   dependencies) or tar (install-vault.sh; install the dependencies yourself).
+# APASSY_ALLOW_UNSUPPORTED: set to 1 to install the vault on another glibc 2.31+
+#   distribution, untested.
 # APASSY_RELAY_URL: download origin (default: https://apassy-relay.wyderka.cc).
 #   A file:// URL can point to a local directory for tests.
 # APASSY_INSTALL_DIR: target directory (default: $HOME/.local/bin).
@@ -27,6 +32,8 @@ if [ "$component" = vault ]; then
         fail 'Vault installation requires root and APASSY_INSTALL_AS_ROOT=1. Prefer the .deb package.'
     fi
     [ -z "${APASSY_INSTALL_DIR:-}" ] || fail 'Vault uses fixed /usr paths; do not set APASSY_INSTALL_DIR.'
+    format=${APASSY_VAULT_FORMAT:-}
+    case "$format" in ''|deb|tar) ;; *) fail 'APASSY_VAULT_FORMAT must be deb or tar.' ;; esac
 fi
 
 system=$(uname -s)
@@ -50,6 +57,63 @@ esac
 if [ "$os" = linux ]; then
     command -v tar >/dev/null 2>&1 || fail 'Install tar first.'
     command -v gzip >/dev/null 2>&1 || fail 'Install gzip first.'
+fi
+
+# The vault packages are built on glibc 2.31 and tested on these distributions
+# (docs/operations/release.md, "Linux vault packages"). Refuse the rest before any
+# download, with the reason.
+supported_vault='Debian 12 or later and Ubuntu 22.04 or later'
+if [ "$component" = vault ]; then
+    libc=$(getconf GNU_LIBC_VERSION 2>/dev/null || true)
+    case "$libc" in
+        'glibc '*) libc=${libc#glibc } ;;
+        *) fail "The vault package needs glibc 2.31 or later; this system has no GNU C library (musl?). Supported: $supported_vault." ;;
+    esac
+    libc_major=${libc%%.*}
+    libc_minor=${libc#*.}
+    libc_minor=${libc_minor%%.*}
+    case "$libc_major.$libc_minor" in
+        *[!0-9.]*|.*|*.) fail "Cannot read the glibc version: $libc" ;;
+    esac
+    if [ "$libc_major" -lt 2 ] || { [ "$libc_major" -eq 2 ] && [ "$libc_minor" -lt 31 ]; }; then
+        fail "The vault package needs glibc 2.31 or later; this system has $libc. Supported: $supported_vault."
+    fi
+    # Read os-release as data, never as a script. APASSY_OS_RELEASE is for tests.
+    os_release=${APASSY_OS_RELEASE:-/etc/os-release}
+    [ -r "$os_release" ] || os_release=/usr/lib/os-release
+    os_field() {
+        [ -r "$os_release" ] || return 0
+        sed -n "s/^$1=//p" "$os_release" | head -n 1 | sed -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/"
+    }
+    distro_id=$(os_field ID)
+    distro_version=$(os_field VERSION_ID)
+    distro_name=$(os_field PRETTY_NAME)
+    distro_major=${distro_version%%.*}
+    distro_minor=${distro_version#"$distro_major"}
+    distro_minor=${distro_minor#.}
+    distro_minor=${distro_minor%%.*}
+    supported=0
+    case "$distro_id:$distro_major" in
+        debian:*[!0-9]*|ubuntu:*[!0-9]*|debian:|ubuntu:) ;;
+        debian:*) [ "$distro_major" -ge 12 ] && supported=1 ;;
+        ubuntu:*)
+            if [ "$distro_major" -gt 22 ] || { [ "$distro_major" -eq 22 ] && [ "${distro_minor:-0}" -ge 4 ] 2>/dev/null; }; then
+                supported=1
+            fi
+            ;;
+    esac
+    if [ "$supported" != 1 ]; then
+        [ "${APASSY_ALLOW_UNSUPPORTED:-0}" = 1 ] ||
+            fail "The vault package supports $supported_vault; this system is ${distro_name:-unknown}. Set APASSY_ALLOW_UNSUPPORTED=1 to try it anyway (untested)."
+        printf '%s\n' "Warning: ${distro_name:-this distribution} is not tested; APASSY_ALLOW_UNSUPPORTED=1." >&2
+    fi
+    if [ -z "$format" ]; then
+        if command -v apt-get >/dev/null 2>&1 && command -v dpkg-deb >/dev/null 2>&1; then format=deb; else format=tar; fi
+    fi
+    if [ "$format" = deb ]; then
+        command -v apt-get >/dev/null 2>&1 || fail 'APASSY_VAULT_FORMAT=deb needs apt-get; use APASSY_VAULT_FORMAT=tar.'
+        command -v dpkg-deb >/dev/null 2>&1 || fail 'APASSY_VAULT_FORMAT=deb needs dpkg-deb; use APASSY_VAULT_FORMAT=tar.'
+    fi
 fi
 
 if command -v curl >/dev/null 2>&1; then
@@ -109,13 +173,22 @@ if [ "$os" = linux ]; then
         arm64) node_arch=aarch64 ;;
         *) node_arch=x86_64 ;;
     esac
+    case "$arch" in
+        arm64) deb_arch=arm64 ;;
+        *) deb_arch=amd64 ;;
+    esac
     package_prefix=apassy
-    if [ "$component" = vault ]; then package_prefix=apassy-vault; fi
-    filename=$(awk -v arch="$node_arch" -v prefix="$package_prefix" '
+    pattern="^apassy-[0-9]+\\.[0-9]+\\.[0-9]+-linux-$node_arch\\.tar\\.gz\$"
+    if [ "$component" = vault ]; then
+        package_prefix=apassy-vault
+        pattern="^apassy-vault-[0-9]+\\.[0-9]+\\.[0-9]+-linux-$node_arch\\.tar\\.gz\$"
+        if [ "$format" = deb ]; then pattern="^apassy-vault_[0-9]+\\.[0-9]+\\.[0-9]+_$deb_arch\\.deb\$"; fi
+    fi
+    filename=$(awk -v pattern="$pattern" '
         {
             name = $2
             sub(/^\*/, "", name)
-            if (name ~ ("^" prefix "-[0-9]+\\.[0-9]+\\.[0-9]+-linux-" arch "\\.tar\\.gz$")) {
+            if (name ~ pattern) {
                 count++
                 found = name
             }
@@ -125,8 +198,13 @@ if [ "$os" = linux ]; then
             print found
         }
     ' "$work/SHA256SUMS") || fail "SHA256SUMS has no single requested package for Linux $node_arch."
-    package_version=${filename#"$package_prefix"-}
-    package_version=${package_version%-linux-"$node_arch".tar.gz}
+    if [ "$component" = vault ] && [ "$format" = deb ]; then
+        package_version=${filename#apassy-vault_}
+        package_version=${package_version%_"$deb_arch".deb}
+    else
+        package_version=${filename#"$package_prefix"-}
+        package_version=${package_version%-linux-"$node_arch".tar.gz}
+    fi
 else
     filename="apassy-team-$os-$arch"
 fi
@@ -153,6 +231,22 @@ fi
 actual=${checksum%% *}
 [ "$actual" = "$expected" ] || fail "The SHA-256 check failed for $filename."
 
+if [ "$component" = vault ] && [ "$format" = deb ]; then
+    # dpkg checks the C library and apt installs the dependencies of the package.
+    for field in "Package apassy-vault" "Version $package_version" "Architecture $deb_arch"; do
+        key=${field%% *}
+        value=$(dpkg-deb --field "$work/$filename" "$key") || fail "Cannot read $filename."
+        [ "$value" = "${field#* }" ] || fail "$filename has $key $value, not ${field#* }."
+    done
+    chmod 0755 "$work"
+    chmod 0644 "$work/$filename"
+    DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-noninteractive} apt-get install -y "$work/$filename" ||
+        fail "apt-get cannot install $filename."
+    actual_version=$(/usr/bin/apassy --version) || fail 'The installed vault cannot run.'
+    [ "$actual_version" = "apassy $package_version" ] || fail 'The installed vault version differs from its package.'
+    printf '%s\n' "$actual_version"
+    exit 0
+fi
 if [ "$component" = vault ]; then
     top=${filename%.tar.gz}
     tar -tzf "$work/$filename" > "$work/entries" || fail "Cannot read $filename."

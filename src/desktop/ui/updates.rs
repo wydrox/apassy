@@ -23,7 +23,8 @@ enum Action {
 
 const FOOTER: &str =
     "Apassy installs only a newer version that Apple notarized and the Apassy team signed.";
-const LINUX_NOTE: &str = "Updates are available only for the macOS app. On Linux, build the new version from the source.";
+/// Linux: a package manager owns the files, so Apassy never replaces them (ADR 0041 §7).
+const LINUX_NOTE: &str = "Apassy does not update itself on Linux: your package manager owns its files. To update, run the installer from apassy-relay.wyderka.cc/install.sh again, or download the new package from apassy-relay.wyderka.cc/dl/ and install it with apt.";
 
 /// Settings > Updates: the version with "Check now", the state with its action, the two
 /// switches, and "What's new in Apassy".

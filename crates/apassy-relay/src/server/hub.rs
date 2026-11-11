@@ -477,9 +477,23 @@ impl Hub {
         }
         // Each open derives the key of its file (PBKDF2, 256 000 rounds, about 0.1 s of
         // one core): with many Connect teams, open them on several threads.
+        // `connect` mode serves vault stores only (docs/SPEC.md section 37): a team of
+        // another kind in a plain `relay.db` is a cutover that did not finish, and stays out
+        // of service until `apassy-relay connect-cutover` ends it.
+        let plain = hub.config.connect.plain_files();
+        for row in rows
+            .iter()
+            .filter(|row| plain && row.kind != TeamKind::Account)
+        {
+            eprintln!(
+                "apassy-relay: team {} is not a vault store and is not served in connect mode: run `apassy-relay connect-cutover`",
+                row.id
+            );
+        }
         let active: Vec<&TeamRow> = rows
             .iter()
             .filter(|row| row.state == TeamState::Active)
+            .filter(|row| !plain || row.kind == TeamKind::Account)
             .collect();
         let threads = std::thread::available_parallelism()
             .map_or(1, std::num::NonZeroUsize::get)
@@ -1772,6 +1786,13 @@ impl Hub {
             let limits = row.limits.apply(update)?;
             let (store, audit) = match &core {
                 Some(core) => (core.store.clone(), core.audit.clone()),
+                None if self.config.connect.plain_files() => (
+                    Arc::new(Store::open_team_plain(
+                        &self.config.team_path(id),
+                        &self.config,
+                    )?),
+                    Audit::new(),
+                ),
                 None => (
                     Arc::new(Store::open_team(&self.config.team_path(id), &row.file_key)?),
                     Audit::new(),
@@ -1856,7 +1877,8 @@ impl Hub {
         // Lock order: directory -> sync_commit -> team store (the sync commit order).
         let rows = self.directory.store.with(|conn| {
             let target = dir.join(crate::config::DIRECTORY_FILE);
-            let bytes = Store::snapshot_on(conn, &target, &self.config.master_key)?;
+            // `connect` mode copies plain files to plain files (docs/SPEC.md section 37).
+            let bytes = Store::snapshot_for(&self.config, conn, &target, &self.config.master_key)?;
             copied.push((crate::config::DIRECTORY_FILE.to_string(), target, bytes));
             let rows = directory::read_teams(conn)?;
             for row in &rows {
@@ -1874,19 +1896,23 @@ impl Hub {
                 });
                 let file = format!("{}/{}.db", crate::config::TEAMS_DIR, row.id);
                 let target = dir.join(&file);
+                let config = &self.config;
                 let bytes = if let Some(core) = &core {
                     core.store
-                        .with(|conn| Store::snapshot_on(conn, &target, &row.file_key))?
+                        .with(|conn| Store::snapshot_for(config, conn, &target, &row.file_key))?
                 } else {
                     // Includes suspended and failed-open teams. Missing/unreadable is
                     // an explicit backup failure, never a successful partial manifest.
-                    let store =
-                        Store::open_read_only(&self.config.team_path(&row.id), &row.file_key)?;
-                    store.with(|conn| Store::snapshot_on(conn, &target, &row.file_key))?
+                    let store = Store::open_read_only_for(
+                        config,
+                        &config.team_path(&row.id),
+                        &row.file_key,
+                    )?;
+                    store.with(|conn| Store::snapshot_for(config, conn, &target, &row.file_key))?
                 };
                 copied.push((file, target.clone(), bytes));
                 copied.extend(self.copy_snapshots(&row.id, &dir)?);
-                let saved = Store::open_read_only(&target, &row.file_key)?;
+                let saved = Store::open_read_only_for(config, &target, &row.file_key)?;
                 saved.with(|conn| {
                     crate::server::sync::verify_snapshots(
                         conn,
@@ -1914,12 +1940,16 @@ impl Hub {
             let hex = crate::sync_head::hex(&hasher.finalize());
             files.push(json!({"name": file, "bytes": bytes, "sha256": hex}));
         }
-        let manifest = json!({
+        let mut manifest = json!({
             "dir": published.to_string_lossy(),
             "created_at": now,
             "teams": rows.len(),
             "files": files,
         });
+        // A backup of `connect` mode holds plain files: a restore starts it without a key.
+        if self.config.connect.plain_files() {
+            manifest["mode"] = json!("connect");
+        }
         let text = serde_json::to_vec_pretty(&manifest)
             .map_err(|_| RelayError::internal("The manifest cannot be written."))?;
         let mut file = std::fs::OpenOptions::new()

@@ -1,7 +1,7 @@
 # Node pairing contract v1
 
 Date: 2026-11-03.
-Status: frozen for [implementation plan S2–S3](../design/implementation-plan-s2-s3.md) (unit N0). Not implemented yet. Units N3 (the parser and the pinned client, Rust, Mac and iPhone core), N4 (the Mac node's links), L1 (`apassy pair` on the Linux node), L4 (the Mac's relay sheet), and N6 (the iPhone app) implement it. Fixtures: `tests/fixtures/node-pairing-v1/`, checked by `contracts::node_pairing_v1_fixtures_match_the_contract` in `tests/contracts.rs`.
+Status: frozen for [implementation plan S2–S3](../design/implementation-plan-s2-s3.md) (unit N0). Section 7a (the Connect route) added 2026-11-10 by [plan s7](../design/implementation-plan-s7-connect.md) unit I2, additive: every link of the earlier text reads as before. Units N3 (the parser and the pinned client, Rust, Mac and iPhone core), N4 (the Mac node's links), L1 (`apassy pair` on the Linux node), L4 (the Mac's relay sheet), and N6 (the iPhone app) implement it. Fixtures: `tests/fixtures/node-pairing-v1/`, checked by `contracts::node_pairing_v1_fixtures_match_the_contract` in `tests/contracts.rs`.
 Decision: [ADR 0037](../adr/0037-own-relay-open-source.md) §2 to §4 and D4; plan decisions D1, D2, D4, D5.
 
 MUST and MUST NOT are implementation requirements.
@@ -13,12 +13,13 @@ A Mac or a Linux machine runs a **node**: the relay of the questions, the feed, 
 - the node origin (section 3);
 - the pin and the pinned trust of a client (section 4);
 - the fragment grammar of two link kinds: the **device link** (`/link#`, ADR 0019 device link code) and the **node pairing link** (`/pair#`, a one-use team code of kind `node`) (sections 5 to 7);
+- the Connect route of a node (section 7a, Apassy Connect, ADR 0037 stage 7);
 - how the ADR 0032 handoff and the pin go together (section 8);
 - what a reader stores and does (section 9).
 
 The wire contracts relay-sync-v1, relay-questions-v1, relay-feed-v1, and relay-access-request-v1 do not change: a node serves them at its origin. The fragment never reaches a server (it is the part after `#`).
 
-Out of scope: Tailscale Serve certificates (ADR 0037 D4, an option for later), the LAN route (D6, later; it will use the same grammar), Apassy Connect (stage 7), WhoIs checks.
+Out of scope: Tailscale Serve certificates (ADR 0037 D4, an option for later), the LAN route (D6, later; it will use the same grammar), the rest of Apassy Connect (stage 7: accounts, the tunnel itself, [connect-tunnel-v1](connect-tunnel-v1.md)), WhoIs checks.
 
 ## 2. Words
 
@@ -71,13 +72,15 @@ ABNF (RFC 5234). The text is ASCII; `name` carries UTF-8 through percent-encodin
 link          = device-link / pair-link
 device-link   = origin "/link#" link-code [ pinned ] [ "&handoff=" handoff ]
 pair-link     = origin "/pair#" team-code pinned
-pinned        = "&pin=" pin [ "&alt=" alt-list ] [ "&name=" name ]
+pinned        = "&pin=" pin [ "&alt=" alt-list ] [ "&node=" node-id ] [ "&name=" name ]
 origin        = "https://" host [ ":" port ]          ; section 3; a pinned link needs the port
 link-code     = "apassy_lnk_" team-id "_" 64hexlower  ; relay-sync-v1 §2
 team-code     = "apassy_tcd_" 64hexlower              ; a team code of kind node (section 6)
 pin           = 43b64u                                ; section 4
-alt-list      = alt *3( "," alt )                     ; 1 to 4 entries
+alt-list      = alt *3( "," alt ) / *3( alt "," ) route ; 1 to 4 entries in all
 alt           = alt-host [ ":" port ]
+route         = "wss://" alt-host [ ":" port ] "/v1/tunnel/dial/" node-id   ; section 7a, the last entry
+node-id       = "node_" 10( %x61-7A / "2" / "3" / "4" / "5" / "6" / "7" )   ; connect-tunnel-v1 §2
 alt-host      = ipv4 / "[" ipv6 "]" / dns-name
 name          = 1*( unreserved / pct-encoded )        ; section 7
 handoff       = "2." qid "." b64u-32 "." b64u-65      ; relay-questions-v1 §21, unchanged
@@ -88,7 +91,7 @@ UPHEX         = DIGIT / %x41-46                       ; uppercase A to F only
 
 Rules of the fragment:
 
-1. The keys come in the order `pin`, `alt`, `name`, `handoff`. Each appears at most once. `alt` and `name` need `pin` (a hosted link has neither). `handoff` is always last and only in a device link.
+1. The keys come in the order `pin`, `alt`, `node`, `name`, `handoff`. Each appears at most once. `alt`, `node`, and `name` need `pin` (a hosted link has none of them). `handoff` is always last and only in a device link.
 2. An unknown key (also a key without `=`), a repeated key, a key out of order, or an empty value refuses the whole link. There is no `?` and no second `#`.
 3. A link is at most 2048 bytes. The reader trims ASCII white space at both ends of a pasted text (as today) and nothing inside.
 4. A link without `pin` is a hosted link: today's form, today's behaviour, system trust.
@@ -118,15 +121,34 @@ Rules of the fragment:
 - `port`: 1 to 65535 without leading zeros. Without a port, the origin's port.
 - An entry equal to the origin's host and port, a repeated entry, `0.0.0.0`, `::`, a loopback, or a link-local address: `bad_alt`.
 
-The client connects to the origin's host first, then each alternative in order, until one connects. A refused or timed-out connection tries the next; a pin mismatch stops at once (no alternative is tried after a wrong certificate). Every attempt sends the same `Host` (the origin's host and port) and signs the same origin. The connect deadline of relay-sync-v1 §3 holds per address, and the total for all addresses is at most 30 s.
+The client connects to the origin's host first, then each alternative of the tailnet in order, until one connects (the Connect route of section 7a comes after them). A refused or timed-out connection tries the next; a pin mismatch stops at once (no alternative is tried after a wrong certificate). Every attempt sends the same `Host` (the origin's host and port) and signs the same origin. The connect deadline of relay-sync-v1 §3 holds per address, and the total for all addresses is at most 30 s.
 
 **`name`** — the node's display name, UTF-8, percent-encoded in one canonical form: each byte of `A-Za-z0-9-._~` is literal, every other byte is `%` and two **uppercase** hex digits. A literal byte written as `%XX`, lowercase hex, invalid UTF-8, more than 40 Unicode scalar values after decoding, a control character (Unicode `Cc`), U+2028, or U+2029: `bad_name`. The name is a label ("via Mac mini “Studio”"), never an authority: the safety words and the owner confirmation are.
+
+**`node`** — section 7a.
 
 **Codes** — not of their form: `bad_code`. A `/pair#` link with a link code, or a `/link#` link with a team code: `bad_code`.
 
 **`handoff`** — the bytes of relay-questions-v1 §21, unchanged. Out of form: `bad_handoff`.
 
-When a link has several faults, the reason is the first of: `too_long`, `bad_origin` (no `/link#` or `/pair#`, a `?`, or a second `#`), `unknown_key`, `repeated_key`, `key_order`, `empty_value`, `bad_code`, `needs_pin`, `handoff_on_pair`, `bad_origin` (the form of section 3), `bad_pin`, `bad_alt`, `bad_name`, `bad_handoff`. Reasons are for logs and tests; every refusal shows one text: "This code isn't valid. Make a new code on the node." (the iPhone core's `link_invalid`).
+When a link has several faults, the reason is the first of: `too_long`, `bad_origin` (no `/link#` or `/pair#`, a `?`, or a second `#`), `unknown_key`, `repeated_key`, `key_order`, `empty_value`, `bad_code`, `needs_pin`, `handoff_on_pair`, `bad_origin` (the form of section 3), `bad_pin`, `bad_alt`, `bad_connect`, `bad_node`, `bad_name`, `bad_handoff`. Within `alt`, every tailnet entry is checked (`bad_alt`) before the route (`bad_connect`).
+
+## 7a. The Connect route
+
+A node on Apassy Connect (ADR 0037 stage 7, [connect-tunnel-v1](connect-tunnel-v1.md)) can also be reached through the Connect dial when no tailnet address answers. Its link carries that second route beside the tailnet address:
+
+```
+…&pin=<pin>&alt=<tailnet entries,>wss://<Connect host>/v1/tunnel/dial/<node id>&node=<node id>[&name=…][&handoff=…]
+```
+
+- **The route** is one `alt` entry and always the last one: `wss://`, the Connect host (a host of the `alt-host` form: lowercase, no user; the port only when it is not 443), the path `/v1/tunnel/dial/`, and the node id (`node_` and 10 characters of `a-z2-7`, connect-tunnel-v1 section 2), with nothing after it. It counts as one of the 4 entries. A link has at most one route.
+- **The Connect host** of the route MUST be the host and port of the Connect origin that the reader is configured with (the Mac: `APASSY_CONNECT_URL` or `https://apassy-relay.wyderka.cc`; the iPhone core: `connect_url` of its config, the same default). A route through any other host is refused, so a code cannot send a device's account token to another server.
+- **`node`** is the node id again, and MUST equal the node id of the route. A route without `node`, a `node` without a route, or two different ids: `bad_node`.
+- **Refusals**: an `alt` entry with a scheme (`://`) that is not the canonical route (`ws://`, `https://`, another path, a trailing slash, a port 443 written, uppercase, a user, a node id of another form), a second route, a route that is not the last entry, or a route through another Connect host: `bad_connect`. Five entries with the route: `bad_alt`.
+- **What a reader does** (section 9, more): it keeps the route as the last entry of the stored alternatives (`RelayLink.alt`, `relay_membership.alt`, `VaultEntry.alt` of `phone.json`; no new column, no schema change), tries the origin's host and the tailnet alternatives first, and only then the dial: `GET /v1/tunnel/dial/{node id}` at its own Connect origin with its account token (connect-tunnel-v1 section 3.3), and inside that byte pipe the same pinned TLS of section 4 to the node, with the same `Host` and the same signed origin. A pin mismatch through the dial stops at once, as on the tailnet. A device without a Connect account never dials; the route is kept.
+- **The fragment never reaches a server**: Connect sees the node id in the path of the dial, never the link, the code, or the pin.
+- **Old readers**: a reader of the earlier text of this contract refuses a link with `node` (`unknown_key`, "Update Apassy to use this code."). The Mac adds the route only for a node that is on Connect (plan s7 unit M5).
+- **Builder and reader**: one of each, shared by the Mac and the iPhone core: `PairedLink::format_with(kind, url, code, name, Some(route))` (or `format` of an address with its route, `RelayUrl::with_tunnel`), and `PairedLink::parse`. Vectors: `tests/fixtures/node-pairing-v1/connect-route.json` (the four links of section 12 read without a route, three new links, and every refusal with its reason). Reasons are for logs and tests; every refusal shows one text: "This code isn't valid. Make a new code on the node." (the iPhone core's `link_invalid`).
 
 ## 8. The handoff and the pin
 
@@ -141,7 +163,7 @@ When a link has several faults, the reason is the first of: `too_long`, `bad_ori
 3. Run the flow of the link kind (section 6) with the origin as the signed and stored value.
 4. Store the trust with the membership, never in synced data:
    - Mac: `RelayLink { url, team_id, device_id, pin, alt }` in `vaults.json`, and `relay_membership.pin`, `relay_membership.alt` (a JSON list) in the vault (**vault schema 28**, a local table, no sync change);
-   - iPhone: `VaultEntry { pin, alt }` in `phone.json` (list version stays 1; missing fields read as no pin and no alternatives), and the same membership columns;
+   - iPhone: `VaultEntry { pin, alt }` in `phone.json` (list version stays 1; missing fields read as no pin and no alternatives), and the same membership columns; the Connect route of section 7a is the last entry of `alt`;
    - watch: the same membership columns in its replica vault (ADR 0039 §4); the iPhone forwards the full link (ADR 0039 §6) and keeps nothing.
 5. Never replace a stored pin or alternatives except through a new pairing of that team. A membership with a pin never connects without it.
 
@@ -152,7 +174,8 @@ When a link has several faults, the reason is the first of: `too_long`, `bad_ori
 | Contract | `node-pairing-v1` |
 | Default node port | 8444 |
 | Pin | 43 characters, b64u of SHA-256 |
-| Alternatives | at most 4 |
+| Alternatives | at most 4, the Connect route included (section 7a) |
+| Connect route | at most 1, the last `alt` entry, through the configured Connect host |
 | Name | at most 40 Unicode scalar values |
 | Link length | at most 2048 bytes |
 | Node pairing code | one use, 10 minutes (at most), kind `node` |

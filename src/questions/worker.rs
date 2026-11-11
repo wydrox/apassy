@@ -93,15 +93,29 @@ pub const ACTIVITY_OPERATION: &str = "answer through the relay";
 const LIST_PAGE: usize = 100;
 /// Bound encrypted cards retained while their key or trusted-device row catches up.
 const MAX_PENDING: usize = LIST_PAGE;
-const RECEIVE_NETWORK: &str =
-    "Requests from other Macs could not be refreshed. Apassy will try again.";
-const RECEIVE_SYNC: &str = "Sync this vault to read a request from another Mac.";
-const RECEIVE_UNREADABLE: &str =
-    "A request from another Mac could not be read. Sync this vault or update Apassy.";
+const RECEIVE_NETWORK: &str = concat!(
+    "Requests from other ",
+    crate::computers!(),
+    " could not be refreshed. Apassy will try again."
+);
+const RECEIVE_SYNC: &str = concat!(
+    "Sync this vault to read a request from another ",
+    crate::computer!(),
+    "."
+);
+const RECEIVE_UNREADABLE: &str = concat!(
+    "A request from another ",
+    crate::computer!(),
+    " could not be read. Sync this vault or update Apassy."
+);
 /// The owner removed this Mac from the questions (its key is in a removed row).
 pub const REMOVED: &str = "This device was removed from questions. To answer and ask through the relay again, turn “Send questions through the relay” on again: it needs your confirmation and a new key.";
 /// The vault has a questions membership on this Mac but no row of this Mac.
-pub const NOT_REGISTERED: &str = "This Mac is not a device of the questions of this vault. Turn “Send questions through the relay” off and on again.";
+pub const NOT_REGISTERED: &str = concat!(
+    "This ",
+    crate::computer!(),
+    " is not a device of the questions of this vault. Turn “Send questions through the relay” off and on again."
+);
 /// `POST /v1/questions` or `GET /v1/questions` answered `404`: the relay predates the
 /// questions (contract section 10).
 pub const UNSUPPORTED: &str = "The relay does not support questions yet — update the relay.";
@@ -109,11 +123,18 @@ pub const UNSUPPORTED: &str = "The relay does not support questions yet — upda
 const UNSUPPORTED_WAIT: Duration = Duration::from_secs(5 * 60);
 /// What the answering device shows after the relay took its answer: the protocol has no
 /// receipts yet, so a refusal shows only as a run that does not go on.
-pub const SENT: &str = "Sent. The Mac checks it; if the run does not continue within a minute, the answer was refused.";
+pub const SENT: &str = concat!(
+    "Sent. The ",
+    crate::computer!(),
+    " checks it; if the run does not continue within a minute, the answer was refused."
+);
 /// The local note of a production question about a team credential (integrator
 /// decision 1).
-pub const TEAM_PRODUCTION: &str =
-    "Remote answers for team production come with shared vaults; answer on this Mac.";
+pub const TEAM_PRODUCTION: &str = concat!(
+    "Remote answers for team production come with shared vaults; answer on this ",
+    crate::computer!(),
+    "."
+);
 
 pub(super) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -127,7 +148,7 @@ pub(crate) fn answered_on_label(device: &TrustedDevice) -> String {
         TrustedDeviceKind::Iphone => "iPhone".to_owned(),
         TrustedDeviceKind::Watch => "Apple Watch".to_owned(),
         TrustedDeviceKind::Mac => match crate::vault::usage::clean(&device.name, 64) {
-            name if name.is_empty() => "another Mac".to_owned(),
+            name if name.is_empty() => concat!("another ", crate::computer!()).to_owned(),
             name => name,
         },
     }
@@ -1234,7 +1255,11 @@ impl Shared {
                 self.keep_local(
                     active,
                     run,
-                    "This question is too long for your other devices. Answer it on this Mac.",
+                    concat!(
+                        "This question is too long for your other devices. Answer it on this ",
+                        crate::computer!(),
+                        "."
+                    ),
                 );
                 return;
             }
@@ -1323,8 +1348,14 @@ impl Shared {
             asked.tries += 1;
             asked.next_try = Instant::now() + Duration::from_secs(wait);
             drop(state);
-            lock(&self.view).problem =
-                Some("The relay does not answer. Questions wait on this Mac.".to_owned());
+            lock(&self.view).problem = Some(
+                concat!(
+                    "The relay does not answer. Questions wait on this ",
+                    crate::computer!(),
+                    "."
+                )
+                .to_owned(),
+            );
             return;
         }
         state.asked.remove(&run_id);
@@ -1332,15 +1363,35 @@ impl Shared {
             // The relay counts the open questions of the team, of this Mac, and of the
             // member, and the questions of the last hour; its message names the limit.
             Some("too_many_questions") => {
-                "The relay has too many open questions of this Mac or this vault. Answer it on this Mac."
+                concat!(
+                    "The relay has too many open questions of this ",
+                    crate::computer!(),
+                    " or this vault. Answer it on this ",
+                    crate::computer!(),
+                    "."
+                )
             }
             Some("payload_too_large") => {
-                "This question is too long for your other devices. Answer it on this Mac."
+                concat!(
+                    "This question is too long for your other devices. Answer it on this ",
+                    crate::computer!(),
+                    "."
+                )
             }
             _ if matches!(error, QuestionsError::Removed) => {
-                "The relay refused this Mac. Answer the question on this Mac."
+                concat!(
+                    "The relay refused this ",
+                    crate::computer!(),
+                    ". Answer the question on this ",
+                    crate::computer!(),
+                    "."
+                )
             }
-            _ => "The relay did not take this question. Answer it on this Mac.",
+            _ => concat!(
+                "The relay did not take this question. Answer it on this ",
+                crate::computer!(),
+                "."
+            ),
         };
         state.local_only.insert(run_id, why.to_owned());
         drop(state);

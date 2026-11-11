@@ -30,7 +30,7 @@ impl OwnerFrequency {
             Self::FifteenMinutes => "15 minutes",
             Self::OneHour => "1 hour",
             Self::UntilLock if cfg!(target_os = "linux") => "Until the screen locks",
-            Self::UntilLock => "Until the Mac locks",
+            Self::UntilLock => concat!("Until the ", crate::computer!(), " locks"),
         }
     }
     pub fn code(self) -> &'static str {

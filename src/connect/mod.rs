@@ -39,7 +39,7 @@ pub use client::{
     AccountCreated, AccountDeleted, AccountView, CheckoutAnswer, CheckoutRequest, ConnectClient,
     DeviceView, GroupDetail, GroupJoined, GroupMember, GroupView, InviteAnswer, MemberRemoved,
     PlanOffer, PlanPrice, PlanView, PlansView, PortalAnswer, RecoverAnswer, RevokeAnswer,
-    SeatsAnswer, StoreDevice, VaultStoreView, WellKnown, configured_origin,
+    SeatsAnswer, StoreDevice, VaultStoreView, WellKnown, configured_origin, set_configured_origin,
 };
 pub use device_key::{
     AccountSigner, DeviceKeyError, DeviceKeyStore, KeychainDeviceKeyStore, MemoryKeyStore,

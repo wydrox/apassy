@@ -608,7 +608,10 @@ fn a_long_or_odd_name_is_cut_and_cleaned() {
     let long = "x".repeat(60);
     assert_eq!(clip(&long).chars().count(), 40);
     assert!(clip(&long).ends_with('…'));
-    assert_eq!(Environment::this_mac("  ").name, "This Mac");
+    assert_eq!(
+        Environment::this_mac("  ").name,
+        concat!("This ", crate::computer!())
+    );
 }
 
 #[test]

@@ -84,8 +84,12 @@ pub(crate) const RETRY_INTERVAL: Duration = Duration::from_secs(60);
 /// worker thread: it runs the Tailscale command line).
 pub(crate) const ACCESS_READ_INTERVAL: Duration = Duration::from_secs(10);
 /// The note when a close keeps the app open.
+#[cfg(not(target_os = "linux"))]
 pub(crate) const KEPT_OPEN: &str =
     "Apassy stays open for your cloud agents: the window is in the Dock. Quit Apassy to stop them.";
+/// The note when a close keeps the app open: Linux has no Dock and no menu bar.
+#[cfg(target_os = "linux")]
+pub(crate) const KEPT_OPEN: &str = "Apassy stays open for your cloud agents: the window is minimized. Press Ctrl+Q to quit Apassy and stop them.";
 
 /// A start of the node on a worker thread.
 struct Starting {
@@ -366,7 +370,10 @@ impl DesktopApp {
     /// the cloud agents. eframe quits when no `CancelClose` comes in the frame of the
     /// request. Quit Apassy (⌘Q) does not ask to close the window, so it still quits.
     pub(crate) fn keep_open_for_node(&mut self, ctx: &egui::Context) {
-        if !ctx.input(|input| input.viewport().close_requested()) || !self.node_running() {
+        if !ctx.input(|input| input.viewport().close_requested())
+            || !self.node_running()
+            || super::quit_requested(ctx)
+        {
             return;
         }
         ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
@@ -558,7 +565,11 @@ impl DesktopApp {
         }
         match node.allow_connect(&self.owner_ui.session.shared_vault(), id) {
             Ok(agent) => self.set_ok(format!(
-                "{} is connected to this Mac. It sees no credential until you choose some in Agents.",
+                concat!(
+                    "{} is connected to this ",
+                    crate::computer!(),
+                    ". It sees no credential until you choose some in Agents."
+                ),
                 agent.name
             )),
             Err(error) => self.set_err(error.message),
@@ -611,7 +622,11 @@ impl DesktopApp {
         match node.set_route(&self.owner_ui.session.shared_vault(), false) {
             Ok(()) => {
                 self.stop_node();
-                self.set_ok("Remote access is off. No remote agent reaches this Mac.");
+                self.set_ok(concat!(
+                    "Remote access is off. No remote agent reaches this ",
+                    crate::computer!(),
+                    "."
+                ));
             }
             Err(error) => self.set_err(error.message),
         }

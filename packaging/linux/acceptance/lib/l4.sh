@@ -16,8 +16,10 @@ L4_USER=${L4_USER:-l4owner}
 L4_VT=${L4_VT:-3}
 L4_DISPLAY=${L4_DISPLAY:-:50}
 L4_GEOMETRY=${L4_GEOMETRY:-1600x1000x24}
-L4_STATE=${L4_STATE:-$HOME/work/l4/state}
-L4_OUT=${L4_OUT:-$HOME/work/l4/out}
+# One run's files: L4_WORK=$HOME/work/l5 keeps a second run apart from the first.
+L4_WORK=${L4_WORK:-$HOME/work/l4}
+L4_STATE=${L4_STATE:-$L4_WORK/state}
+L4_OUT=${L4_OUT:-$L4_WORK/out}
 L4_CONTAINER=${L4_CONTAINER:-}
 L4_KIT=${L4_KIT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
 L4_NODE=${L4_NODE:-/opt/l4-node/bin/node}
@@ -72,6 +74,8 @@ l4_make_secrets() {
     [ -s "$L4_STATE/owner-login-password" ] || head -c 18 /dev/urandom | base64 | tr -d '/+=' > "$L4_STATE/owner-login-password"
     [ -s "$L4_STATE/vault-passphrase" ] || printf 'l4-synthetic-%s' "$(head -c 12 /dev/urandom | base64 | tr -d '/+=')" > "$L4_STATE/vault-passphrase"
     [ -s "$L4_STATE/site-password" ] || printf 'Site-%s' "$(head -c 12 /dev/urandom | base64 | tr -d '/+=')" > "$L4_STATE/site-password"
+    # A synthetic TOTP seed (base32) for otp.html, never a real account's.
+    [ -s "$L4_STATE/totp-seed" ] || head -c 20 /dev/urandom | base32 | tr -d '=\n' > "$L4_STATE/totp-seed"
 }
 
 # Host mode: the owner account and its automatic VT login.
@@ -140,10 +144,10 @@ l4_rp_up() {
     l4_rp_down
     local log="$L4_OUT/logs/rp-events.jsonl"
     if [ -n "$L4_CONTAINER" ]; then
-        docker exec -d -e L4_LOGIN_PASSWORD="$(cat "$L4_STATE/site-password")" "$L4_CONTAINER" \
+        docker exec -d -e L4_LOGIN_PASSWORD="$(cat "$L4_STATE/site-password")" -e L4_TOTP_SEED="$(cat "$L4_STATE/totp-seed")" "$L4_CONTAINER" \
             bash -c "exec /opt/l4-node/bin/node /l4/kit/rp/server.mjs --port $L4_RP_PORT --log /l4/out/logs/rp-events.jsonl >>/l4/out/logs/rp.log 2>&1"
     else
-        L4_LOGIN_PASSWORD="$(cat "$L4_STATE/site-password")" nohup "$L4_NODE" "$L4_KIT/rp/server.mjs" \
+        L4_LOGIN_PASSWORD="$(cat "$L4_STATE/site-password")" L4_TOTP_SEED="$(cat "$L4_STATE/totp-seed")" nohup "$L4_NODE" "$L4_KIT/rp/server.mjs" \
             --port "$L4_RP_PORT" --log "$log" >>"$L4_OUT/logs/rp.log" 2>&1 &
         echo $! > "$L4_STATE/rp.pid"
     fi

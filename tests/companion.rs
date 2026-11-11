@@ -2077,7 +2077,12 @@ fn a_connection_from_the_mac_itself_is_closed_at_once() {
     );
     assert!(
         result.is_err(),
-        "no answer for a peer on the Mac: {result:?}"
+        concat!(
+            "no answer for a peer on the ",
+            apassy::computer!(),
+            ": {result:?}"
+        ),
+        result = result
     );
     assert_eq!(env.handle.open_connections(), 0);
 }

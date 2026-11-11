@@ -1146,6 +1146,7 @@ impl DesktopApp {
                 user_name: info.user_name,
                 user_display_name: info.user_display_name,
                 credential_id: info.credential_id,
+                added: info.added,
             }],
             chosen: 0,
             extensions,

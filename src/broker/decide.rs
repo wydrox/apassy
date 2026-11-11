@@ -616,7 +616,11 @@ fn request_access(
                 Err(_) => {
                     return WireResponse::failure(
                         "access_once_unavailable",
-                        "The scoped request could not be withdrawn. Review on the Mac.",
+                        concat!(
+                            "The scoped request could not be withdrawn. Review on the ",
+                            crate::computer!(),
+                            "."
+                        ),
                     );
                 }
             }
@@ -1074,7 +1078,7 @@ fn ask_owner(
     };
     let on = match settled.method {
         Some(CheckMethod::Companion) => "iPhone",
-        Some(_) => "this Mac",
+        Some(_) => concat!("this ", crate::computer!()),
         None => "",
     };
     let refusal = match settled.outcome {

@@ -144,14 +144,18 @@ const OWNER_REMEMBERED: &str = "Owner approved and remembered the answer";
 const RELOCKED: &str =
     "The vault was locked while Apassy checked this request. Send the request again.";
 /// The device of an answer on the Mac.
-const ANSWERED_ON_MAC: &str = "this Mac";
+const ANSWERED_ON_MAC: &str = concat!("this ", crate::computer!());
 const ANSWERED_ON_IPHONE: &str = "iPhone";
 /// Where the user request of a cloud run comes from, for the card and the log. It
 /// starts with "from the cloud agent", which `learning::resolved_source` reads as text of
 /// the agent.
 pub const CLOUD_REQUEST_SOURCE: &str = "from the cloud agent, not verified";
 /// Why a cloud run asks, before the notes of the hard rules.
-const CLOUD_ASK: &str = "A cloud agent asks to run this through the node of this Mac. Every cloud run waits for you, and Apassy remembers nothing for it.";
+const CLOUD_ASK: &str = concat!(
+    "A cloud agent asks to run this through the node of this ",
+    crate::computer!(),
+    ". Every cloud run waits for you, and Apassy remembers nothing for it."
+);
 /// The `place` of the hard rules of a cloud run.
 const CLOUD_PLACE: &str = "the cloud";
 
@@ -183,7 +187,7 @@ pub struct CloudContext {
 impl CloudContext {
     /// The folder line of the card: a fixed label, never `agent_cwd`.
     fn card_cwd(&self) -> String {
-        "(the cloud agent, not on this Mac)".to_owned()
+        concat!("(the cloud agent, not on this ", crate::computer!(), ")").to_owned()
     }
 
     fn stopped(&self) -> bool {
@@ -1158,7 +1162,11 @@ fn run_inner(
         let Some(exact) = super::access_once::exact_run_hosts(request.command) else {
             return WireResponse::failure(
                 "access_once_unavailable",
-                "This command's complete exact destination ports cannot be established. Review on this Mac.",
+                concat!(
+                    "This command's complete exact destination ports cannot be established. Review on this ",
+                    crate::computer!(),
+                    "."
+                ),
             );
         };
         let Some(action) =

@@ -689,7 +689,11 @@ impl OwnerSession {
         let generation = self.owner_window.begin_unlock(expected).ok_or_else(|| {
             fail(
                 "owner_check_changed",
-                "The Mac session changed during unlock. Confirm again.",
+                concat!(
+                    "The ",
+                    crate::computer!(),
+                    " session changed during unlock. Confirm again."
+                ),
             )
         })?;
         self.forget_all_reveals();

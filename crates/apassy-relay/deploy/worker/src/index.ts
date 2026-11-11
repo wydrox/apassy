@@ -9,6 +9,14 @@
 // A WebSocket upgrade goes to the relay only on `GET /v1/tunnel/*` (connect-tunnel-v1),
 // unchanged, and the relay's `101` comes back as it is; an upgrade anywhere else is
 // refused here. Dials (`GET /v1/tunnel/dial/*`) have their own per-address limiter.
+// One build serves both phases of the hosted relay (docs/operations/connect.md): the var
+// RELAY_MODE is `relay` (unset: today's hosted relay) or `connect` (after the cutover,
+// ADR 0037 stage 7). In `connect` mode the APNs sender `/internal/push` is off (404), the
+// two guards of the free Connect teams (CONNECT_LIMITER, CONNECT_PREFIX_LIMITER) and the
+// client prefix they send are not used, and the agent proxy `/p/` has the JSON cap (the
+// relay has no proxy there and answers 410). `/dl/*`, `/guide`, and `/install.sh` are the
+// same in both. Any other value is a configuration error: 503 on every relay route, 404
+// on `/internal/*`; the static files stay.
 // Erasable TypeScript only (no enums, namespaces, or parameter properties), so
 // Node can run it with type stripping in the tests.
 // workerd accepts only handlers as exports of this main module, so values such as
@@ -53,6 +61,16 @@ export interface Env extends PushEnv {
   TUNNEL_LIMITER?: CreateLimiter;
   /** Static files served without the relay or its edge secret. */
   ASSETS?: AssetService;
+  /** `relay` (or unset) before the cutover, `connect` after it. A var. */
+  RELAY_MODE?: string;
+}
+
+/** The phase of the hosted relay that this Worker fronts, from RELAY_MODE; undefined for a bad value. */
+function relayMode(env: Env): "relay" | "connect" | undefined {
+  const mode = env.RELAY_MODE?.trim();
+  if (mode === undefined || mode === "" || mode === "relay") return "relay";
+  if (mode === "connect") return "connect";
+  return undefined;
 }
 
 const EDGE_HEADER = "x-apassy-edge";
@@ -115,7 +133,7 @@ function jsonError(status: number, code: string, message: string, extra: Record<
 // MAX_STRIPE_WEBHOOK_LENGTH, the agent proxy up to MAX_PROXY_LENGTH, everything else up
 // to MAX_JSON_LENGTH. A snapshot push, a feed put, and a webhook must declare their length.
 // Elsewhere a request without one has no body or a chunked one, which tiny_http does not drain.
-function lengthError(request: Request, path: string): Response | undefined {
+function lengthError(request: Request, path: string, connectMode: boolean): Response | undefined {
   const snapshot = request.method === "PUT" && path === SNAPSHOT_PATH;
   const feed = request.method === "PUT" && path === FEED_PATH;
   const webhook = request.method === "POST" && path === STRIPE_WEBHOOK_PATH;
@@ -149,7 +167,7 @@ function lengthError(request: Request, path: string): Response | undefined {
     if (Number(length) > MAX_STRIPE_WEBHOOK_LENGTH) {
       return jsonError(413, "payload_too_large", "The webhook body is larger than 256 KiB.");
     }
-  } else if (path.startsWith(PROXY_PREFIX)) {
+  } else if (path.startsWith(PROXY_PREFIX) && !connectMode) {
     if (Number(length) > MAX_PROXY_LENGTH) {
       return jsonError(413, "payload_too_large", "The body is larger than 8 MiB.");
     }
@@ -235,14 +253,15 @@ const CONNECT_PATH = "/v1/connect";
 // thread for its whole body. A Connect team needs no code at all. The Stripe webhook has
 // none on purpose: Stripe sends every event from a few shared addresses, and a limit there
 // would drop paid events; its signature is the relay's check.
-function limiterFor(method: string, path: string, env: Env): CreateLimiter | undefined {
+function limiterFor(method: string, path: string, env: Env, connectMode: boolean): CreateLimiter | undefined {
   if (method === "PUT" && path === SNAPSHOT_PATH) return env.SYNC_LIMITER;
   if (method !== "POST") return undefined;
   switch (path) {
     case STRIPE_WEBHOOK_PATH:
       return undefined;
     case CONNECT_PATH:
-      return env.CONNECT_LIMITER;
+      // In `connect` mode the free Connect teams are gone: the relay answers 410 at once.
+      return connectMode ? undefined : env.CONNECT_LIMITER;
     case "/v1/join":
     case "/v1/teams":
     case "/v1/devices/link":
@@ -267,9 +286,16 @@ export default {
     // Check the raw path before URL parsing removes dot segments or backslashes.
     const rawPath = request.url.replace(/^[^:]+:\/\/[^/?#]+/, "").split(/[?#]/, 1)[0]!;
     const url = new URL(request.url);
+    const mode = relayMode(env);
+    const connectMode = mode === "connect";
     // The parsed path is checked too: `/./internal/push` parses to `/internal/push`.
     for (const path of [rawPath, url.pathname]) {
-      if (path === "/internal" || path.startsWith("/internal/")) return handleInternal(request, env);
+      if (path === "/internal" || path.startsWith("/internal/")) {
+        // The APNs sender serves the hosted relay before the cutover only: Connect sends no
+        // push (the nodes use the push gateway, ADR 0037 D7). A bad mode keeps it off too.
+        if (mode !== "relay") return text(404, "not found");
+        return handleInternal(request, env);
+      }
     }
     // The relay refuses an upgrade on every other route too; it never reaches it from here.
     if (wantsUpgrade(request)) {
@@ -296,23 +322,26 @@ export default {
       return staticResponse(await env.ASSETS.fetch(assetRequest), noStore);
     }
 
+    if (mode === undefined) return text(503, "relay not configured");
+
     const hasBody = request.method !== "GET" && request.method !== "HEAD";
     if (hasBody) {
-      const refused = lengthError(request, url.pathname);
+      const refused = lengthError(request, url.pathname, connectMode);
       if (refused) return refused;
     }
 
     // Connect has two guards, each on its own key: the client's /64 (or IPv4 address) first,
     // then its coarser /48 (or /24) prefix, asked only when the first one lets the call pass.
     // Every other route has one guard, keyed by the full address.
-    const isConnect = request.method === "POST" && url.pathname === CONNECT_PATH;
+    // Not in `connect` mode: there the route is retired and has no guard of its own.
+    const isConnect = !connectMode && request.method === "POST" && url.pathname === CONNECT_PATH;
     // A new account, and a recovery, are keyed like Connect's first guard: one client usually
     // holds a whole /64.
     const isAccount =
       request.method === "POST" && (url.pathname === ACCOUNT_PATH || url.pathname === RECOVER_PATH);
     // A dial is keyed the same way.
     const isDial = request.method === "GET" && url.pathname.startsWith(DIAL_PREFIX);
-    const limiter = limiterFor(request.method, url.pathname, env);
+    const limiter = limiterFor(request.method, url.pathname, env, connectMode);
     if (limiter || isConnect || isAccount || isDial) {
       // Fail open if a binding is missing or fails: the relay itself checks codes, keys, and
       // signatures; this limit is a guard against floods, not an authorization check.
