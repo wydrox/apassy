@@ -494,6 +494,71 @@ fn the_front_names_the_peer_of_each_pumped_connection_until_it_ends() {
     );
 }
 
+/// A stream of the Connect tunnel (`serve_connection`): the front writes the connection
+/// to the target down as a tunnel stream with the server name of the client's hello, so
+/// the relay's public listener knows the public origin of the request without a header.
+#[test]
+fn a_tunnel_stream_is_written_down_with_the_server_name_of_its_handshake() {
+    use std::sync::atomic::AtomicBool;
+    let (sender, sources) = std::sync::mpsc::channel();
+    let target = peer_server(sender);
+    let certificate = certificate();
+    let config =
+        apassy::net::tls_front::server_config(&certificate.der, &certificate.key).expect("config");
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind");
+    let address = listener.local_addr().expect("addr");
+    let stop = Arc::new(AtomicBool::new(false));
+    let serving = {
+        let stop = Arc::clone(&stop);
+        thread::spawn(move || {
+            let (conn, _) = listener.accept().expect("accept");
+            apassy::net::tls_front::serve_connection(
+                conn,
+                config,
+                target,
+                FrontLimits::default(),
+                &stop,
+            );
+        })
+    };
+    let socket = TcpStream::connect(address).expect("connect");
+    socket
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("timeout");
+    let name = ServerName::try_from("K7M2Q4X3CA.node.example.test")
+        .expect("name")
+        .to_owned();
+    let connection = ClientConnection::new(
+        client_config(certificate.pin, &[&rustls::version::TLS13]),
+        name,
+    )
+    .expect("client");
+    let mut tls = StreamOwned::new(connection, socket);
+    assert_eq!(send_line(&mut tls, "who").expect("line"), "none", "no peer");
+    let source = sources
+        .recv_timeout(Duration::from_secs(5))
+        .expect("a connection to the target");
+    let stream = front_peers::tunnel_stream(source, target).expect("a tunnel stream");
+    assert_eq!(
+        stream
+            .server_name
+            .map(|name| name.to_ascii_lowercase())
+            .as_deref(),
+        Some("k7m2q4x3ca.node.example.test")
+    );
+    assert_eq!(front_peers::peer_of(source, target), None);
+    drop(tls);
+    assert!(
+        wait_until(Duration::from_secs(5), || front_peers::tunnel_stream(
+            source, target
+        )
+        .is_none()),
+        "the entry goes with the connection"
+    );
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    serving.join().expect("served");
+}
+
 #[test]
 fn a_request_right_behind_the_finished_reaches_the_target() {
     // The client writes its first line before the handshake ends; rustls sends it

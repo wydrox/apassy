@@ -295,6 +295,13 @@ impl TlsSide {
         self.conn.alpn_protocol()
     }
 
+    /// The server name (SNI) of the client's hello, once the handshake read it. With a
+    /// resolver that serves a certificate only for one name (the public streams of the
+    /// Connect tunnel, `crate::node::public_cert`), a finished handshake answered for it.
+    pub fn server_name(&self) -> Option<&str> {
+        self.conn.server_name()
+    }
+
     /// Take raw bytes from the peer and append the plaintext that they carry to
     /// `plain`. An error is a TLS error: the caller sends [`TlsSide::outgoing`] (the
     /// alert) and closes.
@@ -744,9 +751,14 @@ impl Conn for TcpStream {
 /// as a tailnet connection. There is no peer check and no per-peer slot: Connect tells
 /// the node nothing about the caller, who authenticates inside TLS as on the tailnet, and
 /// the tunnel has its own stream limits. While it pumps, the connection to the target is
-/// written down as a tunnel stream in [`front_peers`], so the relay never reads a header
-/// of the client for its failed-auth counts (`X-Forwarded-For` comes from the client
-/// here). `stop` ends the pump (the tunnel stops). It returns when the connection ended.
+/// written down as a tunnel stream in [`front_peers`], with the server name of the
+/// handshake ([`TlsSide::server_name`]), so the relay never reads a header of the client
+/// for its failed-auth counts (`X-Forwarded-For` comes from the client here) or for the
+/// public origin of a request: a `public` stream's name is the one that the public
+/// certificate answered for, and the relay's public listener answers with the origin of
+/// that name (relay docs/SPEC.md section 31.1). On a `device` stream the name is the
+/// client's, which no listener reads. `stop` ends the pump (the tunnel stops). It returns
+/// when the connection ended.
 pub fn serve_connection<C: Conn>(
     mut conn: C,
     config: Arc<ServerConfig>,
@@ -777,8 +789,13 @@ pub fn serve_connection<C: Conn>(
     };
     let _ = target.set_nodelay(true);
     // Before the first byte to the target: the relay reads the request only after it.
+    let server_name = tls.server_name().map(str::to_owned);
     let _entry = match (target.local_addr(), target.peer_addr()) {
-        (Ok(source), Ok(listener)) => Some(front_peers::register_tunnel(source, listener)),
+        (Ok(source), Ok(listener)) => Some(front_peers::register_tunnel_named(
+            source,
+            listener,
+            server_name.as_deref(),
+        )),
         _ => None,
     };
     pump(limits, stop, conn, target, tls, early);

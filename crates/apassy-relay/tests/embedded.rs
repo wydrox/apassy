@@ -41,6 +41,7 @@ fn node_config(dir: &Path) -> NodeConfig {
         data_dir: dir.join("node"),
         master_key: NodeSecret::new(MASTER_KEY.to_string()),
         public_url: PUBLIC_URL.to_string(),
+        public_origins: Vec::new(),
         public_listen: Some(loopback()),
     }
 }
