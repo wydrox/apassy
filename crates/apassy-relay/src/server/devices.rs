@@ -55,6 +55,10 @@ const STORE_CAPS: StoreCaps = StoreCaps {
 /// is kept until it expires on the clock, which never goes back
 /// (`account::NonceClock`), within `StoreCaps`. The key is made at the first challenge and
 /// goes with `DeviceAuthState::clear` (a suspension, a stop): every open nonce ends.
+/// A nonce of a vault store that checked: its bytes, its expiry on the nonce clock, and
+/// the SHA-256 of its key.
+type StoreNonce = ([u8; device::NONCE_BYTES], u64, [u8; 32]);
+
 #[derive(Default)]
 struct StoreNonces {
     key: Option<hmac::Key>,
@@ -160,7 +164,7 @@ impl StoreNonces {
     /// `used_per_key` used nonces; 503 `busy` when the table is full; both leave it unused.
     fn grant(
         &mut self,
-        (bytes, expires_at, key): ([u8; device::NONCE_BYTES], u64, [u8; 32]),
+        (bytes, expires_at, key): StoreNonce,
         now: u64,
         caps: StoreCaps,
     ) -> RelayResult<()> {
@@ -452,7 +456,7 @@ fn store_challenge(
     core: &Core,
     request: &TokenRequest,
     now: u64,
-) -> Option<(DeviceId, ([u8; device::NONCE_BYTES], u64, [u8; 32]))> {
+) -> Option<(DeviceId, StoreNonce)> {
     let public = device::decode_public_key(&request.public_key).ok()?;
     let key_hash: [u8; 32] = Sha256::digest(public).into();
     let (bytes, expires_at) = core
@@ -1082,11 +1086,7 @@ mod store_nonce_tests {
 
     #[test]
     fn a_store_nonce_is_used_once_within_its_bounds() {
-        fn take(
-            nonces: &mut StoreNonces,
-            key: &[u8; 32],
-            now: u64,
-        ) -> ([u8; device::NONCE_BYTES], u64, [u8; 32]) {
+        fn take(nonces: &mut StoreNonces, key: &[u8; 32], now: u64) -> StoreNonce {
             let text = nonces.issue(&team(), key, now).unwrap();
             let (bytes, expiry) = nonces.check(&text, &team(), key, now).unwrap();
             (bytes, expiry, *key)

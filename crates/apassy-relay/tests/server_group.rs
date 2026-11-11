@@ -702,7 +702,12 @@ fn a_store_device_added_again_clears_the_removal_that_waited_for_it() {
         .unwrap()
         .to_string();
     let path = format!("/v1/account/vaults/{team}/devices");
-    let first = c.ok("POST", &path, Some(&owner.token), Some(&store_add_body(&anna)));
+    let first = c.ok(
+        "POST",
+        &path,
+        Some(&owner.token),
+        Some(&store_add_body(&anna)),
+    );
     let id = TeamId::parse(&team).unwrap();
     let hub = c.relay.hub();
     let query_only = |on: bool| {
@@ -723,11 +728,16 @@ fn a_store_device_added_again_clears_the_removal_that_waited_for_it() {
     query_only(false);
     assert_eq!(
         c.rows("SELECT team_id FROM account_store_removal"),
-        [team.clone()]
+        std::slice::from_ref(&team)
     );
     // Anna joins again and is added again: the live row of the store is hers again.
     c.add_member(&owner, &anna);
-    let again = c.ok("POST", &path, Some(&owner.token), Some(&store_add_body(&anna)));
+    let again = c.ok(
+        "POST",
+        &path,
+        Some(&owner.token),
+        Some(&store_add_body(&anna)),
+    );
     assert_eq!(again["store_device_id"], first["store_device_id"]);
     assert!(
         c.rows("SELECT team_id FROM account_store_removal")

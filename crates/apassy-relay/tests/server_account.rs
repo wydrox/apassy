@@ -680,7 +680,8 @@ fn an_account_needs_a_valid_signature_and_one_key_makes_one_account() {
     let mut root_other_name = body.clone();
     root_other_name["statement"] = json!(root_statement(&c, &account_id, &key, "MacBook Air"));
     let mut root_other_account = body.clone();
-    root_other_account["statement"] = json!(root_statement(&c, &new_account_id(), &key, "MacBook Pro"));
+    root_other_account["statement"] =
+        json!(root_statement(&c, &new_account_id(), &key, "MacBook Pro"));
     let mut root_other_key = body.clone();
     root_other_key["statement"] = json!(root_statement(
         &c,
@@ -1136,7 +1137,13 @@ fn a_join_needs_the_confirmation_of_a_live_device_and_both_sides_show_the_same_w
         "POST",
         &format!("/v1/account/devices/pending/{join_id}/confirm"),
         Some(&second_token),
-        Some(&confirm_body(&c, &second, &second_token, &hash, (&b, "iPad"))),
+        Some(&confirm_body(
+            &c,
+            &second,
+            &second_token,
+            &hash,
+            (&b, "iPad"),
+        )),
         403,
         "forbidden",
     );
@@ -3258,8 +3265,10 @@ fn add_at_head(c: &Connect, by: &Dev, token: &str) -> (u16, Value) {
             joined["join_id"].as_u64().unwrap()
         ),
         Some(token),
-        Some(&json!({"public_key": key.public_key_b64(), "version": head + 1,
-                     "statement": statement})),
+        Some(
+            &json!({"public_key": key.public_key_b64(), "version": head + 1,
+                     "statement": statement}),
+        ),
     )
 }
 
@@ -3271,7 +3280,7 @@ fn add_at_head(c: &Connect, by: &Dev, token: &str) -> (u16, Value) {
 fn the_end_of_a_device_list_keeps_room_to_remove_every_device_and_recover() {
     use apassy_relay::server::account::{LAST_ADD_VERSION, MAX_DEVICES, MAX_LIST_ENTRIES};
     assert_eq!(LAST_ADD_VERSION, 246);
-    assert!(MAX_LIST_ENTRIES - LAST_ADD_VERSION >= MAX_DEVICES);
+    const { assert!(MAX_LIST_ENTRIES - LAST_ADD_VERSION >= MAX_DEVICES) };
     let c = start();
     // 1. An add at 246 works; an add at 247 is refused and adds nothing; a remove at 247
     // still works.
@@ -3408,7 +3417,13 @@ fn a_recovery_answers_an_unknown_and_an_existing_account_the_same() {
         "POST",
         "/v1/account/recover",
         None,
-        Some(&recover_body(&c, &existing.account, &[7u8; 16], &key, &[1u8; 16])),
+        Some(&recover_body(
+            &c,
+            &existing.account,
+            &[7u8; 16],
+            &key,
+            &[1u8; 16],
+        )),
     );
     assert_eq!(status, 200);
 }

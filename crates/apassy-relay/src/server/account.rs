@@ -1107,7 +1107,11 @@ fn root_change<'a>(
         by: root,
         signature: statement,
     };
-    if !device::verify(root, &list_message(origin, account, 1, None, &change), statement) {
+    if !device::verify(
+        root,
+        &list_message(origin, account, 1, None, &change),
+        statement,
+    ) {
         return Err(RelayError::invalid(
             "The statement is not the signature of the key over the root entry of the device list. Nothing was made.",
         ));
@@ -3269,7 +3273,10 @@ mod tests {
             state.fail(Some("acc_a"), &prefix, NOW, 100).unwrap();
         }
         assert_eq!(
-            state.fail(Some("acc_a"), &prefix, NOW, 100).unwrap_err().code,
+            state
+                .fail(Some("acc_a"), &prefix, NOW, 100)
+                .unwrap_err()
+                .code,
             codes::RATE_LIMITED
         );
         // Another account from the same prefix goes on until the prefix's limit.
@@ -3296,7 +3303,10 @@ mod tests {
         );
         assert!(!state.accounts.contains_key("acc_b"));
         assert_eq!(
-            state.fail(Some("acc_a"), &[3u8; 32], NOW, 1).unwrap_err().code,
+            state
+                .fail(Some("acc_a"), &[3u8; 32], NOW, 1)
+                .unwrap_err()
+                .code,
             codes::BUSY
         );
         state.fail(Some("acc_a"), &prefix, NOW, 1).unwrap();

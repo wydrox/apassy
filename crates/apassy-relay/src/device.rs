@@ -678,7 +678,17 @@ mod tests {
                 .to_vec()
         );
         assert_eq!(
-            account_list_message("https://c.test", "acc_a", 3, "PH", "remove", "PK", "-", "-", "BY"),
+            account_list_message(
+                "https://c.test",
+                "acc_a",
+                3,
+                "PH",
+                "remove",
+                "PK",
+                "-",
+                "-",
+                "BY"
+            ),
             b"apassy-connect device-list v1\0https://c.test\0acc_a\x003\0PH\0remove\0PK\0-\0-\0BY"
                 .to_vec()
         );
