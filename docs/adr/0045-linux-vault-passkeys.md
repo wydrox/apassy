@@ -35,6 +35,18 @@ browsers, stale processes, mismatched users and writable browser binaries.
 This is defense in depth, not an equivalent to macOS signing. Preserve origin,
 RP ID, challenge, approval and user-verification checks in the shared flow.
 
+When the kernel hides the host's executable (a non-dumpable peer), the app still
+verifies, on the kernel's data only: the peer's user (`SO_PEERCRED` and all four user
+IDs of `/proc/PID/status`), its PID and start time, that the kernel itself hid the link
+(`/proc/PID/exe` owned by root), and of its direct parent (`/proc/PID/stat`) the user,
+start time, root-owned browser executable, mount and user namespaces and switches; the
+peer's own namespaces are not readable then, and nothing is taken from the peer's
+messages, title or environment. Each property is read twice within one check, after
+the request line arrived, and since 2026-11-11 the whole check runs again after the
+owner answered: the answer leaves only for the same peer process and the same browser
+process (by PID and start time), else the request gets the generic refusal
+(`check_same_peer`, tests in `caller_linux.rs` and `passkey_controller_tests.rs`).
+
 Unsafe browser switches are refused, read from every word of the browser's
 rewritten process title: `--remote-debugging-*`, `--load-extension` (one exception,
 below), and, since 2026-11-11, every switch of the current Chromium switch list that
@@ -52,8 +64,15 @@ silently weakens how it treats pages, certificates and names
 `--use-mock-cert-verifier-for-testing`, `--mock-cert-verifier-default-result-for-testing`,
 `--ignore-certificate-errors`, `--ignore-certificate-errors-spki-list`,
 `--unsafely-treat-insecure-origin-as-secure`, `--ssl-key-log-file`,
-`--allow-running-insecure-content`, `--host-resolver-rules`, `--host-rules`). The
-source files are named in `src/browser/caller_linux.rs`. Switches for the display,
+`--allow-running-insecure-content`, `--host-resolver-rules`, `--host-rules`). Since
+2026-11-11 every browser is also refused when it was started with a switch that turns
+off its sandbox or its site isolation or hands flags to its JavaScript engine
+(`--no-sandbox`, `--disable-setuid-sandbox`, `--disable-site-isolation-trials`,
+`--disable-site-isolation-for-policy`, `--js-flags`), or with a `--disable-features`
+value that names a site-isolation or sandbox feature (a name with "Isolat",
+"SitePerProcess", "OriginKeyedProcesses" or "Sandbox", the Privacy Sandbox ads features
+excepted). That refusal names the switch, never its value, and says to start the browser
+without it. The source files are named in `src/browser/caller_linux.rs`. Switches for the display,
 the GPU, the language, the profile folder, the password store and a proxy stay
 accepted (for example `--ozone-platform=wayland`, `--enable-features=…Wayland…`,
 `--force-device-scale-factor`, `--password-store`, `--user-data-dir`,
@@ -84,8 +103,13 @@ executable as the first word, the switches that Debian's wrapper and
 `--disable-gpu-rasterization`, `--ignore-gpu-blocklist`, `--enable-zero-copy`,
 `--use-gl`, `--use-angle`, `--num-raster-threads`, `--lang`, `--accept-lang`,
 `--enable-features` and `--disable-features` with one plain feature name that
-contains Wayland, Ozone, Vaapi, Vulkan or AcceleratedVideo), and `http://` or
-`https://` page addresses. Any other word refuses the browser.
+contains Wayland, Ozone, Vaapi, Vulkan or AcceleratedVideo), since 2026-11-11 the
+profile, password-store and proxy switches (`--profile-directory`, which Chromium's own
+per-profile desktop shortcuts use, with the number of a `Profile N` folder as the next
+word, `--user-data-dir`, `--password-store`, `--proxy-server`: accepted for every
+other browser already, and what a profile holds is outside what the check can see in
+every case), and `http://` or `https://` page addresses. Any other word refuses the
+browser. The bare, empty `--load-extension` stays refused.
 
 The browser process must be in Apassy's mount namespace and user namespace
 (`/proc/PID/ns/mnt` and `/proc/PID/ns/user`, compared by device and inode with

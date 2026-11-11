@@ -5,13 +5,15 @@
 #
 #   run-target.sh ubuntu DIST deb|tar     # this host (Ubuntu 24.04, seat session)
 #   run-target.sh debian13 DIST deb|tar   # disposable debian:trixie container
+#   run-target.sh debian12 DIST deb|tar   # disposable debian:bookworm container
+#   run-target.sh ubuntu2204 DIST deb|tar # disposable ubuntu:22.04 container
 #
 # It installs the package as the documents say, runs the scripted checks and
 # prepares the desktop session. The browser ceremonies follow in README.md, step
 # "Browser", with screenshots to check after each step.
 set -euo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-target=${1:?usage: run-target.sh ubuntu|debian13 DIST deb|tar}
+target=${1:?usage: run-target.sh ubuntu|debian13|debian12|ubuntu2204 DIST deb|tar}
 dist=$(cd "${2:?DIST}" && pwd)
 how=${3:-deb}
 case "$(uname -m)" in x86_64) arch=x86_64 deb_arch=amd64 ;; aarch64) arch=aarch64 deb_arch=arm64 ;; esac
@@ -38,9 +40,10 @@ if [ "$target" = ubuntu ]; then
     bash "$here/keyring-polkit.sh" keyring
     l4_display_up
     l4_rp_up
-elif [ "$target" = debian13 ]; then
-    name=${L4_RUN:-l4}-debian13
-    bash "$here/container.sh" up debian:trixie "$name"
+elif image=$(case "$target" in debian13) echo debian:trixie ;; debian12) echo debian:bookworm ;;
+        ubuntu2204) echo ubuntu:22.04 ;; *) exit 1 ;; esac); then
+    name=${L4_RUN:-l4}-$target
+    bash "$here/container.sh" up "$image" "$name"
     docker cp "$dist/." "$name:/tmp/l4-dist/"
     docker exec -w /tmp/l4-dist "$name" bash -c "$(install_cmds) && apassy --version"
     export L4_CONTAINER=$name L4_OUT=${L4_WORK:-$HOME/work/l4}/out-$name

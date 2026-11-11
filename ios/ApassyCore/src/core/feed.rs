@@ -865,6 +865,10 @@ struct VaultOut {
     answer_key: bool,
     /// The code of the last failed relay call of this vault, until one works.
     error: Option<&'static str>,
+    /// The hosted relay ended the feed of this team (410 `free_connect_ended` or
+    /// `hosted_retired`): no call goes to it again. Absent otherwise.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    relay_ended: bool,
     macs: Vec<MacOut>,
 }
 
@@ -1122,6 +1126,9 @@ fn call_error(error: RelayCallError) -> CoreError {
     match error {
         RelayCallError::Unreachable => SyncError::RelayUnreachable.into(),
         RelayCallError::Sync(error) => error.into(),
+        RelayCallError::Relay { status, code } if super::questions::ended_answer(status, &code) => {
+            super::questions::relay_ended()
+        }
         RelayCallError::Relay { status, code } => match (status, code.as_str()) {
             (403, "not_routed") => CoreError::new(
                 "not_routed",
@@ -1413,7 +1420,9 @@ impl Core {
         let targets = self.fetch_targets();
         let drops = guard(&self.questions).drops;
         let results: Vec<(String, Arc<RelayMember>, CoreResult<bool>)> = match targets.as_slice() {
-            [] => return Ok(false),
+            // No team to ask (every one removed, or ended by the hosted relay): a long poll
+            // waits its time out, so the app that waits again makes no storm of calls.
+            [] => return self.wait_idle(wait, drops),
             // One context: a lock ends its call through the device.
             [(id, member)] => {
                 let result = self.feed_fetch_one(id, member, wait, None);
@@ -1470,6 +1479,10 @@ impl Core {
                     changed |= news;
                     worked = true;
                     None
+                }
+                // The hosted relay ended this team: its state, not a failure of the read.
+                Err(error) if state.note_ended(&member, &error) => {
+                    Some(super::questions::RELAY_ENDED)
                 }
                 Err(error) => {
                     let code = error.code;
@@ -1677,6 +1690,7 @@ impl Core {
             titles: Option<BTreeMap<String, String>>,
             hidden: Vec<Target>,
             error: Option<&'static str>,
+            relay_ended: bool,
             /// The Macs whose feed this iPhone can act on.
             acts: BTreeSet<u64>,
         }
@@ -1684,10 +1698,12 @@ impl Core {
             Selected::Unlocked(id) => Some(id.as_str()),
             _ => None,
         };
-        let copies: Vec<Snapshot> = guard(&self.questions)
+        let state = guard(&self.questions);
+        let copies: Vec<Snapshot> = state
             .contexts
             .iter()
             .map(|(id, context)| Snapshot {
+                relay_ended: !context.keys.is_removed() && state.is_ended(&context.member),
                 vault_id: id.clone(),
                 keys: Arc::clone(&context.keys),
                 shown: context.feed.shown.clone(),
@@ -1707,6 +1723,7 @@ impl Core {
                     .collect(),
             })
             .collect();
+        drop(state);
         let at = now();
         let mut vaults = Vec::new();
         for copy in copies {
@@ -1784,7 +1801,12 @@ impl Core {
                 team_id: keys.team_id.clone(),
                 registered: own.is_some(),
                 answer_key: own.is_some_and(|own| own.answer_key.is_some()),
-                error: copy.error,
+                error: if copy.relay_ended {
+                    Some(super::questions::RELAY_ENDED)
+                } else {
+                    copy.error
+                },
+                relay_ended: copy.relay_ended,
                 macs,
             });
         }

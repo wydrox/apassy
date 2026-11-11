@@ -141,6 +141,12 @@ final class JoinModel {
             step = .name(link: code)
             return
         }
+        if trimmed.hasPrefix(Self.connectCodePrefix) {
+            // The prefix of a Connect code without its form (an old code without the key
+            // fingerprint, or a cut one): the core's reason, and nothing is sent.
+            scanNote = Self.connectCodeInvalid
+            return
+        }
         guard let link = VaultText.joinLink(from: text) else {
             scanNote = "This is not the code of “Add a device…”. On your Mac, open Apassy > Settings > Vault > Sync."
             return
@@ -149,6 +155,14 @@ final class JoinModel {
         node = nil
         step = .name(link: link)
     }
+
+    /// The prefix of the code of "Add a device…" of Apassy Connect (connect-account-v1 section 2).
+    static let connectCodePrefix = "apassy_alk_"
+
+    /// The core's reason for a text that is not a Connect code (`link_invalid` of
+    /// `ios/ApassyCore/src/core/connect.rs`; a model test pins it to that file).
+    static let connectCodeInvalid =
+        "This code does not work: it was used, it expired, or it is not valid. On your Mac, open Apassy > Settings > Connect and make a new code with “Add a device…”."
 
     /// A node pairing code (`/pair#`) makes a team on a Linux node for a Mac; an iPhone joins with
     /// the Mac's device link.

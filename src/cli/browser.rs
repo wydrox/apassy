@@ -34,12 +34,16 @@ password without it.
 #[cfg(target_os = "linux")]
 pub const HELP: &str = "apassy setup browser [--browser chrome|chromium] [--remove]
 
-Connect Chrome stable or Chromium to the installed Apassy browser host.
+Connect Google Chrome or Chromium (from a .deb) to the installed Apassy browser host.
+Settings > Tools > Browser extension in the app does the same.
 The root-owned host is /usr/lib/apassy/apassy-browser-host; the extension is in
 /usr/share/apassy/browser-extension. --browser selects one browser even before its
-profile exists. Load that extension folder from the browser extensions page.
-Each fill and passkey request requires owner confirmation in the Apassy window.
-The vault passphrase works without a keyring, screen lock or biometric reader.
+profile exists. Add the extension from the Chrome Web Store, or load that folder with
+Developer mode on the extensions page of the browser. A snap or Flatpak browser is not
+supported: it cannot start the host.
+Each fill and passkey request asks for the vault passphrase or system authentication,
+in the Apassy window or in the terminal of apassy owner serve. The passphrase works
+without a keyring, screen lock or biometric reader.
 --remove deletes native messaging manifests; remove the extension in the browser too.
 ";
 
@@ -154,13 +158,7 @@ pub fn run_with_json(mut args: Args, json: bool) -> Outcome {
     let home = install::home().ok_or_else(|| Failure::Other("HOME is not set.".to_owned()))?;
     // The agent profile denies a change in the app bundle, not in a source tree.
     let Some(app) = Install::current() else {
-        return Err(Failure::Other(
-            if cfg!(target_os = "linux") {
-                "Install the Linux vault package with its root-owned host at /usr/lib/apassy/apassy-browser-host. Source builds are not accepted browser hosts."
-            } else {
-                "Use the apassy program inside Apassy.app: /Applications/Apassy.app/Contents/MacOS/apassy setup browser. Source builds are not protected browser hosts."
-            }.to_owned(),
-        ));
+        return Err(Failure::Other(crate::browser_source_build!().to_owned()));
     };
     if !app.host().is_file() {
         return Err(Failure::Other(
@@ -238,7 +236,9 @@ pub fn run_with_json(mut args: Args, json: bool) -> Outcome {
     } else {
         println!("The extension folder is missing. Reinstall the Apassy package.");
     }
-    if !cfg!(target_os = "linux") && !app.is_installed_app() {
+    // macOS only: the Linux package is always at /usr/lib/apassy, without a sandbox profile.
+    #[cfg(not(target_os = "linux"))]
+    if !app.is_installed_app() {
         println!(
             "This Apassy.app is not /Applications/Apassy.app. The agent profile protects it only when agents start with the apassy-sandbox of this app, or with --app-build."
         );

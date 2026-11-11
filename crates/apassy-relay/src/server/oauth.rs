@@ -37,7 +37,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::config::{OAuthConfig, RelayConfig};
+use crate::config::{OAuthConfig, RelayConfig, host_word};
 use crate::error::{RelayError, RelayResult, codes};
 use crate::ids::{AgentId, TeamId};
 use crate::secret::{SecretString, TokenKind, new_token, parse_token, same_bytes, token_hash};
@@ -663,8 +663,11 @@ fn request_id_ok(id: &str) -> bool {
 
 /// The line of the waiting and the busy page: requests that someone else started can wait
 /// on the Mac, and only the owner can end them.
-pub const DENY_OTHERS: &str =
-    "Deny requests on your Mac that you did not start, then connect again.";
+pub const DENY_OTHERS: &str = concat!(
+    "Deny requests on your ",
+    host_word!(),
+    " that you did not start, then connect again."
+);
 
 /// The text of the connect page. Every field is plain text, escaped when written.
 struct Page {
@@ -681,9 +684,15 @@ impl Page {
             title: format!("{client} wants to connect to {mac}"),
             code: Some(code.to_string()),
             lines: vec![
-                "Approve on your Mac or iPhone.".to_string(),
+                concat!("Approve on your ", host_word!(), " or iPhone.").to_string(),
                 format!(
-                    "Check that the app shows the same code. Apassy must be open and unlocked on the Mac. The request ends in {minutes} {unit}."
+                    concat!(
+                        "Check that the app shows the same code. Apassy must be open and unlocked on the ",
+                        host_word!(),
+                        ". The request ends in {minutes} {unit}."
+                    ),
+                    minutes = minutes,
+                    unit = unit
                 ),
                 DENY_OTHERS.to_string(),
             ],
@@ -732,7 +741,7 @@ impl Page {
 
     fn broken() -> Self {
         Self {
-            title: "The Mac could not answer.".to_string(),
+            title: concat!("The ", host_word!(), " could not answer.").to_string(),
             code: None,
             lines: vec!["Try again in a moment.".to_string()],
         }
@@ -1189,7 +1198,11 @@ impl Flow<'_> {
         match registered {
             None => {
                 return Ok(Reply::limited(
-                    "Too many clients registered on this Mac. Try again later.",
+                    concat!(
+                        "Too many clients registered on this ",
+                        host_word!(),
+                        ". Try again later."
+                    ),
                     REGISTRATION_WINDOW_SECS,
                 ));
             }
@@ -1281,7 +1294,11 @@ impl Flow<'_> {
         if get("resource").is_some_and(|resource| resource != self.resource()) {
             return Ok(back(
                 "invalid_target",
-                "The resource is the MCP address of this Mac.",
+                concat!(
+                    "The resource is the MCP address of this ",
+                    host_word!(),
+                    "."
+                ),
             ));
         }
         if state.is_some_and(|state| state.len() > MAX_STATE) {
@@ -1488,7 +1505,11 @@ impl Flow<'_> {
             return Ok(Reply::error(
                 400,
                 "invalid_target",
-                "The resource is the MCP address of this Mac.",
+                concat!(
+                    "The resource is the MCP address of this ",
+                    host_word!(),
+                    "."
+                ),
             ));
         }
         let Some(client_id) = get("client_id").filter(|id| !id.is_empty()) else {
@@ -2326,11 +2347,26 @@ mod tests {
         assert!(html.contains("K7Q-4MD"));
         assert!(html.contains("ends in 5 minutes"));
         // The waiting and the busy page tell the owner to deny what they did not start.
-        let line = "Deny requests on your Mac that you did not start, then connect again.";
+        let line = format!(
+            "Deny requests on your {} that you did not start, then connect again.",
+            crate::config::HOST_WORD
+        );
         assert_eq!(DENY_OTHERS, line);
-        assert!(html.contains(line), "{html}");
+        assert_eq!(
+            crate::config::HOST_WORD,
+            if cfg!(target_os = "linux") {
+                "computer"
+            } else {
+                "Mac"
+            }
+        );
+        assert!(html.contains(&format!(
+            "Approve on your {} or iPhone.",
+            crate::config::HOST_WORD
+        )));
+        assert!(html.contains(&line), "{html}");
         let busy = Page::busy().html();
         assert!(busy.contains("Too many connection requests wait."));
-        assert!(busy.contains(line), "{busy}");
+        assert!(busy.contains(&line), "{busy}");
     }
 }

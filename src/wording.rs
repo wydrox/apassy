@@ -187,12 +187,22 @@ macro_rules! agent_sandbox {
         "in the Apassy sandbox on macOS with the command below."
     };
 }
-/// On Linux: the agent runs without the Apassy sandbox.
+/// On Linux: the agent runs without the Apassy sandbox ([`agents_unconfined!`]).
 #[cfg(target_os = "linux")]
 #[macro_export]
 macro_rules! agent_sandbox {
     () => {
-        "with the command below. On Linux it runs as your user: the Apassy sandbox is macOS only."
+        concat!("with the command below. ", $crate::agents_unconfined!())
+    };
+}
+
+/// Linux only: what it means that `apassy-sandbox` (Seatbelt) exists only on macOS. The
+/// agent setup screens and `docs/operations/linux-vault.md` say it.
+#[cfg(target_os = "linux")]
+#[macro_export]
+macro_rules! agents_unconfined {
+    () => {
+        "On Linux, agents run without Apassy's sandbox. The bouncer and your approvals still decide each use of a credential, but the agent process itself is not confined: it can read and change what your user can."
     };
 }
 
@@ -282,8 +292,10 @@ macro_rules! setup_start_help {
 #[macro_export]
 macro_rules! setup_start_help {
     () => {
-        "Start the host as usual. Linux has no Apassy sandbox launcher yet (Seatbelt is macOS
-only), so the agent runs as your user. A question waits up to 5 minutes:
+        "Start the host as usual. On Linux, agents run without Apassy's sandbox (Seatbelt is
+macOS only). The bouncer and your approvals still decide each use of a credential, but
+the agent process itself is not confined: it can read and change what your user can.
+A question waits up to 5 minutes:
   claude: MCP_TOOL_TIMEOUT=660000 claude
   codex:  codex
 "
@@ -322,6 +334,114 @@ macro_rules! desktop_app {
 macro_rules! desktop_app {
     () => {
         "Apassy"
+    };
+}
+
+/// The badge of a browser row when no installed app connects browsers: "Needs
+/// Apassy.app" on macOS, "Needs the Apassy package" on Linux.
+#[cfg(not(target_os = "linux"))]
+#[macro_export]
+macro_rules! needs_app {
+    () => {
+        "Needs Apassy.app"
+    };
+}
+/// On Linux: "Needs the Apassy package".
+#[cfg(target_os = "linux")]
+#[macro_export]
+macro_rules! needs_app {
+    () => {
+        "Needs the Apassy package"
+    };
+}
+
+/// Where the extension must come from: "the same Apassy.app" on macOS, "the same
+/// Apassy package" on Linux.
+#[cfg(not(target_os = "linux"))]
+#[macro_export]
+macro_rules! same_app {
+    () => {
+        "the same Apassy.app"
+    };
+}
+/// On Linux: "the same Apassy package".
+#[cfg(target_os = "linux")]
+#[macro_export]
+macro_rules! same_app {
+    () => {
+        "the same Apassy package"
+    };
+}
+
+/// How `apassy setup browser` tells a source build what to run instead.
+#[cfg(not(target_os = "linux"))]
+#[macro_export]
+macro_rules! browser_source_build {
+    () => {
+        "Use the apassy program inside Apassy.app: /Applications/Apassy.app/Contents/MacOS/apassy setup browser. Source builds are not protected browser hosts."
+    };
+}
+/// On Linux: install the package with its root-owned host.
+#[cfg(target_os = "linux")]
+#[macro_export]
+macro_rules! browser_source_build {
+    () => {
+        "Install the Linux vault package with its root-owned host at /usr/lib/apassy/apassy-browser-host. Source builds are not accepted browser hosts."
+    };
+}
+
+/// The hover of Copy and Show: how the owner confirms on this platform. The Linux owner
+/// dialog offers the passphrase and "Use system authentication" (polkit).
+#[cfg(not(target_os = "linux"))]
+#[macro_export]
+macro_rules! confirm_hint {
+    () => {
+        "Confirm with Touch ID or passphrase."
+    };
+}
+/// On Linux: the vault passphrase or system authentication.
+#[cfg(target_os = "linux")]
+#[macro_export]
+macro_rules! confirm_hint {
+    () => {
+        "Confirm with your vault passphrase or system authentication."
+    };
+}
+
+/// The caller of a passkey request without a page: "the macOS passkey sheet" on macOS.
+/// Linux has no system passkey sheet; such a request names an app on this computer.
+#[cfg(not(target_os = "linux"))]
+#[macro_export]
+macro_rules! passkey_sheet {
+    () => {
+        "the macOS passkey sheet"
+    };
+}
+/// On Linux: "an app on this computer".
+#[cfg(target_os = "linux")]
+#[macro_export]
+macro_rules! passkey_sheet {
+    () => {
+        "an app on this computer"
+    };
+}
+
+/// What an Allow on another device of the vault needs: "an Allow there needs Face ID or
+/// Touch ID" on macOS (an iPhone or a Mac). From Linux the other device can be a Linux
+/// computer too, so Linux names no Apple check.
+#[cfg(not(target_os = "linux"))]
+#[macro_export]
+macro_rules! allow_there {
+    () => {
+        "an Allow there needs Face ID or Touch ID"
+    };
+}
+/// On Linux: "an Allow there needs the owner check of that device".
+#[cfg(target_os = "linux")]
+#[macro_export]
+macro_rules! allow_there {
+    () => {
+        "an Allow there needs the owner check of that device"
     };
 }
 
@@ -502,6 +622,12 @@ mod tests {
             crate::setup_start_help!(),
             crate::touch_id_on_it!(),
             crate::desktop_app!(),
+            crate::needs_app!(),
+            crate::same_app!(),
+            crate::browser_source_build!(),
+            crate::confirm_hint!(),
+            crate::passkey_sheet!(),
+            crate::allow_there!(),
             crate::shift_key!(),
             crate::shortcut!("S"),
             crate::shortcut_shift!("H"),
@@ -544,6 +670,12 @@ mod tests {
 ",
                 "Touch ID on it",
                 "Mac",
+                "Needs Apassy.app",
+                "the same Apassy.app",
+                "Use the apassy program inside Apassy.app: /Applications/Apassy.app/Contents/MacOS/apassy setup browser. Source builds are not protected browser hosts.",
+                "Confirm with Touch ID or passphrase.",
+                "the macOS passkey sheet",
+                "an Allow there needs Face ID or Touch ID",
                 "⇧",
                 "⌘S",
                 "⌘⇧H",
@@ -576,18 +708,26 @@ mod tests {
                 "F9",
                 "Alt+Left",
                 "Apassy",
-                "with the command below. On Linux it runs as your user: the Apassy sandbox is macOS only.",
+                "with the command below. On Linux, agents run without Apassy's sandbox. The bouncer and your approvals still decide each use of a credential, but the agent process itself is not confined: it can read and change what your user can.",
                 "a stopped sync service or a file download",
                 "the apassy program of the Apassy package (/usr/bin/apassy)",
                 "the apassy program of the same package version as the running window",
                 "The Apassy package includes the MCP server and the prompt hook.",
-                "Start the host as usual. Linux has no Apassy sandbox launcher yet (Seatbelt is macOS
-only), so the agent runs as your user. A question waits up to 5 minutes:
+                "Start the host as usual. On Linux, agents run without Apassy's sandbox (Seatbelt is
+macOS only). The bouncer and your approvals still decide each use of a credential, but
+the agent process itself is not confined: it can read and change what your user can.
+A question waits up to 5 minutes:
   claude: MCP_TOOL_TIMEOUT=660000 claude
   codex:  codex
 ",
                 "an owner check on it",
                 "Apassy",
+                "Needs the Apassy package",
+                "the same Apassy package",
+                "Install the Linux vault package with its root-owned host at /usr/lib/apassy/apassy-browser-host. Source builds are not accepted browser hosts.",
+                "Confirm with your vault passphrase or system authentication.",
+                "an app on this computer",
+                "an Allow there needs the owner check of that device",
                 "Shift+",
                 "Ctrl+S",
                 "Ctrl+Shift+H",
@@ -615,6 +755,21 @@ only), so the agent runs as your user. A question waits up to 5 minutes:
             // "macOS" may say what Linux lacks; "Mac" alone never names this computer.
             assert!(!text.replace("macOS", "").contains("Mac"), "{text}");
         }
+    }
+
+    /// Linux says plainly that agents are not confined, and what still holds.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_says_that_agents_run_without_the_sandbox() {
+        let text = crate::agents_unconfined!();
+        for words in [
+            "without Apassy's sandbox",
+            "The bouncer and your approvals still decide each use of a credential",
+            "not confined",
+        ] {
+            assert!(text.contains(words), "{text}");
+        }
+        assert!(crate::agent_sandbox!().ends_with(text));
     }
 
     #[test]

@@ -72,6 +72,9 @@ public struct VaultError: Error, Sendable, Equatable, LocalizedError {
         case tooManyActions = "too_many_actions"
         /// The relay asks this iPhone to wait a minute before it reads the feeds again.
         case feedRate = "feed_rate"
+        /// The hosted relay ended the free questions, feed, and push of this team (410
+        /// `free_connect_ended` or `hosted_retired`): the iPhone is paired again from the Mac.
+        case relayEnded = "relay_ended"
         /// The service has no such call (an older core; app side, not the core).
         case unsupported
         case accessUnavailable = "access_unavailable"

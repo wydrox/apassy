@@ -28,7 +28,7 @@ use crate::browser::wire::{
     Response, VaultState, WireError,
 };
 use crate::owner::owner_store::OwnerSession;
-use crate::owner::socket::{LineWire, PeerGone};
+use crate::owner::socket::{LineWire, PeerGone, PeerSeen};
 use crate::owner::wire::SecretText;
 use crate::vault::{
     LargeBlobOp, LargeBlobResult, PasskeyAssertion, PasskeyAssertionExtensions, PasskeyInfo,
@@ -40,7 +40,13 @@ const ES256: i64 = -7;
 
 /// The check of the program at the other end of a guarded request.
 pub trait PeerCheck: 'static {
-    fn check(stream: &UnixStream) -> Result<(), WireError>;
+    /// The check before any card. What it saw goes to [`PeerCheck::again`].
+    fn check(stream: &UnixStream) -> Result<PeerSeen, WireError>;
+
+    /// The check after the owner answered, before the answer is written.
+    fn again(stream: &UnixStream, seen: &PeerSeen) -> Result<(), WireError> {
+        crate::browser::caller::check_same_peer(stream, seen)
+    }
 }
 
 /// The checks of the platform: the same function as the desktop window. On Linux it has
@@ -48,10 +54,10 @@ pub trait PeerCheck: 'static {
 pub struct SystemPeers;
 
 impl PeerCheck for SystemPeers {
-    fn check(stream: &UnixStream) -> Result<(), WireError> {
-        match crate::browser::caller::peer_identity(stream)? {
-            None => Ok(()),
-            Some(_) => Err(WireError::new(
+    fn check(stream: &UnixStream) -> Result<PeerSeen, WireError> {
+        match crate::browser::caller::peer_identity_seen(stream)? {
+            (None, seen) => Ok(seen),
+            (Some(_), _) => Err(WireError::new(
                 "unsafe_browser",
                 "This browser is controlled by other programs. apassy owner serve has no browser debugging permission; use a normal browser profile.",
             )),
@@ -123,12 +129,16 @@ impl<P: PeerCheck> LineWire for HeadlessWire<P> {
         Response::error(code, message)
     }
 
-    fn check_peer(stream: &UnixStream, request: &HeadlessRequest) -> Result<(), Response> {
+    fn check_peer(stream: &UnixStream, request: &HeadlessRequest) -> Result<PeerSeen, Response> {
         same_user(stream).map_err(Response::from)?;
         if guarded(&request.command) {
-            P::check(stream).map_err(Response::from)?;
+            return P::check(stream).map_err(Response::from);
         }
-        Ok(())
+        Ok(PeerSeen::default())
+    }
+
+    fn check_peer_again(stream: &UnixStream, seen: &PeerSeen) -> Result<(), Response> {
+        P::again(stream, seen).map_err(Response::from)
     }
 
     fn watch(request: &HeadlessRequest) -> Option<PeerGone> {

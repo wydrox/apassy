@@ -1089,6 +1089,8 @@ fn setup_guidance(state: &mut super::UiState, ui: &mut egui::Ui) {
         );
         kit::code_block(ui, &protected, 2);
     }
+    #[cfg(target_os = "linux")]
+    kit::note(ui, crate::agents_unconfined!());
     kit::note(
         ui,
         "4. Ask the agent to use a credential. The bouncer decides; when it asks you, the question shows in Decisions.",

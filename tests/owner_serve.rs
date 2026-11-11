@@ -42,8 +42,8 @@ const UNLOCK: &str = "Vault passphrase: ";
 struct AcceptPeers;
 
 impl PeerCheck for AcceptPeers {
-    fn check(_stream: &UnixStream) -> Result<(), WireError> {
-        Ok(())
+    fn check(_stream: &UnixStream) -> Result<apassy::browser::caller::PeerSeen, WireError> {
+        Ok(apassy::browser::caller::PeerSeen::default())
     }
 }
 

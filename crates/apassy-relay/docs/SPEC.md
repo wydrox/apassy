@@ -1810,7 +1810,7 @@ A Mac's own node (ADR 0037, cloud slice; docs/design/implementation-plan-0037-cl
 | `connect_teams_per_day`, `connect_teams_max` | 0: Connect is off |
 | `auth_limiter` | on (30.5) |
 | `operator_socket` | off: no `admin.sock` (below) |
-| `oauth` | `Some(OAuthConfig::new(..))`: the MCP authorization flow (section 31); the connect page names the Mac `EMBEDDED_MAC_NAME`, "your Mac", also when `EmbeddedRelay::start` starts it for the app: the page is public, so it never shows the computer name. The hosted relay (`from_env`) has `None`. |
+| `oauth` | `Some(OAuthConfig::new(..))`: the MCP authorization flow (section 31); the connect page names the computer `EMBEDDED_MAC_NAME`: "your Mac" on macOS, "your computer" on Linux (`HOST_WORD`, the platform word of the machine the relay runs on), also when `EmbeddedRelay::start` starts it for the app: the page is public, so it never shows the computer name. The hosted relay (`from_env`) has `None`. |
 | `backup_dir` | `<data_dir>/backups` |
 | `limits`, upstream, timeouts | the defaults of `from_env` |
 
@@ -1930,7 +1930,7 @@ The owner answers in the app with `RunningNode::decide_connect(id, Allow{team, a
 | `denied` | 200 "You denied the connection." |
 | `expired`, or an unknown id | 200 (404 for an unknown id) "The request ended." |
 
-`<client>` is the registered name, cleaned (no control character, no format character of category Cf, and no code point of the tag block U+E0000–E007F: `apassy::text::is_hidden_char` of the core, the rule of the node and of the connect card too; runs of spaces as one; trimmed; at most 64 bytes) and HTML-escaped, or "An MCP client". The page cleans a stored name again, so a client stored by an older version shows no such character either. `<Mac>` is `OAuthConfig.mac_name`: "your Mac" (`EMBEDDED_MAC_NAME`) on every node of the app, never the computer name. The page never shows an item, an agent list, the owner's name, or the name of the Mac; only the owner's own prompts (the Touch ID dialog, the iPhone card) name the Mac.
+`<client>` is the registered name, cleaned (no control character, no format character of category Cf, and no code point of the tag block U+E0000–E007F: `apassy::text::is_hidden_char` of the core, the rule of the node and of the connect card too; runs of spaces as one; trimmed; at most 64 bytes) and HTML-escaped, or "An MCP client". The page cleans a stored name again, so a client stored by an older version shows no such character either. `<Mac>` is `OAuthConfig.mac_name`: "your Mac" (`EMBEDDED_MAC_NAME`) on every node of the Mac app and "your computer" on a Linux node, never the computer name. The other lines of the page and the OAuth errors that name the machine use the same word (`HOST_WORD`): "Approve on your Mac or iPhone." or "Approve on your computer or iPhone.". The page never shows an item, an agent list, the owner's name, or the name of the Mac; only the owner's own prompts (the Touch ID dialog, the iPhone card) name the Mac.
 
 ### 31.5 Limits
 

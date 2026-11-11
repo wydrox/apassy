@@ -122,6 +122,11 @@ pub struct State {
     /// iPhone: each read tries again while the app runs. A lock or a suspend drops them
     /// with their keys.
     leftovers: Vec<Leftover>,
+    /// The teams, by relay origin and team ID, whose questions, feed, or push the hosted
+    /// relay ended (410 `free_connect_ended` or `hosted_retired`, section 5.10): no call
+    /// goes to them again in this process. No secret; not dropped with the contexts, so a
+    /// lock and an unlock make no new call.
+    ended: BTreeSet<(String, String)>,
 }
 
 /// What a removed vault's team still holds of this iPhone, with the device that can take
@@ -314,6 +319,30 @@ impl State {
         self.push_clear.remove(vault_id) || handle
     }
 
+    /// Whether the hosted relay ended the free paths of the team of `member`.
+    pub(super) fn is_ended(&self, member: &RelayMember) -> bool {
+        self.ended
+            .contains(&(member.relay_url().to_owned(), member.team_id().to_owned()))
+    }
+
+    /// Note that the hosted relay ended the team of `member`, when `error` says so.
+    /// Returns whether it did.
+    pub(super) fn note_ended(&mut self, member: &RelayMember, error: &CoreError) -> bool {
+        if error.code != RELAY_ENDED {
+            return false;
+        }
+        self.ended
+            .insert((member.relay_url().to_owned(), member.team_id().to_owned()));
+        true
+    }
+
+    /// Whether a context of a device that was not removed is of an ended team.
+    pub(super) fn any_ended(&self) -> bool {
+        self.contexts
+            .values()
+            .any(|context| !context.keys.is_removed() && self.is_ended(&context.member))
+    }
+
     /// The vaults whose context holds `qid`.
     fn owners(&self, qid: &str) -> Vec<String> {
         self.contexts
@@ -473,6 +502,11 @@ struct StatusOut {
     registered: bool,
     /// The owner removed this iPhone on a Mac: it needs a new `join_attach`.
     removed: bool,
+    /// The hosted relay ended the questions of this team (410 `free_connect_ended` or
+    /// `hosted_retired`): no call goes to it again; the iPhone pairs again from the Mac.
+    /// Absent otherwise.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    relay_ended: bool,
     /// The questions team is on a node (a pinned origin, node-pairing-v1): its origin, for
     /// "via your Mac". Absent for a hosted relay.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -501,11 +535,12 @@ impl StatusOut {
             has_key: false,
             registered: false,
             removed: false,
+            relay_ended: false,
             node: None,
         }
     }
 
-    fn of(keys: &Keys) -> Self {
+    fn of(keys: &Keys, relay_ended: bool) -> Self {
         Self {
             enabled: true,
             team_id: Some(keys.team_id.clone()),
@@ -519,6 +554,7 @@ impl StatusOut {
             has_key: keys.key.is_some(),
             registered: keys.own.is_some(),
             removed: keys.is_removed(),
+            relay_ended: relay_ended && !keys.is_removed(),
             node: keys.node_origin.clone().map(|origin| NodeOut {
                 origin,
                 node_words: keys.node_words.clone(),
@@ -757,6 +793,24 @@ struct AnswerIn {
 
 // ---- Errors. ----
 
+/// The code of [`relay_ended`].
+pub(super) const RELAY_ENDED: &str = "relay_ended";
+
+/// The hosted relay ended the free questions, feed, and push of this team (410
+/// `free_connect_ended` or `hosted_retired`): the iPhone pairs again from the Mac. No
+/// plan, price, or purchase (plan s7 section 6).
+pub(super) fn relay_ended() -> CoreError {
+    CoreError::new(
+        RELAY_ENDED,
+        "Approvals through this relay have ended. Pair this iPhone again from Apassy on your Mac.",
+    )
+}
+
+/// Whether a relay answer is the end of the free paths of the hosted relay.
+pub(super) fn ended_answer(status: u16, code: &str) -> bool {
+    status == 410 && matches!(code, "free_connect_ended" | "hosted_retired")
+}
+
 fn no_questions() -> CoreError {
     CoreError::new(
         "no_questions",
@@ -833,6 +887,7 @@ fn call_error(error: RelayCallError) -> CoreError {
     match error {
         RelayCallError::Unreachable => SyncError::RelayUnreachable.into(),
         RelayCallError::Sync(error) => error.into(),
+        RelayCallError::Relay { status, code } if ended_answer(status, &code) => relay_ended(),
         RelayCallError::Relay { status, code } => match (status, code.as_str()) {
             (409, "question_settled") => {
                 CoreError::new("already_answered", "Already answered on another device.")
@@ -1667,7 +1722,9 @@ impl Core {
             state
                 .contexts
                 .get(vault_id)
-                .map_or_else(StatusOut::off, |context| StatusOut::of(&context.keys))
+                .map_or_else(StatusOut::off, |context| {
+                    StatusOut::of(&context.keys, state.is_ended(&context.member))
+                })
         };
         if matches!(&selected, Selected::Unlocked(id) if id == vault_id) {
             // The open vault has its context already, but the app may keep this
@@ -1809,7 +1866,13 @@ impl Core {
     /// `DELETE /v1/push/token` (or `/v1/push/handle`), then `DELETE /v1/devices/{id}` of a notifications-only
     /// team. A failure stays for the next try.
     fn leave_team(leftover: &mut Leftover) {
-        if leftover.token && Self::delete_push(&leftover.member, leftover.handle).is_ok() {
+        // A team that the hosted relay ended sends no push any more: nothing to take off.
+        if leftover.token
+            && match Self::delete_push(&leftover.member, leftover.handle) {
+                Ok(()) => true,
+                Err(error) => error.code == RELAY_ENDED,
+            }
+        {
             leftover.token = false;
         }
         if leftover.token {
@@ -1856,10 +1919,11 @@ impl Core {
 
     /// The contexts that ask the relay: all but those of a removed iPhone.
     pub(super) fn fetch_targets(&self) -> Vec<(String, Arc<RelayMember>)> {
-        guard(&self.questions)
+        let state = guard(&self.questions);
+        state
             .contexts
             .iter()
-            .filter(|(_, context)| !context.keys.is_removed())
+            .filter(|(_, context)| !context.keys.is_removed() && !state.is_ended(&context.member))
             .map(|(id, context)| (id.clone(), Arc::clone(&context.member)))
             .collect()
     }
@@ -1945,6 +2009,9 @@ impl Core {
                     worked = true;
                     None
                 }
+                // The hosted relay ended this team: its state, not a failure of the
+                // read (the list shows it, and no call goes there again).
+                Err(error) if state.note_ended(&member, &error) => Some(RELAY_ENDED),
                 Err(error) => {
                     let code = error.code;
                     failed.get_or_insert(error);
@@ -1963,7 +2030,7 @@ impl Core {
 
     /// A long poll with nothing to ask: wait out `wait`, as the relay would, so a caller
     /// that waits again never spins. A lock ends it.
-    fn wait_idle(&self, wait: Duration, drops: u64) -> CoreResult<bool> {
+    pub(super) fn wait_idle(&self, wait: Duration, drops: u64) -> CoreResult<bool> {
         if wait.is_zero() {
             return Ok(false);
         }
@@ -2001,6 +2068,10 @@ impl Core {
         cancel: Option<&Cancel>,
     ) -> CoreResult<bool> {
         self.push_due(vault_id, member);
+        // The push change found the end of the free paths: no read follows it.
+        if guard(&self.questions).is_ended(member) {
+            return Err(relay_ended());
+        }
         let mut changed = false;
         let mut wait = wait;
         for _ in 0..MAX_PAGES {
@@ -2121,28 +2192,37 @@ impl Core {
             .map(|entry| (entry.id.clone(), entry.name.clone()))
             .collect();
         // The cards open without the mutex.
-        type Snapshot = (String, Arc<Keys>, Vec<Record>, Option<&'static str>);
-        let copies: Vec<Snapshot> = guard(&self.questions)
-            .contexts
-            .iter()
-            .map(|(id, context)| {
-                (
-                    id.clone(),
-                    Arc::clone(&context.keys),
-                    context.records.values().cloned().collect(),
-                    context.error,
-                )
-            })
-            .collect();
+        type Snapshot = (String, Arc<Keys>, Vec<Record>, Option<&'static str>, bool);
+        let copies: Vec<Snapshot> = {
+            let state = guard(&self.questions);
+            state
+                .contexts
+                .iter()
+                .map(|(id, context)| {
+                    let ended = state.is_ended(&context.member);
+                    (
+                        id.clone(),
+                        Arc::clone(&context.keys),
+                        context.records.values().cloned().collect(),
+                        if ended {
+                            Some(RELAY_ENDED)
+                        } else {
+                            context.error
+                        },
+                        ended,
+                    )
+                })
+                .collect()
+        };
         let at = now();
         let mut status = StatusOut::off();
         let mut vaults = Vec::new();
         let mut questions = Vec::new();
-        for (id, keys, records, error) in copies {
+        for (id, keys, records, error, ended) in copies {
             let name = names.get(&id).cloned().unwrap_or_default();
             let is_selected = selected.id() == Some(id.as_str());
             if is_selected {
-                status = StatusOut::of(&keys);
+                status = StatusOut::of(&keys, ended);
             }
             // A removed iPhone shows no question of that vault.
             if !keys.is_removed() {
@@ -2155,7 +2235,7 @@ impl Core {
             vaults.push(VaultOut {
                 unlocked: is_selected && matches!(selected, Selected::Unlocked(_)),
                 selected: is_selected,
-                status: StatusOut::of(&keys),
+                status: StatusOut::of(&keys, ended),
                 error,
                 vault_name: name,
                 vault_id: id,
@@ -2923,17 +3003,24 @@ impl Core {
             };
             (context.push_due.take(), token)
         };
-        let done = match (due, token) {
+        let result = match (due, token) {
             (None, _) => return,
-            (Some(PushDue::Set), Some(token)) => self.put_push(vault_id, member, &token).is_ok(),
+            (Some(PushDue::Set), Some(token)) => {
+                self.put_push(vault_id, member, &token).map(|_| ())
+            }
             // Notifications went off after the context was made.
-            (Some(PushDue::Set), None) => true,
+            (Some(PushDue::Set), None) => Ok(()),
             (Some(PushDue::Clear), _) => {
                 let handle = self.handle_team(vault_id, member);
-                Self::delete_push(member, handle).is_ok()
+                Self::delete_push(member, handle)
             }
         };
         let mut state = guard(&self.questions);
+        // The hosted relay ended this team: the push goes there never again.
+        let done = match result {
+            Ok(()) => true,
+            Err(error) => state.note_ended(member, &error),
+        };
         if done {
             if due == Some(PushDue::Clear) {
                 let cleared = state.push_clear.remove(vault_id);
@@ -2997,6 +3084,9 @@ impl Core {
         }
         let mut targets = self.fetch_targets();
         if targets.is_empty() {
+            if guard(&self.questions).any_ended() {
+                return Err(relay_ended());
+            }
             return Err(selected.missing());
         }
         // The selected vault first: its device number is the one of the answer.
@@ -3016,9 +3106,14 @@ impl Core {
                     }
                 }
                 Err(error) => {
-                    if let Ok(context) = guard(&self.questions).context_mut(&id, &member) {
+                    let mut state = guard(&self.questions);
+                    // An ended team gets the token never again (no retry at each read).
+                    if !state.note_ended(&member, &error)
+                        && let Ok(context) = state.context_mut(&id, &member)
+                    {
                         context.push_due = Some(PushDue::Set);
                     }
+                    drop(state);
                     let code = error.code;
                     failed.get_or_insert(error);
                     PushOut {
@@ -3053,6 +3148,7 @@ impl Core {
             .map(|entry| entry.id.clone())
             .collect();
         let kind = self.push_kind();
+        let mut cleared = Vec::new();
         let targets = {
             let mut state = guard(&self.questions);
             for context in state.contexts.values_mut() {
@@ -3063,11 +3159,23 @@ impl Core {
                 .filter(|id| !state.contexts.contains_key(id))
                 .collect();
             state.push_clear.extend(without);
-            // A removed iPhone is no device of that team any more: nothing to clear.
+            // A removed iPhone is no device of that team any more, and a team that the
+            // hosted relay ended pushes nothing: nothing to clear.
+            let ended: Vec<String> = state
+                .contexts
+                .iter()
+                .filter(|(_, context)| {
+                    !context.keys.is_removed() && state.is_ended(&context.member)
+                })
+                .map(|(id, _)| id.clone())
+                .collect();
+            cleared.extend(ended);
             let targets = state
                 .contexts
                 .iter()
-                .filter(|(_, context)| !context.keys.is_removed())
+                .filter(|(_, context)| {
+                    !context.keys.is_removed() && !state.is_ended(&context.member)
+                })
                 .map(|(id, context)| {
                     let handle =
                         state.push_route(id, &context.member, kind) != push_gateway::Route::Token;
@@ -3078,10 +3186,13 @@ impl Core {
             state.push = None;
             targets
         };
-        let mut cleared = Vec::new();
         for (id, member, handle) in targets {
             match Self::delete_push(&member, handle) {
                 Ok(()) => cleared.push(id),
+                // The hosted relay ended this team: it pushes nothing any more.
+                Err(error) if guard(&self.questions).note_ended(&member, &error) => {
+                    cleared.push(id);
+                }
                 Err(_) => {
                     let mut state = guard(&self.questions);
                     if let Ok(context) = state.context_mut(&id, &member) {
