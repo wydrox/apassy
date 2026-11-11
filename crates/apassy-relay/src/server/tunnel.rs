@@ -42,10 +42,15 @@
 //! Every queue has a cap. A node's outgoing queue holds at most
 //! [`Limits::node_queue`] bytes; a client that sends faster waits (backpressure to its
 //! TCP window). A stream buffers at most [`Limits::stream_buffer`] bytes toward a
-//! client, the window it granted. Resets, windows, and pongs go ahead of the data,
-//! bounded by the streams (one reset for each, a few windows for each, one pong): none is
-//! dropped, and neither a reset nor a window goes ahead of its own stream's `open` (a
-//! stream whose `open` was still queued leaves the queue without a trace). Reads have an
+//! client, the window it granted. Resets, windows, and pongs go ahead of the data, and
+//! none is dropped: one pong at most, one reset for each stream that Connect ends, and one
+//! `window` frame for each quarter window of node data that a client read. For a node
+//! that reads its WebSocket that is a few windows for each stream; a node that stops
+//! reading can still send within the windows that Connect granted, so its queue grows by
+//! one window frame (12 bytes) for each 64 KiB that its clients read, until the writer's
+//! write timeout ([`Limits::idle_timeout`]) ends the WebSocket. Neither a reset nor a
+//! window goes ahead of its own stream's `open` (a stream whose `open` was still queued
+//! leaves the queue without a trace). Reads have an
 //! idle limit, writes a timeout, and a maintenance thread resets idle streams and asks the
 //! directory again about the plans and grants of the open streams ([`Limits::recheck`]):
 //! a definite "no" ends them with 4003; a directory that cannot answer skips the round
@@ -790,9 +795,11 @@ struct Queued {
 struct OutState {
     /// Resets, windows, and pongs: may pass queued data (a reset can cross data in
     /// flight). At most one pong (a new one replaces it), one reset for each stream that
-    /// Connect ends, and the windows of a stream whose node data the client read (at most
-    /// a few for each stream: the node sends nothing beyond them), so its length is
-    /// bounded by the streams of the WebSocket: nothing here is dropped.
+    /// Connect ends, and one window for each quarter window of node data that a client
+    /// read. Nothing here is dropped. With a node that reads, that is a few windows for
+    /// each stream; with a node that does not read, the windows grow with the node data
+    /// that its clients read (12 bytes for each 64 KiB) until the writer's write timeout
+    /// ends the WebSocket.
     urgent: VecDeque<Out>,
     /// Opens, data, and closes, in order.
     fifo: VecDeque<Queued>,
