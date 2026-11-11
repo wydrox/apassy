@@ -2101,19 +2101,19 @@ fn an_agent_that_half_closes_gives_the_node_the_close_grace_of_silence() {
 
 #[test]
 fn a_half_closed_agent_that_reads_slowly_gets_a_large_answer_whole() {
-    // A window of 2 MiB: Connect grants the node 512 KiB more each time the agent read a
+    // A window of 4 MiB: Connect grants the node 1 MiB more each time the agent read a
     // quarter of it. The agent reads 64 KiB each 100 ms, so between two grants the node
-    // waits for window for about 800 ms, longer than the grace of silence (300 ms), while
-    // the bytes that reach the agent move every 100 ms.
+    // waits for window for about 1.6 s, longer than the grace of silence (1 s), while the
+    // bytes that reach the agent move every 100 ms.
     let h = Harness::with(
         Limits {
-            close_grace: Duration::from_millis(300),
-            stream_buffer: 2 * 1024 * 1024,
+            close_grace: Duration::from_secs(1),
+            stream_buffer: 4 * 1024 * 1024,
             ..test_limits()
         },
         Duration::from_secs(30),
     );
-    let total = 6 * 1024 * 1024;
+    let total = 8 * 1024 * 1024;
     let mut node = h.node("tok-a1").unwrap();
     let sni = sni_listener(&h, IngressConfig::default());
     let mut agent = agent(sni.addr);
