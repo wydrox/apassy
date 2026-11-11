@@ -549,6 +549,11 @@ impl Shared {
             let list = match result {
                 Ok(list) => list,
                 Err(error) => {
+                    if let Some(why) = error.path_ended() {
+                        // `410` of the hosted relay (plan s7 unit M5): stop for good.
+                        self.mark_ended(&active, "Apassy", why);
+                        return;
+                    }
                     self.reader_error(&error);
                     return;
                 }

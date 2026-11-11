@@ -88,6 +88,13 @@
 //! state. A store whose account is signed out on this Mac waits with "Connect: signed
 //! out" until Settings › Connect signs in.
 //!
+//! A relay copy on the hosted relay whose free path ended (`410 free_connect_ended`, or
+//! `410 hosted_retired` once the hosted relay serves Apassy Connect only; plan s7 unit
+//! M5) stops at the first refusal: the worker and the waiter ask that relay nothing more
+//! for this sync ([`ConnectState::HostedEnded`]), the vault on this Mac stays as it is,
+//! and the window offers the choices of the notice (your own node, or Apassy Connect).
+//! Another sync of the vault (a move) starts again.
+//!
 //! The waiter thread never takes the op lock or the schedule mutex. It takes the plan
 //! mutex for a copy, then the vault mutex alone and only to see whether the vault is
 //! unlocked. It waits on the relay with no lock held, then sets the pull flag and takes
@@ -106,6 +113,7 @@ use eframe::egui;
 use crate::broker::SharedVault;
 use crate::desktop::sync_health::{LogDetails, StuckNotice, SyncHealth, SyncKind};
 use crate::native::SyncStuckReason;
+use crate::relay::membership::PathEnded;
 use crate::sync::{
     FileStatus, FolderSync, RelayPoll, RelayRefusal, RelaySync, StorePlan, SyncError, SyncOutcome,
     VaultSync, is_plan_refusal, waits_for_account,
@@ -149,6 +157,13 @@ const STOP_WAIT: Duration = Duration::from_secs(5);
 pub(crate) const BEFORE_LOCK_LIMIT: Duration = Duration::from_secs(10);
 /// The most events that wait for a frame. A hidden window can draw none for hours.
 const MAX_EVENTS: usize = 32;
+/// How often the worker adds the newer verified devices of the Connect account to the
+/// vault stores of the list (plan s7 unit M5; connect-account-v1 sections 7.5 and 8).
+pub(crate) const REGISTER_EVERY: Duration = Duration::from_secs(5 * 60);
+
+/// The Connect account of this Mac as the window hands it to the worker: the account in
+/// memory, which the worker locks only for its Connect calls.
+pub(crate) type AccountSlot = crate::connect::AccountSlot;
 
 /// The lock around each sync operation that changes files. Take it before the vault
 /// mutex.
@@ -195,6 +210,33 @@ pub(crate) enum ConnectState {
     Suspended { delete_at: Option<u64> },
     /// The account of this Mac is signed out: the sync waits for "Sign In…".
     SignedOut,
+    /// The hosted relay ended this free relay copy (`410`, plan s7 unit M5): Apassy asks
+    /// it nothing more, and the vault on this Mac is safe. The choices: your own node, or
+    /// Apassy Connect.
+    HostedEnded(PathEnded),
+}
+
+/// The state of a free relay copy whose path the hosted relay ended, in a sentence: the
+/// vault on this Mac is safe, and the two choices of the notice (plan s7 unit M5; plans
+/// section 5: relay sync is not the paid feature, Apassy Connect is).
+pub(crate) fn ended_copy_words(why: PathEnded) -> String {
+    let head = match why {
+        PathEnded::FreeEnded => format!(
+            "Relay sync on apassy-relay.wyderka.cc ended with Apassy {}.",
+            crate::relay::membership::FREE_RELAY_PATHS_END_VERSION
+        ),
+        PathEnded::Retired => "apassy-relay.wyderka.cc no longer keeps relay copies.".to_owned(),
+    };
+    format!(
+        concat!(
+            "{} The vault on this ",
+            crate::computer!(),
+            " is safe and does not change. Make your own ",
+            crate::computer!(),
+            " or Linux node the sync home (free), or move the copy to Apassy Connect."
+        ),
+        head
+    )
 }
 
 impl ConnectState {
@@ -257,6 +299,9 @@ struct Plan {
     names: BTreeMap<String, String>,
     /// The vault slot of the session.
     vault: Option<SharedVault>,
+    /// The Connect account of this Mac while the app has an account session
+    /// ([`SyncWorker::set_account`]).
+    account: Option<AccountSlot>,
 }
 
 /// The schedule. Only a step holds it.
@@ -277,6 +322,9 @@ struct Schedule {
     /// Connect refuses the pushes of the open vault store (read-only): a change of this
     /// Mac waits for a pull, which tries the push once more, instead of its own sync.
     read_only: bool,
+    /// When the worker adds the newer devices of the account to the vault stores next.
+    /// `None`: at the first step with an account.
+    next_register: Option<Instant>,
 }
 
 /// What the window reads.
@@ -318,6 +366,10 @@ struct Shared {
     /// Wakes the waiter: a stop, or another open vault. The waiter resets it.
     waiter_wake: Mutex<bool>,
     waiter_woken: Condvar,
+    /// The relay syncs whose hosted relay ended their free path (`410`), by the state
+    /// path of their [`crate::sync::RelayConfig`]: the worker and the waiter call them no
+    /// more. Another relay sync of the same vault has another state path.
+    ended: Mutex<BTreeMap<PathBuf, PathEnded>>,
     /// The sync log and the streaks of failures.
     health: Mutex<SyncHealth>,
     /// The notification of a vault that does not sync.
@@ -325,6 +377,9 @@ struct Shared {
     /// The download requests of the worker, for the tests.
     #[cfg(test)]
     downloads_asked: std::sync::atomic::AtomicUsize,
+    /// The account devices that the worker added to vault stores, for the tests.
+    #[cfg(test)]
+    registered: std::sync::atomic::AtomicUsize,
     /// The one Apassy Connect account session of the app (plan s7 unit M5b): a vault
     /// store signs with its key, and with none while it is closed or removed.
     connect: Mutex<Option<Arc<crate::connect::AccountSession>>>,
@@ -332,6 +387,11 @@ struct Shared {
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Whether the hosted relay ended the free path of `relay` (`410`).
+fn ended_of(shared: &Shared, relay: &RelaySync) -> Option<PathEnded> {
+    lock(&shared.ended).get(&relay.config().state_path).copied()
 }
 
 fn is_unlocked(vault: &SharedVault) -> bool {
@@ -443,6 +503,7 @@ impl Shared {
             *schedule = Schedule {
                 generation,
                 downloads: std::mem::take(&mut schedule.downloads),
+                next_register: schedule.next_register,
                 ..Schedule::default()
             };
             self.relay_backoff.store(false, Ordering::SeqCst);
@@ -476,6 +537,9 @@ impl Shared {
         {
             self.show_removed(id);
         }
+        // A relay copy whose free path ended asks nothing more (plan s7 unit M5).
+        let ended = relay.and_then(|relay| ended_of(self, relay));
+        let removed = removed || ended.is_some();
         if removed {
             self.pull.store(false, Ordering::SeqCst);
         }
@@ -533,6 +597,7 @@ impl Shared {
         if schedule.next_check.is_none_or(|at| now >= at) {
             self.check(now, &mut schedule, open.as_ref(), vault.as_ref());
         }
+        let register = self.register_step(now, &mut schedule);
         let unlocked = vault.as_ref().is_some_and(is_unlocked);
         let local = schedule
             .next_local_check
@@ -554,6 +619,7 @@ impl Shared {
             relay_pull,
             removed_try,
             lock_check,
+            register,
         ]
         .into_iter()
         .flatten()
@@ -683,6 +749,20 @@ impl Shared {
             // The vault locked or changed: nothing to tell.
             return;
         }
+        if let (Err(err), Some(relay)) = (&result, sync.as_relay())
+            && let Some(why) = PathEnded::of_sync(*err)
+        {
+            // The hosted relay ended this free relay copy: no back-off and no retry, one
+            // state and one note. The vault on this Mac does not change.
+            self.relay_backoff.store(true, Ordering::SeqCst);
+            schedule.relay_failures = 0;
+            schedule.relay_retry_at = None;
+            schedule.next_relay_pull = None;
+            schedule.changed_since = None;
+            lock(&self.out).change_waits = false;
+            self.show_ended(id, relay, why);
+            return;
+        }
         let relay = sync.as_relay().is_some();
         let store = sync.as_relay().filter(|relay| relay.uses_account_key());
         let read_only = matches!(result, Err(err) if is_plan_refusal(err)) && store.is_some();
@@ -791,6 +871,78 @@ impl Shared {
             }
         }
         self.repaint();
+    }
+
+    /// Every [`REGISTER_EVERY`] while the app has a Connect account session: the newer
+    /// devices of the account join each vault store of the list
+    /// (`RelaySync::register_account_devices`; only verified devices, connect-account-v1
+    /// section 7.5, `ConnectAccount::register_own_store_device`), without the owner
+    /// opening Settings. No owner check, as at the start of a store. An account that a
+    /// call of the window holds waits for the next round. Returns the next time.
+    fn register_step(&self, now: Instant, schedule: &mut Schedule) -> Option<Instant> {
+        let (account, stores) = {
+            let plan = lock(&self.plan);
+            let stores: Vec<RelaySync> = plan
+                .synced
+                .iter()
+                .filter_map(|(_, sync)| sync.as_relay())
+                .filter(|relay| relay.uses_account_key())
+                .cloned()
+                .collect();
+            (plan.account.clone(), stores)
+        };
+        let account = account?;
+        if stores.is_empty() {
+            return None;
+        }
+        if schedule.next_register.is_some_and(|at| now < at) {
+            return schedule.next_register;
+        }
+        schedule.next_register = Some(now + REGISTER_EVERY);
+        let added = match account.try_lock() {
+            Ok(mut guard) => match guard.as_mut() {
+                Some(account) => stores
+                    .iter()
+                    .filter_map(|relay| relay.register_account_devices(account).ok())
+                    .map(|names| names.len())
+                    .sum(),
+                None => 0,
+            },
+            Err(_) => {
+                // The window uses the account now: the next round tries again soon.
+                schedule.next_register = Some(now + CHECK_EVERY);
+                0
+            }
+        };
+        #[cfg(test)]
+        self.registered
+            .fetch_add(added, std::sync::atomic::Ordering::SeqCst);
+        #[cfg(not(test))]
+        let _ = added;
+        schedule.next_register
+    }
+
+    /// The hosted relay ended the free path of `relay`, the relay sync of the vault `id`
+    /// (`410`): it gets no call any more, its row shows [`ConnectState::HostedEnded`], and
+    /// the window says it once ([`ended_copy_words`]).
+    fn show_ended(&self, id: &str, relay: &RelaySync, why: PathEnded) {
+        lock(&self.ended).insert(relay.config().state_path.clone(), why);
+        let status = UiStatus::Connect(ConnectState::HostedEnded(why));
+        let changed = {
+            let mut out = lock(&self.out);
+            let before = out.statuses.insert(id.to_owned(), status.clone());
+            let changed = before.as_ref() != Some(&status);
+            if changed {
+                out.push(SyncEvent::Failure {
+                    id: id.to_owned(),
+                    text: ended_copy_words(why),
+                });
+            }
+            changed
+        };
+        if changed {
+            self.repaint();
+        }
     }
 
     /// Tell [`SyncHealth`] the result of a sync of the vault `id`, and post its notice.
@@ -981,10 +1133,9 @@ fn wait_for_relay(shared: &Shared) {
                 plan.vault.clone(),
             )
         };
-        let ready = open
-            .as_ref()
-            .is_some_and(|(_, relay)| relay.has_session() && !relay.is_removed())
-            && vault.as_ref().is_some_and(is_unlocked);
+        let ready = open.as_ref().is_some_and(|(_, relay)| {
+            relay.has_session() && !relay.is_removed() && ended_of(shared, relay).is_none()
+        }) && vault.as_ref().is_some_and(is_unlocked);
         let Some((id, relay)) = open.filter(|_| ready) else {
             signalled = None;
             if !shared.waiter_sleep(RELAY_IDLE) {
@@ -1010,6 +1161,14 @@ fn wait_for_relay(shared: &Shared) {
                 signalled = None;
                 // A full long poll is the normal answer; an early one is not.
                 started.elapsed() >= RELAY_WAIT / 2
+            }
+            Err(error) if PathEnded::of_sync(error).is_some() => {
+                // The hosted relay ended this free relay copy: the worker shows it at its
+                // next step, and the waiter asks no more.
+                if let Some(why) = PathEnded::of_sync(error) {
+                    shared.show_ended(&id, &relay, why);
+                }
+                false
             }
             Err(SyncError::RemovedFromRelay) if relay.is_removed() => {
                 // The relay refused this device: the window shows it now, and the next
@@ -1180,6 +1339,21 @@ impl SyncWorker {
         };
         if changed {
             self.shared.wake();
+        }
+    }
+
+    /// The Connect account of this Mac while the app has an account session (plan s7
+    /// unit M5): the worker adds the newer verified devices of the account to the vault
+    /// stores every [`REGISTER_EVERY`]. `None` after a sign-out.
+    pub(crate) fn set_account(&self, account: Option<AccountSlot>) {
+        let mut plan = lock(&self.shared.plan);
+        let same = match (&plan.account, &account) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            plan.account = account;
         }
     }
 
@@ -1686,6 +1860,67 @@ mod tests {
             assert_eq!(
                 b.sync(lock(&vault).as_mut().unwrap()).unwrap_err(),
                 SyncError::StaleCopy
+            );
+        }
+
+        /// Plan s7 unit M5: the hosted relay ends a free relay copy (`410 hosted_retired`
+        /// on every sync route). The worker and the waiter stop at the first refusal: no
+        /// back-off loop, one state with the choices, one note, and the vault on this Mac
+        /// as it was.
+        #[test]
+        fn a_relay_copy_that_the_hosted_relay_ended_stops_at_the_first_410() {
+            use crate::desktop::fake_relay::HOSTED_RETIRED;
+            let root = tempfile::TempDir::new().expect("dir");
+            let relay = FakeRelay::start();
+            let (_a, _vault_a, b, mut vault_b) = pair(root.path(), &relay);
+            vault_b.add(item("Beta")).expect("add");
+            let items = vault_b.search("").expect("search").len();
+            relay.fail_next("GET /v1/sync", 1_000, HOSTED_RETIRED);
+            relay.fail_next("PUT /v1/sync", 1_000, HOSTED_RETIRED);
+            relay.fail_next("POST /v1/sync", 1_000, HOSTED_RETIRED);
+            let vault: SharedVault = Arc::new(Mutex::new(Some(vault_b)));
+            let before = relay.count("GET /v1/sync") + relay.count("PUT /v1/sync");
+            // The vault is in the list too, as in the app: the statuses of the list keep
+            // the state.
+            let mut worker = SyncWorker::default();
+            worker.set_synced_all(vec![("b".to_owned(), VaultSync::Relay(b.clone()))]);
+            worker.track_sync(
+                Some(("b".to_owned(), VaultSync::Relay(b.clone()))),
+                Arc::clone(&vault),
+            );
+            worker.start(&egui::Context::default());
+            std::thread::sleep(Duration::from_secs(4));
+            let asked = relay.count("GET /v1/sync") + relay.count("PUT /v1/sync") - before;
+            let status = worker.statuses().get("b").cloned();
+            let events = worker.take_events();
+            drop(worker);
+            assert!(
+                (1..=3).contains(&asked),
+                "{asked} sync requests in 4 s: {:?}",
+                relay.log()
+            );
+            assert_eq!(
+                status,
+                Some(UiStatus::Connect(ConnectState::HostedEnded(
+                    PathEnded::Retired
+                ))),
+                "{events:?} {:?}",
+                relay.log()
+            );
+            let notes: Vec<_> = events
+                .iter()
+                .filter(|event| matches!(event, SyncEvent::Failure { .. }))
+                .collect();
+            assert_eq!(notes.len(), 1, "one note: {events:?}");
+            assert_eq!(
+                lock(&vault)
+                    .as_ref()
+                    .unwrap()
+                    .search("")
+                    .expect("search")
+                    .len(),
+                items,
+                "nothing local is lost"
             );
         }
 

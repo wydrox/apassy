@@ -229,6 +229,14 @@ fn failure(error: Failure) -> ConnectError {
         Failure::Relay(503, _, _) => ConnectError::DailyCapacity,
         Failure::Relay(429, _, _) => ConnectError::NetworkLimit,
         Failure::Relay(404, _, _) => ConnectError::Unsupported,
+        // `410 free_connect_ended` and `410 hosted_retired` (plan s7 unit M5): the free path
+        // ended for good; the app shows the choices of the notice.
+        Failure::Relay(410, code, _) if code == "free_connect_ended" => {
+            ConnectError::Sync(SyncError::Relay(crate::sync::RelayRefusal::FreeEnded))
+        }
+        Failure::Relay(410, code, _) if code == "hosted_retired" => {
+            ConnectError::Sync(SyncError::Relay(crate::sync::RelayRefusal::HostedRetired))
+        }
         _ => ConnectError::Refused,
     }
 }

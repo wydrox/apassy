@@ -69,13 +69,26 @@ pub fn new_node_team(
     route: &TailnetRoute,
     device_name: &str,
 ) -> Result<RelayMembership, NodeError> {
+    new_node_team_at(node, &route.origin, &route.pin, &route.alt, device_name)
+}
+
+/// [`new_node_team`] for the origin `origin`, the pin `pin`, and the tailnet
+/// alternatives `alt`: also a node with only the Connect route (plan s7 unit M5), whose
+/// codes add the Connect route as their last alternative.
+pub fn new_node_team_at(
+    node: &dyn RunningNode,
+    origin: &str,
+    pin: &crate::net::pin::Pin,
+    alt: &[String],
+    device_name: &str,
+) -> Result<RelayMembership, NodeError> {
     let key = DeviceKey::generate().map_err(sync_error)?;
     let device = crate::sync::relay::clean_name(device_name, "Mac");
     let (team, device_id) =
         node.create_device_team(QUESTIONS_TEAM_NAME, &device, &key.public_key_b64u())?;
     Ok(RelayMembership {
         team_id: team.0,
-        relay_url: route.origin.clone(),
+        relay_url: origin.to_owned(),
         device_id,
         public_key: key.public_key().to_vec(),
         key_pkcs8: key
@@ -84,8 +97,8 @@ pub fn new_node_team(
             .unwrap_or_else(|| Zeroizing::new(Vec::new())),
         purposes: BTreeSet::from([MembershipPurpose::Questions]),
         created_at: 0,
-        pin: Some(route.pin.text()),
-        alt: route.alt.clone(),
+        pin: Some(pin.text()),
+        alt: alt.to_vec(),
     })
 }
 
