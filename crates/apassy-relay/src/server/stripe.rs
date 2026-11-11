@@ -52,6 +52,11 @@ const MAX_SIGNATURE_HEADER: usize = 4096;
 const MAX_SIGNATURES: usize = 8;
 /// Attempts of one call: the first and one retry with the same idempotency key.
 const ATTEMPTS: u32 = 2;
+/// The size of one page of a Stripe list (Stripe's largest `limit`).
+pub const LIST_PAGE: usize = 100;
+/// The most pages of one list that Connect reads (`starting_after`); a longer list is
+/// treated as unknown (`complete: false`).
+pub const MAX_LIST_PAGES: usize = 10;
 
 /// Where log lines go. The default writes to standard error with the relay's prefix.
 pub type LogSink = Arc<dyn Fn(&str) + Send + Sync>;
@@ -335,10 +340,20 @@ pub struct SubscriptionRead {
 pub struct CustomerSubscriptions {
     /// (subscription id, Stripe status), as Stripe lists them.
     pub list: Vec<(String, String)>,
-    /// False when Stripe has more than one page.
+    /// False when Stripe has more than `MAX_LIST_PAGES` pages.
     pub complete: bool,
-    /// Stripe's time from the answer's `Date` header.
+    /// Stripe's time from the `Date` header of the first answer.
     pub date: Option<u64>,
+}
+
+/// The open Checkout Sessions of one customer at Stripe
+/// (`StripeClient::customer_open_sessions`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomerSessions {
+    /// The session ids, as Stripe lists them.
+    pub list: Vec<String>,
+    /// False when Stripe has more than `MAX_LIST_PAGES` pages.
+    pub complete: bool,
 }
 
 /// True for a URL that Connect may hand to a browser for this Stripe origin: the origin
@@ -679,42 +694,124 @@ impl StripeClient {
         Ok(SubscriptionRead { object, date })
     }
 
-    /// `GET /v1/subscriptions?customer=…&status=all&limit=100`: every subscription of a
-    /// customer at Stripe, ended ones included, as (id, status). `complete` is false when
-    /// Stripe has more than one page: the caller treats the list as unknown.
+    /// `GET /v1/subscriptions?customer=…&status=all&limit=100`, page after page
+    /// (`starting_after`): every subscription of a customer at Stripe, ended ones
+    /// included, as (id, status). `complete` is false when Stripe has more than
+    /// `MAX_LIST_PAGES` pages: the caller treats the list as unknown.
     pub fn customer_subscriptions(&self, customer: &str) -> RelayResult<CustomerSubscriptions> {
         if !is_stripe_id("cus_", customer) {
             return Err(RelayError::internal(
                 "The stored Stripe customer id is not valid.",
             ));
         }
-        let query = form_encode(&[
-            ("customer".to_owned(), customer.to_owned()),
-            ("status".to_owned(), "all".to_owned()),
-            ("limit".to_owned(), "100".to_owned()),
-        ]);
-        let (value, date) =
-            self.call_dated(Method::Get, "/v1/subscriptions", Some(&query), None, None)?;
-        let Some(data) = value.pointer("/data").and_then(Value::as_array) else {
-            return Err(self.bad_answer("/v1/subscriptions"));
-        };
-        let mut list = Vec::with_capacity(data.len());
-        for object in data {
-            let id = object.pointer("/id").and_then(Value::as_str);
-            let status = object.pointer("/status").and_then(Value::as_str);
-            let owner = object.pointer("/customer").and_then(Value::as_str);
-            match (id, status) {
-                (Some(id), Some(status)) if is_stripe_id("sub_", id) && owner == Some(customer) => {
-                    list.push((id.to_owned(), status.to_owned()));
+        let path = "/v1/subscriptions";
+        let (list, complete, date) = self.list_pages(
+            path,
+            &[
+                ("customer", customer.to_owned()),
+                ("status", "all".to_owned()),
+            ],
+            |object| {
+                let id = object.pointer("/id").and_then(Value::as_str);
+                let status = object.pointer("/status").and_then(Value::as_str);
+                let owner = object.pointer("/customer").and_then(Value::as_str);
+                match (id, status) {
+                    (Some(id), Some(status))
+                        if is_stripe_id("sub_", id) && owner == Some(customer) =>
+                    {
+                        Ok((id.to_owned(), status.to_owned()))
+                    }
+                    _ => Err(self.bad_answer(path)),
                 }
-                _ => return Err(self.bad_answer("/v1/subscriptions")),
-            }
-        }
+            },
+        )?;
         Ok(CustomerSubscriptions {
             list,
-            complete: value.pointer("/has_more").and_then(Value::as_bool) == Some(false),
+            complete,
             date,
         })
+    }
+
+    /// `GET /v1/checkout/sessions?customer=…&status=open&limit=100`, page after page: the
+    /// open Checkout Sessions of a customer at Stripe, also those Connect no longer
+    /// stores. `complete` is false when Stripe has more than `MAX_LIST_PAGES` pages.
+    pub fn customer_open_sessions(&self, customer: &str) -> RelayResult<CustomerSessions> {
+        if !is_stripe_id("cus_", customer) {
+            return Err(RelayError::internal(
+                "The stored Stripe customer id is not valid.",
+            ));
+        }
+        let path = "/v1/checkout/sessions";
+        let (list, complete, _) = self.list_pages(
+            path,
+            &[
+                ("customer", customer.to_owned()),
+                ("status", "open".to_owned()),
+            ],
+            |object| {
+                let id = object.pointer("/id").and_then(Value::as_str);
+                let owner = object.pointer("/customer").and_then(Value::as_str);
+                match id {
+                    Some(id) if is_stripe_id("cs_", id) && owner == Some(customer) => {
+                        Ok(id.to_owned())
+                    }
+                    _ => Err(self.bad_answer(path)),
+                }
+            },
+        )?;
+        Ok(CustomerSessions { list, complete })
+    }
+
+    /// Reads a Stripe list page after page (`limit=100`, then `starting_after` the last
+    /// id), at most `MAX_LIST_PAGES` pages. Answers the entries, whether the list ended
+    /// within them, and Stripe's time of the first answer.
+    fn list_pages<T>(
+        &self,
+        path: &str,
+        filters: &[(&str, String)],
+        entry: impl Fn(&Value) -> RelayResult<T>,
+    ) -> RelayResult<(Vec<T>, bool, Option<u64>)> {
+        let mut entries = Vec::new();
+        let mut after: Option<String> = None;
+        let mut first_date = None;
+        for page in 0..MAX_LIST_PAGES {
+            let mut query: Vec<(String, String)> = filters
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), value.clone()))
+                .collect();
+            query.push(("limit".to_owned(), LIST_PAGE.to_string()));
+            if let Some(after) = &after {
+                query.push(("starting_after".to_owned(), after.clone()));
+            }
+            let (value, date) =
+                self.call_dated(Method::Get, path, Some(&form_encode(&query)), None, None)?;
+            if page == 0 {
+                first_date = date;
+            }
+            let Some(data) = value.pointer("/data").and_then(Value::as_array) else {
+                return Err(self.bad_answer(path));
+            };
+            let more = match value.pointer("/has_more").and_then(Value::as_bool) {
+                Some(more) => more,
+                None => return Err(self.bad_answer(path)),
+            };
+            for object in data {
+                entries.push(entry(object)?);
+            }
+            if !more {
+                return Ok((entries, true, first_date));
+            }
+            // A page that says there is more must end with an id to go on from.
+            match data
+                .last()
+                .and_then(|object| object.pointer("/id"))
+                .and_then(Value::as_str)
+            {
+                Some(id) if Some(id) != after.as_deref() => after = Some(id.to_owned()),
+                _ => return Err(self.bad_answer(path)),
+            }
+        }
+        Ok((entries, false, first_date))
     }
 
     /// `GET /v1/subscription_items/{item}`: the quantity Stripe has for an item (read back

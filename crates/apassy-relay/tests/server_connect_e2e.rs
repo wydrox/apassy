@@ -289,6 +289,9 @@ fn connect_works_end_to_end_with_the_app_client() {
         (open.kind, open.is_open(), open.payload.len()),
         (Kind::Device, true, 0)
     );
+    // Connect grants the node the rest of its stream buffer right behind the `open`.
+    let grant = frame::decode(&node_socket.binary()).unwrap();
+    assert_eq!((grant.stream, grant.is_window()), (open.stream, true));
     dial.send(b"a TLS ClientHello, in fact");
     let data = frame::decode(&node_socket.binary()).unwrap();
     assert_eq!(

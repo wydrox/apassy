@@ -10,6 +10,16 @@
 //!
 //! A wrong master key, a wrong context, a changed byte, a cut, and an unknown version
 //! all give [`SealError::Open`]; the error does not say which.
+//!
+//! What the seal protects: a sealed file without the master key opens nothing (a copy of
+//! one file, a backup without the key), and a value opens only in its context. With the
+//! key in the Keychain (`crate::node::master_key::KeySource::Keychain`) that holds for
+//! every reader of the node directory. When the key is the 0600 file `master.key` of the
+//! node directory itself (`KeySource::File`: a build without the Keychain, or a Linux
+//! node without `systemd-creds`), it sits beside the files that it seals, so whoever
+//! reads that directory as this user (the user's own programs, root, a backup of the
+//! whole directory) reads the key too and opens them: there the file modes keep other
+//! users out, and the seal adds only the binding to the context.
 
 use ring::aead::{AES_256_GCM, Aad, LessSafeKey, NONCE_LEN, Nonce, UnboundKey};
 use ring::hkdf::{HKDF_SHA256, Salt};
@@ -18,8 +28,8 @@ use zeroize::Zeroizing;
 
 /// The HKDF info of the front's private key.
 pub const FRONT_INFO: &[u8] = b"apassy-node-front-v1";
-/// The HKDF info of the private keys of the Connect files of a node: the public
-/// certificate's key and the ACME account key (`crate::node::public_cert`).
+/// The HKDF info of the Connect files of a node: the public certificate with its key
+/// (`crate::node::public_cert`) and the ACME account key (`crate::node::acme`).
 pub const CONNECT_INFO: &[u8] = b"apassy-node-connect-v1";
 /// The first byte of a sealed value.
 pub const VERSION: u8 = 1;

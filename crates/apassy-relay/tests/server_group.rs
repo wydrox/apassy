@@ -1080,3 +1080,34 @@ fn joining_a_group_ends_the_checkout_the_account_had_open() {
         ["-"]
     );
 }
+
+#[test]
+fn a_buyer_whose_data_waits_keeps_the_stores_of_its_members_too() {
+    let c = start();
+    let owner = family(&c, 4);
+    let member = c.account("Ola");
+    c.add_member(&owner, &member);
+    let (team, _) = c.store(&member, VAULT);
+    let old = format!("sub_{}", &owner.account[4..]);
+    c.update(&owner, "connect_family_month", 4, "canceled");
+    c.end_subscription_at(&old, connect::now() - 91 * 86_400);
+    assert_eq!(c.plan(&member)["status"], "none");
+    // Stripe has another subscription of the owner that is not over: the owner's data
+    // waits, and so does the data of its members.
+    let mut newer = c.stripe.subscription(&old).unwrap();
+    newer["id"] = json!(format!("{old}2"));
+    newer["status"] = json!("past_due");
+    newer["ended_at"] = Value::Null;
+    c.stripe.put_subscription(newer);
+    let hub = c.relay.hub();
+    let billing = hub.billing().expect("billing").clone();
+    assert_eq!(
+        apassy_relay::server::billing_store::maintain(&hub, &billing, connect::now()).unwrap(),
+        0
+    );
+    assert!(c.rows("SELECT id FROM team").contains(&team));
+    assert!(
+        c.rows("SELECT detail FROM audit WHERE action = 'plan_stores_deleted'")
+            .is_empty()
+    );
+}

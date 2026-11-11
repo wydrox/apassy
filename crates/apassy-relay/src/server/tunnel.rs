@@ -21,9 +21,18 @@
 //!
 //! Each stream is in one class of the node's account, with its own slots and counts: the
 //! dials of the account's own devices, the dials of another account with a grant (a share
-//! of the slots and of the dial budget), and the public and ACME streams of the ingress
-//! (slots, a per-node open rate, a first-byte deadline, and a byte budget of their own).
-//! See [`Limits`].
+//! of the slots and of the dial budget, and of that share for each other account), the
+//! public streams of the ingress (slots, a per-node open rate, a first-byte deadline, and
+//! a byte budget of their own), and the ACME streams of the ingress (a few slots of their
+//! own, outside the public rate and budget, so the node's certificate renewal always gets
+//! through). See [`Limits`].
+//!
+//! Each direction of a stream has a window ([`frame::INITIAL_WINDOW`], then `window`
+//! frames): Connect sends a client's bytes to the node only within the window that the
+//! node granted (a client that sends more waits: backpressure to its TCP window), and it
+//! grants the node more as the client reads (at most [`Limits::stream_buffer`] in
+//! flight). A node that sends over its window breaks the stream rule `over_window`, and
+//! the stream is reset.
 //!
 //! A node's `close` ends the stream for its client, a dial and an ingress connection
 //! alike: the client gets the last bytes, then its connection closes, and Connect closes
@@ -33,12 +42,20 @@
 //! Every queue has a cap. A node's outgoing queue holds at most
 //! [`Limits::node_queue`] bytes; a client that sends faster waits (backpressure to its
 //! TCP window). A stream buffers at most [`Limits::stream_buffer`] bytes toward a
-//! client; over it the stream is reset (contract section 4). Resets and pongs go ahead
-//! of the data, bounded by the streams (one reset for each, one pong): none is dropped,
-//! and a reset never goes ahead of its own stream's `open` (a stream whose `open` was
-//! still queued leaves the queue without a trace). Reads have an idle limit, writes a
-//! timeout, and a maintenance thread resets idle streams and asks the directory again
-//! about the plans and grants of the open streams ([`Limits::recheck`]).
+//! client, the window it granted. Resets, windows, and pongs go ahead of the data, and
+//! none is dropped: one pong at most, one reset for each stream that Connect ends, and one
+//! `window` frame for each quarter window of node data that a client read. For a node
+//! that reads its WebSocket that is a few windows for each stream; a node that stops
+//! reading can still send within the windows that Connect granted, so its queue grows by
+//! one window frame (12 bytes) for each 64 KiB that its clients read, until the writer's
+//! write timeout ([`Limits::idle_timeout`]) ends the WebSocket. Neither a reset nor a
+//! window goes ahead of its own stream's `open` (a stream whose `open` was still queued
+//! leaves the queue without a trace). Reads have an
+//! idle limit, writes a timeout, and a maintenance thread resets idle streams and asks the
+//! directory again about the plans and grants of the open streams ([`Limits::recheck`]):
+//! a definite "no" ends them with 4003; a directory that cannot answer skips the round
+//! for them, at most [`Limits::recheck_skips`] rounds in a row, then they end with 1013
+//! (try again).
 //!
 //! Locks, in the only order they nest: the node map, a node's stream state, a stream's
 //! inbox. The account counters and each outbox are leaves (nothing is locked inside).
@@ -49,11 +66,11 @@ pub mod ws;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use frame::{Applied, CLOSE, Dir, Kind, OPEN, RESET, Sequencer};
+use frame::{Applied, CLOSE, Dir, Kind, OPEN, RESET, Sequencer, WINDOW};
 use ws::{Message, WsError, close};
 
 /// Error codes of the tunnel routes (connect-account-v1 section 4, tunnel contract 3.3).
@@ -67,6 +84,7 @@ pub mod codes {
     pub const ACCOUNT_LIMIT: &str = "account_limit";
     pub const TUNNEL_LIMIT: &str = "tunnel_limit";
     pub const TUNNEL_OFFLINE: &str = "tunnel_offline";
+    pub const BUSY: &str = "busy";
 }
 
 /// A refusal before the `101`, with its HTTP status.
@@ -124,6 +142,11 @@ impl TunnelError {
         codes::TUNNEL_OFFLINE,
         "The node is not connected to Apassy Connect.",
     );
+    pub const BUSY: Self = Self::new(
+        503,
+        codes::BUSY,
+        "Apassy Connect cannot check the account now. Try again.",
+    );
 
     /// The JSON error envelope (`{"ok":false,"error":{...}}`).
     pub fn body(&self) -> Vec<u8> {
@@ -135,11 +158,13 @@ impl TunnelError {
 
 /// The limits of the tunnel (contract section 8). Configuration, not wire constants.
 ///
-/// Each account has three kinds of open streams, each with its own slots and counts:
+/// Each account has four kinds of open streams, each with its own slots and counts:
 /// the dials of its own devices, the dials of other accounts with a grant (a share of
 /// the dial slots and of the dial budget, so the account's own devices always keep the
-/// rest), and the public and ACME streams of the ingress (slots, an open rate, and a byte
-/// budget of their own, so a stranger at the ingress never makes a dial fail).
+/// rest), the public streams of the ingress (slots, an open rate, and a byte budget of
+/// their own, so a stranger at the ingress never makes a dial fail), and the ACME streams
+/// of the ingress (a few slots of their own, outside the public rate and budget, so the
+/// public streams never keep the certificate renewal out).
 #[derive(Debug, Clone)]
 pub struct Limits {
     /// Open dials of one account's nodes (its own devices and other accounts together).
@@ -158,33 +183,52 @@ pub struct Limits {
     /// this many of [`Limits::streams_per_account`]; the rest stays for its own devices.
     pub grantee_streams: usize,
     /// The share of the dial budget, in percent, that the dials of other accounts may
-    /// spend together; the rest stays for the account's own devices.
+    /// spend together; the rest stays for the account's own devices. One other account
+    /// spends at most its part of that share: `streams_per_grantee / grantee_streams` of
+    /// it ([`Limits::grantee_each_budget`]), so one never uses up the share of the others.
     pub grantee_bytes_percent: u64,
-    /// Open public and ACME streams of one account: slots of their own.
+    /// Open public streams of one account: slots of their own.
     pub ingress_streams: usize,
-    /// New public and ACME streams of one node in one clock minute.
+    /// New public streams of one node in one clock minute.
     pub ingress_per_minute: u32,
     /// The node sends its first frame on a public or ACME stream within this, else the
     /// stream is reset.
     pub ingress_first_byte: Duration,
-    /// Bytes of the public and ACME streams of one account in one UTC month, for each
-    /// budget unit: a budget of their own, apart from the dial budget.
+    /// Bytes of the public streams of one account in one UTC month, for each budget unit:
+    /// a budget of their own, apart from the dial budget.
     pub ingress_bytes_per_month: u64,
+    /// Open ACME streams of one account: slots of their own, outside the public slots,
+    /// rate, and budget (an ACME stream carries at most 8 KiB in and 64 KiB out).
+    pub acme_streams: usize,
+    /// New ACME streams of one account in one clock minute (refused ones count): a rate of
+    /// their own, far above what a renewal needs (a CA validates one token from a few
+    /// places, and retries), so the class opens no streams without end.
+    pub acme_per_minute: u32,
     /// How often the plan of each account with open streams, and the grant of each open
     /// dial of another account, are checked again (a plan or a group can end by time).
     pub recheck: Duration,
+    /// Rounds of [`Limits::recheck`] in a row that a stream may skip because the
+    /// directory could not answer; after them it ends with 1013 (try again).
+    pub recheck_skips: u32,
     /// Connect pings each WebSocket this often.
     pub ping_interval: Duration,
     /// A WebSocket with no message for this long closes (reads and writes time out).
     pub idle_timeout: Duration,
     /// A stream with no bytes for this long is reset.
     pub stream_idle: Duration,
-    /// Bytes buffered toward one client; over it the stream is reset.
+    /// Bytes buffered toward one client: the window that Connect grants the node for
+    /// one stream (at least [`frame::INITIAL_WINDOW`]); a node that sends more is reset.
     pub stream_buffer: usize,
     /// Bytes queued toward one node; a client sending more waits.
     pub node_queue: usize,
-    /// After a client left, the node has this long to close its side, then a reset.
+    /// After a client left (a dial's WebSocket close), the node has this long to close its
+    /// side, then a reset. After an ingress client's half-close (or an ACME request), the
+    /// node has this long of silence: bytes either way, also bytes that the client reads,
+    /// start it again.
     pub close_grace: Duration,
+    /// The longest life of a stream after its client closed its direction, however its
+    /// bytes still move: then a reset.
+    pub half_closed_life: Duration,
     /// All node WebSockets of this broker.
     pub max_nodes: usize,
     /// All open streams of this broker.
@@ -192,7 +236,7 @@ pub struct Limits {
     /// The share of [`Limits::max_streams`], in percent, that the public and ACME streams
     /// of all nodes may hold together ([`Limits::ingress_cap`]): the rest stays for the
     /// dials, so the ingress of many nodes together never takes every stream of the
-    /// broker.
+    /// broker. The ACME streams are part of this share.
     pub ingress_share_percent: u64,
     /// How often the maintenance thread looks at idle streams.
     pub tick: Duration,
@@ -212,13 +256,17 @@ impl Default for Limits {
             ingress_per_minute: 60,
             ingress_first_byte: Duration::from_secs(10),
             ingress_bytes_per_month: 5 * 1024 * 1024 * 1024,
+            acme_streams: 4,
+            acme_per_minute: 30,
             recheck: Duration::from_secs(60),
+            recheck_skips: 3,
             ping_interval: Duration::from_secs(30),
             idle_timeout: Duration::from_secs(90),
             stream_idle: Duration::from_secs(15 * 60),
             stream_buffer: 256 * 1024,
             node_queue: 1024 * 1024,
             close_grace: Duration::from_secs(10),
+            half_closed_life: Duration::from_secs(10 * 60),
             max_nodes: 4096,
             max_streams: 4096,
             ingress_share_percent: 50,
@@ -235,6 +283,19 @@ impl Limits {
         let share = u128::from(self.ingress_share_percent.min(90));
         let cap = (self.max_streams as u128 * share / 100) as usize;
         cap.clamp(1, self.max_streams.saturating_sub(1).max(1))
+    }
+
+    /// The dial bytes that one other account may spend in a month of a budget: its part
+    /// of the share of all other accounts, as its slots are part of theirs.
+    pub fn grantee_each_budget(&self, budget: u64) -> u64 {
+        let share = u128::from(budget) * u128::from(self.grantee_bytes_percent.min(100)) / 100;
+        let part = share * self.streams_per_grantee as u128 / self.grantee_streams.max(1) as u128;
+        u64::try_from(part.min(share)).unwrap_or(u64::MAX)
+    }
+
+    /// The window that Connect grants a node for one stream.
+    fn window(&self) -> u64 {
+        (self.stream_buffer as u64).clamp(frame::INITIAL_WINDOW, frame::MAX_WINDOW)
     }
 }
 
@@ -315,30 +376,59 @@ pub enum Refusal {
     Unauthenticated,
     /// 403 `account_required`: a token that is not an account token (a team token).
     AccountRequired,
+    /// The token cannot be checked now (the store failed): 503 `busy`, never a 401.
+    Unavailable,
 }
 
-/// What the broker asks of the account store (unit C1 implements it).
+/// The directory could not answer (its store failed): not a "no". Admission refuses
+/// with `503 busy`; the recheck skips the round.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Unavailable;
+
+/// What the broker asks of the account store (unit C1 implements it). A lookup that the
+/// store cannot answer is [`Unavailable`] (or [`Refusal::Unavailable`]), never a "no": the
+/// routes answer `503 busy` for it (contract 3.3), and only a definite answer is a 401, a
+/// 403, or a 404.
 pub trait TunnelDirectory: Send + Sync {
     /// The caller of a bearer token (the value after `Bearer `).
     fn caller(&self, bearer: &str) -> Result<Caller, Refusal>;
     /// The node registered for the caller's device, if any.
-    fn device_node(&self, caller: &Caller) -> Option<NodeEntry>;
+    fn device_node(&self, caller: &Caller) -> Result<Option<NodeEntry>, Unavailable>;
     /// A node by id.
-    fn node(&self, node_id: &str) -> Option<NodeEntry>;
-    /// Whether the node's account granted the given account (`tunnel_grant`).
-    fn has_grant(&self, node_id: &str, grantee_account: &str) -> bool;
+    fn node(&self, node_id: &str) -> Result<Option<NodeEntry>, Unavailable>;
+    /// Whether the node's account granted the given account (`tunnel_grant`) and the
+    /// grant still holds.
+    fn has_grant(&self, node_id: &str, grantee_account: &str) -> Result<bool, Unavailable>;
     /// Whether the account has a plan with the tunnel (connect-billing-v1 section 8).
-    fn entitled(&self, account_id: &str) -> bool;
+    fn entitled(&self, account_id: &str) -> Result<bool, Unavailable>;
     /// How many byte budgets the account has: 1, or the people of Family, or the members
-    /// of Team.
-    fn budget_units(&self, _account_id: &str) -> u64 {
-        1
+    /// of Team. [`Unavailable`] keeps the budget known before (none at the first use: the
+    /// next stream asks again).
+    fn budget_units(&self, _account_id: &str) -> Result<u64, Unavailable> {
+        Ok(1)
     }
 }
 
 /// May `caller_account` dial `node`: its own node, or one whose account granted it.
-pub fn may_dial(directory: &dyn TunnelDirectory, caller_account: &str, node: &NodeEntry) -> bool {
-    node.account_id == caller_account || directory.has_grant(&node.node_id, caller_account)
+pub fn may_dial(
+    directory: &dyn TunnelDirectory,
+    caller_account: &str,
+    node: &NodeEntry,
+) -> Result<bool, Unavailable> {
+    if node.account_id == caller_account {
+        return Ok(true);
+    }
+    directory.has_grant(&node.node_id, caller_account)
+}
+
+/// Admission: an entitled account passes, a definite "no" is `403 plan_required`, a
+/// directory that cannot answer is `503 busy`.
+fn require_plan(directory: &dyn TunnelDirectory, account_id: &str) -> Result<(), TunnelError> {
+    match directory.entitled(account_id) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(TunnelError::PLAN_REQUIRED),
+        Err(Unavailable) => Err(TunnelError::BUSY),
+    }
 }
 
 /// A node id: `node_` and 10 characters of `a-z2-7`.
@@ -384,11 +474,13 @@ pub struct Usage {
     pub tripped: bool,
 }
 
-/// The stored key of the ingress counters of an account: `<account>/ingress`.
+/// The stored key of the public-stream counters of an account: `<account>/ingress`.
 const INGRESS_SUFFIX: &str = "/ingress";
+/// The stored key of the ACME-stream counters of an account: `<account>/acme`.
+const ACME_SUFFIX: &str = "/acme";
 /// The stored key of the counters of another account's dials to an account's nodes:
 /// `<account>/dial/<other account>`.
-const GRANTEE_INFIX: &str = "/dial/";
+pub const GRANTEE_INFIX: &str = "/dial/";
 
 /// Who opened a stream, for the slots and the counts of the node's account.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -397,8 +489,17 @@ enum Class {
     Own,
     /// A dial of a device of another account, with a grant.
     Grantee(String),
-    /// A public or ACME stream of the ingress.
+    /// A public stream of the ingress.
     Ingress,
+    /// An ACME stream of the ingress.
+    Acme,
+}
+
+impl Class {
+    /// A stream of the ingress (public or ACME).
+    fn ingress(&self) -> bool {
+        matches!(self, Class::Ingress | Class::Acme)
+    }
 }
 
 /// The counts of one other account's dials to the nodes of an account.
@@ -410,6 +511,8 @@ struct Grantee {
     open: usize,
     minute: u64,
     minute_dials: u32,
+    /// Its part of the share of other accounts is spent this month.
+    tripped: bool,
 }
 
 #[derive(Debug, Default)]
@@ -438,7 +541,15 @@ struct Account {
     grantee_bytes: u64,
     grantees_tripped: bool,
     grantee_budget: u64,
+    /// What one other account may spend of it ([`Limits::grantee_each_budget`]).
+    grantee_each_budget: u64,
     grantee_open: usize,
+    /// ACME streams: bytes and streams of the month (part of `bytes`), open now.
+    acme_bytes: u64,
+    acme_streams: u64,
+    acme_open: usize,
+    /// ACME streams opened in the clock minute of `minute`.
+    acme_minute_opens: u32,
 }
 
 impl Account {
@@ -455,23 +566,63 @@ impl Account {
             self.ingress_tripped = false;
             self.grantee_bytes = 0;
             self.grantees_tripped = false;
+            self.acme_bytes = 0;
+            self.acme_streams = 0;
             self.grantees.retain(|_, grantee| grantee.open > 0);
             for grantee in self.grantees.values_mut() {
                 grantee.bytes = 0;
                 grantee.dials = 0;
                 grantee.streams = 0;
+                grantee.tripped = false;
             }
         }
         let minute = now / 60;
         if self.minute != minute {
             self.minute = minute;
             self.minute_dials = 0;
+            self.acme_minute_opens = 0;
+        }
+    }
+
+    /// The budgets of the units known now. A budget that changed is checked again: a trip
+    /// that no longer holds is lifted (and trips again, ending its streams, at the next
+    /// counted byte over the new budget).
+    fn set_budgets(&mut self, budget: u64, ingress: u64, grantee: u64, each: u64) {
+        let old = (
+            self.budget,
+            self.ingress_budget,
+            self.grantee_budget,
+            self.grantee_each_budget,
+        );
+        self.budget = budget;
+        self.ingress_budget = ingress;
+        self.grantee_budget = grantee;
+        self.grantee_each_budget = each;
+        if old == (budget, ingress, grantee, each) {
+            return;
+        }
+        let spent = |bytes: u64, of: u64| budget > 0 && bytes >= of;
+        if !spent(self.dial_bytes(), budget) {
+            self.tripped = false;
+        }
+        if !(ingress > 0 && self.ingress_bytes >= ingress) {
+            self.ingress_tripped = false;
+        }
+        if !spent(self.grantee_bytes, grantee) {
+            self.grantees_tripped = false;
+        }
+        for counts in self.grantees.values_mut() {
+            if !spent(counts.bytes, each) {
+                counts.tripped = false;
+            }
         }
     }
 
     /// The bytes of the dials this month (all bytes but the ingress's).
     fn dial_bytes(&self) -> u64 {
-        self.bytes.saturating_sub(self.ingress_bytes)
+        self.bytes
+            .saturating_sub(self.ingress_bytes)
+            .saturating_sub(self.acme_bytes)
     }
 
     fn dials_spent(&self) -> bool {
@@ -480,6 +631,13 @@ impl Account {
 
     fn grantees_spent(&self) -> bool {
         self.grantees_tripped || (self.budget > 0 && self.grantee_bytes >= self.grantee_budget)
+    }
+
+    /// One other account spent its part of the share.
+    fn grantee_spent(&self, grantee: &str) -> bool {
+        self.grantees.get(grantee).is_some_and(|counts| {
+            counts.tripped || (self.budget > 0 && counts.bytes >= self.grantee_each_budget)
+        })
     }
 
     fn ingress_spent(&self) -> bool {
@@ -493,8 +651,19 @@ impl Account {
             bytes: self.bytes,
             dials: self.dials,
             streams: self.streams,
-            open_streams: self.open + self.ingress_open,
+            open_streams: self.open + self.ingress_open + self.acme_open,
             tripped: self.tripped,
+        }
+    }
+
+    fn acme_usage(&self) -> Usage {
+        Usage {
+            month: self.month,
+            bytes: self.acme_bytes,
+            dials: 0,
+            streams: self.acme_streams,
+            open_streams: self.acme_open,
+            tripped: false,
         }
     }
 
@@ -517,7 +686,7 @@ impl Account {
             dials: counts.map_or(0, |counts| counts.dials),
             streams: counts.map_or(0, |counts| counts.streams),
             open_streams: counts.map_or(0, |counts| counts.open),
-            tripped: self.grantees_tripped,
+            tripped: self.grantees_tripped || counts.is_some_and(|counts| counts.tripped),
         }
     }
 }
@@ -543,7 +712,7 @@ impl Drop for Slot {
         if let Some(inner) = self.inner.upgrade() {
             let mut accounts = lock(&inner.accounts);
             accounts.open_total = accounts.open_total.saturating_sub(1);
-            if self.class == Class::Ingress {
+            if self.class.ingress() {
                 accounts.ingress_total = accounts.ingress_total.saturating_sub(1);
             }
             if let Some(account) = accounts.by_id.get_mut(&self.account) {
@@ -559,6 +728,7 @@ impl Drop for Slot {
                     Class::Ingress => {
                         account.ingress_open = account.ingress_open.saturating_sub(1);
                     }
+                    Class::Acme => account.acme_open = account.acme_open.saturating_sub(1),
                 }
             }
         }
@@ -623,9 +793,13 @@ struct Queued {
 
 #[derive(Default)]
 struct OutState {
-    /// Resets and pongs: may pass queued data (a reset can cross data in flight). At most
-    /// one pong (a new one replaces it) and one reset for each stream that Connect ends,
-    /// so its length is bounded by the streams of the WebSocket: nothing here is dropped.
+    /// Resets, windows, and pongs: may pass queued data (a reset can cross data in
+    /// flight). At most one pong (a new one replaces it), one reset for each stream that
+    /// Connect ends, and one window for each quarter window of node data that a client
+    /// read. Nothing here is dropped. With a node that reads, that is a few windows for
+    /// each stream; with a node that does not read, the windows grow with the node data
+    /// that its clients read (12 bytes for each 64 KiB) until the writer's write timeout
+    /// ends the WebSocket.
     urgent: VecDeque<Out>,
     /// Opens, data, and closes, in order.
     fifo: VecDeque<Queued>,
@@ -731,6 +905,17 @@ impl Outbox {
         true
     }
 
+    /// Queues a `window` frame ahead of the data. Only for a stream whose `open` went out
+    /// (the node sent data on it).
+    fn push_window(&self, frame: Vec<u8>) {
+        let mut state = lock(&self.state);
+        if state.close.is_some() {
+            return;
+        }
+        state.urgent.push_back(Out::Frame(frame));
+        self.ready.notify_one();
+    }
+
     fn close(&self, code: u16) {
         let mut state = lock(&self.state);
         if state.close.is_none() {
@@ -809,6 +994,18 @@ struct Stream {
     activity: AtomicU64,
     /// Milliseconds since the epoch when the client left (0: still there).
     client_gone: AtomicU64,
+    /// Milliseconds since the epoch when the client closed its direction and still reads
+    /// (a TCP half-close; an ACME request with its `open`), 0: not closed. The node then
+    /// has [`Limits::close_grace`] of silence to send more or close, else a reset.
+    client_shut: AtomicU64,
+    /// Rounds of the recheck in a row that the directory could not answer for it.
+    unchecked: AtomicU32,
+    /// Counts the node's `window` frames on this stream; a sender waiting for window
+    /// waits for it to change.
+    window_seen: Mutex<u64>,
+    window_cond: Condvar,
+    /// Node bytes that the client read since Connect last granted the node more.
+    drained: AtomicU64,
     /// Most bytes the node may send on this stream (ACME answers), else unlimited.
     max_from_node: Option<usize>,
     from_node: AtomicU64,
@@ -843,7 +1040,14 @@ impl Stream {
             self.ended.store(true, Ordering::SeqCst);
             self.cond.notify_all();
         }
+        self.window_changed();
         drop(lock(&self.slot).take());
+    }
+
+    /// Wakes a sender that waits for window (a `window` frame, or the stream ended).
+    fn window_changed(&self) {
+        *lock(&self.window_seen) += 1;
+        self.window_cond.notify_all();
     }
 
     fn is_ended(&self) -> bool {
@@ -883,6 +1087,12 @@ struct Inner {
     rechecked: AtomicU64,
     /// Ended streams whose client writer was inside a write, with a deadline.
     stuck: Mutex<Vec<(Arc<Stream>, u64)>>,
+    /// The most bytes that one stream held toward its client since the start.
+    peak_buffer: AtomicUsize,
+    /// Deleted accounts whose counters a snapshot taken before the deletion may still
+    /// hold: the usage writer writes none of their rows, and lets each go after its next
+    /// snapshot ([`Broker::forgotten`]). A leaf lock, taken inside `accounts`.
+    forgotten: Mutex<HashSet<String>>,
 }
 
 /// The tunnel broker. Cheap to clone; all clones share one registry.
@@ -967,6 +1177,8 @@ impl Broker {
             stop: AtomicBool::new(false),
             rechecked: AtomicU64::new(0),
             stuck: Mutex::new(Vec::new()),
+            peak_buffer: AtomicUsize::new(0),
+            forgotten: Mutex::new(HashSet::new()),
         });
         let weak = Arc::downgrade(&inner);
         let tick = inner.limits.tick;
@@ -991,6 +1203,12 @@ impl Broker {
         &self.inner.zone
     }
 
+    /// The most bytes that one stream held toward its client since the start: at most
+    /// [`Limits::stream_buffer`], the window that Connect grants a node.
+    pub fn peak_stream_buffer(&self) -> usize {
+        self.inner.peak_buffer.load(Ordering::Relaxed)
+    }
+
     /// Stops the maintenance thread and closes every node WebSocket.
     pub fn stop(&self) {
         self.inner.stop.store(true, Ordering::SeqCst);
@@ -999,6 +1217,12 @@ impl Broker {
             self.inner
                 .terminate(&conn, close::NORMAL, close::NODE_OFFLINE);
         }
+    }
+
+    /// One round of the recheck of plans and grants now, as the maintenance thread runs
+    /// every [`Limits::recheck`] (tests, and an operator after a store outage).
+    pub fn recheck_now(&self) {
+        self.inner.recheck();
     }
 
     /// Whether the node has an open WebSocket (`NodeView.online`).
@@ -1017,9 +1241,39 @@ impl Broker {
         self.with_account(account_id, |account| account.usage())
     }
 
-    /// The public and ACME streams of an account this month (their own budget).
+    /// The public streams of an account this month (their own budget).
     pub fn ingress_usage(&self, account_id: &str) -> Usage {
         self.with_account(account_id, |account| account.ingress_usage())
+    }
+
+    /// The ACME streams of an account this month (outside the public budget).
+    pub fn acme_usage(&self, account_id: &str) -> Usage {
+        self.with_account(account_id, |account| account.acme_usage())
+    }
+
+    /// A deleted account: its counters, and the counters of its dials to other accounts'
+    /// nodes, leave memory (its streams ended with [`Broker::end_account`]). The account
+    /// stays in [`Broker::forgotten`] until the usage writer's next snapshot, so a snapshot
+    /// taken before the deletion writes none of its rows again.
+    pub fn forget_account(&self, account_id: &str) {
+        let mut accounts = lock(&self.inner.accounts);
+        accounts.by_id.remove(account_id);
+        for account in accounts.by_id.values_mut() {
+            account.grantees.remove(account_id);
+        }
+        lock(&self.inner.forgotten).insert(account_id.to_string());
+    }
+
+    /// The accounts deleted since the usage writer last let them go
+    /// ([`Broker::let_go`]).
+    pub fn forgotten(&self) -> HashSet<String> {
+        lock(&self.inner.forgotten).clone()
+    }
+
+    /// The usage writer took a snapshot after these deletions: no later snapshot holds
+    /// their counters.
+    pub fn let_go(&self, accounts: &HashSet<String>) {
+        lock(&self.inner.forgotten).retain(|account| !accounts.contains(account));
     }
 
     /// The dials of `grantee`'s devices to the nodes of `account_id` this month;
@@ -1037,8 +1291,10 @@ impl Broker {
     }
 
     /// The counters of every account with use this month, to store (contract section 9):
-    /// the account's own row (key: the account id), its ingress (`<account>/ingress`), and
-    /// each other account that dialed its nodes (`<account>/dial/<other account>`).
+    /// the account's own row (key: the account id; every byte, dial, and stream of its
+    /// nodes), and the parts of it: its public streams (`<account>/ingress`), its ACME
+    /// streams (`<account>/acme`), and each other account that dialed its nodes
+    /// (`<account>/dial/<other account>`).
     pub fn usage_all(&self) -> Vec<(String, Usage)> {
         let now = self.inner.clock.now();
         let mut accounts = lock(&self.inner.accounts);
@@ -1048,6 +1304,9 @@ impl Broker {
             out.push((id.clone(), account.usage()));
             if account.ingress_bytes > 0 || account.ingress_streams > 0 {
                 out.push((format!("{id}{INGRESS_SUFFIX}"), account.ingress_usage()));
+            }
+            if account.acme_bytes > 0 || account.acme_streams > 0 {
+                out.push((format!("{id}{ACME_SUFFIX}"), account.acme_usage()));
             }
             for (grantee, counts) in &account.grantees {
                 if counts.bytes > 0 || counts.dials > 0 || counts.streams > 0 {
@@ -1083,6 +1342,9 @@ impl Broker {
         } else if part == INGRESS_SUFFIX {
             account.ingress_bytes = account.ingress_bytes.max(usage.bytes);
             account.ingress_streams = account.ingress_streams.max(usage.streams);
+        } else if part == ACME_SUFFIX {
+            account.acme_bytes = account.acme_bytes.max(usage.bytes);
+            account.acme_streams = account.acme_streams.max(usage.streams);
         } else if let Some(grantee) = part.strip_prefix(GRANTEE_INFIX)
             && !grantee.is_empty()
         {
@@ -1107,10 +1369,9 @@ impl Broker {
             .inner
             .directory
             .device_node(&caller)
+            .map_err(|Unavailable| TunnelError::BUSY)?
             .ok_or(TunnelError::NODE_UNKNOWN)?;
-        if !self.inner.directory.entitled(&entry.account_id) {
-            return Err(TunnelError::PLAN_REQUIRED);
-        }
+        require_plan(&*self.inner.directory, &entry.account_id)?;
         self.inner.admit_node(&entry)?;
         Ok(NodeTicket { entry })
     }
@@ -1175,16 +1436,21 @@ impl Broker {
     ) -> Result<Ticket, TunnelError> {
         upgrade.map_err(TunnelError::invalid)?;
         let caller = self.inner.caller(bearer)?;
-        let entry = valid_node_id(node_id)
-            .then(|| self.inner.directory.node(node_id))
-            .flatten()
+        if !valid_node_id(node_id) {
+            return Err(TunnelError::NODE_UNKNOWN);
+        }
+        let entry = self
+            .inner
+            .directory
+            .node(node_id)
+            .map_err(|Unavailable| TunnelError::BUSY)?
             .ok_or(TunnelError::NODE_UNKNOWN)?;
-        if !may_dial(&*self.inner.directory, &caller.account_id, &entry) {
-            return Err(TunnelError::NOT_IN_GROUP);
+        match may_dial(&*self.inner.directory, &caller.account_id, &entry) {
+            Ok(true) => {}
+            Ok(false) => return Err(TunnelError::NOT_IN_GROUP),
+            Err(Unavailable) => return Err(TunnelError::BUSY),
         }
-        if !self.inner.directory.entitled(&entry.account_id) {
-            return Err(TunnelError::PLAN_REQUIRED);
-        }
+        require_plan(&*self.inner.directory, &entry.account_id)?;
         let class = if caller.account_id == entry.account_id {
             Class::Own
         } else {
@@ -1203,7 +1469,9 @@ impl Broker {
     }
 
     /// Opens a `public` or `acme` stream for the ingress, with the bytes read so far.
-    /// `flags` may add `CLOSE` (an ACME request is the whole client direction).
+    /// `flags` may add `CLOSE` (an ACME request is the whole client direction). An ACME
+    /// stream takes a slot of the account's ACME class, outside the public slots, rate,
+    /// and budget.
     pub fn open_ingress(
         &self,
         server_name: &str,
@@ -1217,13 +1485,20 @@ impl Broker {
             .inner
             .directory
             .node(&node_id)
+            .ok()
+            .flatten()
             .ok_or(IngressRefusal::Unrecognized)?;
-        if !self.online(&node_id) || !self.inner.directory.entitled(&entry.account_id) {
+        if !self.online(&node_id) || self.inner.directory.entitled(&entry.account_id) != Ok(true) {
             return Err(IngressRefusal::Unrecognized);
         }
+        let class = if kind == Kind::Acme {
+            Class::Acme
+        } else {
+            Class::Ingress
+        };
         let slot = self
             .inner
-            .reserve(&entry, &Class::Ingress)
+            .reserve(&entry, &class)
             .map_err(|_| IngressRefusal::Limit)?;
         self.inner
             .open(&entry, kind, flags & CLOSE, first, None, slot)
@@ -1435,6 +1710,7 @@ impl Inner {
             .map_err(|refusal| match refusal {
                 Refusal::Unauthenticated => TunnelError::UNAUTHENTICATED,
                 Refusal::AccountRequired => TunnelError::ACCOUNT_REQUIRED,
+                Refusal::Unavailable => TunnelError::BUSY,
             })
     }
 
@@ -1460,13 +1736,22 @@ impl Inner {
     /// counts a dial. Each class has its own slots and checks (see [`Limits`]).
     fn reserve(self: &Arc<Self>, entry: &NodeEntry, class: &Class) -> Result<Slot, TunnelError> {
         let account_id = entry.account_id.as_str();
-        let units = self.directory.budget_units(account_id).max(1);
-        let budget = self.limits.bytes_per_month.saturating_mul(units);
-        let ingress_budget = self.limits.ingress_bytes_per_month.saturating_mul(units);
-        let grantee_budget = u64::try_from(
-            u128::from(budget) * u128::from(self.limits.grantee_bytes_percent.min(100)) / 100,
-        )
-        .unwrap_or(u64::MAX);
+        // A lookup that fails keeps the budgets known before (none at the first use: the
+        // stream is not refused for a budget, and the next stream asks again).
+        let budgets = self.directory.budget_units(account_id).ok().map(|units| {
+            let units = units.max(1);
+            let budget = self.limits.bytes_per_month.saturating_mul(units);
+            let grantee_budget = u64::try_from(
+                u128::from(budget) * u128::from(self.limits.grantee_bytes_percent.min(100)) / 100,
+            )
+            .unwrap_or(u64::MAX);
+            (
+                budget,
+                self.limits.ingress_bytes_per_month.saturating_mul(units),
+                grantee_budget,
+                self.limits.grantee_each_budget(budget),
+            )
+        });
         let now = self.clock.now();
         if *class == Class::Ingress && !self.ingress_rate(&entry.node_id, now) {
             return Err(TunnelError::TUNNEL_LIMIT);
@@ -1477,9 +1762,9 @@ impl Inner {
         let ingress_full = accounts.ingress_total >= limits.ingress_cap();
         let account = accounts.by_id.entry(account_id.to_string()).or_default();
         account.roll(now);
-        account.budget = budget;
-        account.ingress_budget = ingress_budget;
-        account.grantee_budget = grantee_budget;
+        if let Some((budget, ingress, grantee, each)) = budgets {
+            account.set_budgets(budget, ingress, grantee, each);
+        }
         match class {
             Class::Own => {
                 if account.minute_dials >= limits.dials_per_minute {
@@ -1493,7 +1778,9 @@ impl Inner {
                 account.open += 1;
             }
             Class::Grantee(grantee) => {
-                let spent = account.dials_spent() || account.grantees_spent();
+                let spent = account.dials_spent()
+                    || account.grantees_spent()
+                    || account.grantee_spent(grantee);
                 let counts = account.grantees.entry(grantee.clone()).or_default();
                 let minute = now / 60;
                 if counts.minute != minute {
@@ -1528,9 +1815,19 @@ impl Inner {
                 }
                 account.ingress_open += 1;
             }
+            Class::Acme => {
+                if account.acme_minute_opens >= limits.acme_per_minute {
+                    return Err(TunnelError::TUNNEL_LIMIT);
+                }
+                account.acme_minute_opens += 1;
+                if full || ingress_full || account.acme_open >= limits.acme_streams {
+                    return Err(TunnelError::TUNNEL_LIMIT);
+                }
+                account.acme_open += 1;
+            }
         }
         accounts.open_total += 1;
-        if *class == Class::Ingress {
+        if class.ingress() {
             accounts.ingress_total += 1;
         }
         Ok(Slot {
@@ -1540,7 +1837,7 @@ impl Inner {
         })
     }
 
-    /// Counts a new public or ACME stream of a node in this clock minute; `false` over
+    /// Counts a new public stream of a node in this clock minute; `false` over
     /// [`Limits::ingress_per_minute`].
     fn ingress_rate(&self, node_id: &str, now: u64) -> bool {
         let Some(conn) = lock(&self.nodes).get(node_id).cloned() else {
@@ -1594,6 +1891,17 @@ impl Inner {
                 opened,
                 activity: AtomicU64::new(opened),
                 client_gone: AtomicU64::new(0),
+                // An ACME request is the whole client direction: the node has the close
+                // grace of silence after its first frame.
+                client_shut: AtomicU64::new(if extra_flags & CLOSE != 0 {
+                    opened.max(1)
+                } else {
+                    0
+                }),
+                unchecked: AtomicU32::new(0),
+                window_seen: Mutex::new(0),
+                window_cond: Condvar::new(),
+                drained: AtomicU64::new(0),
                 max_from_node: (kind == Kind::Acme).then_some(64 * 1024),
                 from_node: AtomicU64::new(0),
                 send: Mutex::new(extra_flags & CLOSE != 0),
@@ -1604,12 +1912,29 @@ impl Inner {
             let flags = OPEN | extra_flags;
             state
                 .seq
-                .apply_head(Dir::ToNode, id, kind, flags, || stream.clone())
+                .apply_parts(Dir::ToNode, id, kind, flags, &first, || stream.clone())
                 .ok()?;
             let frame = frame::encode(id, kind, flags, &first);
             if !conn.outbox.push(frame, &stream.ended, false) {
                 state.seq.remove(id);
                 return None;
+            }
+            // The node may send the initial window; Connect grants the rest of its buffer
+            // at once, right behind the `open` (never ahead of it).
+            let more = self.limits.window() - frame::INITIAL_WINDOW;
+            if let Ok(more) = u32::try_from(more)
+                && more > 0
+            {
+                let grant = frame::window(id, kind, more);
+                if state
+                    .seq
+                    .apply_parts(Dir::ToNode, id, kind, WINDOW, &more.to_be_bytes(), || {
+                        unreachable_stream()
+                    })
+                    .is_ok()
+                {
+                    conn.outbox.push(grant, &stream.ended, false);
+                }
             }
             stream
         };
@@ -1625,6 +1950,7 @@ impl Inner {
                         }
                     }
                     Class::Ingress => account.ingress_streams += 1,
+                    Class::Acme => account.acme_streams += 1,
                 }
             }
         }
@@ -1646,6 +1972,7 @@ impl Inner {
         enum Ends {
             Dials,
             Grantees,
+            Grantee(String),
             Ingress,
         }
         let now = self.clock.now();
@@ -1664,11 +1991,20 @@ impl Inner {
                         ends.push(Ends::Ingress);
                     }
                 }
+                // A small class outside every budget (at most 8 KiB in and 64 KiB out for
+                // each stream): counted, never refused for its bytes.
+                Class::Acme => account.acme_bytes = account.acme_bytes.saturating_add(bytes),
                 class => {
                     if let Class::Grantee(grantee) = class {
+                        account.grantee_bytes = account.grantee_bytes.saturating_add(bytes);
+                        let each = account.grantee_each_budget;
+                        let budget = account.budget;
                         let counts = account.grantees.entry(grantee.clone()).or_default();
                         counts.bytes = counts.bytes.saturating_add(bytes);
-                        account.grantee_bytes = account.grantee_bytes.saturating_add(bytes);
+                        if !counts.tripped && budget > 0 && counts.bytes >= each {
+                            counts.tripped = true;
+                            ends.push(Ends::Grantee(grantee.clone()));
+                        }
                         if !account.grantees_tripped && account.grantees_spent() {
                             account.grantees_tripped = true;
                             ends.push(Ends::Grantees);
@@ -1685,9 +2021,12 @@ impl Inner {
             self.reset_where(
                 |_, other| {
                     other.account == stream.account
-                        && match end {
-                            Ends::Dials => other.class != Class::Ingress,
+                        && match &end {
+                            Ends::Dials => !other.class.ingress(),
                             Ends::Grantees => matches!(other.class, Class::Grantee(_)),
+                            Ends::Grantee(grantee) => {
+                                matches!(&other.class, Class::Grantee(g) if g == grantee)
+                            }
                             Ends::Ingress => other.class == Class::Ingress,
                         }
                 },
@@ -1703,6 +2042,7 @@ impl Inner {
         // they hold `send`, and a sender waiting for room sees it at once.
         stream.ended.store(true, Ordering::SeqCst);
         conn.outbox.wake();
+        stream.window_changed();
         {
             let _sending = lock(&stream.send);
             let live = lock(&conn.state).seq.remove(stream.id).is_some();
@@ -1796,13 +2136,18 @@ impl Inner {
         let now = self.millis();
         let idle = self.limits.stream_idle.as_millis() as u64;
         let grace = self.limits.close_grace.as_millis() as u64;
+        let half_life = self.limits.half_closed_life.as_millis() as u64;
         let first = self.limits.ingress_first_byte.as_millis() as u64;
         self.reset_where(
             |_, stream| {
                 let gone = stream.client_gone.load(Ordering::Relaxed);
-                now.saturating_sub(stream.activity.load(Ordering::Relaxed)) >= idle
+                let shut = stream.client_shut.load(Ordering::Relaxed);
+                let activity = stream.activity.load(Ordering::Relaxed);
+                now.saturating_sub(activity) >= idle
                     || (gone != 0 && now.saturating_sub(gone) >= grace)
-                    || (stream.class == Class::Ingress
+                    || (shut != 0 && now.saturating_sub(shut.max(activity)) >= grace)
+                    || (shut != 0 && now.saturating_sub(shut) >= half_life)
+                    || (stream.class.ingress()
                         && !stream.node_seen.load(Ordering::Relaxed)
                         && now.saturating_sub(stream.opened) >= first)
             },
@@ -1819,7 +2164,11 @@ impl Inner {
     /// Asks the directory again about the open streams: the open streams of an account
     /// whose plan ended (also by time, without a hook) end with 4003, and so do the open
     /// dials of another account whose grant no longer holds (the grant went, or the two
-    /// accounts no longer share a group). No lock is held while the directory answers.
+    /// accounts no longer share a group). Only a definite "no" ends a stream with 4003:
+    /// a stream whose plan or grant the directory could not tell skips this round, and
+    /// after [`Limits::recheck_skips`] skipped rounds in a row it ends with 1013 (try
+    /// again); a round that could tell starts its count again. No lock is held while the
+    /// directory answers.
     fn recheck(&self) {
         let conns: Vec<_> = lock(&self.nodes).values().cloned().collect();
         let mut accounts = HashSet::new();
@@ -1832,16 +2181,44 @@ impl Inner {
                 }
             }
         }
+        let mut unknown_plans = HashSet::new();
         for account in accounts {
-            if !self.directory.entitled(&account) {
-                self.reset_where(|conn, _| conn.account == account, close::REVOKED);
+            match self.directory.entitled(&account) {
+                Ok(true) => {}
+                Ok(false) => {
+                    self.reset_where(|conn, _| conn.account == account, close::REVOKED);
+                }
+                Err(Unavailable) => {
+                    unknown_plans.insert(account);
+                }
             }
         }
+        let mut unknown_grants = HashSet::new();
         for (node_id, grantee) in grants {
-            if !self.directory.has_grant(&node_id, &grantee) {
-                self.revoke_grant(&node_id, &grantee);
+            match self.directory.has_grant(&node_id, &grantee) {
+                Ok(true) => {}
+                Ok(false) => {
+                    self.revoke_grant(&node_id, &grantee);
+                }
+                Err(Unavailable) => {
+                    unknown_grants.insert((node_id, grantee));
+                }
             }
         }
+        let skips = self.limits.recheck_skips;
+        self.reset_where(
+            |conn, stream| {
+                let unknown = unknown_plans.contains(&stream.account)
+                    || matches!(&stream.class, Class::Grantee(grantee)
+                        if unknown_grants.contains(&(conn.node_id.clone(), grantee.clone())));
+                if !unknown {
+                    stream.unchecked.store(0, Ordering::Relaxed);
+                    return false;
+                }
+                stream.unchecked.fetch_add(1, Ordering::Relaxed) + 1 > skips
+            },
+            close::TRY_AGAIN,
+        );
     }
 
     // ----- The node's WebSocket.
@@ -1878,6 +2255,13 @@ impl Inner {
             .apply(Dir::ToConnect, &frame, unreachable_stream);
         let (reset, closing) = (frame.is_reset(), frame.is_close());
         match applied {
+            Ok(Applied::Frame {
+                value: stream,
+                ended: _,
+            }) if frame.is_window() => {
+                // The node lets Connect send more of the client's bytes.
+                stream.window_changed();
+            }
             Ok(Applied::Frame {
                 value: stream,
                 ended,
@@ -1937,10 +2321,13 @@ impl Inner {
         if inbox.end.is_some() || inbox.client_close.is_some() {
             return true; // the client is gone: drop
         }
-        if inbox.bytes + payload.len() > self.limits.stream_buffer {
+        // The window that Connect granted keeps a node within this; more is a broken rule
+        // that the sequencer saw first.
+        if inbox.bytes + payload.len() > self.limits.window() as usize {
             return false;
         }
         inbox.bytes += payload.len();
+        self.peak_buffer.fetch_max(inbox.bytes, Ordering::Relaxed);
         inbox.chunks.push_back(payload);
         stream.cond.notify_all();
         true
@@ -1977,14 +2364,57 @@ impl Inner {
 
     // ----- Client sides.
 
-    /// Sends client bytes on a stream, in frames of at most 16384 bytes. `false`: the
-    /// stream or the node is gone.
+    /// Sends client bytes on a stream, in frames of at most 16384 bytes, each within the
+    /// window that the node granted: without window the client's reader waits (and its
+    /// TCP window fills). `false`: the stream or the node is gone.
     fn send_client_bytes(self: &Arc<Self>, conn: &NodeConn, stream: &Stream, bytes: &[u8]) -> bool {
-        for chunk in bytes.chunks(frame::MAX_PAYLOAD) {
+        let mut rest = bytes;
+        while !rest.is_empty() {
+            let seen = *lock(&stream.window_seen);
             let closed = lock(&stream.send);
             if *closed || stream.is_ended() || stream.node_done.load(Ordering::SeqCst) {
                 return false;
             }
+            let take = {
+                let mut state = lock(&conn.state);
+                let Some(credit) = state.seq.credit(stream.id, Dir::ToNode) else {
+                    return false;
+                };
+                let take = rest
+                    .len()
+                    .min(frame::MAX_PAYLOAD)
+                    .min(usize::try_from(credit).unwrap_or(usize::MAX));
+                if take > 0
+                    && state
+                        .seq
+                        .apply_parts(
+                            Dir::ToNode,
+                            stream.id,
+                            stream.kind,
+                            0,
+                            &rest[..take],
+                            unreachable_stream,
+                        )
+                        .is_err()
+                {
+                    return false;
+                }
+                take
+            };
+            if take == 0 {
+                drop(closed);
+                let mut current = lock(&stream.window_seen);
+                if *current == seen {
+                    current = stream
+                        .window_cond
+                        .wait_timeout(current, Duration::from_millis(200))
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .0;
+                }
+                drop(current);
+                continue;
+            }
+            let (chunk, after) = rest.split_at(take);
             let frame = frame::encode(stream.id, stream.kind, 0, chunk);
             if !conn.outbox.push(frame, &stream.ended, true) {
                 return false;
@@ -1992,8 +2422,44 @@ impl Inner {
             drop(closed);
             self.count(stream, chunk.len());
             stream.touch(self);
+            rest = after;
         }
         true
+    }
+
+    /// The client read `bytes` of the node's data: once a quarter of the window is read,
+    /// Connect grants the node that much more (a `window` frame ahead of the data).
+    fn drained(&self, conn: &NodeConn, stream: &Stream, bytes: usize) {
+        // Bytes that reach the client are activity: a node that waits for window because
+        // its client reads slowly is not silent.
+        if bytes > 0 {
+            stream.touch(self);
+        }
+        let step = (self.limits.window() / 4).max(frame::MAX_PAYLOAD as u64);
+        let total = stream.drained.fetch_add(bytes as u64, Ordering::SeqCst) + bytes as u64;
+        if total < step {
+            return;
+        }
+        let total = stream.drained.swap(0, Ordering::SeqCst);
+        let Ok(added) = u32::try_from(total) else {
+            return;
+        };
+        if added == 0 {
+            return;
+        }
+        let mut state = lock(&conn.state);
+        let granted = state.seq.apply_parts(
+            Dir::ToNode,
+            stream.id,
+            stream.kind,
+            WINDOW,
+            &added.to_be_bytes(),
+            unreachable_stream,
+        );
+        if matches!(granted, Ok(Applied::Frame { .. })) {
+            conn.outbox
+                .push_window(frame::window(stream.id, stream.kind, added));
+        }
     }
 
     /// The client closed its direction: a `close` frame to the node. `websocket`: reply
@@ -2155,6 +2621,10 @@ impl Inner {
             stream
                 .writing
                 .store(!matches!(act, Act::Close(..)), Ordering::SeqCst);
+            let data_len = match &act {
+                Act::Data(chunk) => Some(chunk.len()),
+                _ => None,
+            };
             let result = match act {
                 Act::Data(chunk) => ws::write_frame(&mut *writer, ws::OP_BINARY, &chunk, None),
                 Act::Pong(payload) => ws::write_frame(&mut *writer, ws::OP_PONG, &payload, None),
@@ -2180,6 +2650,9 @@ impl Inner {
                 self.abort(conn, stream, close::NORMAL);
                 shutdown();
                 return;
+            }
+            if let Some(read) = data_len {
+                self.drained(conn, stream, read);
             }
         }
     }
@@ -2224,7 +2697,17 @@ impl Inner {
         let mut buffer = vec![0u8; frame::MAX_PAYLOAD];
         loop {
             match tcp.read(&mut buffer) {
-                Ok(0) => return self.client_closed(conn, stream, false),
+                Ok(0) => {
+                    // A half-close: the client still reads, and the node has the close
+                    // grace of silence to answer or close.
+                    let _ = stream.client_shut.compare_exchange(
+                        0,
+                        self.millis().max(1),
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    );
+                    return self.client_closed(conn, stream, false);
+                }
                 Ok(read) => {
                     if !self.send_client_bytes(conn, stream, &buffer[..read]) {
                         return;
@@ -2276,6 +2759,7 @@ impl Inner {
                         let _ = tcp.shutdown(Shutdown::Both);
                         return;
                     }
+                    self.drained(conn, stream, chunk.len());
                 }
                 None => {
                     // The node closed its direction, and its last bytes are out: the
@@ -2311,6 +2795,8 @@ struct MemoryState {
     grants: HashSet<(String, String)>,
     entitled: HashSet<String>,
     units: HashMap<String, u64>,
+    /// The store fails: plan and grant lookups answer [`Unavailable`].
+    failing: bool,
 }
 
 impl MemoryDirectory {
@@ -2371,6 +2857,12 @@ impl MemoryDirectory {
         }
     }
 
+    /// Plan, grant, and budget lookups fail ([`Unavailable`]) while `failing` (a store
+    /// error).
+    pub fn set_failing(&self, failing: bool) {
+        lock(&self.state).failing = failing;
+    }
+
     pub fn set_budget_units(&self, account_id: &str, units: u64) {
         lock(&self.state)
             .units
@@ -2387,34 +2879,42 @@ impl TunnelDirectory for MemoryDirectory {
             .unwrap_or(Err(Refusal::Unauthenticated))
     }
 
-    fn device_node(&self, caller: &Caller) -> Option<NodeEntry> {
-        lock(&self.state)
+    fn device_node(&self, caller: &Caller) -> Result<Option<NodeEntry>, Unavailable> {
+        Ok(lock(&self.state)
             .nodes
             .values()
             .find(|node| node.device_id == caller.device_id && node.account_id == caller.account_id)
-            .cloned()
+            .cloned())
     }
 
-    fn node(&self, node_id: &str) -> Option<NodeEntry> {
-        lock(&self.state).nodes.get(node_id).cloned()
+    fn node(&self, node_id: &str) -> Result<Option<NodeEntry>, Unavailable> {
+        Ok(lock(&self.state).nodes.get(node_id).cloned())
     }
 
-    fn has_grant(&self, node_id: &str, grantee_account: &str) -> bool {
-        lock(&self.state)
+    fn has_grant(&self, node_id: &str, grantee_account: &str) -> Result<bool, Unavailable> {
+        let state = lock(&self.state);
+        if state.failing {
+            return Err(Unavailable);
+        }
+        Ok(state
             .grants
-            .contains(&(node_id.to_string(), grantee_account.to_string()))
+            .contains(&(node_id.to_string(), grantee_account.to_string())))
     }
 
-    fn entitled(&self, account_id: &str) -> bool {
-        lock(&self.state).entitled.contains(account_id)
+    fn entitled(&self, account_id: &str) -> Result<bool, Unavailable> {
+        let state = lock(&self.state);
+        if state.failing {
+            return Err(Unavailable);
+        }
+        Ok(state.entitled.contains(account_id))
     }
 
-    fn budget_units(&self, account_id: &str) -> u64 {
-        lock(&self.state)
-            .units
-            .get(account_id)
-            .copied()
-            .unwrap_or(1)
+    fn budget_units(&self, account_id: &str) -> Result<u64, Unavailable> {
+        let state = lock(&self.state);
+        if state.failing {
+            return Err(Unavailable);
+        }
+        Ok(state.units.get(account_id).copied().unwrap_or(1))
     }
 }
 

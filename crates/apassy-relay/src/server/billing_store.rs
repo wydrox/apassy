@@ -562,27 +562,37 @@ impl BillingTx for SqlBilling<'_> {
     }
 
     /// Also writes the audit row `billing_problem_recorded` (ids only) for a new or a
-    /// reopened problem.
+    /// reopened problem, or one whose reason changed: the row takes the new reason, the
+    /// audit rows keep every earlier one.
     fn record_problem(&mut self, problem: &Problem) -> RelayResult<bool> {
-        let open: Option<(i64, Option<i64>)> = self
+        let open: Option<(i64, Option<i64>, String)> = self
             .conn
             .query_row(
-                "SELECT id, resolved_at FROM billing_problem WHERE object_id = ?1",
+                "SELECT id, resolved_at, reason FROM billing_problem WHERE object_id = ?1",
                 params![problem.object],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()
             .map_err(db)?;
         let new = match open {
-            Some((id, resolved)) => {
+            Some((id, resolved, reason)) => {
                 self.conn
                     .execute(
                         "UPDATE billing_problem SET last_at = ?2, events = events + 1, \
-                         resolved_at = NULL, event_id = coalesce(?3, event_id) WHERE id = ?1",
-                        params![id, to_i(problem.at), problem.event],
+                         resolved_at = NULL, event_id = coalesce(?3, event_id), reason = ?4, \
+                         account_id = coalesce(?5, account_id), \
+                         customer_id = coalesce(?6, customer_id) WHERE id = ?1",
+                        params![
+                            id,
+                            to_i(problem.at),
+                            problem.event,
+                            problem.reason,
+                            problem.account,
+                            problem.customer
+                        ],
                     )
                     .map_err(db)?;
-                resolved.is_some()
+                resolved.is_some() || reason != problem.reason
             }
             None => {
                 self.conn
@@ -615,6 +625,44 @@ impl BillingTx for SqlBilling<'_> {
             )?;
         }
         Ok(new)
+    }
+
+    /// Writes the audit row `billing_problem_resolved` (actor `billing`, with `how`).
+    fn close_problem(
+        &mut self,
+        object: &str,
+        reason: &str,
+        how: &str,
+        at: u64,
+    ) -> RelayResult<bool> {
+        let open: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT id FROM billing_problem WHERE object_id = ?1 AND reason = ?2 \
+                 AND resolved_at IS NULL",
+                params![object, reason],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db)?;
+        let Some(id) = open else {
+            return Ok(false);
+        };
+        self.conn
+            .execute(
+                "UPDATE billing_problem SET resolved_at = ?2 WHERE id = ?1",
+                params![id, to_i(at)],
+            )
+            .map_err(db)?;
+        self.audit.write_on(
+            self.conn,
+            at,
+            "billing",
+            "billing_problem_resolved",
+            None,
+            &json!({"problem": id, "object": object, "reason": reason, "how": how}),
+        )?;
+        Ok(true)
     }
 
     fn open_problems(&mut self) -> RelayResult<Vec<ProblemRow>> {
@@ -866,8 +914,19 @@ pub fn defer_background_pass(hub: &Hub, now: u64) {
 /// and suspended are states of the plan, not actions: nothing else changes. Answers how
 /// many plans were done.
 pub fn maintain(hub: &Hub, billing: &ConnectBilling, now: u64) -> RelayResult<usize> {
+    maintain_until(hub, billing, now, &|| false)
+}
+
+/// `maintain` that stops between subscriptions, groups, and due plans once `stop` answers
+/// true (the relay stops): what is left waits for the next pass.
+pub fn maintain_until(
+    hub: &Hub,
+    billing: &ConnectBilling,
+    now: u64,
+    stop: &dyn Fn() -> bool,
+) -> RelayResult<usize> {
     let report = billing.maintenance(now)?;
-    let reconciled = billing.reconcile(now)?;
+    let reconciled = billing.reconcile_until(now, stop)?;
     for (_, account) in &reconciled.read {
         after_webhook(
             hub,
@@ -889,6 +948,9 @@ pub fn maintain(hub: &Hub, billing: &ConnectBilling, now: u64) -> RelayResult<us
     }
     let mut done = 0;
     for due in &report.due {
+        if stop() {
+            break;
+        }
         match delete_due(hub, billing, due, now) {
             Ok(true) => done += 1,
             Ok(false) => {}
@@ -906,8 +968,10 @@ pub fn maintain(hub: &Hub, billing: &ConnectBilling, now: u64) -> RelayResult<us
 /// by the rules of an event, and `Billing::deletion_blocked` asks for each account whether
 /// anything at Stripe or an open problem keeps the data of an account whose plan is over
 /// here. While that keeps the buying account, nothing is deleted, its members' data
-/// neither. Then, under the lock of the buying
-/// account, the plan must still be due, and each account goes whose plan is `none`.
+/// neither. Then, under the lock of the buying account, the plan must still be due and
+/// the buyer must have no stored checkout session (a checkout stores its session under
+/// that lock), and each account goes whose plan is `none` and that has no stored checkout
+/// session, checked under its own lock.
 ///
 /// The audit row `plan_stores_deleted` and I-4 `forget` are written when something was
 /// deleted or the plan is done, so a plan that waits writes no row each pass. A plan is
@@ -973,6 +1037,14 @@ fn delete_due(
         if !billing.still_due(&due.subscription, now)? {
             return Ok(false);
         }
+        // A checkout stored after `deletion_blocked` asked: the buyer may be paying.
+        if billing.has_open_checkout(&due.account, now)? {
+            billing.log(&format!(
+                "the stores of {} (subscription {}) stay: a checkout session",
+                due.account, due.subscription
+            ));
+            return Ok(false);
+        }
         let mut stores = 0u64;
         let mut nodes = 0u64;
         let mut deleted: Vec<(String, u64)> = Vec::new();
@@ -984,12 +1056,19 @@ fn delete_due(
                 billing.with_account_lock(account, || delete_account_data(hub, billing, account, now))
             };
             match result {
-                Ok(Some((s, n))) => {
+                Ok(AccountData::Deleted(s, n)) => {
                     stores += s;
                     nodes += n;
                     deleted.push((account.clone(), s + n));
                 }
-                Ok(None) => {}
+                Ok(AccountData::Kept) => {}
+                Ok(AccountData::Waiting) => {
+                    waiting += 1;
+                    billing.log(&format!(
+                        "the stores of {account} (subscription {}) stay: a checkout session",
+                        due.subscription
+                    ));
+                }
                 Err(_) => {
                     failed += 1;
                     billing.log(&format!(
@@ -1035,21 +1114,34 @@ fn delete_due(
     })
 }
 
-/// The stores and nodes of one account of a due plan, when its plan is over (`none`): a
-/// member with a plan of its own, entitled or in its own read-only time, keeps them.
-/// `None` when it keeps them.
+/// What `delete_account_data` did with the data of one account.
+enum AccountData {
+    /// Its plan is not over: it keeps its data.
+    Kept,
+    /// It has a stored checkout session: its data waits for the next pass.
+    Waiting,
+    /// The stores and the nodes that went.
+    Deleted(u64, u64),
+}
+
+/// The stores and nodes of one account of a due plan, under the account's lock, when its
+/// plan is over (`none`) and it has no stored checkout session: a member with a plan of
+/// its own, entitled or in its own read-only time, keeps them.
 fn delete_account_data(
     hub: &Hub,
     billing: &ConnectBilling,
     account: &str,
     now: u64,
-) -> RelayResult<Option<(u64, u64)>> {
+) -> RelayResult<AccountData> {
     if billing.plan_view(account, now)?.status != PlanStatus::None {
-        return Ok(None);
+        return Ok(AccountData::Kept);
+    }
+    if billing.has_open_checkout(account, now)? {
+        return Ok(AccountData::Waiting);
     }
     let stores = crate::server::account::delete_stores_of(hub, account, now)?;
     let nodes = delete_nodes_of(hub, account)?;
-    Ok(Some((stores, nodes)))
+    Ok(AccountData::Deleted(stores, nodes))
 }
 
 /// Deletes the tunnel nodes of `account` and the grants of those nodes (an ended plan at

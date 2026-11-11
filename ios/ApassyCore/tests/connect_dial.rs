@@ -664,7 +664,6 @@ impl Node {
             clock: Arc::new(SystemClock::default()),
             ping_interval: ping,
             idle_limit: idle,
-            close_grace: Duration::from_secs(10),
             limits: limits(),
             zone: ZONE.to_owned(),
         };
