@@ -44,6 +44,9 @@ qrcode = { version = "=0.14.1", default-features = false }
 # A test certificate authority for the mock upstream (the core pin).
 rcgen = { version = "=0.14.10", default-features = false, features = ["crypto", "pem", "ring"] }
 tempfile = "=3.27.0"
+# tests/server_tunnel.rs: a client socket with a small receive buffer (a slow reader whose
+# kernel buffers do not hide the tunnel's window). The pin of the workspace's dev tests.
+socket2 = { version = "=0.6.3", default-features = false }
 
 [[bin]]
 name = "apassy-relay"

@@ -27,7 +27,9 @@
 //! client needs: only clients allowed at least once count toward `MAX_CLIENTS` and the
 //! registration window, a full table drops the oldest client that was never allowed, and
 //! such a client is pruned an hour after its registration. Bad codes and refresh tokens
-//! count for their client only (`ClientFailures`), never for the whole listener.
+//! count for their client only (`ClientFailures`), never for the whole listener, and
+//! through a `public` stream of the Connect tunnel for no client: every caller there has
+//! the node's public name, and Connect bounds the streams of a node.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
@@ -275,7 +277,10 @@ pub fn www_authenticate(config: &RelayConfig, origin: &str, token_sent: bool) ->
 /// that the request arrived on, one of `RelayConfig::public_origins` (`http.rs` decides it
 /// from the listener and the tunnel stream, never from a header): the metadata, the
 /// pages, and `iss` name it, and a client, its codes, and its tokens work only on the
-/// origin it registered at (`client_origin`).
+/// origin it registered at (`client_origin`). `via_tunnel`: the request came through a
+/// `public` stream of the Connect tunnel (`http.rs` knows it from the front, never from a
+/// header); its bad codes and refresh tokens count in no client's window, and no window
+/// refuses it (`ClientFailures`).
 #[allow(clippy::too_many_arguments)]
 pub fn handle(
     hub: &Hub,
@@ -285,6 +290,7 @@ pub fn handle(
     body: &[u8],
     content_type: Option<&str>,
     origin: &str,
+    via_tunnel: bool,
     now: u64,
 ) -> Reply {
     let Some(oauth) = hub.config.oauth.clone() else {
@@ -295,6 +301,7 @@ pub fn handle(
         oauth: &oauth,
         origin,
         origins: hub.config.public_origins(),
+        counted: !via_tunnel,
         now,
     };
     let answer = match route {
@@ -354,7 +361,11 @@ fn params_of(body: &[u8], content_type: Option<&str>) -> Option<HashMap<String, 
 /// first failure. With `CLIENT_FAILURES_MAX` of them, every token request of that client
 /// is 429 `rate_limited` until the window ends; no other client and no other endpoint is
 /// refused. Codes and refresh tokens are 256 random bits: this only slows a client that
-/// sends bad ones in a loop. In memory only, in the hub.
+/// sends bad ones in a loop. In memory only, in the hub. A request through a `public`
+/// stream of the Connect tunnel is neither counted nor refused here: every caller there
+/// arrives from the loopback with the node's public name, so no window tells one caller
+/// from another; Connect bounds the new streams of a node (docs/SPEC.md section 35.4), and
+/// each carries one request, as for the listener's limiter (30.5).
 #[derive(Debug, Default)]
 pub struct ClientFailures {
     /// For each client: the start of its window and the failures in it.
@@ -1124,6 +1135,9 @@ struct Flow<'a> {
     origin: &'a str,
     /// Every public origin of the node, `public_url` first.
     origins: Vec<&'a str>,
+    /// Bad codes and refresh tokens count, and a client at its limit is refused
+    /// (`ClientFailures`): false for a `public` stream of the Connect tunnel.
+    counted: bool,
     now: u64,
 }
 
@@ -1652,13 +1666,16 @@ impl Flow<'_> {
             ));
         }
         let failures = &self.hub.oauth_failures;
-        if failures.limited(client_id, self.now) {
+        if self.counted && failures.limited(client_id, self.now) {
             return Ok(Reply::limited(
                 "Too many bad codes or refresh tokens from this client. Try again later.",
                 CLIENT_FAILURE_WINDOW_SECS,
             ));
         }
         let reply = self.grant_of(form, client_id)?;
+        if !self.counted {
+            return Ok(reply);
+        }
         if let Reply::Json {
             auth_failed: true, ..
         } = reply

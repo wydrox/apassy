@@ -187,10 +187,16 @@ impl NodeSocket {
         }
     }
 
+    /// The next frame of the node that is not a `window` (flow control, contract 4).
     fn next_frame(&mut self) -> frame::Frame {
-        match self.next() {
-            Message::Binary(bytes) => frame::decode(&bytes).expect("a frame of the node"),
-            other => panic!("expected a frame, got {other:?}"),
+        loop {
+            let frame = match self.next() {
+                Message::Binary(bytes) => frame::decode(&bytes).expect("a frame of the node"),
+                other => panic!("expected a frame, got {other:?}"),
+            };
+            if !frame.is_window() {
+                return frame;
+            }
         }
     }
 }
@@ -293,6 +299,11 @@ struct Running {
 }
 
 fn tunnel(addr: SocketAddr, ping: Duration, idle: Duration) -> Running {
+    tunnel_to(addr, ping, idle, Targets::default())
+}
+
+/// [`tunnel`] whose streams go to `targets`.
+fn tunnel_to(addr: SocketAddr, ping: Duration, idle: Duration, targets: Targets) -> Running {
     let dir = tempfile::tempdir().expect("dir");
     let auth = Arc::new(FixedToken {
         origin: format!("http://127.0.0.1:{}", addr.port()),
@@ -302,14 +313,13 @@ fn tunnel(addr: SocketAddr, ping: Duration, idle: Duration) -> Running {
     setup.acme = None;
     setup.ping_interval = ping;
     setup.idle_limit = idle;
-    setup.close_grace = Duration::from_millis(300);
     setup.zone = ZONE.to_owned();
     let handle = Tunnel::start(TunnelOptions {
         setup,
         node_dir: dir.path().to_path_buf(),
         name: "Synthetic Mac".to_owned(),
         certificate: NodeCertificate::generate("Synthetic Mac").expect("certificate"),
-        targets: Targets::default(),
+        targets,
         seal: Arc::new(SealKey::derive(&[3u8; 32], CONNECT_INFO).expect("seal")),
     })
     .expect("tunnel");
@@ -481,7 +491,7 @@ fn the_node_takes_only_its_own_public_name_in_the_zone() {
     wait_for("the registration is refused", || {
         matches!(
             &running.handle.status().state,
-            TunnelState::Reconnecting { why } if why.contains("does not match this node")
+            TunnelState::Reconnecting { why } if why.contains("a registration that is not this")
         )
     });
     assert_eq!(running.handle.status().public_name, None);
@@ -528,4 +538,68 @@ fn a_replaced_websocket_does_not_connect_again_at_once() {
         sockets.recv_timeout(Duration::from_secs(3)).is_err(),
         "no new WebSocket right after a replacement"
     );
+}
+
+#[test]
+fn sixteen_open_public_streams_leave_the_acme_streams_their_own_slots() {
+    // A public target that accepts and holds: each public stream waits in its TLS
+    // handshake, so all sixteen stay open on the node.
+    let public = TcpListener::bind("127.0.0.1:0").expect("public target");
+    let targets = Targets {
+        device: None,
+        public: Some(public.local_addr().expect("addr")),
+    };
+    let (addr, sockets) = fake_connect();
+    let running = tunnel_to(
+        addr,
+        Duration::from_secs(30),
+        Duration::from_secs(90),
+        targets,
+    );
+    let mut socket = sockets
+        .recv_timeout(Duration::from_secs(20))
+        .expect("the node connects");
+    wait_for("on", || running.handle.status().state == TunnelState::On);
+    for id in 1..=16 {
+        socket.send_frame(id, Kind::Public, OPEN, b"");
+    }
+    // A device stream after them: the node holds the sixteen (no reset for them).
+    socket.send_frame(17, Kind::Device, OPEN, b"");
+    let reset = socket.next_frame();
+    assert_eq!((reset.stream, reset.flags), (17, RESET), "no device target");
+    // A seventeenth public stream is over the public slots: reset.
+    socket.send_frame(18, Kind::Public, OPEN, b"");
+    let reset = socket.next_frame();
+    assert_eq!(
+        (reset.stream, reset.flags),
+        (18, RESET),
+        "the public slots are full"
+    );
+    // The ACME streams have slots of their own: the node answers, it does not reset.
+    for id in 19..=22 {
+        socket.send_frame(
+            id,
+            Kind::Acme,
+            OPEN | CLOSE,
+            format!(
+                "GET /.well-known/acme-challenge/not_pending HTTP/1.1\r\nHost: {PUBLIC_NAME}\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        let mut answer = Vec::new();
+        loop {
+            let part = socket.next_frame();
+            assert_eq!(part.stream, id, "only the ACME stream answers");
+            assert_eq!(part.flags & RESET, 0, "the ACME stream {id} is not reset");
+            answer.extend_from_slice(&part.payload);
+            if part.flags & CLOSE != 0 {
+                break;
+            }
+        }
+        assert!(
+            answer.starts_with(b"HTTP/1.1 404 Not Found\r\n"),
+            "{answer:?}"
+        );
+    }
+    drop(public);
 }
