@@ -1978,6 +1978,7 @@ fn the_acme_class_has_slots_of_its_own_inside_the_brokers_ingress_share() {
     );
     // A node that never answers keeps the one ACME slot.
     let mut node = h.node("tok-a1").unwrap();
+    wait_until("the node is online", || h.broker.online(NODE_A));
     let request = acme_request(
         "aaaaaaaaaa.node.example.test",
         "/.well-known/acme-challenge/SynthToken_0123",
@@ -2128,6 +2129,7 @@ fn a_half_closed_agent_that_reads_slowly_gets_a_large_answer_whole() {
     );
     let total = 3 * 1024 * 1024;
     let mut node = h.node("tok-a1").unwrap();
+    wait_until("the node is online", || h.broker.online(NODE_A));
     // The ingress's own step after it read the ClientHello, on sockets whose kernel
     // buffers are small (32 KiB each way), so that they do not absorb the answer.
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2212,6 +2214,7 @@ fn a_half_closed_agent_that_reads_slowly_gets_a_large_answer_whole() {
 fn the_acme_class_has_an_open_rate_of_its_own_for_each_account() {
     let h = Harness::new();
     let _node = h.node("tok-a1").unwrap();
+    wait_until("the node is online", || h.broker.online(NODE_A));
     let request = acme_request(
         "aaaaaaaaaa.node.example.test",
         "/.well-known/acme-challenge/SynthToken_0123",
