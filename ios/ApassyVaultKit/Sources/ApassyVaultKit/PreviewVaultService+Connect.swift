@@ -11,6 +11,14 @@ struct PreviewConnect {
     var nextError: VaultError?
     /// Test support: the links of each `connectJoin`, in order.
     var links: [String] = []
+    /// Test support: Connect says this iPhone is no device of the account any more.
+    var removed = false
+    /// Test support: the devices of the account, the dial route, and the dial state.
+    var devices: [ConnectDevice] = []
+    var dialRoute = false
+    var dialState: ConnectDialState = .unused
+    /// Test support: the number of `connectForget` calls.
+    var forgets = 0
 }
 
 extension PreviewVaultService {
@@ -57,16 +65,41 @@ extension PreviewVaultService {
 
     public func connectStatus() async throws -> ConnectStatus {
         guard let account = connectState.accountID else {
-            return ConnectStatus(state: .none, join: connectState.join)
+            return ConnectStatus(
+                state: .none, dialRoute: false, dialState: connectState.dialState, join: connectState.join)
         }
-        return ConnectStatus(state: .account, accountID: account, deviceName: "iPhone", plan: connectState.plan)
+        return ConnectStatus(
+            state: .account, removed: connectState.removed, accountID: account, deviceName: "iPhone",
+            plan: connectState.plan, dialRoute: connectState.dialRoute, dialState: connectState.dialState,
+            devices: connectState.devices)
     }
 
+    /// As the core: the key, the state, and a join that waits go; Connect is not asked.
     public func connectForget() async throws -> Bool {
         let had = connectState.accountID != nil
+        let links = connectState.links
+        let forgets = connectState.forgets + 1
         connectState = PreviewConnect()
+        connectState.links = links
+        connectState.forgets = forgets
         return had
     }
+
+    /// Test support: this iPhone is a device of the synthetic account `accountID` (no join).
+    public func setConnectAccount(_ accountID: String?, removed: Bool = false, devices: [ConnectDevice] = []) {
+        connectState.accountID = accountID
+        connectState.removed = removed
+        connectState.devices = devices
+    }
+
+    /// Test support: the route and the state of the dial that `connectStatus` reports.
+    public func setConnectDial(route: Bool, state: ConnectDialState) {
+        connectState.dialRoute = route
+        connectState.dialState = state
+    }
+
+    /// Test support: the number of `connectForget` calls.
+    public func connectForgets() -> Int { connectState.forgets }
 
     /// Test support: the plan of the synthetic account.
     public func setConnectPlan(_ plan: ConnectPlan) { connectState.plan = plan }

@@ -37,13 +37,16 @@ public struct FeedVault: Decodable, Sendable, Equatable, Identifiable {
     /// The code of the last relay call of this vault that failed (`feed_unavailable`,
     /// `relay_unreachable`, `removed`, …), until one works.
     public var error: String?
+    /// The hosted relay ended the feed of this team (410 `free_connect_ended` or `hosted_retired`):
+    /// the core reads it no more.
+    public var relayEnded: Bool
     public var macs: [FeedMac]
 
     public var id: String { vaultID }
 
     public init(
         vaultID: String, vaultName: String, teamID: String, registered: Bool = true, answerKey: Bool = true,
-        error: String? = nil, macs: [FeedMac]
+        error: String? = nil, relayEnded: Bool = false, macs: [FeedMac]
     ) {
         self.vaultID = vaultID
         self.vaultName = vaultName
@@ -51,11 +54,13 @@ public struct FeedVault: Decodable, Sendable, Equatable, Identifiable {
         self.registered = registered
         self.answerKey = answerKey
         self.error = error
+        self.relayEnded = relayEnded
         self.macs = macs
     }
 
     enum CodingKeys: String, CodingKey {
         case registered, error, macs
+        case relayEnded = "relay_ended"
         case vaultID = "vault_id"
         case vaultName = "vault_name"
         case teamID = "team_id"
@@ -70,6 +75,7 @@ public struct FeedVault: Decodable, Sendable, Equatable, Identifiable {
         registered = container.flag(forKey: .registered)
         answerKey = container.flag(forKey: .answerKey)
         error = container.optionalText(forKey: .error)
+        relayEnded = container.flag(forKey: .relayEnded)
         macs = container.lossy(FeedMac.self, forKey: .macs)
     }
 }
