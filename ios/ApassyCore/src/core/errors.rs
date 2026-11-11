@@ -156,6 +156,14 @@ impl From<SyncError> for CoreError {
                 "waits_for_device",
                 "Waiting for another device of this account to sync. Nothing was changed.",
             ),
+            SyncError::ChecksDeviceList => Self::new(
+                "waits_for_device",
+                "Checking the device list of this account. Nothing was changed.",
+            ),
+            SyncError::UnknownSigner => Self::new(
+                "forked_copy",
+                "The relay copy has a change by a device that is not in the device list of this account.",
+            ),
             SyncError::TooLarge => Self::new(
                 "too_large",
                 "The vault is too large for the relay (64 MiB).",

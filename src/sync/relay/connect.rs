@@ -433,9 +433,10 @@ impl RelaySync {
                     SessionKey::Account(signer),
                     Some(store_device),
                 )
-                .with_shared_signers(Arc::new(Mutex::new(Some(policy)))),
+                .with_fixed_signers(policy),
             ),
             team: store.name.clone(),
+            notes: Arc::default(),
         })
     }
 

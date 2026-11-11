@@ -719,8 +719,7 @@ fn a_pending_creation_is_repeated_by_the_next_try() {
     let a = device();
     let failed =
         ConnectAccount::create(client(&connect), &a.store, &a.path, "Rafal", "MacBook Pro")
-            .err()
-            .expect("no answer");
+            .expect_err("no answer");
     assert!(
         matches!(failed, ConnectError::Offline | ConnectError::Broken),
         "{failed:?}"
@@ -751,14 +750,12 @@ fn a_pending_creation_is_repeated_by_the_next_try() {
     connect.lose_next_answers("POST /v1/account", 50);
     let b = device();
     ConnectAccount::create(client(&connect), &b.store, &b.path, "Rafal", "MacBook Air")
-        .err()
-        .expect("no answer");
+        .expect_err("no answer");
     apassy::connect::account::forget_pending_creation_codes();
     connect.keep_answers();
     let refused =
         ConnectAccount::create(client(&connect), &b.store, &b.path, "Rafal", "MacBook Air")
-            .err()
-            .expect("no code to show");
+            .expect_err("no code to show");
     assert_eq!(refused, ConnectError::RecoveryCodeNotShown);
     // The account is made and its file written: it opens, and no creation is pending.
     assert_eq!(connect.accounts().len(), 1);
@@ -792,8 +789,7 @@ fn a_taken_account_id_gets_a_new_id_and_a_used_key_stops() {
     let b = device();
     let refused =
         ConnectAccount::create(client(&connect), &b.store, &b.path, "Rafal", "MacBook Air")
-            .err()
-            .expect("conflict");
+            .expect_err("conflict");
     assert_eq!(refused, ConnectError::Conflict);
     assert_eq!(connect.count("POST /v1/account"), 1);
 }
