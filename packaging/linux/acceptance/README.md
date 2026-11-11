@@ -19,7 +19,7 @@ real relying party.
 | `build-on-devbox.sh` | On the Mac: build and package a commit like the CI `linux-vault` job, in a container on the devbox (`git archive`, Ubuntu 24.04, Rust 1.97.0, debug build stripped, `build-vault.sh`) |
 | `release-matrix.sh` | On the devbox: one release build (CI artifact `apassy-vault-linux-x86_64`) in minimal Debian 12, 13 and Ubuntu 22.04, 24.04 containers: `install.sh` deb and tar from a `file://` origin, `ldd -r`, the window under Xvfb with the libraries it loads, the headless owner checks; Debian 11 and Ubuntu 20.04 refused |
 | `setup-host.sh` | Install Xvfb, openbox, xdotool, ImageMagick, gnome-keyring, libsecret-tools, polkitd, Google Chrome stable, Chromium (Debian: deb; Ubuntu: snap), Node.js 22 and the RP's dependency |
-| `container.sh` | Create the disposable `debian:trixie` container for the Debian target |
+| `container.sh` | Create a disposable container for a container target (`debian:trixie`, `debian:bookworm`, `ubuntu:22.04`) |
 | `run-target.sh` | One command per target: install the package as documented, run the scripted checks, create the vault in the window, start the RP |
 | `headless-owner.sh` | `apassy owner` commands in a real terminal of an account without session bus, display or logind session |
 | `keyring-polkit.sh` | Secret Service opt-in, refusal, unlock, no bus, locked keyring, disable; polkit agent for the window |
@@ -46,6 +46,8 @@ real relying party.
    bash run-target.sh ubuntu   ~/work/l4/artifacts/build-x86_64-<commit> deb
    bash run-target.sh ubuntu   ~/work/l4/artifacts/build-x86_64-<commit> tar
    bash run-target.sh debian13 ~/work/l4/artifacts/build-x86_64-<commit> deb
+   bash run-target.sh debian12 ~/work/l4/artifacts/build-x86_64-<commit> deb     # oldest Debian
+   bash run-target.sh ubuntu2204 ~/work/l4/artifacts/build-x86_64-<commit> deb   # oldest Ubuntu
    ```
 
    Ubuntu runs on the host: polkit's `allow_active` needs the local seat session
