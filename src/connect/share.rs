@@ -676,10 +676,13 @@ fn drop_unused_pins(state: &mut AccountState, own: &ListShares) {
     });
 }
 
+/// The lists verified within one refresh, by account and root (`None`: it did not verify).
+type VerifiedLists = HashMap<(String, Vec<u8>), Option<Verified>>;
+
 /// The lists verified within one refresh, by account and root: each list of a refresh is
 /// checked once, also when several pins take it.
 #[derive(Default)]
-pub(super) struct ListCache(RefCell<HashMap<(String, Vec<u8>), Option<Verified>>>);
+pub(super) struct ListCache(RefCell<VerifiedLists>);
 
 impl ListCache {
     fn verify(

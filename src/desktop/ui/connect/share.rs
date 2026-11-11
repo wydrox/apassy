@@ -876,6 +876,7 @@ pub(crate) enum Guard {
 }
 
 /// What "Continue" of the picker found.
+#[allow(clippy::large_enum_variant)] // One message at a time on the channel; a box buys nothing.
 pub(crate) enum Started {
     /// A code was made (in the slot).
     Code,
@@ -884,6 +885,7 @@ pub(crate) enum Started {
 }
 
 /// The result of one worker step.
+#[allow(clippy::large_enum_variant)] // One message at a time on the channel; a box buys nothing.
 pub(crate) enum Outcome {
     Refreshed(Result<Refreshed, ConnectError>),
     /// The lists read again for a head whose signer is not verified yet.
@@ -958,6 +960,7 @@ impl ShareUi {
     }
 
     /// Read the lists again at the next frame.
+    #[cfg(test)]
     pub(crate) fn refresh_now(&mut self) {
         self.refreshed_at = None;
     }

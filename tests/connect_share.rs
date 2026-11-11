@@ -918,7 +918,7 @@ fn a_store_of_this_account_is_never_offered_or_joined() {
         );
     };
     // This computer syncs the store as its own vault.
-    refused(&mut f, &[second.clone()]);
+    refused(&mut f, std::slice::from_ref(&second));
     // The own list shares the store (with X): it is this account's.
     let (proof, epoch) = f
         .owner_a
