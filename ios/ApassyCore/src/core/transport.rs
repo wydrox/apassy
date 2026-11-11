@@ -24,8 +24,9 @@
 //! storm of dials: `403 plan_required` (and no account) is `not_on_connect` for 15
 //! minutes, `503 tunnel_offline` (the Mac has no tunnel open) is `mac_offline` and
 //! `429 tunnel_limit` is `limit`, each with its own wait, and an unreachable Connect
-//! (also `503 busy`, and a dial that Connect closed with 1013 because it could not check
-//! the plan) waits 1 s, doubling, at most 60 s. A dial closed with 4003 (the plan or the
+//! (also `503 busy`, the edge's per-address `429 rate_limited`, and a dial that Connect
+//! closed with 1013 because it could not check the plan) waits 1 s, doubling, at most
+//! 60 s. A dial closed with 4003 (the plan or the
 //! grant definitely ended) is `not_on_connect`. None of them is an error to show, and none names a
 //! plan, a price, or a purchase (plan section 6). `connect_status` reports the state and
 //! whether the Mac is reached through Connect now (`dial_route`).
@@ -525,8 +526,8 @@ fn refusal(status: u16, body: &[u8]) -> Failure {
         (401, _) => Failure::Unauthenticated,
         (403, "plan_required" | "account_required") => Failure::NotOnConnect,
         (404, _) | (503, "tunnel_offline") => Failure::MacOffline,
-        (429, _) => Failure::Limit,
-        (503, _) | (500..=599, _) => Failure::Unreachable,
+        (429, "tunnel_limit") => Failure::Limit,
+        (429, _) | (503, _) | (500..=599, _) => Failure::Unreachable,
         _ => Failure::Refused,
     }
 }
@@ -980,7 +981,10 @@ mod tests {
             (404, "node_unknown", Failure::MacOffline),
             (503, "tunnel_offline", Failure::MacOffline),
             (429, "tunnel_limit", Failure::Limit),
-            (429, "rate_limited", Failure::Limit),
+            // The edge's per-address limit (other phones behind the same address): the
+            // backoff, not the long wait of the account's limit.
+            (429, "rate_limited", Failure::Unreachable),
+            (429, "", Failure::Unreachable),
             (503, "busy", Failure::Unreachable),
             (400, "invalid_request", Failure::Refused),
         ];
