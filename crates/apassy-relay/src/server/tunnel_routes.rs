@@ -140,36 +140,38 @@ fn grant_valid(hub: &Hub, node_id: &str, grantee: &str, now: u64) -> RelayResult
     }
 }
 
+/// Every lookup answers a definite "no" only from the store's own answer: a store error is
+/// [`Unavailable`] (`503 busy` on the routes, a skipped round in the recheck).
 impl TunnelDirectory for AccountDirectory {
     fn caller(&self, bearer: &str) -> Result<Caller, Refusal> {
-        let hub = self.hub.upgrade().ok_or(Refusal::Unauthenticated)?;
+        let hub = self.hub.upgrade().ok_or(Refusal::Unavailable)?;
         match account::authenticate(&hub, Some(bearer), crate::now_unix()) {
             Ok(caller) => Ok(Caller {
                 account_id: caller.account,
                 device_id: caller.device,
             }),
             Err(error) if error.code == codes::ACCOUNT_REQUIRED => Err(Refusal::AccountRequired),
-            Err(_) => Err(Refusal::Unauthenticated),
+            Err(error) if error.code == codes::UNAUTHENTICATED => Err(Refusal::Unauthenticated),
+            Err(_) => Err(Refusal::Unavailable),
         }
     }
 
-    fn device_node(&self, caller: &Caller) -> Option<NodeEntry> {
-        let hub = self.hub.upgrade()?;
-        hub.directory
+    fn device_node(&self, caller: &Caller) -> Result<Option<NodeEntry>, Unavailable> {
+        let hub = self.hub.upgrade().ok_or(Unavailable)?;
+        let entry = hub
+            .directory
             .store
             .with(|conn| node_of_device(conn, &caller.device_id))
-            .ok()
-            .flatten()
-            .filter(|entry| entry.account_id == caller.account_id)
+            .map_err(|_| Unavailable)?;
+        Ok(entry.filter(|entry| entry.account_id == caller.account_id))
     }
 
-    fn node(&self, node_id: &str) -> Option<NodeEntry> {
-        let hub = self.hub.upgrade()?;
+    fn node(&self, node_id: &str) -> Result<Option<NodeEntry>, Unavailable> {
+        let hub = self.hub.upgrade().ok_or(Unavailable)?;
         hub.directory
             .store
             .with(|conn| node_by_id(conn, node_id))
-            .ok()
-            .flatten()
+            .map_err(|_| Unavailable)
     }
 
     /// A store error is [`Unavailable`], never a "no": the recheck then skips a round
@@ -185,14 +187,14 @@ impl TunnelDirectory for AccountDirectory {
         entitled(&hub, account_id, crate::now_unix()).map_err(|_| Unavailable)
     }
 
-    fn budget_units(&self, account_id: &str) -> u64 {
-        self.hub.upgrade().map_or(1, |hub| {
-            hub.accounts
-                .plans()
-                .people(&hub.directory.store, account_id, crate::now_unix())
-                .unwrap_or(1)
-                .max(1)
-        })
+    /// A store error is [`Unavailable`]: the broker keeps the budget it knew.
+    fn budget_units(&self, account_id: &str) -> Result<u64, Unavailable> {
+        let hub = self.hub.upgrade().ok_or(Unavailable)?;
+        hub.accounts
+            .plans()
+            .people(&hub.directory.store, account_id, crate::now_unix())
+            .map(|units| units.max(1))
+            .map_err(|_| Unavailable)
     }
 }
 

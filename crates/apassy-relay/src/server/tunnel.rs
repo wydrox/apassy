@@ -195,6 +195,10 @@ pub struct Limits {
     /// Open ACME streams of one account: slots of their own, outside the public slots,
     /// rate, and budget (an ACME stream carries at most 8 KiB in and 64 KiB out).
     pub acme_streams: usize,
+    /// New ACME streams of one account in one clock minute (refused ones count): a rate of
+    /// their own, far above what a renewal needs (a CA validates one token from a few
+    /// places, and retries), so the class opens no streams without end.
+    pub acme_per_minute: u32,
     /// How often the plan of each account with open streams, and the grant of each open
     /// dial of another account, are checked again (a plan or a group can end by time).
     pub recheck: Duration,
@@ -242,6 +246,7 @@ impl Default for Limits {
             ingress_first_byte: Duration::from_secs(10),
             ingress_bytes_per_month: 5 * 1024 * 1024 * 1024,
             acme_streams: 4,
+            acme_per_minute: 30,
             recheck: Duration::from_secs(60),
             recheck_skips: 3,
             ping_interval: Duration::from_secs(30),
@@ -359,6 +364,8 @@ pub enum Refusal {
     Unauthenticated,
     /// 403 `account_required`: a token that is not an account token (a team token).
     AccountRequired,
+    /// The token cannot be checked now (the store failed): 503 `busy`, never a 401.
+    Unavailable,
 }
 
 /// The directory could not answer (its store failed): not a "no". Admission refuses
@@ -366,23 +373,27 @@ pub enum Refusal {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Unavailable;
 
-/// What the broker asks of the account store (unit C1 implements it).
+/// What the broker asks of the account store (unit C1 implements it). A lookup that the
+/// store cannot answer is [`Unavailable`] (or [`Refusal::Unavailable`]), never a "no": the
+/// routes answer `503 busy` for it (contract 3.3), and only a definite answer is a 401, a
+/// 403, or a 404.
 pub trait TunnelDirectory: Send + Sync {
     /// The caller of a bearer token (the value after `Bearer `).
     fn caller(&self, bearer: &str) -> Result<Caller, Refusal>;
     /// The node registered for the caller's device, if any.
-    fn device_node(&self, caller: &Caller) -> Option<NodeEntry>;
+    fn device_node(&self, caller: &Caller) -> Result<Option<NodeEntry>, Unavailable>;
     /// A node by id.
-    fn node(&self, node_id: &str) -> Option<NodeEntry>;
+    fn node(&self, node_id: &str) -> Result<Option<NodeEntry>, Unavailable>;
     /// Whether the node's account granted the given account (`tunnel_grant`) and the
     /// grant still holds.
     fn has_grant(&self, node_id: &str, grantee_account: &str) -> Result<bool, Unavailable>;
     /// Whether the account has a plan with the tunnel (connect-billing-v1 section 8).
     fn entitled(&self, account_id: &str) -> Result<bool, Unavailable>;
     /// How many byte budgets the account has: 1, or the people of Family, or the members
-    /// of Team.
-    fn budget_units(&self, _account_id: &str) -> u64 {
-        1
+    /// of Team. [`Unavailable`] keeps the budget known before (none at the first use: the
+    /// next stream asks again).
+    fn budget_units(&self, _account_id: &str) -> Result<u64, Unavailable> {
+        Ok(1)
     }
 }
 
@@ -525,6 +536,8 @@ struct Account {
     acme_bytes: u64,
     acme_streams: u64,
     acme_open: usize,
+    /// ACME streams opened in the clock minute of `minute`.
+    acme_minute_opens: u32,
 }
 
 impl Account {
@@ -555,6 +568,41 @@ impl Account {
         if self.minute != minute {
             self.minute = minute;
             self.minute_dials = 0;
+            self.acme_minute_opens = 0;
+        }
+    }
+
+    /// The budgets of the units known now. A budget that changed is checked again: a trip
+    /// that no longer holds is lifted (and trips again, ending its streams, at the next
+    /// counted byte over the new budget).
+    fn set_budgets(&mut self, budget: u64, ingress: u64, grantee: u64, each: u64) {
+        let old = (
+            self.budget,
+            self.ingress_budget,
+            self.grantee_budget,
+            self.grantee_each_budget,
+        );
+        self.budget = budget;
+        self.ingress_budget = ingress;
+        self.grantee_budget = grantee;
+        self.grantee_each_budget = each;
+        if old == (budget, ingress, grantee, each) {
+            return;
+        }
+        let spent = |bytes: u64, of: u64| budget > 0 && bytes >= of;
+        if !spent(self.dial_bytes(), budget) {
+            self.tripped = false;
+        }
+        if !(ingress > 0 && self.ingress_bytes >= ingress) {
+            self.ingress_tripped = false;
+        }
+        if !spent(self.grantee_bytes, grantee) {
+            self.grantees_tripped = false;
+        }
+        for counts in self.grantees.values_mut() {
+            if !spent(counts.bytes, each) {
+                counts.tripped = false;
+            }
         }
     }
 
@@ -1287,6 +1335,7 @@ impl Broker {
             .inner
             .directory
             .device_node(&caller)
+            .map_err(|Unavailable| TunnelError::BUSY)?
             .ok_or(TunnelError::NODE_UNKNOWN)?;
         require_plan(&*self.inner.directory, &entry.account_id)?;
         self.inner.admit_node(&entry)?;
@@ -1353,9 +1402,14 @@ impl Broker {
     ) -> Result<Ticket, TunnelError> {
         upgrade.map_err(TunnelError::invalid)?;
         let caller = self.inner.caller(bearer)?;
-        let entry = valid_node_id(node_id)
-            .then(|| self.inner.directory.node(node_id))
-            .flatten()
+        if !valid_node_id(node_id) {
+            return Err(TunnelError::NODE_UNKNOWN);
+        }
+        let entry = self
+            .inner
+            .directory
+            .node(node_id)
+            .map_err(|Unavailable| TunnelError::BUSY)?
             .ok_or(TunnelError::NODE_UNKNOWN)?;
         match may_dial(&*self.inner.directory, &caller.account_id, &entry) {
             Ok(true) => {}
@@ -1397,6 +1451,8 @@ impl Broker {
             .inner
             .directory
             .node(&node_id)
+            .ok()
+            .flatten()
             .ok_or(IngressRefusal::Unrecognized)?;
         if !self.online(&node_id) || self.inner.directory.entitled(&entry.account_id) != Ok(true) {
             return Err(IngressRefusal::Unrecognized);
@@ -1620,6 +1676,7 @@ impl Inner {
             .map_err(|refusal| match refusal {
                 Refusal::Unauthenticated => TunnelError::UNAUTHENTICATED,
                 Refusal::AccountRequired => TunnelError::ACCOUNT_REQUIRED,
+                Refusal::Unavailable => TunnelError::BUSY,
             })
     }
 
@@ -1645,14 +1702,22 @@ impl Inner {
     /// counts a dial. Each class has its own slots and checks (see [`Limits`]).
     fn reserve(self: &Arc<Self>, entry: &NodeEntry, class: &Class) -> Result<Slot, TunnelError> {
         let account_id = entry.account_id.as_str();
-        let units = self.directory.budget_units(account_id).max(1);
-        let budget = self.limits.bytes_per_month.saturating_mul(units);
-        let ingress_budget = self.limits.ingress_bytes_per_month.saturating_mul(units);
-        let grantee_budget = u64::try_from(
-            u128::from(budget) * u128::from(self.limits.grantee_bytes_percent.min(100)) / 100,
-        )
-        .unwrap_or(u64::MAX);
-        let grantee_each_budget = self.limits.grantee_each_budget(budget);
+        // A lookup that fails keeps the budgets known before (none at the first use: the
+        // stream is not refused for a budget, and the next stream asks again).
+        let budgets = self.directory.budget_units(account_id).ok().map(|units| {
+            let units = units.max(1);
+            let budget = self.limits.bytes_per_month.saturating_mul(units);
+            let grantee_budget = u64::try_from(
+                u128::from(budget) * u128::from(self.limits.grantee_bytes_percent.min(100)) / 100,
+            )
+            .unwrap_or(u64::MAX);
+            (
+                budget,
+                self.limits.ingress_bytes_per_month.saturating_mul(units),
+                grantee_budget,
+                self.limits.grantee_each_budget(budget),
+            )
+        });
         let now = self.clock.now();
         if *class == Class::Ingress && !self.ingress_rate(&entry.node_id, now) {
             return Err(TunnelError::TUNNEL_LIMIT);
@@ -1663,10 +1728,9 @@ impl Inner {
         let ingress_full = accounts.ingress_total >= limits.ingress_cap();
         let account = accounts.by_id.entry(account_id.to_string()).or_default();
         account.roll(now);
-        account.budget = budget;
-        account.ingress_budget = ingress_budget;
-        account.grantee_budget = grantee_budget;
-        account.grantee_each_budget = grantee_each_budget;
+        if let Some((budget, ingress, grantee, each)) = budgets {
+            account.set_budgets(budget, ingress, grantee, each);
+        }
         match class {
             Class::Own => {
                 if account.minute_dials >= limits.dials_per_minute {
@@ -1718,6 +1782,10 @@ impl Inner {
                 account.ingress_open += 1;
             }
             Class::Acme => {
+                if account.acme_minute_opens >= limits.acme_per_minute {
+                    return Err(TunnelError::TUNNEL_LIMIT);
+                }
+                account.acme_minute_opens += 1;
                 if full || ingress_full || account.acme_open >= limits.acme_streams {
                     return Err(TunnelError::TUNNEL_LIMIT);
                 }
@@ -2748,7 +2816,8 @@ impl MemoryDirectory {
         }
     }
 
-    /// Plan and grant lookups fail ([`Unavailable`]) while `failing` (a store error).
+    /// Plan, grant, and budget lookups fail ([`Unavailable`]) while `failing` (a store
+    /// error).
     pub fn set_failing(&self, failing: bool) {
         lock(&self.state).failing = failing;
     }
@@ -2769,16 +2838,16 @@ impl TunnelDirectory for MemoryDirectory {
             .unwrap_or(Err(Refusal::Unauthenticated))
     }
 
-    fn device_node(&self, caller: &Caller) -> Option<NodeEntry> {
-        lock(&self.state)
+    fn device_node(&self, caller: &Caller) -> Result<Option<NodeEntry>, Unavailable> {
+        Ok(lock(&self.state)
             .nodes
             .values()
             .find(|node| node.device_id == caller.device_id && node.account_id == caller.account_id)
-            .cloned()
+            .cloned())
     }
 
-    fn node(&self, node_id: &str) -> Option<NodeEntry> {
-        lock(&self.state).nodes.get(node_id).cloned()
+    fn node(&self, node_id: &str) -> Result<Option<NodeEntry>, Unavailable> {
+        Ok(lock(&self.state).nodes.get(node_id).cloned())
     }
 
     fn has_grant(&self, node_id: &str, grantee_account: &str) -> Result<bool, Unavailable> {
@@ -2799,12 +2868,12 @@ impl TunnelDirectory for MemoryDirectory {
         Ok(state.entitled.contains(account_id))
     }
 
-    fn budget_units(&self, account_id: &str) -> u64 {
-        lock(&self.state)
-            .units
-            .get(account_id)
-            .copied()
-            .unwrap_or(1)
+    fn budget_units(&self, account_id: &str) -> Result<u64, Unavailable> {
+        let state = lock(&self.state);
+        if state.failing {
+            return Err(Unavailable);
+        }
+        Ok(state.units.get(account_id).copied().unwrap_or(1))
     }
 }
 

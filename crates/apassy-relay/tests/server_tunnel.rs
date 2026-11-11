@@ -776,13 +776,16 @@ fn the_byte_budget_trips_and_resets_on_the_first_of_the_month() {
         h.dial("tok-a2", NODE_A).err(),
         Some((429, "tunnel_limit".into()))
     );
-    // Other accounts are not affected, and the budget scales with the plan's people.
+    // The budget scales with the plan's people, and a larger one counts at once: with
+    // three, 3000 bytes, so the month's 1200 no longer spend it.
     h.directory.set_budget_units("acc_a", 3);
-    assert_eq!(
-        h.dial("tok-a2", NODE_A).err(),
-        Some((429, "tunnel_limit".into())),
-        "a tripped month stays tripped"
-    );
+    let mut more = h
+        .dial("tok-a2", NODE_A)
+        .expect("a larger budget counts from the next stream");
+    more.send(b"hi");
+    assert_eq!(more.read_bytes(2), b"hi");
+    assert!(!h.broker.usage("acc_a").tripped);
+    drop(more);
     // 2026-12-01T00:00:00Z.
     h.clock.set(1_796_083_200);
     let mut next_month = h.dial("tok-a2", NODE_A).expect("a new month");
