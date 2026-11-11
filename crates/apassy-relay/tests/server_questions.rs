@@ -1914,18 +1914,23 @@ fn push_retry_rechecks_tokens_expiry_and_restart_replays_open_questions() {
         "UPDATE question SET expires_at = {}",
         now_unix() - 1
     ));
+    // On a slow machine the first retry (after one unit at the earliest) can go out before
+    // this change lands: count from here. The next retry would be due inside the wait.
+    std::thread::sleep(Duration::from_millis(500));
+    let sent = worker.calls.lock().unwrap().len();
+    assert!((2..=3).contains(&sent), "{sent} calls before the expiry");
     std::thread::sleep(Duration::from_secs(4));
     assert_eq!(
         worker.calls.lock().unwrap().len(),
-        2,
+        sent,
         "expired question is not retried"
     );
     ask(&relay, &mac, &qid(76), "member");
-    assert_eq!(worker.calls(3).len(), 3);
+    assert_eq!(worker.calls(sent + 1).len(), sent + 1);
     worker.status.store(200, Ordering::Relaxed);
     let _relay = relay.restart();
     assert!(
-        worker.calls(4).len() >= 4,
+        worker.calls(sent + 2).len() >= sent + 2,
         "unexpired open question survives relay restart"
     );
 }
