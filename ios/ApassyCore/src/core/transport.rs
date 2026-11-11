@@ -28,12 +28,23 @@
 //! plan, a price, or a purchase (plan section 6). `connect_status` reports the state and
 //! whether the Mac is reached through Connect now (`dial_route`).
 //!
-//! **The pipe.** One dial for each connection of the relay client (the client makes one
-//! connection for each request). A reader thread turns the WebSocket messages into
-//! bytes and answers Connect's pings; a ping thread pings every 30 s and ends a dial
-//! that hears nothing for 90 s (contract 3.2 and 8), so a long poll keeps its dial
-//! through Cloudflare and Connect. `lock` and `suspend` end every dial at once
-//! ([`Transport::close`]), and the relay client's cancel ends the dial of its request.
+//! **The pipe.** One dial for each connection of the relay client. A reader thread turns
+//! the WebSocket messages into bytes and answers Connect's pings; a ping thread pings
+//! every 30 s and ends a dial that hears nothing for 90 s (contract 3.2 and 8), so a long
+//! poll keeps its dial through Cloudflare and Connect. `lock` and `suspend` end every
+//! dial at once ([`Transport::close`]), and the relay client's cancel ends the dial of
+//! its request.
+//!
+//! **One dial for requests that follow each other.** The relay client keeps the pinned
+//! connection inside a dial open after a complete answer ([`KeptDials`], one for each
+//! node), and the next request to that node through the dial takes it: no new dial, no
+//! new TLS handshake, so a burst of requests stays far below Connect's 60 dials a minute.
+//! A kept dial closes after [`Timing::kept_idle`] (30 s) without a request, below the
+//! node's 45 s wait for the next request; at `lock` and `suspend` with every other dial;
+//! and when Connect or the node ends it. A long poll always has a dial of its own. When a
+//! kept dial turns out dead, a request that did not reach it, and a read (`GET`) that
+//! did, take a fresh dial; any other request fails as a broken connection does (it may
+//! have reached the Mac).
 //!
 //! The WebSocket and its codec are the relay crate's own (`apassy::node::tunnel::ws`,
 //! compiled from `crates/apassy-relay/src/server/tunnel/ws.rs`), and the TLS socket to
@@ -53,8 +64,8 @@ use apassy::connect::ConnectError;
 use apassy::node::tunnel::ws::{self, Message, client, close};
 use apassy::node::tunnel::{Socket, frame, open_socket};
 use apassy::sync::{
-    HttpError, NodeRoute, RelayConfig, RelayMember, RelayUrl, TunnelDialer, TunnelPipe,
-    TunnelRoute, membership_relay_url, probe_direct,
+    HttpError, KEPT_DIAL_IDLE, KeptDials, NodeRoute, RelayConfig, RelayMember, RelayUrl,
+    TunnelDialer, TunnelPipe, TunnelRoute, membership_relay_url, probe_direct,
 };
 use apassy::vault::RelayMembership;
 use zeroize::Zeroizing;
@@ -95,6 +106,8 @@ pub struct Timing {
     pub not_on_connect: Duration,
     pub limit: Duration,
     pub probe_every: Duration,
+    /// A kept dial without a request closes after this ([`KEPT_DIAL_IDLE`]).
+    pub kept_idle: Duration,
     /// Tests only: the dial neither pings nor answers Connect's pings, to show what the
     /// pings keep alive. Always false in the product.
     pub silent: bool,
@@ -110,6 +123,7 @@ impl Default for Timing {
             not_on_connect: NOT_ON_CONNECT_WAIT,
             limit: LIMIT_WAIT,
             probe_every: PROBE_EVERY,
+            kept_idle: KEPT_DIAL_IDLE,
             silent: false,
         }
     }
@@ -212,6 +226,8 @@ pub struct Routes {
     dials: AtomicU64,
     /// Counts each close (a lock, a suspend): a dial on its way when one came ends.
     closes: AtomicU64,
+    /// The pinned connections of finished requests, kept open in their dials.
+    kept: KeptDials,
 }
 
 /// The transport of a core ([`Routes`] and whether this process dials at all: only the
@@ -234,6 +250,7 @@ impl Transport {
             next_pipe: AtomicU64::new(1),
             dials: AtomicU64::new(0),
             closes: AtomicU64::new(0),
+            kept: KeptDials::new(),
         });
         Self { routes, dials }
     }
@@ -273,9 +290,10 @@ impl Transport {
         }
     }
 
-    /// `lock` and `suspend`: every dial ends at once, also one on its way, and the
-    /// route memory starts again (no route is "in use" after a lock). The waits of the
-    /// states stay, so an unlock makes no storm of dials.
+    /// `lock` and `suspend`: every dial ends at once, also one on its way and every kept
+    /// one (its connection leaves memory), and the route memory starts again (no route
+    /// is "in use" after a lock). The waits of the states stay, so an unlock makes no
+    /// storm of dials.
     pub fn close(&self) {
         self.routes.closes.fetch_add(1, Ordering::SeqCst);
         let ends: Vec<_> = std::mem::take(&mut *guard(&self.routes.pipes))
@@ -284,6 +302,7 @@ impl Transport {
         for end in ends {
             end();
         }
+        self.routes.kept.clear();
         let mut memory = guard(&self.routes.memory);
         for node in memory.nodes.values_mut() {
             node.route = None;
@@ -309,6 +328,7 @@ impl Transport {
 
     /// Other times (tests).
     pub fn set_timing(&self, timing: Timing) {
+        self.routes.kept.set_idle(timing.kept_idle);
         *guard(&self.routes.timing) = timing;
     }
 
@@ -550,6 +570,10 @@ impl TunnelDialer for Routes {
         let mut memory = guard(&self.memory);
         let node = memory.nodes.entry(url.as_str().to_owned()).or_default();
         node.direct_failed_at = Some(Instant::now());
+    }
+
+    fn kept(&self) -> Option<KeptDials> {
+        Some(self.kept.clone())
     }
 
     fn dial(
@@ -900,6 +924,13 @@ impl TunnelPipe for DialPipe {
     fn closer(&self) -> Arc<dyn Fn() + Send + Sync> {
         DialPipe::closer(self)
     }
+
+    /// Open, and no byte from Connect waits unread: an idle TLS connection to the node
+    /// gets none (the front sends no tickets), so a byte here is the node's close.
+    fn is_idle_open(&self) -> bool {
+        let inbox = guard(&self.shared.inbox);
+        !self.shared.ended.load(Ordering::SeqCst) && !inbox.eof && inbox.bytes.is_empty()
+    }
 }
 
 #[cfg(test)]
@@ -913,6 +944,7 @@ mod tests {
         assert_eq!(timing.idle, Duration::from_secs(90));
         assert_eq!(timing.backoff_first, Duration::from_secs(1));
         assert_eq!(timing.backoff_max, Duration::from_secs(60));
+        assert_eq!(timing.kept_idle, Duration::from_secs(30));
         assert!(!timing.silent);
     }
 

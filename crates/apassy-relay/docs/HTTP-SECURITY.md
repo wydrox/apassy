@@ -34,7 +34,14 @@ release. Future upgrades must remove/reapply these changes deliberately.
   Incomplete length-delimited bodies also fail. Trailers remain unsupported, as in
   the base crate. Valid chunk extensions and ordinary chunked bodies still work.
 - The relay uses one request per connection and explicitly closes it after the
-  response. Absolute header/body budgets are 10/30 seconds, with at most 5 seconds
+  response. The one exception (2026-11-11): a device stream of the Connect tunnel on the
+  tailnet listener, which the node's TLS front writes down in process
+  (`apassy::net::front_peers::is_tunnel`, never a header), carries sequential requests
+  (`tiny_http::KeepAlive`, docs/SPEC.md section 35.6). They are never pipelined: the next
+  head is read only after the answer before it was written whole, bytes of a next request
+  that came before that close the connection, a body that was not read to its end closes
+  it, and each request has the deadlines below from its first byte. Between requests the
+  next head must start within 45 s; an idle or pipelined connection closes without a byte. Absolute header/body budgets are 10/30 seconds, with at most 5 seconds
   of blocking socket read or write. Body progress does not reset its total budget.
   This permits the existing 64 MiB upload cap at sufficient throughput; clients on
   slower links receive a transport failure and must retry after checking the head.
@@ -78,8 +85,8 @@ and dual-license attribution. The new inbound chunk reader was reviewed in full.
 
 | Published advisory | Disposition for this relay |
 | --- | --- |
-| [CVE-2020-35884 / RUSTSEC-2020-0031](https://rustsec.org/advisories/RUSTSEC-2020-0031.html) | Mitigated: upstream lists 0.8.0+ as fixed; this 0.12.0 base also gets strict TE/CL rejection and no connection reuse. |
-| [CVE-2026-66752](https://github.com/tiny-http/tiny-http/issues/287) | Fixed by the local patch: one `chunked` TE only, never together with CL; duplicate/overflowing CL, folding and guarded upgrades fail. No pipelined successor is dispatched. |
+| [CVE-2020-35884 / RUSTSEC-2020-0031](https://rustsec.org/advisories/RUSTSEC-2020-0031.html) | Mitigated: upstream lists 0.8.0+ as fixed; this 0.12.0 base also gets strict TE/CL rejection and no connection reuse (but sequential, never pipelined, requests on a device stream of the tunnel). |
+| [CVE-2026-66752](https://github.com/tiny-http/tiny-http/issues/287) | Fixed by the local patch: one `chunked` TE only, never together with CL; duplicate/overflowing CL, folding and guarded upgrades fail. No pipelined successor is dispatched: a connection serves one request, or, on a device stream of the tunnel, sequential requests whose next head is read only after the answer before it, and pipelined bytes close it. |
 | [CVE-2026-66753](https://github.com/tiny-http/tiny-http/issues/288) | Fixed by the local patch on relay construction paths: Header::from_bytes/from_str reject line controls and invalid names. The relay never constructs a Header directly from its public fields. |
 
 The Worker forwards a parsed Request body, not the original HTTP bytes. It drops
