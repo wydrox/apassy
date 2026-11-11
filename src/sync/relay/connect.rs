@@ -114,6 +114,9 @@ pub enum StoreError {
     /// holds no verified share of it (connect-account-v1 section 16). Nothing was asked or
     /// made.
     OtherAccount,
+    /// A store of another account that this account joined holds no device of this one
+    /// yet: a device of the account that shares it adds it (section 16).
+    NotInSharedStore,
 }
 
 impl From<SyncError> for StoreError {
@@ -159,6 +162,9 @@ impl fmt::Display for StoreError {
             Self::NothingToMove => f.write_str("This vault has no relay copy to move."),
             Self::OtherAccount => f.write_str(
                 "This vault is shared with another account, and this device has not verified the share yet. Open Settings › Connect, then try again.",
+            ),
+            Self::NotInSharedStore => f.write_str(
+                "This device is not in the shared copy of this vault yet. It is added when the person who shares the vault opens Apassy on a device that syncs it. Then try again.",
             ),
         }
     }
@@ -258,6 +264,16 @@ impl RelaySync {
     /// later version from the next check on.
     pub fn set_account_signers(&self, policy: Option<super::SignerPolicy>) {
         *lock(&self.account_keys) = policy;
+    }
+
+    /// Whether the signers that this relay sync holds give the store `team_id` signers of
+    /// its own: a store shared between accounts (connect-account-v1 section 16), from the
+    /// account file alone. Settings › Connect › Shared Vaults notes the lists of such a
+    /// store itself, after the quiet time of its head.
+    pub fn shares_between_accounts(&self, team_id: &str) -> bool {
+        lock(&self.account_keys)
+            .as_ref()
+            .is_some_and(|policy| policy.stores.iter().any(|store| store.team_id == team_id))
     }
 
     /// The signers that the running sessions of this vault take ([`Self::set_account_signers`]).
@@ -414,13 +430,16 @@ impl RelaySync {
     /// The device of this Mac in `store`, for a new vault on this Mac from the Connect
     /// copy ("Use a vault from another Mac" › "Apassy Connect"): download it with
     /// [`JoinedDevice::download`] and make the vault with [`Self::adopt`] and the
-    /// passphrase of the copy. The store must list this Mac. Its session takes the signer
-    /// policy of the account file from the first request on (no answer of Connect is
-    /// waited for), in a slot that [`Self::adopt`] hands to the relay sync of the new
-    /// vault, so a later refresh of the account reaches it. A store that holds devices of
-    /// another account ([`VaultStoreView::shared`]) needs a share of it in the account
-    /// file (`ConnectAccount::shares_store`), else it is [`StoreError::OtherAccount`],
-    /// before any request.
+    /// passphrase of the copy. The store must list this Mac (a store of another account
+    /// that this account joined: [`StoreError::NotInSharedStore`]). Its session follows
+    /// the signer policy of the account file from the first request on (no answer of
+    /// Connect is waited for), in a slot of its own that the window updates after each
+    /// refresh ([`JoinedDevice::set_signers`]) and that [`Self::adopt`] hands to the relay
+    /// sync of the new vault: a head of a member whose list a refresh reads meanwhile is
+    /// "checking the device list", never a damaged copy at once. A store that holds
+    /// devices of another account ([`VaultStoreView::shared`]) needs a share of it in the
+    /// account file (`ConnectAccount::shares_store`), else it is
+    /// [`StoreError::OtherAccount`], before any request.
     pub fn joined_from_store(
         account: &mut ConnectAccount,
         store: &VaultStoreView,
@@ -430,15 +449,22 @@ impl RelaySync {
         }
         let url = crate::sync::RelayUrl::parse(account.client().origin())?;
         let me = account.state().device_id.clone();
+        let not_in = if account.joined_store_owner(&store.team_id).is_some() {
+            StoreError::NotInSharedStore
+        } else {
+            StoreError::NotInStore
+        };
         let store_device = store
             .devices
             .iter()
             .find(|device| device.device_id == me)
             .map(|device| device.store_device_id)
             .filter(|id| *id > 0)
-            .ok_or(StoreError::NotInStore)?;
+            .ok_or(not_in)?;
         let signer = account.signer()?;
-        let policy = crate::connect::signer_policy(account.state());
+        let slot = Arc::new(std::sync::Mutex::new(Some(crate::connect::signer_policy(
+            account.state(),
+        ))));
         Ok(JoinedDevice {
             session: Arc::new(
                 Session::new(
@@ -447,10 +473,11 @@ impl RelaySync {
                     SessionKey::Account(signer),
                     Some(store_device),
                 )
-                .with_fixed_signers(policy),
+                .with_shared_signers(Arc::clone(&slot)),
             ),
             team: store.name.clone(),
             notes: Arc::default(),
+            signers: Some(slot),
         })
     }
 

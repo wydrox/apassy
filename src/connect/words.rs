@@ -75,6 +75,18 @@ pub fn new_account_id() -> Result<String, ConnectError> {
     Ok(id)
 }
 
+/// A new vault store id, made by the device that makes the store (its `store` entry names
+/// it, connect-account-v1 section 8): `t_` and 10 random characters of `a-z2-7`.
+pub fn new_store_id() -> Result<String, ConnectError> {
+    const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+    let bytes = random::<10>()?;
+    let mut id = String::from("t_");
+    for byte in bytes.iter() {
+        id.push(char::from(ALPHABET[usize::from(byte & 31)]));
+    }
+    Ok(id)
+}
+
 /// The short fingerprint of a device key (X9.63) that an owner check shows: the first 6
 /// bytes of its SHA-256, as three groups of four lowercase hex characters
 /// (`1a2b 3c4d 5e6f`). Settings › Connect shows the fingerprint of this device's own key,

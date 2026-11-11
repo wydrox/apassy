@@ -48,8 +48,20 @@ impl fake_connect::StoreRelay for crate::desktop::fake_relay::FakeRelay {
     fn set_origin(&self, origin: &str) {
         crate::desktop::fake_relay::FakeRelay::set_origin(self, origin);
     }
-    fn add_store_team(&self, name: &str, device_name: &str, public_key: &[u8]) -> (String, u64) {
-        crate::desktop::fake_relay::FakeRelay::add_store_team(self, name, device_name, public_key)
+    fn add_store_team(
+        &self,
+        team_id: &str,
+        name: &str,
+        device_name: &str,
+        public_key: &[u8],
+    ) -> u64 {
+        crate::desktop::fake_relay::FakeRelay::add_store_team(
+            self,
+            team_id,
+            name,
+            device_name,
+            public_key,
+        )
     }
     fn add_store_device(&self, team_id: &str, device_name: &str, public_key: &[u8]) -> u64 {
         crate::desktop::fake_relay::FakeRelay::add_store_device(
@@ -2296,17 +2308,13 @@ fn the_signers_reach_the_sync_after_a_share_step_whose_later_call_failed() {
     session
         .with_account(|account| {
             let requests = account.share_requests(&link)?;
-            let action = account.share_action(&link, &requests[0], &names);
+            let action = account.share_action(&link, &requests[0], &names)?;
             account.confirm_share(&link, &requests[0], &names, proof(action), &epoch)
         })
         .expect("share");
-    ola.accept_share(
-        &answer,
-        &names,
-        proof(ola.accept_action(&answer, &names)),
-        &epoch,
-    )
-    .expect("Ola accepts");
+    let accept = ola.accept_action(&answer, &names).expect("action");
+    ola.accept_share(&answer, &names, proof(accept), &epoch)
+        .expect("Ola accepts");
     // Ola's second device joins her account.
     let x2_keys = MemoryKeyStore::new();
     let ola_link = ola.start_link().expect("link");

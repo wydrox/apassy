@@ -8,8 +8,8 @@ use eframe::egui;
 use zeroize::Zeroizing;
 
 use super::*;
-use crate::connect::share::{MemberStatus, StoreStatus};
-use crate::connect::{ShareOffer, ShareStatus, VaultStoreView};
+use crate::connect::share::{EndedMember, MemberStatus, StoreStatus};
+use crate::connect::{LeftStore, ShareOffer, ShareStatus, VaultStoreView};
 use crate::desktop::ui::owner_tests::{collect, input};
 
 /// The painted text of three frames of `draw` (a new sheet is invisible in its first).
@@ -38,6 +38,7 @@ fn store(team: &str, name: &str) -> VaultStoreView {
         created_at: 1_790_000_000,
         shared: true,
         devices: Vec::new(),
+        void: Vec::new(),
     }
 }
 
@@ -77,7 +78,20 @@ fn status() -> ShareStatus {
                     member("acc_olaaaaaaaa", "Ola", false, false),
                     member("acc_annaaaaaaa", "Anna", true, true),
                 ],
+                ended_members: vec![
+                    EndedMember {
+                        account_id: "acc_piotraaaaa".to_owned(),
+                        name: "Piotr".to_owned(),
+                        left: true,
+                    },
+                    EndedMember {
+                        account_id: "acc_ewaaaaaaaa".to_owned(),
+                        name: "Ewa".to_owned(),
+                        left: false,
+                    },
+                ],
                 ended: false,
+                void: false,
                 owner_suspended: false,
             },
             StoreStatus {
@@ -85,7 +99,9 @@ fn status() -> ShareStatus {
                 owner: Some("acc_piotraaaaa".to_owned()),
                 owner_name: Some("Piotr".to_owned()),
                 members: Vec::new(),
+                ended_members: Vec::new(),
                 ended: false,
+                void: false,
                 owner_suspended: true,
             },
             StoreStatus {
@@ -93,7 +109,9 @@ fn status() -> ShareStatus {
                 owner: Some("acc_ewaaaaaaaa".to_owned()),
                 owner_name: Some("Ewa".to_owned()),
                 members: Vec::new(),
+                ended_members: Vec::new(),
                 ended: true,
+                void: false,
                 owner_suspended: false,
             },
         ],
@@ -101,6 +119,18 @@ fn status() -> ShareStatus {
         names,
         ..ShareStatus::default()
     }
+}
+
+/// The vaults of this computer that sync a store: Garden and Car (joined), Family (own).
+fn local() -> BTreeMap<String, String> {
+    [
+        ("t_familyaaaa", "Family"),
+        ("t_gardenaaaa", "Garden"),
+        ("t_caraaaaaaa", "Car"),
+    ]
+    .into_iter()
+    .map(|(team, name)| (team.to_owned(), name.to_owned()))
+    .collect()
 }
 
 fn stores() -> Vec<VaultStoreView> {
@@ -114,7 +144,7 @@ fn stores() -> Vec<VaultStoreView> {
 
 #[test]
 fn the_section_shows_each_state_of_a_shared_vault() {
-    let view = view_of(&status(), &stores(), &BTreeMap::new(), true, &[]);
+    let view = view_of(&status(), &stores(), &local(), true, &[]);
     let text = painted(|_, ui| {
         draw(ui, &view);
     });
@@ -129,8 +159,13 @@ fn the_section_shows_each_state_of_a_shared_vault() {
         &shared_by("Garden", "Piotr"),
         &reset_member("Piotr"),
         &shared_by("Car", "Ewa"),
-        ENDED,
-        &shared_by("Travel", "Ola"),
+        &stopped("Ewa"),
+        &shared_by(VAULT_OFFERED, "Ola"),
+        &connect_calls("Travel"),
+        &left_vault("Piotr"),
+        &sharing_ended("Ewa"),
+        &share_again("Piotr"),
+        &share_again("Ewa"),
         JOIN,
         LEAVE,
         ACCEPT,
@@ -141,7 +176,7 @@ fn the_section_shows_each_state_of_a_shared_vault() {
     let checking = view_of(
         &status(),
         &stores(),
-        &BTreeMap::new(),
+        &local(),
         true,
         &["t_caraaaaaaa".to_owned()],
     );
@@ -150,13 +185,17 @@ fn the_section_shows_each_state_of_a_shared_vault() {
         .iter()
         .find(|store| store.team_id == "t_caraaaaaaa")
         .unwrap();
-    assert_eq!(joined.joined.as_deref(), Some(ENDED), "the end comes first");
+    assert_eq!(
+        joined.joined.as_deref(),
+        Some(stopped("Ewa").as_str()),
+        "the end comes first"
+    );
     let mut alive = status();
     alive.stores[2].ended = false;
     let checking = view_of(
         &alive,
         &stores(),
-        &BTreeMap::new(),
+        &local(),
         true,
         &["t_caraaaaaaa".to_owned()],
     );
@@ -167,19 +206,76 @@ fn the_section_shows_each_state_of_a_shared_vault() {
         .unwrap();
     assert_eq!(joined.joined.as_deref(), Some(CHECKING));
     // Outside a family or team, there is nothing to share with or accept.
-    let alone = view_of(&status(), &stores(), &BTreeMap::new(), false, &[]);
+    let alone = view_of(&status(), &stores(), &local(), false, &[]);
     let text = painted(|_, ui| {
         draw(ui, &alone);
     });
     assert!(
-        !text.contains(SHARE_WITH) && !text.contains(ACCEPT),
+        !text.contains(SHARE_WITH) && !text.contains(ACCEPT) && !text.contains(&share_again("Ewa")),
         "{text}"
     );
 }
 
+/// The lines of the section come from the lists: a store that this account left says on
+/// which device (also after a restart), a void share says that it ended, and a joined
+/// store that no vault here syncs offers the download.
+#[test]
+fn the_rows_of_left_void_and_absent_stores_come_from_the_status() {
+    let mut status = status();
+    status.left = vec![
+        LeftStore {
+            team_id: "t_oldaaaaaaa".to_owned(),
+            owner: "acc_olaaaaaaaa".to_owned(),
+            device: "Laptop".to_owned(),
+            here: false,
+        },
+        LeftStore {
+            team_id: "t_heraaaaaaa".to_owned(),
+            owner: "acc_olaaaaaaaa".to_owned(),
+            device: "This one".to_owned(),
+            here: true,
+        },
+    ];
+    status.stores[1].owner_suspended = false;
+    status.stores[1].void = true;
+    let mut away = local();
+    away.remove("t_gardenaaaa");
+    let view = view_of(&status, &stores(), &away, true, &[]);
+    let text = painted(|_, ui| {
+        draw(ui, &view);
+    });
+    for expected in [
+        &left_on("Laptop"),
+        LEFT_HERE,
+        ENDED,
+        &connect_calls("Garden"),
+    ] {
+        assert!(text.contains(expected), "{expected} in:\n{text}");
+    }
+    let left = view
+        .others
+        .iter()
+        .find(|store| store.team_id == "t_oldaaaaaaa")
+        .unwrap();
+    assert!(left.left && left.joined.is_none());
+    // A joined store that no vault here syncs, and that did not end: the download.
+    status.stores[1].void = false;
+    let view = view_of(&status, &stores(), &away, true, &[]);
+    let garden = view
+        .others
+        .iter()
+        .find(|store| store.team_id == "t_gardenaaaa")
+        .unwrap();
+    assert!(garden.download);
+    let text = painted(|_, ui| {
+        draw(ui, &view);
+    });
+    assert!(text.contains(DOWNLOAD), "{text}");
+}
+
 #[test]
 fn the_model_puts_each_store_where_it_belongs() {
-    let view = view_of(&status(), &stores(), &BTreeMap::new(), true, &[]);
+    let view = view_of(&status(), &stores(), &local(), true, &[]);
     assert_eq!(
         view.own
             .iter()
@@ -342,6 +438,13 @@ fn the_texts_name_nothing_of_one_platform() {
         stop("Ola"),
         shared_by("Family", "Ola"),
         shared_with("Ola"),
+        stopped("Ola"),
+        left_vault("Ola"),
+        sharing_ended("Ola"),
+        share_again("Ola"),
+        connect_calls("Family"),
+        not_listed("Ola"),
+        left_on("Laptop"),
     ];
     for text in TEXTS.iter().copied().chain(made.iter().map(String::as_str)) {
         for word in [

@@ -24,8 +24,14 @@ impl fake_connect::StoreRelay for fake_relay::FakeRelay {
     fn set_origin(&self, origin: &str) {
         fake_relay::FakeRelay::set_origin(self, origin);
     }
-    fn add_store_team(&self, name: &str, device_name: &str, public_key: &[u8]) -> (String, u64) {
-        fake_relay::FakeRelay::add_store_team(self, name, device_name, public_key)
+    fn add_store_team(
+        &self,
+        team_id: &str,
+        name: &str,
+        device_name: &str,
+        public_key: &[u8],
+    ) -> u64 {
+        fake_relay::FakeRelay::add_store_team(self, team_id, name, device_name, public_key)
     }
     fn add_store_device(&self, team_id: &str, device_name: &str, public_key: &[u8]) -> u64 {
         fake_relay::FakeRelay::add_store_device(self, team_id, device_name, public_key)

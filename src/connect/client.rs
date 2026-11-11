@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::ConnectError;
 use super::trust::ListEntry;
-use crate::sync::relay::{ApiError, call, call_without_busy_retries, json_request};
+use crate::sync::relay::{ApiError, call, call_in_scope, call_without_busy_retries, json_request};
 use crate::sync::relay_http::Request;
 use crate::sync::{RelayUrl, SyncError};
 
@@ -182,9 +182,14 @@ pub(super) struct JoinCancel<'a> {
 }
 
 #[derive(Serialize)]
-struct VaultCreate<'a> {
-    vault_id: &'a str,
-    name: &'a str,
+pub(super) struct VaultCreate<'a> {
+    pub vault_id: &'a str,
+    pub name: &'a str,
+    /// The id of the new store, made by this device.
+    pub team_id: &'a str,
+    /// The `store` entry for it at the version after the head (section 8).
+    pub version: u64,
+    pub statement: &'a str,
 }
 
 /// The device to add to a store and the key that this device verified for it.
@@ -464,6 +469,10 @@ pub struct VaultStoreView {
     pub created_at: u64,
     pub shared: bool,
     pub devices: Vec<StoreDevice>,
+    /// The accounts whose active `share` of this store Connect counts as void (section 16):
+    /// the owner's device ends those shares; nothing starts from it.
+    #[serde(default)]
+    pub void: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -700,6 +709,33 @@ impl ConnectClient {
         call(&self.url, &request).map_err(connect_error)
     }
 
+    /// `method path` with a JSON body on a route of the budget `scope` of section 16
+    /// (`super::share`, its only caller): a `429` of it holds back only that budget.
+    pub(super) fn send_json_in_scope<T: DeserializeOwned>(
+        &self,
+        method: &'static str,
+        path: &str,
+        bearer: Option<&str>,
+        body: &impl Serialize,
+        scope: &str,
+    ) -> Result<T, ConnectError> {
+        let mut request = json_request(method, path, bearer, body);
+        request.deadline = Some(Instant::now() + CALL_DEADLINE);
+        call_in_scope(&self.url, &request, scope).map_err(connect_error)
+    }
+
+    /// `GET path` on a route of the budget `scope` of section 16.
+    pub(super) fn get_json_in_scope<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        bearer: Option<&str>,
+        scope: &str,
+    ) -> Result<T, ConnectError> {
+        let mut request = Request::new("GET", path.to_owned(), bearer);
+        request.deadline = Some(Instant::now() + CALL_DEADLINE);
+        call_in_scope(&self.url, &request, scope).map_err(connect_error)
+    }
+
     fn post<T: DeserializeOwned>(
         &self,
         path: &str,
@@ -715,37 +751,6 @@ impl ConnectClient {
         bearer: Option<&str>,
     ) -> Result<T, ConnectError> {
         self.send(Request::new("GET", path.to_owned(), bearer))
-    }
-
-    /// `POST path` with a JSON body: the calls of the other modules of `connect`
-    /// (`super::share`).
-    pub(super) fn post_json<T: DeserializeOwned>(
-        &self,
-        path: &str,
-        bearer: Option<&str>,
-        body: &impl Serialize,
-    ) -> Result<T, ConnectError> {
-        self.post(path, bearer, body)
-    }
-
-    /// `GET path`.
-    pub(super) fn get_json<T: DeserializeOwned>(
-        &self,
-        path: &str,
-        bearer: Option<&str>,
-    ) -> Result<T, ConnectError> {
-        self.get(path, bearer)
-    }
-
-    /// `method path` with a JSON body.
-    pub(super) fn send_json<T: DeserializeOwned>(
-        &self,
-        method: &'static str,
-        path: &str,
-        bearer: Option<&str>,
-        body: &impl Serialize,
-    ) -> Result<T, ConnectError> {
-        self.send(json_request(method, path, bearer, body))
     }
 
     // ---- Edge routes: no Authorization. ----
@@ -895,14 +900,9 @@ impl ConnectClient {
     pub(super) fn create_vault_store(
         &self,
         token: &str,
-        vault_id: &str,
-        name: &str,
+        body: &VaultCreate<'_>,
     ) -> Result<VaultStoreView, ConnectError> {
-        self.post(
-            "/v1/account/vaults",
-            Some(token),
-            &VaultCreate { vault_id, name },
-        )
+        self.post("/v1/account/vaults", Some(token), body)
     }
 
     pub(super) fn vault_stores(&self, token: &str) -> Result<Vec<VaultStoreView>, ConnectError> {

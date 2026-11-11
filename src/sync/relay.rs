@@ -274,18 +274,28 @@ fn rate_limits() -> &'static Mutex<BTreeMap<String, Instant>> {
 
 /// The time left before `url` may be asked again, when a `429` asked to wait.
 pub(crate) fn rate_limited(url: &RelayUrl) -> Option<Duration> {
+    limited(url.as_str())
+}
+
+/// The time left of the wait kept under `key`.
+fn limited(key: &str) -> Option<Duration> {
     let mut limits = lock(rate_limits());
     let left = limits
-        .get(url.as_str())
+        .get(key)
         .map(|until| until.saturating_duration_since(Instant::now()));
     match left {
         Some(left) if !left.is_zero() => Some(left),
         Some(_) => {
-            limits.remove(url.as_str());
+            limits.remove(key);
             None
         }
         None => None,
     }
+}
+
+/// The key of the waits of the budget `scope` of `url`.
+fn scope_key(url: &RelayUrl, scope: &str) -> String {
+    format!("{} {scope}", url.as_str())
 }
 
 fn rate_limit_error(left: Duration) -> ApiError {
@@ -322,7 +332,19 @@ pub(crate) fn call<T: DeserializeOwned>(
     url: &RelayUrl,
     request: &Request<'_>,
 ) -> Result<T, ApiError> {
-    call_with_busy_retries(url, request, BUSY_RETRIES)
+    call_with_busy_retries(url, request, BUSY_RETRIES, None)
+}
+
+/// [`call`] on a route that Connect counts in a budget of its own, `scope` (the reads and
+/// the ceremony of the shared vaults, connect-account-v1 sections 3 and 13): a `429` of it
+/// holds back only the calls of that budget until its `Retry-After` passed, and a wait of
+/// the whole relay holds it back too.
+pub(crate) fn call_in_scope<T: DeserializeOwned>(
+    url: &RelayUrl,
+    request: &Request<'_>,
+    scope: &str,
+) -> Result<T, ApiError> {
+    call_with_busy_retries(url, request, BUSY_RETRIES, Some(scope))
 }
 
 /// One call that never sends the same body again after `503 busy`: the caller decides
@@ -332,17 +354,19 @@ pub(crate) fn call_without_busy_retries<T: DeserializeOwned>(
     url: &RelayUrl,
     request: &Request<'_>,
 ) -> Result<T, ApiError> {
-    call_with_busy_retries(url, request, 0)
+    call_with_busy_retries(url, request, 0, None)
 }
 
 fn call_with_busy_retries<T: DeserializeOwned>(
     url: &RelayUrl,
     request: &Request<'_>,
     busy_retries: usize,
+    scope: Option<&str>,
 ) -> Result<T, ApiError> {
+    let key = scope.map_or_else(|| url.as_str().to_owned(), |scope| scope_key(url, scope));
     let mut attempt = 0;
     loop {
-        if let Some(left) = rate_limited(url) {
+        if let Some(left) = rate_limited(url).or_else(|| limited(&key)) {
             return Err(rate_limit_error(left));
         }
         let answer = relay_http::exchange(url, request).map_err(http_error)?;
@@ -369,7 +393,7 @@ fn call_with_busy_retries<T: DeserializeOwned>(
             }) => {
                 let wait =
                     Duration::from_secs(retry_after.unwrap_or(RATE_WAIT).clamp(1, MAX_RATE_WAIT));
-                lock(rate_limits()).insert(url.as_str().to_owned(), Instant::now() + wait);
+                lock(rate_limits()).insert(key, Instant::now() + wait);
                 return Err(rate_limit_error(wait));
             }
             other => return other,
@@ -657,14 +681,6 @@ impl Session {
     /// head.
     pub(crate) fn with_shared_signers(mut self, slot: Arc<Mutex<Option<SignerPolicy>>>) -> Self {
         self.signer_keys = Some(SignerSource::Shared(slot));
-        self
-    }
-
-    /// The session with a policy of its own: a join or an adoption, which verified the
-    /// device list just before. An adoption rebinds it to the policy of its relay sync
-    /// ([`Self::rebound`]).
-    pub(crate) fn with_fixed_signers(mut self, policy: SignerPolicy) -> Self {
-        self.signer_keys = Some(SignerSource::Fixed(Arc::new(policy)));
         self
     }
 
@@ -1226,12 +1242,15 @@ pub(crate) fn link_chain(
     Ok((version, previous))
 }
 
-/// Whether `key` is a key that the device list of this Mac held and removed, by the
-/// policy of `session` now ([`SignerPolicy::left`]).
+/// Whether `key` is a key that left the signers of the store of `session`, by its policy
+/// now ([`SignerPolicy::for_team`]): for a store of this account a key that the device list
+/// of this Mac held and removed ([`SignerPolicy::left`]); for a store shared between
+/// accounts also an ended key of another account of the store (section 16.6).
 fn departed_key(session: &Session, key: &[u8]) -> bool {
-    session
-        .policy_now()
-        .is_some_and(|policy| policy.left_key(key) && !policy.accepts(key))
+    session.policy_now().is_some_and(|policy| {
+        let policy = policy.for_team(&session.team_id);
+        policy.left_key(key) && !policy.accepts(key)
+    })
 }
 
 // ---- The transport. ----
@@ -1349,8 +1368,10 @@ impl RelayTransport {
     /// list that this Mac fetched after the first refusal of that head still refuses it,
     /// then [`SyncError::UnknownSigner`] (for the current head itself, `Damaged`).
     ///
-    /// A policy of its own ([`SignerSource::Fixed`]: a join or an adoption, which verified
-    /// the list just before) waits for no list: its refusal is final at once.
+    /// A policy of its own ([`SignerSource::Fixed`]: a transport of a test or of a caller
+    /// that verified the list just before) waits for no list: its refusal is final at once.
+    /// A join of a vault store follows the slot of the account's signers instead
+    /// (`RelaySync::joined_from_store`).
     fn unlisted(&self, head: &str) -> SyncError {
         if matches!(self.signer_keys, Some(SignerSource::Fixed(_))) {
             return SyncError::UnknownSigner;
@@ -3582,6 +3603,7 @@ impl PendingJoin {
                     session: Arc::clone(&self.session),
                     team: self.team.clone(),
                     notes: Arc::default(),
+                    signers: None,
                 }))
             }
             Err(error) => match sync_error(error) {
@@ -3632,6 +3654,7 @@ impl PendingJoin {
                     session: self.session,
                     team: self.team,
                     notes: Arc::default(),
+                    signers: None,
                 }
                 .cancel();
                 Ok(())
@@ -3647,6 +3670,9 @@ pub struct JoinedDevice {
     team: String,
     /// What the checks of its downloads noted ([`Self::waiting_head`]).
     notes: Arc<HeadNotes>,
+    /// For a vault store of a Connect account: the slot of the signer policy that its
+    /// session follows from the first request ([`Self::set_signers`]).
+    pub(crate) signers: Option<Arc<Mutex<Option<SignerPolicy>>>>,
 }
 
 impl fmt::Debug for JoinedDevice {
@@ -3682,6 +3708,22 @@ impl JoinedDevice {
     /// The team name.
     pub fn team(&self) -> &str {
         &self.team
+    }
+
+    /// The signer policy of the account file after a step that wrote it (the window hands
+    /// each one over): the session of a vault store follows it while the copy downloads,
+    /// so a list that a refresh read reaches the check of the next download. No effect for
+    /// a device of a relay team.
+    pub fn set_signers(&self, policy: Option<SignerPolicy>) {
+        if let Some(slot) = &self.signers {
+            *lock(slot) = policy;
+        }
+    }
+
+    /// A device list that this device fetched reached the policy of its session: a head
+    /// whose signer the lists still do not hold is refused from the next check on.
+    pub fn note_device_list(&self) {
+        self.notes.lists.fetch_add(1, Ordering::SeqCst);
     }
 
     /// The device number of this Mac on the relay.

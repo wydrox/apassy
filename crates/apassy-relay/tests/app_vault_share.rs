@@ -256,12 +256,16 @@ fn two_accounts_of_a_family_share_a_vault_and_end_it() {
     assert_eq!(requests[0].words, answer.words);
     assert_eq!(requests[0].account_id, x_id);
     let names = ShareNames::default();
-    let (proof, epoch) = owner_a.proof(account_a.share_action(&link, &requests[0], &names));
+    let (proof, epoch) = owner_a.proof(
+        account_a
+            .share_action(&link, &requests[0], &names)
+            .expect("action"),
+    );
     let confirmed = account_a
         .confirm_share(&link, &requests[0], &names, proof, &epoch)
         .expect("A confirms");
     assert_eq!(confirmed.added.len(), 1, "{confirmed:?}");
-    let (proof, epoch) = owner_x.proof(account_x.accept_action(&answer, &names));
+    let (proof, epoch) = owner_x.proof(account_x.accept_action(&answer, &names).expect("action"));
     account_x
         .accept_share(&answer, &names, proof, &epoch)
         .expect("X accepts");
