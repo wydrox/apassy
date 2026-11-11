@@ -34,7 +34,9 @@
 //! open for [`STABLE_LINK`]. A WebSocket that Connect replaced (another process of this
 //! node, close 4005) waits [`REPLACED_WAIT`]; a tunnel limit or byte budget of the account
 //! (close 4002, `429 tunnel_limit`, `403 account_limit`) waits [`LIMIT_WAIT`]; an account
-//! without the tunnel waits [`NOT_ON_CONNECT_WAIT`]. An end of the WebSocket resets every
+//! without the tunnel waits [`NOT_ON_CONNECT_WAIT`]. Any other refusal, the edge's `429
+//! rate_limited` too (a limit of the address, shared with other clients behind it), takes
+//! the next step of the backoff. An end of the WebSocket resets every
 //! open stream: the front ends its connections to the relay, so no stream survives.
 //! [`TunnelHandle::stop`] (a lock, a quit, a node stop) closes the WebSocket with 1000,
 //! ends every stream at once, and joins its threads (at most [`STOP_WAIT`] for one inside
@@ -53,10 +55,10 @@
 //! [`STREAM_BUFFER`] bytes wait toward the front for one stream. Connect sending over
 //! the window breaks the stream rule `over_window`, and the node resets the stream.
 //!
-//! Limits of the node: at most [`MAX_DEVICE_STREAMS`] open `device` streams and
-//! [`MAX_INGRESS_STREAMS`] `public` and `acme` streams (the dial and ingress slots of
-//! contract 8; a stream over them is reset), the window of each stream, and the front's
-//! own limits for each connection.
+//! Limits of the node: at most [`MAX_DEVICE_STREAMS`] open `device` streams,
+//! [`MAX_PUBLIC_STREAMS`] `public` streams, and [`MAX_ACME_STREAMS`] `acme` streams, each
+//! kind in slots of its own as at Connect (contract 8; a stream over them is reset), the
+//! window of each stream, and the front's own limits for each connection.
 //!
 //! No stream content is logged. The account token stays in the account seam: it goes
 //! only into the `Authorization` header of the requests to the Connect origin.
@@ -106,7 +108,8 @@ pub const NOT_ON_CONNECT_WAIT: Duration = Duration::from_secs(15 * 60);
 /// 4005: another process with this node's account device).
 pub const REPLACED_WAIT: Duration = Duration::from_secs(5 * 60);
 /// The wait after a tunnel limit or the byte budget of the account (close 4002, `429
-/// tunnel_limit`, `403 account_limit`).
+/// tunnel_limit`, `403 account_limit`). Not after the edge's `429 rate_limited`: the
+/// backoff.
 pub const LIMIT_WAIT: Duration = Duration::from_secs(15 * 60);
 /// A WebSocket that stayed open this long starts the backoff again at 1 s.
 pub const STABLE_LINK: Duration = Duration::from_secs(60);
@@ -115,11 +118,13 @@ pub const STABLE_LINK: Duration = Duration::from_secs(60);
 pub const STREAM_BUFFER: usize = 256 * 1024;
 /// Open `device` streams of this node at once (the dial slots of contract 8).
 pub const MAX_DEVICE_STREAMS: usize = 64;
-/// Open `public` and `acme` streams of this node at once (the ingress slots of contract
-/// 8).
-pub const MAX_INGRESS_STREAMS: usize = 16;
+/// Open `public` streams of this node at once (the public slots of contract 8).
+pub const MAX_PUBLIC_STREAMS: usize = 16;
+/// Open `acme` streams of this node at once: slots of their own, as at Connect (contract
+/// 8), so open `public` streams never keep the certificate renewal out.
+pub const MAX_ACME_STREAMS: usize = 4;
 /// Open streams of this node at once.
-pub const MAX_STREAMS: usize = MAX_DEVICE_STREAMS + MAX_INGRESS_STREAMS;
+pub const MAX_STREAMS: usize = MAX_DEVICE_STREAMS + MAX_PUBLIC_STREAMS + MAX_ACME_STREAMS;
 /// The zone of the public names when `APASSY_CONNECT_NODE_ZONE` is not set (contract 2).
 pub const DEFAULT_NODE_ZONE: &str = "node.apassy.wyderka.cc";
 /// The setting of the zone of the public names (a sandbox Connect).
@@ -1355,11 +1360,10 @@ fn read_link(
     code
 }
 
-/// The open streams of `kind`'s slots: `device`, or `public` and `acme` together.
+/// The open streams of `kind`: each kind has slots of its own.
 fn live_of(seq: &Sequencer<Arc<StreamShared>>, kind: Kind) -> usize {
-    let ingress = |kind: Kind| kind != Kind::Device;
     seq.values()
-        .filter(|(_, stream)| ingress(stream.kind) == ingress(kind))
+        .filter(|(_, stream)| stream.kind == kind)
         .count()
 }
 
@@ -1374,7 +1378,8 @@ fn apply(
         let mut seq = lock(&link.seq);
         let cap = match kind {
             Kind::Device => MAX_DEVICE_STREAMS,
-            Kind::Public | Kind::Acme => MAX_INGRESS_STREAMS,
+            Kind::Public => MAX_PUBLIC_STREAMS,
+            Kind::Acme => MAX_ACME_STREAMS,
         };
         if frame.flags & OPEN != 0 && live_of(&seq, kind) >= cap {
             // Over the node's cap: the id is used up, the stream is refused.
@@ -1822,7 +1827,11 @@ pub fn after_link(end: LinkEnd) -> NextTry {
 pub fn after_refusal(failure: &Failure) -> NextTry {
     match failure {
         Failure::NotEntitled | Failure::NoAccount => NextTry::Wait(NOT_ON_CONNECT_WAIT),
-        Failure::Refused { status: 429, .. } => NextTry::Wait(LIMIT_WAIT),
+        // Only the relay's own limit of the account waits long; the edge's per-address
+        // `rate_limited` (other clients behind the same address) takes the backoff.
+        Failure::Refused { status: 429, code } if code == "tunnel_limit" => {
+            NextTry::Wait(LIMIT_WAIT)
+        }
         Failure::Refused { status: 403, code } if code == "account_limit" => {
             NextTry::Wait(LIMIT_WAIT)
         }
@@ -2029,31 +2038,34 @@ pub struct Kept {
     pub done: bool,
 }
 
-/// Keeps an issued certificate: `store` writes it to the node directory, and the picker
-/// installs it for the `public` streams.
+/// Keeps an issued certificate: the picker installs it for the `public` streams at once,
+/// then `store` writes it to the node directory. A store that fails leaves it serving
+/// from memory, and the caller stores it again later (`done: false`).
 pub fn keep_issued(
     picker: &CertPicker,
     issued: &acme::Issued,
     store: impl FnOnce() -> io::Result<()>,
 ) -> Kept {
-    match store().and_then(|()| picker.install_public(&issued.chain, &issued.key)) {
-        Ok(()) => Kept {
-            state: CertState::Valid {
-                not_after: issued.not_after,
-            },
-            done: true,
-        },
-        Err(error) => Kept {
-            state: CertState::Missing(format!("the certificate cannot be kept: {error}")),
+    if let Err(error) = picker.install_public(&issued.chain, &issued.key) {
+        return Kept {
+            state: CertState::Missing(format!("the certificate cannot be used: {error}")),
             done: false,
-        },
+        };
+    }
+    let state = CertState::Valid {
+        not_after: issued.not_after,
+    };
+    Kept {
+        state,
+        done: store().is_ok(),
     }
 }
 
 /// The certificate thread: order a certificate when there is none or it ends within the
-/// renewal window, through the tunnel once it is open; then look again every hour. A
-/// certificate that was issued but could not be stored or installed is kept in memory
-/// and stored again with the backoff, without a new order, while it is usable.
+/// renewal window, through the tunnel once it is open; then look again every hour. An
+/// issued certificate is installed at once; one that could not be stored (or installed)
+/// is kept in memory and stored again with the backoff, without a new order, while it is
+/// usable.
 fn renew_loop(
     shared: &Arc<Shared>,
     options: &AcmeOptions,
@@ -2159,7 +2171,10 @@ mod tests {
         assert_eq!(PING_INTERVAL, Duration::from_secs(30));
         assert_eq!(IDLE_LIMIT, Duration::from_secs(90));
         assert_eq!(STREAM_BUFFER, 256 * 1024);
-        assert_eq!((MAX_DEVICE_STREAMS, MAX_INGRESS_STREAMS), (64, 16));
+        assert_eq!(
+            (MAX_DEVICE_STREAMS, MAX_PUBLIC_STREAMS, MAX_ACME_STREAMS),
+            (64, 16, 4)
+        );
         assert_eq!(frame::INITIAL_WINDOW, 64 * 1024);
         assert_eq!(ws::SUBPROTOCOL, "apassy-tunnel-v1");
     }
