@@ -460,18 +460,24 @@ impl Store {
         })
     }
 
-    /// Opens a plain file without `plain_allowed`, for the two operator commands that
-    /// make or check plain files while the relay is stopped and still has its master key:
-    /// `connect-cutover` (it checks the plain copies it wrote) and `backup` of a stopped
-    /// relay. Never used by a running relay.
-    pub(crate) fn open_plain_unchecked(path: &Path) -> RelayResult<Self> {
+    /// Opens a plain file to read it only (`SQLITE_OPEN_READ_ONLY`), without
+    /// `plain_allowed`: for `connect-cutover`, which checks the plain copies it wrote while
+    /// the relay is stopped and still has its master key (its dry run included), and for the
+    /// start check of a finished cutover (`cutover::check_start`). Never writes a byte;
+    /// never used to serve.
+    pub(crate) fn open_plain_read_only_unchecked(path: &Path) -> RelayResult<Self> {
         let meta = fs::symlink_metadata(path)
             .map_err(|_| RelayError::internal("The file does not exist."))?;
         if !meta.is_file() {
             return Err(RelayError::internal("The file is not a regular file."));
         }
         Ok(Self {
-            conn: Mutex::new(open_plain_conn(path)?),
+            conn: Mutex::new(open_plain_conn_with(
+                path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | rusqlite::OpenFlags::SQLITE_OPEN_URI
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )?),
         })
     }
 

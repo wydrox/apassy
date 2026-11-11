@@ -1607,12 +1607,20 @@ impl Hub {
     /// Deletes a suspended team: its row and file key in the directory, then its file.
     /// There is no undo. With `free_connect_key` (a Connect team only, 400 otherwise) the
     /// device key that made the team may make a new one (docs/SPEC.md section 27.10).
-    /// Returns whether a connect key was freed.
+    /// Returns whether a connect key was freed. A vault store of an account (kind
+    /// `account`) is refused in both modes: only its account removes it, with its device
+    /// map and waiting removals (`delete_vault_store`).
     pub fn delete(&self, id: &TeamId, free_connect_key: bool, now: u64) -> RelayResult<bool> {
         let row = self
             .directory
             .team(id)?
             .ok_or_else(|| RelayError::not_found("team"))?;
+        if row.kind == TeamKind::Account {
+            return Err(RelayError::new(
+                codes::CONFLICT,
+                "This is a vault store of an account: `admin delete` never deletes one. Its account removes it (`DELETE /v1/account/vaults/{team_id}` from a device in the store, or `DELETE /v1/account`). Nothing was changed.",
+            ));
+        }
         if free_connect_key && row.kind != TeamKind::Connect {
             return Err(RelayError::invalid(
                 "Only a Connect team has a connect key to free.",
