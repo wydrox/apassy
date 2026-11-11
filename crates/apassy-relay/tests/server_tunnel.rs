@@ -2115,7 +2115,7 @@ fn small_buffer_agent(addr: SocketAddr) -> TcpStream {
 fn a_half_closed_agent_that_reads_slowly_gets_a_large_answer_whole() {
     // A window of 2 MiB: Connect grants the node 512 KiB more each time the agent read a
     // quarter of it. The agent reads 32 KiB each 100 ms through a 32 KiB receive buffer
-    // (so the kernel's buffers do not absorb the answer), so between two grants the node
+    // and Connect writes it through a 32 KiB send buffer, so between two grants the node
     // waits for window for about 1.6 s, longer than the grace of silence (1 s), while the
     // bytes that reach the agent move every 100 ms.
     let h = Harness::with(
@@ -2126,14 +2126,24 @@ fn a_half_closed_agent_that_reads_slowly_gets_a_large_answer_whole() {
         },
         Duration::from_secs(30),
     );
-    let total = 4 * 1024 * 1024;
+    let total = 3 * 1024 * 1024;
     let mut node = h.node("tok-a1").unwrap();
-    let sni = sni_listener(&h, IngressConfig::default());
-    let mut agent = small_buffer_agent(sni.addr);
+    // The ingress's own step after it read the ClientHello, on sockets whose kernel
+    // buffers are small (32 KiB each way), so that they do not absorb the answer.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut agent = small_buffer_agent(listener.local_addr().unwrap());
+    let (server, _) = listener.accept().unwrap();
+    socket2::SockRef::from(&server)
+        .set_send_buffer_size(32 * 1024)
+        .unwrap();
+    let ticket = h
+        .broker
+        .open_ingress("aaaaaaaaaa.node.example.test", Kind::Public, hello_a(), 0)
+        .expect("a public stream");
+    h.broker.run_raw(ticket, server, true);
     agent
         .set_read_timeout(Some(Duration::from_secs(20)))
         .unwrap();
-    agent.write_all(&hello_a()).unwrap();
     agent.shutdown(std::net::Shutdown::Write).unwrap();
     let open = node.next_any_frame();
     assert_eq!(open.kind, Kind::Public);
