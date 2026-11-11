@@ -223,8 +223,13 @@ fn logs_filter_the_rows_and_open_a_cloud_run() {
     let cloud = data.events[1].key();
     let mut app = app_with(&dir, Place::Logs, ActivityScope::default(), data);
     let text = frames(&mut app, 4);
+    // The rows of the fixture end a few minutes before now: just after midnight (UTC)
+    // they are all yesterday's, so the first day header is one of the two.
+    assert!(
+        text.contains("Today") || text.contains("Yesterday"),
+        "a day header: {text}"
+    );
     for expected in [
-        "Today",
         "Time",
         "Environment",
         "Event",
