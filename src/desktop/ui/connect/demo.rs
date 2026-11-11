@@ -119,17 +119,24 @@ pub(crate) fn fixture_plans() -> Plans {
 }
 
 fn devices() -> Vec<Device> {
-    let device =
-        |id: &str, name: &str, platform: &str, added: u64, seen: Option<u64>, this: bool| Device {
-            id: id.to_owned(),
-            name: name.to_owned(),
-            platform: platform.to_owned(),
-            created_at: added,
-            last_seen_at: seen,
-            this,
-            verified: true,
-            fingerprint: crate::connect::key_fingerprint(id.as_bytes()),
-        };
+    // The demo has no keys: each device shows a fixed fingerprint of the form of
+    // `connect::key_fingerprint`, so the demo builds without the vault feature.
+    let device = |id: &str,
+                  name: &str,
+                  platform: &str,
+                  added: u64,
+                  seen: Option<u64>,
+                  this: bool,
+                  fingerprint: &str| Device {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        platform: platform.to_owned(),
+        created_at: added,
+        last_seen_at: seen,
+        this,
+        verified: true,
+        fingerprint: fingerprint.to_owned(),
+    };
     vec![
         device(
             "dev_mmmmmmmmma",
@@ -138,6 +145,7 @@ fn devices() -> Vec<Device> {
             CREATED,
             None,
             true,
+            "3f0a 91c2 7be4",
         ),
         device(
             "dev_mmmmmmmmmb",
@@ -146,6 +154,7 @@ fn devices() -> Vec<Device> {
             CREATED + DAY,
             Some(NOW - 7_200),
             false,
+            "c815 2d6e a093",
         ),
         device(
             "dev_mmmmmmmmmc",
@@ -154,6 +163,7 @@ fn devices() -> Vec<Device> {
             CREATED + DAY,
             Some(NOW - DAY - 600),
             false,
+            "5e7b 0c48 f21d",
         ),
     ]
 }
