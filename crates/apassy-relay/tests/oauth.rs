@@ -18,7 +18,7 @@ use apassy::node::backend::{
     CatalogItem, ConnectDecision, NewCloudAgent, NodeAgentId, NodeTeamId, PendingConnect,
     RunningNode, TokenIssue,
 };
-use apassy_relay::config::{EmbeddedOptions, OAuthConfig, RelayConfig, UpstreamOptions};
+use apassy_relay::config::{EmbeddedOptions, HOST_WORD, OAuthConfig, RelayConfig, UpstreamOptions};
 use apassy_relay::embedded::EmbeddedNode;
 use apassy_relay::hostkeys;
 use apassy_relay::secret::SecretString;
@@ -595,7 +595,10 @@ fn register_authorize_wait_allow_token_and_mcp() {
             .contains(&format!("Grok Bot wants to connect to {MAC}"))
     );
     assert!(page.text.contains(&request.code));
-    assert!(page.text.contains("Approve on your Mac or iPhone."));
+    assert!(
+        page.text
+            .contains(&format!("Approve on your {HOST_WORD} or iPhone."))
+    );
     // Allowed: the next refresh sends the browser back with the code, once.
     let agent = node.allow(&request);
     assert!(node.node().pending_connects().unwrap().is_empty());
@@ -1113,9 +1116,9 @@ fn open_connect_requests_are_limited_per_node() {
     assert_eq!(answer.status, 429);
     assert!(answer.text.contains("Too many connection requests wait."));
     assert!(
-        answer
-            .text
-            .contains("Deny requests on your Mac that you did not start, then connect again."),
+        answer.text.contains(&format!(
+            "Deny requests on your {HOST_WORD} that you did not start, then connect again."
+        )),
         "{}",
         answer.text
     );
@@ -1156,8 +1159,9 @@ fn a_new_authorize_of_the_same_client_ends_the_waiting_request_and_shows_its_own
     assert_eq!(page.status, 200, "{}", page.text);
     assert!(page.text.contains(&request.code), "{}", page.text);
     assert!(
-        page.text
-            .contains("Deny requests on your Mac that you did not start, then connect again."),
+        page.text.contains(&format!(
+            "Deny requests on your {HOST_WORD} that you did not start, then connect again."
+        )),
         "{}",
         page.text
     );

@@ -215,6 +215,9 @@ pub(super) fn sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
                 }
             }
         });
+        // `apassy-sandbox` (Seatbelt) is macOS only: say what that means before setup.
+        #[cfg(target_os = "linux")]
+        kit::note(ui, crate::agents_unconfined!());
         kit::section(
             ui,
             None,

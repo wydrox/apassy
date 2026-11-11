@@ -502,7 +502,11 @@ impl Request {
         if self.v != BROWSER_WIRE_VERSION {
             return Err(WireError::new(
                 "bad_version",
-                "This Apassy extension does not match the app. Load the extension from the same Apassy.app.",
+                concat!(
+                    "This Apassy extension does not match the app. Load the extension from ",
+                    crate::same_app!(),
+                    "."
+                ),
             ));
         }
         let url = |url: Option<String>| match url {
@@ -687,7 +691,11 @@ fn check_version(v: u32) -> Result<(), WireError> {
     } else {
         Err(WireError::new(
             "bad_version",
-            "This Apassy extension does not match the app. Load the extension from the same Apassy.app.",
+            concat!(
+                "This Apassy extension does not match the app. Load the extension from ",
+                crate::same_app!(),
+                "."
+            ),
         ))
     }
 }
