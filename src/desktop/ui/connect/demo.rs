@@ -492,6 +492,7 @@ fn frame(code: &str) -> (Shown, Option<Sheet>) {
                     "amber lotus quiet prism walnut ember falcon meadow pilot cobalt summit river nickel violet canyon tulip"
                         .to_owned(),
                 ),
+                unrecorded: false,
             }),
         ),
         "T1" => (
