@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Prepare a DISPOSABLE Ubuntu 24.04+ or Debian 13+ machine (or container) for the
+# Prepare a DISPOSABLE Ubuntu 22.04+ or Debian 12+ machine (or container) for the
 # Linux vault acceptance kit. It installs system packages, Google Chrome stable
 # from Google's apt repository and Chromium (Debian: the chromium deb; Ubuntu:
 # only the snap exists), and a private Node.js for the local relying party.
@@ -14,11 +14,15 @@ SUDO=sudo
 [ "$(id -u)" = 0 ] && SUDO=
 export DEBIAN_FRONTEND=noninteractive
 $SUDO apt-get update -q
-# polkitd/pkexec provide pkcheck and pkttyagent (policykit-1 is transitional).
+# polkitd/pkexec provide pkcheck and pkttyagent (policykit-1 is transitional);
+# Ubuntu 22.04 has only policykit-1.
+polkit="polkitd pkexec"
+apt-cache show polkitd >/dev/null 2>&1 || polkit=policykit-1
+# shellcheck disable=SC2086
 $SUDO apt-get install -y -q --no-install-recommends \
     ca-certificates curl gnupg xz-utils jq python3 sudo procps psmisc tmux file \
     xvfb xauth x11-utils xdotool imagemagick openbox fonts-dejavu-core \
-    dbus dbus-x11 dbus-user-session gnome-keyring libsecret-tools polkitd pkexec \
+    dbus dbus-x11 dbus-user-session gnome-keyring libsecret-tools $polkit \
     libegl1 libgl1 libgl1-mesa-dri
 if [ ! -f /usr/share/keyrings/l4-google-chrome.gpg ]; then
     curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | $SUDO gpg --dearmor -o /usr/share/keyrings/l4-google-chrome.gpg

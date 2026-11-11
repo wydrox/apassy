@@ -86,6 +86,66 @@ fn row_view(browser: &Browser, state: &State, stale: bool) -> Option<RowView> {
     })
 }
 
+/// The label, style and hover text of one button of a row whose status is `status`.
+fn button_view(button: Action, status: &str) -> (&'static str, Style, Option<&'static str>) {
+    match button {
+        Action::Connect => (
+            "Connect",
+            Style::Prominent,
+            Some(
+                "Connect opens the Apassy page of the Chrome Web Store in the browser. Click Add to Chrome there. Do it once for each browser.",
+            ),
+        ),
+        Action::Disconnect if status == UNSUPPORTED_STATUS => (
+            "Remove manifest",
+            Style::Bordered,
+            Some("This browser cannot use the manifest. Remove it."),
+        ),
+        Action::Disconnect => ("Disconnect", Style::Bordered, None),
+        Action::OpenStore => ("Get the extension", Style::Bordered, None),
+    }
+}
+
+/// Every text of the browser rows, for each browser in each state, with and without a
+/// manifest: the name, the status, the note, and each button with its hover. The
+/// wording guard reads them (`wording_tests.rs`): the rows need an installed package,
+/// which a test build is not.
+#[cfg(all(test, target_os = "linux"))]
+pub(super) fn every_row_text() -> Vec<String> {
+    use crate::browser::install::Unsupported;
+    let mut texts = vec![
+        crate::needs_app!().to_owned(),
+        SOURCE_BUILD_NOTE.to_owned(),
+        concat!("No Chromium browser is on this ", crate::computer!(), ".").to_owned(),
+    ];
+    for browser in BROWSERS {
+        for state in [
+            State::Missing,
+            State::NotConnected,
+            State::Connected,
+            State::Other("/opt/other/apassy-browser-host".to_owned()),
+            State::Unsupported(Unsupported::Snap),
+            State::Unsupported(Unsupported::Flatpak),
+            State::Unsupported(Unsupported::UnknownBuild),
+        ] {
+            for stale in [false, true] {
+                let Some(row) = row_view(browser, &state, stale) else {
+                    continue;
+                };
+                texts.push(browser.name.to_owned());
+                texts.push(row.status.to_owned());
+                texts.extend(row.note);
+                for button in row.buttons {
+                    let (label, _, hover) = button_view(button, row.status);
+                    texts.push(label.to_owned());
+                    texts.extend(hover.map(str::to_owned));
+                }
+            }
+        }
+    }
+    texts
+}
+
 /// When the extension last talked to the app.
 fn last_seen_text(seen: Option<Instant>) -> String {
     let Some(seen) = seen else {
@@ -101,51 +161,55 @@ fn last_seen_text(seen: Option<Instant>) -> String {
     }
 }
 
-/// Settings > Tools > Browser extension: a row for each Chromium browser on this Mac
+/// Settings > Tools > Browser extension: a row for each Chromium browser on this computer
 /// with its state and "Connect", and when the extension last asked.
 pub(super) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     use super::settings::rows;
 
     let bundle = Install::current();
-    ui.label("Browser instances agents may fill in with remote debugging (all profiles)");
-    if let Some(identity) = app.browser.unsafe_instance.clone() {
-        ui.horizontal(|ui| {
-            ui.label(identity.description());
-            if ui.button("Trust this instance…").clicked() {
-                app.prepare_owner(
-                    crate::desktop::owner_check::OwnerRequest::BrowserDebugging {
-                        request_label: "Agent fills in all profiles of this instance".into(),
-                        identity,
-                        scope: None,
-                        binding: None,
-                    },
-                    Some(ui.ctx()),
-                    false,
-                );
-            }
-        });
-    }
-    let profiles = app
-        .browser
-        .trusted_instances
-        .get_or_insert_with(crate::browser::trust::profiles)
-        .clone();
-    match profiles {
-        Ok(profiles) => {
-            for identity in profiles {
-                ui.horizontal(|ui| {
-                    ui.label(identity.description());
-                    if ui.button("Remove").clicked() {
-                        if let Err(e) = crate::browser::trust::remove(&identity) {
-                            app.set_err(e);
-                        }
-                        app.browser.trusted_instances = None;
-                    }
-                });
-            }
+    // Linux refuses a browser that was started for remote debugging outright
+    // (src/browser/caller_linux.rs), so it has no such instances to trust.
+    if !cfg!(target_os = "linux") {
+        ui.label("Browser instances agents may fill in with remote debugging (all profiles)");
+        if let Some(identity) = app.browser.unsafe_instance.clone() {
+            ui.horizontal(|ui| {
+                ui.label(identity.description());
+                if ui.button("Trust this instance…").clicked() {
+                    app.prepare_owner(
+                        crate::desktop::owner_check::OwnerRequest::BrowserDebugging {
+                            request_label: "Agent fills in all profiles of this instance".into(),
+                            identity,
+                            scope: None,
+                            binding: None,
+                        },
+                        Some(ui.ctx()),
+                        false,
+                    );
+                }
+            });
         }
-        Err(_) => {
-            ui.label("Protected device setting unavailable. Agent fills are refused.");
+        let profiles = app
+            .browser
+            .trusted_instances
+            .get_or_insert_with(crate::browser::trust::profiles)
+            .clone();
+        match profiles {
+            Ok(profiles) => {
+                for identity in profiles {
+                    ui.horizontal(|ui| {
+                        ui.label(identity.description());
+                        if ui.button("Remove").clicked() {
+                            if let Err(e) = crate::browser::trust::remove(&identity) {
+                                app.set_err(e);
+                            }
+                            app.browser.trusted_instances = None;
+                        }
+                    });
+                }
+            }
+            Err(_) => {
+                ui.label("Protected device setting unavailable. Agent fills are refused.");
+            }
         }
     }
     let home = install::home();
@@ -162,7 +226,7 @@ pub(super) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
             let (Some(bundle), Some(home)) = (&bundle, &home) else {
                 g.line_note(
                     "Chrome extension",
-                    Some(kit::text("Needs Apassy.app", Font::Body).color(Tone::Warning.text())),
+                    Some(kit::text(crate::needs_app!(), Font::Body).color(Tone::Warning.text())),
                     Some(rows::note(SOURCE_BUILD_NOTE)),
                     |_| {},
                 );
@@ -188,20 +252,7 @@ pub(super) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                     row.note.as_deref().map(rows::note),
                     |ui| {
                         for button in &row.buttons {
-                            let (label, style, hover) = match button {
-                                Action::Connect => (
-                                    "Connect",
-                                    Style::Prominent,
-                                    Some("Connect opens the Apassy page of the Chrome Web Store in the browser. Click Add to Chrome there. Do it once for each browser."),
-                                ),
-                                Action::Disconnect if row.status == UNSUPPORTED_STATUS => (
-                                    "Remove manifest",
-                                    Style::Bordered,
-                                    Some("This browser cannot use the manifest. Remove it."),
-                                ),
-                                Action::Disconnect => ("Disconnect", Style::Bordered, None),
-                                Action::OpenStore => ("Get the extension", Style::Bordered, None),
-                            };
+                            let (label, style, hover) = button_view(*button, row.status);
                             let mut response = kit::small_button(ui, label, style);
                             if let Some(hover) = hover {
                                 response = response.on_hover_text(hover);
@@ -214,13 +265,20 @@ pub(super) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 );
             }
             if found == 0 {
-                g.note_row("No Chromium browser is on this Mac.");
+                g.note_row(concat!(
+                    "No Chromium browser is on this ",
+                    crate::computer!(),
+                    "."
+                ));
             }
             g.line(
                 "Extension",
                 Some(rows::value(last_seen_text(app.browser.last_seen))),
                 |_| {},
             );
+            // macOS only: the Linux package is always installed at /usr/lib/apassy, and
+            // Linux has no agent sandbox profile.
+            #[cfg(not(target_os = "linux"))]
             if !bundle.is_installed_app() {
                 g.tone_row(
                     "This Apassy.app is not /Applications/Apassy.app. The agent profile protects it only when agents start with the apassy-sandbox of this app.",

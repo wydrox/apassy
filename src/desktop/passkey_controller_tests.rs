@@ -1340,7 +1340,11 @@ fn the_sheet_lists_metadata_and_signs_after_its_own_check() {
     assert!(dialog.browser.is_none(), "no browser note for the sheet");
     let text = dialog.request.describe();
     assert!(
-        text.starts_with("macOS asks to sign in to example.com"),
+        text.starts_with(if cfg!(target_os = "linux") {
+            "An app on this computer asks to sign in to example.com"
+        } else {
+            "macOS asks to sign in to example.com"
+        }),
         "{text}"
     );
     assert!(!text.contains("https://"), "{text}");
@@ -2019,6 +2023,61 @@ fn the_socket_marks_a_request_whose_peer_hung_up() {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert!(envelope.request.is_set());
+    socket.stop();
+}
+
+/// A wire whose second peer check, after the UI answered, refuses.
+struct RecheckWire;
+
+impl LineWire for RecheckWire {
+    type Request = ();
+    type Response = Response;
+    const NAME: &'static str = "recheck-test";
+    const MAX_REQUEST_BYTES: usize = 1024;
+    const MAX_CONNECTIONS: usize = 2;
+    const BUSY: &'static str = "busy";
+
+    fn parse(_line: &[u8]) -> Result<(), Response> {
+        Ok(())
+    }
+
+    fn error(code: &'static str, message: &'static str) -> Response {
+        Response::error(code, message)
+    }
+
+    fn check_peer_again(
+        _stream: &UnixStream,
+        _seen: &owner_socket::PeerSeen,
+    ) -> Result<(), Response> {
+        Err(Response::error("unsupported", "checked again"))
+    }
+}
+
+/// The answer of the UI leaves only when the peer passes its check again: otherwise the
+/// peer gets the refusal and never the answer.
+#[test]
+fn the_socket_withholds_the_answer_when_the_second_peer_check_refuses() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("r").join("recheck.sock");
+    let (mut socket, inbox) =
+        owner_socket::start_line::<RecheckWire>(&path, || {}).expect("socket");
+    let mut client = UnixStream::connect(&path).unwrap();
+    client.write_all(b"{}\n").unwrap();
+    let envelope = inbox.recv_timeout(Duration::from_secs(5)).expect("request");
+    envelope
+        .reply
+        .send(Response::ok(
+            "answer of the ui",
+            Data::Status {
+                vault: VaultState::Unlocked,
+                version: "test".to_owned(),
+            },
+        ))
+        .unwrap();
+    let mut text = String::new();
+    client.read_to_string(&mut text).unwrap();
+    assert!(text.contains("checked again"), "{text}");
+    assert!(!text.contains("answer of the ui"), "{text}");
     socket.stop();
 }
 

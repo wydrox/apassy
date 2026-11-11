@@ -461,6 +461,17 @@ impl Fixture {
         keys
     }
 
+    /// The file key of `team`, from the keyed `relay.db`.
+    fn file_key(&self, team: &TeamId) -> SecretString {
+        let directory =
+            Store::open_read_only(&self.config.directory_path(), &self.config.master_key).unwrap();
+        directory
+            .with(|conn| directory::team_by_id(conn, team))
+            .unwrap()
+            .unwrap()
+            .file_key
+    }
+
     /// The folder of the fixture's stopped backup.
     fn backup(&self) -> PathBuf {
         std::fs::read_dir(&self.config.backup_dir)
@@ -1848,6 +1859,21 @@ fn the_backup_and_the_cutover_cover_every_file_and_leave_no_keyed_copy_of_a_stor
     let store_file = f.config.team_path(&f.store);
     let pre = store_file.with_extension("db.pre-v7");
     std::fs::copy(&store_file, &pre).unwrap();
+    // A keyed copy from an older team schema (`.pre-v6`, another version and table set):
+    // it becomes plain too, with its own version and rows.
+    let pre_v6 = store_file.with_extension("db.pre-v6");
+    std::fs::copy(&store_file, &pre_v6).unwrap();
+    {
+        let key = f.file_key(&f.store);
+        let old = Store::open_at(&pre_v6, &key).unwrap();
+        old.with(|conn| {
+            conn.execute_batch(
+                "CREATE TABLE old_v6 (v TEXT); INSERT INTO old_v6 VALUES ('six'); PRAGMA user_version = 6;",
+            )
+            .map_err(apassy_relay::server::store::db)
+        })
+        .unwrap();
+    }
     let manifest = cutover::stopped_backup(&f.config, now() + 4).unwrap();
     let listed: Vec<&str> = manifest["files"]
         .as_array()
@@ -1859,16 +1885,17 @@ fn the_backup_and_the_cutover_cover_every_file_and_leave_no_keyed_copy_of_a_stor
         "relay.db.migrating",
         "relay.db.migrating-journal",
         &format!("teams/{}.db.pre-v7", f.store),
+        &format!("teams/{}.db.pre-v6", f.store),
     ] {
         assert!(listed.contains(&name), "{name} is not in the backup");
     }
     let plan = f.dry().unwrap();
-    assert!(
-        plan.converted
-            .contains(&format!("teams/{}.db.pre-v7", f.store)),
-        "{:?}",
-        plan.converted
-    );
+    for name in [
+        format!("teams/{}.db.pre-v7", f.store),
+        format!("teams/{}.db.pre-v6", f.store),
+    ] {
+        assert!(plan.converted.contains(&name), "{:?}", plan.converted);
+    }
     let report = f.run(true).unwrap();
     assert_eq!(report.state, "done");
     for name in ["relay.db.migrating", "relay.db.migrating-journal"] {
@@ -1888,6 +1915,14 @@ fn the_backup_and_the_cutover_cover_every_file_and_leave_no_keyed_copy_of_a_stor
         .query_row("SELECT count(*) FROM sqlite_master", [], |row| row.get(0))
         .unwrap();
     assert!(heads > 0);
+    let conn = rusqlite::Connection::open(&pre_v6).unwrap();
+    let (version, six): (i64, String) = (
+        conn.query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap(),
+        conn.query_row("SELECT v FROM old_v6", [], |row| row.get(0))
+            .unwrap(),
+    );
+    assert_eq!((version, six.as_str()), (6, "six"));
 }
 
 #[test]
@@ -1955,16 +1990,53 @@ fn the_stopped_backup_restores_a_cutover_stopped_halfway() {
 #[test]
 fn the_cutover_never_deletes_a_file_of_an_account_store() {
     let f = fixture();
-    // Files of a store that the relay never makes (an old copy, an extra snapshot): the
-    // cutover leaves them, byte for byte; the files of the other teams go.
+    // A file of a store that does not open with the store's key: after the cutover no key
+    // would open it, so the cutover refuses before any change, and names it.
+    let unreadable = f.config.team_path(&f.store).with_extension("db.pre-v7");
+    std::fs::write(&unreadable, "not a file of the store's key").unwrap();
+    cutover::stopped_backup(&f.config, now() + 2).unwrap();
+    let before = contents(f.data());
+    for options in [
+        Options::default(),
+        Options {
+            confirm: Some("0".repeat(64)),
+            ..Options::default()
+        },
+    ] {
+        let error = f.run_with(options).unwrap_err();
+        assert!(
+            error
+                .message
+                .contains(&format!("teams/{}.db.pre-v7", f.store)),
+            "{}",
+            error.message
+        );
+        assert!(
+            error.message.contains("does not open with the store's key"),
+            "{}",
+            error.message
+        );
+        assert!(!error.message.contains("admin delete"), "{}", error.message);
+        assert_eq!(contents(f.data()), before);
+    }
+    std::fs::remove_file(&unreadable).unwrap();
+    // Files of a store that the relay never makes (a plain old copy, an extra snapshot):
+    // the cutover leaves them, byte for byte; the files of the other teams go.
+    let plain_copy = f.config.team_path(&f.store).with_extension("db.pre-v5");
+    rusqlite::Connection::open(&plain_copy)
+        .unwrap()
+        .execute_batch("CREATE TABLE note (v TEXT); INSERT INTO note VALUES ('plain');")
+        .unwrap();
     let extra = [
-        f.config.team_path(&f.store).with_extension("db.pre-v7"),
+        plain_copy.clone(),
         f.config.sync_dir(&f.other_store).join("9.bin"),
     ];
     std::fs::create_dir_all(f.config.sync_dir(&f.other_store)).unwrap();
-    for (index, path) in extra.iter().enumerate() {
-        std::fs::write(path, format!("store file {index}")).unwrap();
-    }
+    std::fs::write(&extra[1], "store file 1").unwrap();
+    let extra_bytes: Vec<Vec<u8>> = extra
+        .iter()
+        .map(|path| std::fs::read(path).unwrap())
+        .collect();
     // A file of no team stays and is named; another folder of a team that goes, goes.
     let stray = f.config.teams_dir().join("notes.txt");
     std::fs::write(&stray, "an operator's note").unwrap();
@@ -1975,13 +2047,8 @@ fn the_cutover_never_deletes_a_file_of_an_account_store() {
     cutover::stopped_backup(&f.config, now() + 3).unwrap();
     let report = f.run(true).unwrap();
     assert_eq!(report.state, "done");
-    for (index, path) in extra.iter().enumerate() {
-        assert_eq!(
-            std::fs::read_to_string(path).unwrap(),
-            format!("store file {index}"),
-            "{}",
-            path.display()
-        );
+    for (path, bytes) in extra.iter().zip(&extra_bytes) {
+        assert_eq!(&std::fs::read(path).unwrap(), bytes, "{}", path.display());
     }
     for name in &report.files_deleted {
         let id = name
@@ -2015,14 +2082,415 @@ fn the_cutover_never_deletes_a_file_of_an_account_store() {
             .files_deleted
             .contains(&format!("teams/{}.extra/x.bin", f.free))
     );
-    // A file of a store that is not a database of its key is left and named.
+    // A plain file of a store (no key opens it, none needs to) is left and named.
     assert!(
         report
             .left
-            .contains(&format!("teams/{}.db.pre-v7", f.store)),
+            .contains(&format!("teams/{}.db.pre-v5", f.store)),
         "{:?}",
         report.left
     );
+}
+
+/// `connect` mode starts on the data directory of `config`, then stops; or the error.
+fn connect_start(config: &RelayConfig) -> Result<(), apassy_relay::error::RelayError> {
+    Relay::start(connect_on_any_port(config)).map(|running| running.stop())
+}
+
+#[test]
+fn the_start_after_a_finished_cutover_reads_the_files_when_the_record_is_damaged() {
+    let f = fixture();
+    assert_eq!(f.run(true).unwrap().state, "done");
+    let record = f.data().join(cutover::CUTOVER_FILE);
+    let good = std::fs::read(&record).unwrap();
+    let mut committing: Value = serde_json::from_slice(&good).unwrap();
+    committing["state"] = json!("committing");
+    // A record that cannot be read, or that says another state: the files are those of a
+    // finished cutover, so connect mode starts, and the record is left as it is.
+    for damaged in [
+        b"{ not json".to_vec(),
+        Vec::new(),
+        serde_json::to_vec(&committing).unwrap(),
+    ] {
+        std::fs::write(&record, &damaged).unwrap();
+        connect_start(&f.config).unwrap();
+        assert_eq!(
+            std::fs::read(&record).unwrap(),
+            damaged,
+            "the start rewrote the record"
+        );
+        // The cutover says that there is nothing to do, and why, without a change.
+        let before = contents(f.data());
+        let error = f.dry().unwrap_err();
+        assert!(
+            error.message.contains("in the form of a finished cutover"),
+            "{}",
+            error.message
+        );
+        assert_eq!(contents(f.data()), before);
+    }
+    // A hot journal of the plain relay.db (a crash of Connect mid-write) beside a damaged
+    // record: the start check reads no page, the relay rolls the write back and starts.
+    std::fs::write(&record, b"{ not json").unwrap();
+    let copy = tempfile::tempdir().unwrap();
+    let mut config = f.config.clone();
+    config.data_dir = copy.path().join("data");
+    {
+        let conn = rusqlite::Connection::open(f.data().join("relay.db")).unwrap();
+        conn.execute_batch(
+            "PRAGMA cache_size = 2; BEGIN; CREATE TABLE torn (v BLOB); \
+             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 400) \
+             INSERT INTO torn SELECT randomblob(2000) FROM n;",
+        )
+        .unwrap();
+        // The copy, taken while the write is open, is the disk after a crash at this point.
+        copy_tree(f.data(), &config.data_dir);
+        conn.execute_batch("ROLLBACK").unwrap();
+    }
+    let _ = std::fs::remove_file(config.data_dir.join("relay.lock"));
+    assert!(config.data_dir.join("relay.db-journal").exists());
+    connect_start(&config).unwrap();
+    assert!(!config.data_dir.join("relay.db-journal").exists());
+    let tables: i64 = rusqlite::Connection::open(config.data_dir.join("relay.db"))
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE name = 'torn'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(tables, 0, "the write of the crash was not rolled back");
+    assert_eq!(
+        std::fs::read(config.data_dir.join(cutover::CUTOVER_FILE)).unwrap(),
+        b"{ not json"
+    );
+    // With the record as it was, the relay starts as before.
+    std::fs::write(&record, &good).unwrap();
+    connect_start(&f.config).unwrap();
+}
+
+#[test]
+fn the_start_refuses_a_record_that_is_not_done_when_the_cutover_is_not_finished() {
+    let f = fixture();
+    f.run_until(Interrupt::DeletedOneTeam).unwrap_err();
+    // relay.db.keyed is lost by hand: relay.db is plain, the record says "committing", and
+    // keyed files of the teams that go are still there.
+    std::fs::remove_file(f.data().join(cutover::KEYED_DIRECTORY_FILE)).unwrap();
+    let record = f.data().join(cutover::CUTOVER_FILE);
+    let committing = std::fs::read(&record).unwrap();
+    for damaged in [committing.clone(), b"{ not json".to_vec()] {
+        std::fs::write(&record, &damaged).unwrap();
+        let before = contents(f.data());
+        let refused = connect_start(&f.config).unwrap_err();
+        assert!(
+            refused
+                .message
+                .contains("not in the form of a finished cutover"),
+            "{}",
+            refused.message
+        );
+        // The first file that shows it is named (here an old file that the cutover deletes).
+        assert!(
+            refused.message.contains("is there") || refused.message.contains("is encrypted"),
+            "{}",
+            refused.message
+        );
+        assert!(
+            refused.message.contains("Restore the stopped backup"),
+            "{}",
+            refused.message
+        );
+        assert!(!refused.message.contains("delete"), "{}", refused.message);
+        assert_eq!(contents(f.data()), before, "the refused start wrote");
+        // The cutover cannot finish it, and says so.
+        let error = f.dry().unwrap_err();
+        assert!(
+            error.message.contains("cannot finish it"),
+            "{}",
+            error.message
+        );
+        assert_eq!(contents(f.data()), before);
+    }
+}
+
+#[test]
+fn a_dry_run_of_a_committed_cutover_answers_what_the_confirmed_run_does() {
+    let f = fixture();
+    let plan = f.plan();
+    f.run_until(Interrupt::Committed).unwrap_err();
+    let confirm = || {
+        f.run_with(Options {
+            confirm: Some(plan.clone()),
+            ..Options::default()
+        })
+    };
+    let before = contents(f.data());
+    let pending = f.dry().unwrap();
+    assert_eq!(contents(f.data()), before, "the dry run wrote");
+    assert_eq!(
+        (pending.state.as_str(), pending.plan_sha256.as_str()),
+        ("committing", plan.as_str())
+    );
+    let mut converted = pending.converted.clone();
+    converted.sort();
+    let mut to_convert = pending.to_convert.clone();
+    to_convert.sort();
+    assert_eq!(to_convert, converted);
+    for team in [&f.operator, &f.free, &f.suspended] {
+        assert!(
+            pending.to_delete.contains(&format!("teams/{team}.db")),
+            "{:?}",
+            pending.to_delete
+        );
+    }
+    assert!(pending.to_delete.contains(&"team.db.pre-teams".to_string()));
+    for name in &pending.converted {
+        assert!(
+            pending.side_files.contains(&format!("{name}.plain")),
+            "{:?}",
+            pending.side_files
+        );
+    }
+    let line = cutover::summary(&pending);
+    assert!(
+        line.contains("Every check of the confirmed run passed"),
+        "{line}"
+    );
+    // A file of a team that goes, new since the backup: the dry run and the confirmed run
+    // refuse alike, and nothing is deleted.
+    let new = f.config.team_path(&f.operator).with_extension("db.pre-v9");
+    std::fs::write(&new, b"new since the backup").unwrap();
+    let before = contents(f.data());
+    for error in [f.dry().unwrap_err(), confirm().unwrap_err()] {
+        assert!(
+            error
+                .message
+                .contains("is not in the backup that the cutover checked"),
+            "{}",
+            error.message
+        );
+        assert!(
+            error
+                .message
+                .contains(&format!("teams/{}.db.pre-v9", f.operator)),
+            "{}",
+            error.message
+        );
+    }
+    assert_eq!(contents(f.data()), before);
+    std::fs::remove_file(&new).unwrap();
+    // A record changed by hand (a list of the plan): it no longer gives its own plan, so
+    // the dry run and the confirmed run refuse alike.
+    let record = f.data().join(cutover::CUTOVER_FILE);
+    let original = std::fs::read(&record).unwrap();
+    for edit in ["converted", "left"] {
+        let mut edited: Value = serde_json::from_slice(&original).unwrap();
+        match edit {
+            "converted" => {
+                edited["converted"].as_array_mut().unwrap().pop();
+            }
+            _ => edited["left"] = json!([format!("teams/{}.db", f.operator)]),
+        }
+        std::fs::write(&record, serde_json::to_vec_pretty(&edited).unwrap()).unwrap();
+        let before = contents(f.data());
+        for error in [f.dry().unwrap_err(), confirm().unwrap_err()] {
+            assert!(
+                error.message.contains("does not give its own plan_sha256"),
+                "{edit}: {}",
+                error.message
+            );
+        }
+        assert_eq!(contents(f.data()), before, "{edit}");
+    }
+    std::fs::write(&record, &original).unwrap();
+    let done = confirm().unwrap();
+    assert_eq!(done.state, "done");
+    assert_eq!(done.files_deleted, pending.to_delete);
+    assert!(done.to_convert.is_empty() && done.to_delete.is_empty());
+}
+
+#[test]
+fn a_resumed_cutover_writes_a_missing_or_partial_plain_copy_again() {
+    let f = fixture();
+    let plan = f.plan();
+    f.run_until(Interrupt::Committed).unwrap_err();
+    // A re-export that stopped: one copy is half written, with a journal; the other is gone.
+    let partial = f.data().join(format!("teams/{}.db.plain", f.store));
+    let bytes = std::fs::read(&partial).unwrap();
+    std::fs::write(&partial, &bytes[..bytes.len() / 2]).unwrap();
+    std::fs::write(
+        f.data().join(format!("teams/{}.db.plain-journal", f.store)),
+        [0xd9u8; 600],
+    )
+    .unwrap();
+    std::fs::remove_file(f.data().join(format!("teams/{}.db.plain", f.other_store))).unwrap();
+    let pending = f.dry().unwrap();
+    for store in [&f.store, &f.other_store] {
+        assert!(pending.to_convert.contains(&format!("teams/{store}.db")));
+    }
+    assert!(
+        pending
+            .side_files
+            .contains(&format!("teams/{}.db.plain-journal", f.store))
+    );
+    let report = f
+        .run_with(Options {
+            confirm: Some(plan),
+            ..Options::default()
+        })
+        .unwrap();
+    assert_eq!(report.state, "done");
+    assert!(
+        report
+            .side_files
+            .contains(&format!("teams/{}.db.plain-journal", f.store)),
+        "{:?}",
+        report.side_files
+    );
+    for store in [&f.store, &f.other_store] {
+        assert!(is_plain(&f.config.team_path(store)));
+        assert!(!f.data().join(format!("teams/{store}.db.plain")).exists());
+    }
+    let (c, mut account, store, device, mut pusher, snapshots) = f.start_connect();
+    check_store_works(&c, &mut account, &store, device, &mut pusher, &snapshots);
+}
+
+#[test]
+fn every_file_that_the_cutover_deletes_is_in_the_backup_and_the_record() {
+    let f = fixture();
+    // A `.plain` name of a team that goes and one of no team: data, not side files.
+    let operator_plain = format!("teams/{}.db.plain", f.operator);
+    std::fs::write(f.data().join(&operator_plain), b"an operator's file").unwrap();
+    std::fs::write(f.data().join("teams/notes.plain"), b"a note").unwrap();
+    // Files of a team id that relay.db does not name (a delete that stopped).
+    let orphan = TeamId::parse("t_orphanqqq2").unwrap();
+    let orphan_files = [
+        format!("teams/{orphan}.db"),
+        format!("teams/{orphan}.sync/1.bin"),
+    ];
+    std::fs::create_dir_all(f.config.sync_dir(&orphan)).unwrap();
+    for name in &orphan_files {
+        std::fs::write(f.data().join(name), b"left by a delete").unwrap();
+    }
+    // A side file of an earlier run: the plain copy of a store's file.
+    let side = format!("teams/{}.db.plain", f.store);
+    std::fs::write(f.data().join(&side), b"a copy of a run that stopped").unwrap();
+    let manifest = cutover::stopped_backup(&f.config, now() + 6).unwrap();
+    let listed: BTreeSet<&str> = manifest["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["name"].as_str().unwrap())
+        .collect();
+    for name in orphan_files
+        .iter()
+        .chain([&operator_plain, &"teams/notes.plain".to_string()])
+    {
+        assert!(
+            listed.contains(name.as_str()),
+            "{name} is not in the backup"
+        );
+    }
+    assert!(
+        !listed.contains(side.as_str()),
+        "a side file is in the backup"
+    );
+    let plan = f.dry().unwrap();
+    assert_eq!(plan.orphans, vec![orphan.clone()]);
+    assert!(plan.side_files.contains(&side), "{:?}", plan.side_files);
+    assert!(plan.left.contains(&"teams/notes.plain".to_string()));
+    assert!(cutover::summary(&plan).contains("1 team ids that relay.db does not name"));
+    let report = f.run(true).unwrap();
+    assert_eq!(report.state, "done");
+    for name in orphan_files.iter().chain([&operator_plain]) {
+        assert!(
+            report.files_deleted.contains(name),
+            "{name} went without being counted"
+        );
+        assert!(!f.data().join(name).exists(), "{name}");
+    }
+    // Everything that went is in the inventory, so in the backup.
+    let before: BTreeSet<&str> = report
+        .files_before
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect();
+    for name in &report.files_deleted {
+        assert!(before.contains(name.as_str()), "{name}");
+        assert!(listed.contains(name.as_str()), "{name}");
+    }
+    assert!(report.side_files.contains(&side));
+    assert_eq!(report.orphans, vec![orphan]);
+    assert_eq!(
+        std::fs::read(f.data().join("teams/notes.plain")).unwrap(),
+        b"a note"
+    );
+    let record: Report =
+        serde_json::from_slice(&std::fs::read(f.data().join(cutover::CUTOVER_FILE)).unwrap())
+            .unwrap();
+    assert_eq!(record.files_deleted, report.files_deleted);
+    assert!(record.side_files.contains(&side));
+}
+
+#[test]
+fn admin_delete_never_deletes_a_vault_store_in_either_mode() {
+    let refuse = |c: &Connect, store: &TeamId, path: &Path| {
+        c.relay
+            .operator(Command::Suspend {
+                team: store.clone(),
+            })
+            .unwrap();
+        for free_connect_key in [false, true] {
+            let error = c
+                .relay
+                .operator(Command::Delete {
+                    team: store.clone(),
+                    free_connect_key,
+                })
+                .unwrap_err();
+            // The operator socket carries the code in the message.
+            assert!(error.message.contains("conflict"), "{}", error.message);
+            assert!(
+                error.message.contains("Nothing was changed"),
+                "{}",
+                error.message
+            );
+            assert!(
+                error
+                    .message
+                    .contains("DELETE /v1/account/vaults/{team_id}")
+                    && error.message.contains("DELETE /v1/account"),
+                "{}",
+                error.message
+            );
+        }
+        assert!(path.exists(), "the store's file is gone");
+        let teams = c.relay.operator(Command::Teams).unwrap();
+        assert!(
+            teams
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|team| team["id"] == store.as_str()),
+            "{teams}"
+        );
+    };
+    // The hosted relay with accounts on.
+    let c = connect::start_with_config(|_| {});
+    let account = c.account("Rafal");
+    c.subscribe(&account, "connect_personal_month", 1);
+    let (store, _) = c.store(&account, VAULT);
+    let store = TeamId::parse(&store).unwrap();
+    let path = c.relay.config.team_path(&store);
+    refuse(&c, &store, &path);
+    // Connect mode.
+    let c = connect_relay();
+    let account = c.account("Rafal");
+    c.subscribe(&account, "connect_personal_month", 1);
+    let (store, _) = c.store(&account, VAULT);
+    let store = TeamId::parse(&store).unwrap();
+    let path = c.relay.config.team_path(&store);
+    refuse(&c, &store, &path);
 }
 
 #[test]

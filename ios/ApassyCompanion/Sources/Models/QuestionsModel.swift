@@ -362,9 +362,16 @@ final class QuestionsModel {
     /// on a node, else "via Apassy relay". Only the vaults with a questions team.
     var questionRoutes: [QuestionRoute] {
         let entries = vault?.vaults ?? []
-        return contexts.filter { $0.status.enabled && !$0.status.removed }.map { context in
+        return contexts.filter { $0.status.enabled && !$0.status.removed && !$0.status.relayEnded }.map { context in
             QuestionRoute(vault: context, route: DeviceRoute.of(context.status, entries: entries))
         }
+    }
+
+    /// Whether the hosted relay ended the questions of a vault of the list (410 `free_connect_ended`
+    /// or `hosted_retired`, plan s7 R3): Settings > Devices shows the calm state of
+    /// `RelayEndedNotice` in the place of its route. The core calls that team no more.
+    var relayEnded: Bool {
+        phase == .ready && contexts.contains { $0.status.enabled && !$0.status.removed && $0.status.relayEnded }
     }
 
     /// The vaults among `contexts` whose node does not answer, with the node's name of their entry.
@@ -1489,8 +1496,12 @@ final class QuestionsModel {
     }
 
     /// The teams of the list that can get a token: a questions team, and this iPhone not removed.
+    /// The teams that take the push token: not a removed iPhone's, and not one that the hosted relay
+    /// ended.
     private var pushTeams: Set<String> {
-        Set(contexts.filter { $0.status.enabled && !$0.status.removed }.compactMap(\.status.teamID))
+        Set(
+            contexts.filter { $0.status.enabled && !$0.status.removed && !$0.status.relayEnded }
+                .compactMap(\.status.teamID))
     }
 
     private func updatePushToken() async {
@@ -1528,6 +1539,11 @@ final class QuestionsModel {
             registrationFailure = nil
         } catch let error as VaultError where error.code == .noQuestions || error.code == .locked {
             // No team yet, or the vault locked: the token goes at the next refresh.
+        } catch let error as VaultError where error.code == .relayEnded {
+            // The hosted relay ended these teams: no failure to show (Settings > Devices shows the
+            // calm state), and no new try in this launch.
+            tokenTeams.formUnion(teams)
+            registrationFailure = nil
         } catch {
             registrationFailure = error.localizedDescription
         }

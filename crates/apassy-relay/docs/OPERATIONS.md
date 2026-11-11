@@ -2010,18 +2010,22 @@ the version and the commit. `admin team-code`, `admin node-code`, `init --team`,
 
 The relay does not start on a cutover that is not finished, in either mode, and changes no file
 then: a plain `relay.db` beside `relay.db.keyed` is refused in both modes; `connect` mode also
-refuses an encrypted `relay.db` and a `cutover.json` whose `state` is not `done`. The message
-says to run the cutover again (29.5) with the configuration before it. A vault store that does
-not open at start is logged as out of service with the advice to keep its file and restore it
-from a backup, never to delete it.
+refuses an encrypted `relay.db`. The message says to run the cutover again (29.5) with the
+configuration before it. A `cutover.json` that cannot be read or is not `done` stops `connect`
+mode only when the files are not those of a finished cutover (then: restore the stopped
+backup); on the files of a finished cutover the relay starts, logs it, and leaves the record
+as it is. A vault store that does not open at start is logged as out of service with the
+advice to keep its file and restore it from a backup, never to delete it.
 
 ### 29.3 Backups
 
 - `admin backup` works in both modes; in `connect` mode it copies plain files, and its
   `MANIFEST.json` says `"mode": "connect"`. `snapshot-check` reads plain files there.
 - `apassy-relay backup` is the backup of a **stopped** relay (it takes `relay.lock`): a
-  byte-for-byte copy of `relay.db`, `teams/` with the snapshots and `.pre-v*` copies,
-  `team.db`, `team.db.pre-teams`, `relay.db.migrating` and its journal, and `audit-archive/`,
+  byte-for-byte copy of `relay.db`, every file of `teams/` (with the snapshots, `.pre-v*`
+  copies, and files of team ids without a row) but the cutover's `.plain` copies of the
+  files of a vault store, `team.db`, `team.db.pre-teams`, `relay.db.migrating` and its
+  journal, and `audit-archive/`,
   with `MANIFEST.json` (`"stopped": true`, sizes and SHA-256). It refuses while the relay runs,
   while a write journal remains (start and stop the relay once), and on a committed cutover
   (`relay.db` plain beside `relay.db.keyed`). A `relay.db.keyed` beside a keyed `relay.db` (a
@@ -2049,7 +2053,10 @@ docker compose run --rm --no-deps -T relay connect-cutover \
 It runs with the configuration **before** the cutover (the master key set, `APASSY_RELAY_MODE`
 unset) and the relay stopped. The dry run (the default) checks everything and prints the plan
 as JSON (the stores that stay, the teams that go, the files with their hashes, the backup it
-checked, and `plan_sha256`, the SHA-256 of that plan); it writes nothing.
+checked, and `plan_sha256`, the SHA-256 of that plan and of the relay's version and commit:
+a new image needs a new dry run); it writes nothing. A file of a vault store that does not
+open with the store's key refuses it before any change (restore it or move it out of the data
+directory, then a new stopped backup); `admin delete` never deletes a vault store.
 `--confirm-delete-teams <plan_sha256>` goes on only if the plan is still that one (a newer
 backup or a changed file refuses it: run the dry run again and read it). It keeps `relay.db`
 and the vault stores of the accounts as plain files (a keyed `.pre-v*` copy of a store too),
@@ -2085,7 +2092,9 @@ Run it again with `--confirm-delete-teams <plan_sha256>`: before its commit poin
 `cutover.json`. `relay.db.keyed` exists from the commit point to the end; it is the keyed
 directory with the team keys, the second run needs it, and it is deleted only when it is, byte
 for byte, the `relay.db` of the inventory. A dry run says which case it is (`state`, `pending`)
-and names the plan. The relay does not start in either mode until the run ends with
+and names the plan; after the commit point it makes every check of the confirmed run and
+lists `to_convert` and `to_delete`. A plain copy of the stopped run is written again. The
+relay does not start in either mode until the run ends with
 `"state": "done"` (29.2). The stopped backup restores the relay as it was at any point (29.3).
 
 ### 29.6 Rollback from Connect

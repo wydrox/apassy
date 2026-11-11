@@ -136,6 +136,41 @@ public struct ConnectDevice: Codable, Sendable, Equatable {
         case deviceID = "device_id"
         case isThisDevice = "this"
     }
+
+    /// A missing `verified` is "not verified": the app never vouches for a device that the core did
+    /// not check.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        deviceID = try container.decode(String.self, forKey: .deviceID)
+        name = try container.decode(String.self, forKey: .name)
+        platform = (try? container.decodeIfPresent(String.self, forKey: .platform)) ?? ""
+        isThisDevice = (try? container.decodeIfPresent(Bool.self, forKey: .isThisDevice)) ?? false
+        verified = (try? container.decodeIfPresent(Bool.self, forKey: .verified)) ?? false
+    }
+}
+
+/// The state of the Connect dial (contract ios-core-v1 section 5.15, `dial_state`). Every state is
+/// quiet: the app shows no error and no hint for it, and none names a plan or a purchase.
+public enum ConnectDialState: String, Codable, Sendable, Equatable {
+    /// No dial since the start or the last lock.
+    case unused
+    /// The last dial reached the Mac.
+    case connected
+    /// Connect refused the dial for the plan or the account, or this iPhone has no account.
+    case notOnConnect = "not_on_connect"
+    /// The Mac has no tunnel open.
+    case macOffline = "mac_offline"
+    case limit
+    /// Connect did not answer.
+    case unreachable
+    case refused
+    /// A state of a newer core: shown as nothing.
+    case unknown
+
+    public init(from decoder: any Decoder) throws {
+        let text = try decoder.singleValueContainer().decode(String.self)
+        self = ConnectDialState(rawValue: text) ?? .unknown
+    }
 }
 
 /// `connect_status`: whether this iPhone is a device of a Connect account, and its plan.
@@ -143,8 +178,9 @@ public struct ConnectStatus: Codable, Sendable, Equatable {
     public enum State: String, Codable, Sendable { case none, account }
 
     public var state: State
-    /// True when Connect says a Mac removed this iPhone from its account, or the key of this iPhone
-    /// is gone. With state `account`, the key and the account file stay until `connectForget`.
+    /// True when Connect says this iPhone is no device of the account any more (a Mac removed it,
+    /// or the account was deleted), or the Keychain lost the key. It comes with state `account`:
+    /// the key and the account file stay until `connectForget`. A refused sign-in is no removal.
     public var removed: Bool
     public var accountID: String?
     public var deviceName: String?
@@ -152,8 +188,11 @@ public struct ConnectStatus: Codable, Sendable, Equatable {
     public var plan: ConnectPlan?
     /// True when Connect did not answer: `plan` is the last answer of this session.
     public var stale: Bool
-    /// True when this iPhone reaches its Mac through Apassy Connect (plan s7 unit I2).
+    /// True when the last connection to a Mac went through the Connect dial (plan s7 unit I2), since
+    /// the last lock; false while the tailnet reaches the Mac.
     public var dialRoute: Bool
+    /// The state of the dial (section 5.15). `unused` from a core that does not report it.
+    public var dialState: ConnectDialState
     /// A join that waits for the Mac.
     public var join: ConnectJoin?
     /// The devices of the account, each with `verified`; empty when Connect did not answer.
@@ -164,8 +203,8 @@ public struct ConnectStatus: Codable, Sendable, Equatable {
 
     public init(
         state: State, removed: Bool = false, accountID: String? = nil, deviceName: String? = nil,
-        plan: ConnectPlan? = nil, stale: Bool = false, dialRoute: Bool = false, join: ConnectJoin? = nil,
-        devices: [ConnectDevice] = []
+        plan: ConnectPlan? = nil, stale: Bool = false, dialRoute: Bool = false, dialState: ConnectDialState = .unused,
+        join: ConnectJoin? = nil, devices: [ConnectDevice] = []
     ) {
         self.state = state
         self.removed = removed
@@ -174,6 +213,7 @@ public struct ConnectStatus: Codable, Sendable, Equatable {
         self.plan = plan
         self.stale = stale
         self.dialRoute = dialRoute
+        self.dialState = dialState
         self.join = join
         self.devices = devices
     }
@@ -187,8 +227,17 @@ public struct ConnectStatus: Codable, Sendable, Equatable {
         plan = try container.decodeIfPresent(ConnectPlan.self, forKey: .plan)
         stale = try container.decodeIfPresent(Bool.self, forKey: .stale) ?? false
         dialRoute = try container.decodeIfPresent(Bool.self, forKey: .dialRoute) ?? false
+        dialState = (try? container.decodeIfPresent(ConnectDialState.self, forKey: .dialState)) ?? .unused
         join = try container.decodeIfPresent(ConnectJoin.self, forKey: .join)
-        devices = try container.decodeIfPresent([ConnectDevice].self, forKey: .devices) ?? []
+        // A device that this app cannot read is left out; the others still show.
+        devices = (try? container.decodeIfPresent([Lossy<ConnectDevice>].self, forKey: .devices))?
+            .compactMap(\.value) ?? []
+    }
+
+    /// One element of a list that decodes to nil when it cannot be read.
+    private struct Lossy<Value: Decodable>: Decodable {
+        var value: Value?
+        init(from decoder: any Decoder) throws { value = try? Value(from: decoder) }
     }
 
     enum CodingKeys: String, CodingKey {
@@ -196,6 +245,7 @@ public struct ConnectStatus: Codable, Sendable, Equatable {
         case accountID = "account_id"
         case deviceName = "device_name"
         case dialRoute = "dial_route"
+        case dialState = "dial_state"
     }
 }
 

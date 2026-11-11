@@ -26,7 +26,17 @@ struct ConnectPlanRowTests {
         ("checking", nil, false, "Checking"),
         ("unavailable", nil, true, "Not available"),
         ("notOnConnect", ConnectStatus(state: .none), false, "Not on Connect"),
-        ("notOnConnect after a removal", ConnectStatus(state: .none, removed: true), false, "Not on Connect"),
+        ("removed without an account", ConnectStatus(state: .none, removed: true), false, "Removed from the account"),
+        (
+            "removed from the account",
+            ConnectStatus(state: .account, removed: true, accountID: "acc_k7m2q4x3ca", deviceName: "iPhone"), false,
+            "Removed from the account"
+        ),
+        (
+            "removed with the last plan",
+            account(ConnectPlan(plan: "personal", status: .active, entitled: true, renewsAt: renews), removed: true),
+            false, "Removed from the account"
+        ),
         (
             "account without a plan", account(ConnectPlan(plan: nil, status: .none, entitled: false)), false,
             "Not on Connect"
@@ -126,12 +136,14 @@ struct ConnectPlanRowTests {
         #expect(removed.lines == [ConnectPlanRow.removedLine])
     }
 
-    @Test("a removed account and devices that are not verified are text lines")
+    @Test("a removed account is a text line; the devices that are not verified are not in the row")
     func removedAndNotVerified() {
         let removed = ConnectStatus(state: .account, removed: true, accountID: "acc_k7m2q4x3ca", deviceName: "iPhone")
         let removedContent = ConnectPlanRow.content(removed, timeZone: Self.utc)
-        #expect(removedContent.value == "Not on Connect")
+        #expect(removedContent.value == "Removed from the account")
         #expect(removedContent.lines == [ConnectPlanRow.removedLine])
+        #expect(ConnectPlanRow.of(removed) == .removed)
+        #expect(!ConnectPlanRow.removed.isOnAccount, "no “Managed in Apassy on your Mac” after a removal")
 
         let devices = [
             ConnectDevice(deviceID: "dev_m2k7q3x4ab", name: "MacBook Pro", platform: "mac", isThisDevice: false, verified: true),
@@ -141,7 +153,8 @@ struct ConnectPlanRowTests {
         var active = Self.account(ConnectPlan(plan: "personal", status: .active, entitled: true, renewsAt: Self.renews))
         active.devices = devices
         let content = ConnectPlanRow.content(active, timeZone: Self.utc)
-        #expect(content.lines == [ConnectPlanRow.managedLine, "Not verified: Mac Studio, iPad"])
+        // The line of the devices is in Settings > Devices (`ConnectDevicesText`), once.
+        #expect(content.lines == [ConnectPlanRow.managedLine])
 
         for text in removedContent.lines + content.lines {
             for word in Self.banned {
@@ -236,12 +249,49 @@ struct ConnectPlanRowTests {
         // An account alone is no route: Apassy Connect shows only when the core dials through it (I2).
         #expect(MacReach.routes(vaults: [], questionRoutes: [], wifiPaired: false, connect: onAccount) == [])
         #expect(MacReach.routes(vaults: [], questionRoutes: [], wifiPaired: false, connect: dialing) == [.connect])
+        // The dial in use means the tailnet did not answer: Apassy Connect in the place of Tailscale.
         #expect(
             MacReach.routes(vaults: [node], questionRoutes: [], wifiPaired: true, connect: dialing)
-                == [.tailscale, .connect, .wifi])
+                == [.connect, .wifi])
+        #expect(
+            MacReach.line(MacReach.routes(vaults: [node], questionRoutes: [], wifiPaired: false, connect: dialing))
+                == "Reaches your Mac through: Apassy Connect")
+        // Only the tailnet works: Tailscale alone, also on an account.
+        #expect(
+            MacReach.line(MacReach.routes(vaults: [node], questionRoutes: [], wifiPaired: false, connect: onAccount))
+                == "Reaches your Mac through: Tailscale")
         var removed = ConnectStatus(state: .none)
         removed.dialRoute = true
         #expect(MacReach.routes(vaults: [], questionRoutes: [], wifiPaired: false, connect: removed) == [])
+        var removedAccount = onAccount
+        removedAccount.removed = true
+        removedAccount.dialRoute = true
+        #expect(MacReach.routes(vaults: [node], questionRoutes: [], wifiPaired: false, connect: removedAccount) == [.tailscale])
+    }
+
+    @Test("the dial shows its quiet states as text: Mac is offline, Not on Connect, else nothing")
+    func dialLine() {
+        func status(_ state: ConnectDialState, route: Bool = false, removed: Bool = false, account: Bool = true)
+            -> ConnectStatus
+        {
+            ConnectStatus(
+                state: account ? .account : .none, removed: removed, accountID: account ? "acc_k7m2q4x3ca" : nil,
+                dialRoute: route, dialState: state)
+        }
+        #expect(MacReach.dialLine(status(.macOffline)) == "Mac is offline")
+        #expect(MacReach.dialLine(status(.notOnConnect)) == "Not on Connect")
+        #expect(MacReach.dialLine(status(.notOnConnect, account: false)) == "Not on Connect")
+        for quiet in [ConnectDialState.unused, .connected, .limit, .unreachable, .refused, .unknown] {
+            #expect(MacReach.dialLine(status(quiet)) == nil, "\(quiet)")
+        }
+        // The dial in use is the route line, not a state; a removed iPhone shows no dial.
+        #expect(MacReach.dialLine(status(.connected, route: true)) == nil)
+        #expect(MacReach.dialLine(status(.macOffline, route: true)) == nil)
+        #expect(MacReach.dialLine(status(.macOffline, removed: true)) == nil)
+        #expect(MacReach.dialLine(nil) == nil)
+        for text in ["Mac is offline", "Not on Connect"] {
+            for word in Self.banned { #expect(!text.contains(word), "\(word) in \(text)") }
+        }
     }
 }
 
@@ -253,12 +303,13 @@ struct ConnectJoinModelTests {
 
     @MainActor
     final class Fixture {
-        let service = PreviewVaultService(empty: true)
+        let service: PreviewVaultService
         var cancelled = 0
         var finished: [VaultEntry] = []
         var model: JoinModel!
 
-        init() {
+        init(service: PreviewVaultService = PreviewVaultService(empty: true)) {
+            self.service = service
             model = JoinModel(
                 service: service, passphraseStore: MemoryPassphraseStore(), settings: makeSettings(),
                 biometry: .faceID, deviceName: "Test iPhone", pollInterval: .milliseconds(20),

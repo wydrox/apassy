@@ -66,11 +66,7 @@ pub(crate) fn unsupported_note() -> &'static str {
 
 /// How the owner confirms on this platform, for the hovers of Copy and Show. The Linux
 /// owner dialog offers the passphrase and "Use system authentication" (polkit).
-pub(crate) const CONFIRM_HINT: &str = if cfg!(target_os = "linux") {
-    "Confirm with your vault passphrase or system authentication."
-} else {
-    "Confirm with Touch ID or passphrase."
-};
+pub(crate) const CONFIRM_HINT: &str = crate::confirm_hint!();
 
 /// Tests choose the session of their thread; the default can copy (memory board).
 #[cfg(test)]

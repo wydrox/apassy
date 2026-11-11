@@ -543,3 +543,144 @@ In `docs/reviews/linux-acceptance-2026-11/` (1600x1000, synthetic data):
 `l8-ubuntu-01-sandbox-refused-tooltip`, `l8-ubuntu-02-switch-refused-tooltip`,
 `l8-ubuntu-03-wayland-card`, `l8-ubuntu-04-wayland-verified`,
 `l8-debian13-01-system-extension-card`, `l8-debian13-02-extra-switch-refused`.
+
+## Release packages in browsers, 2026-11-11 (unit L9)
+
+The last Linux unit (branch `feat/linux-final`, draft PR #135, stacked on PR #110): the
+wording leftovers, the sandbox and site-isolation switches, the profile switches next to
+Debian's system extensions, the peer check after the owner answered, and the note that
+agents run without Apassy's sandbox. For the first time the browser runs use the
+**release** packages that CI builds for the PR (`linux-vault-package`), not a debug build.
+Same kit, run prefix `l9` (`~/work/l9`, accounts `l9owner` and `l9headless`).
+
+Result: everything that ran passed, on Ubuntu 24.04, Debian 13, and for the first time
+on the oldest supported systems, Debian 12 and Ubuntu 22.04. Copy under Wayland was
+tried once and not reached. arm64 was not run on a real machine.
+
+### Build under test
+
+CI run 42943845544 of PR #135, head `3631a7515aa28efe9898622227e26650731cacb9`, artifact
+`apassy-vault-linux-x86_64` (`gh run download`). `release-vault-linux-x86_64.json` records
+`commit` and `built_from` both `3631a751…`, `glibc_max` 2.30. Version 0.5.19, release
+build. Later commits of the branch add this record and screenshots only.
+
+| File | Size (bytes) | SHA-256 |
+| --- | --- | --- |
+| `apassy-vault_0.5.19_amd64.deb` | 16749012 | `2c010d35478f565c500865eb61ffd390fc35c2c4169e5123dbe98aa0b986cef3` |
+| `apassy-vault-0.5.19-linux-x86_64.tar.gz` | 23693541 | `fa941574f85004eaaaeaf4812fe763ef42bd7ba31dbabf98ed5d92ae2cfe003d` |
+
+`sha256sum -c SHA256SUMS-vault-x86_64` passed on the host and in each container. The
+installed `/usr/bin/apassy` has SHA-256 `9237c018…ba66d7`, `apassy-browser-host`
+`d17558e0…41a2008a9dc3`.
+
+### Environment
+
+- Host `devbox-x86`: Ubuntu 24.04.5 LTS, kernel 6.8.0-147-generic, x86_64; seat session
+  of `l9owner` on tty3; Xvfb 2:21.1.12-1ubuntu1.9 at 1600x1000, openbox; gnome-keyring
+  46.1, polkitd 124-2ubuntu1.24.04.4 with `pkttyagent`; Google Chrome 157.0.8103.50.
+  Wayland: sway 1.9-1build2 headless, wtype (installed for the run, removed after).
+- Containers (privileged, no logind seat, so no polkit), each with the kit's
+  `setup-host.sh`: `debian:trixie` (Debian 13, libc6 2.41-12+deb13u4, Chromium
+  156.0.8078.79-1~deb13u1, `chromium-lwn4chrome` 1.0-3, Chrome 157.0.8103.50),
+  `debian:bookworm` (Debian 12, libc6 2.36-9+deb12u14, Chrome 157.0.8103.50) and
+  `ubuntu:22.04` (Ubuntu 22.04.5 LTS, libc6 2.35-0ubuntu3.15, Chrome 157.0.8103.50).
+  The kit now runs these as `run-target.sh debian12|ubuntu2204` (Ubuntu 22.04 has
+  `policykit-1` instead of `polkitd`).
+- RP: the kit's `rp/`, Node.js 22.23.4, `@simplewebauthn/server` 14.0.3.
+
+### Matrix
+
+PASS and FAIL are observed on the release build above; NOT RUN was not tested. Each
+verified ceremony also passed the RP's negative re-checks (wrong origin, wrong RP ID,
+and for a sign-in a damaged signature: all `refused`), attestation AAGUID zero, user
+verification true.
+
+| Check | Ubuntu 24.04 host | Debian 13 container | Debian 12 container | Ubuntu 22.04 container |
+| --- | --- | --- | --- | --- |
+| `apt-get install` of the release deb (after `apt-get remove` on the host) | PASS | PASS | PASS | PASS |
+| Headless owner commands (13) | PASS 13/13 | PASS 13/13 | PASS 13/13 | PASS 13/13 |
+| Secret Service opt-in (8) | PASS 8/8 | NOT RUN | NOT RUN | NOT RUN |
+| Window (X11): first run, create vault, item list | PASS | PASS | PASS | PASS |
+| `apassy setup browser --browser chrome` | PASS | PASS | PASS | PASS |
+| `apassy setup browser --browser chromium` | PASS: snap refused with the reason, exit 1 | PASS: deb Chromium written | – | – |
+| API refusals (`refusals.sh api`, 7) | PASS 7/7 | NOT RUN | NOT RUN | NOT RUN |
+| Google Chrome 157: passkey create, verified | PASS | NOT RUN | PASS | PASS |
+| Google Chrome 157: passkey sign-in, verified | PASS (five times) | NOT RUN | PASS | PASS |
+| Chrome: wrong RP ID create and sign-in | PASS: `SecurityError`, no card | – | NOT RUN | NOT RUN |
+| Chrome: password save, then fill and RP login | PASS: save card, fill card, `passwordMatches: true` | – | NOT RUN | NOT RUN |
+| Chrome: one-time code fill (otp.html, popup › … › Fill code) | PASS: `codeMatches: true` | – | NOT RUN | NOT RUN |
+| polkit `auth_self` in the card ("Use system authentication") | PASS: a wrong password failed, the page got `NotAllowedError`, the toast said "System authentication did not succeed. Confirm with the passphrase."; the right one approved and the sign-in verified | NOT RUN (no seat) | NOT RUN | NOT RUN |
+| Chrome refusals: `--remote-debugging-port`, copied Chrome under `/opt`, `chmod o+w` Chrome | PASS 3/3 | – | – | – |
+| Chrome, accepted: `--disable-features=PrivacySandboxAdsAPIsOverride`, `--profile-directory=Default`, default start before and after the refusals | PASS 4/4 | – | – | – |
+| Chrome, newly refused: `--no-sandbox`, `--disable-setuid-sandbox`, `--disable-site-isolation-trials`, `--disable-site-isolation-for-policy`, `--js-flags=--expose-gc`, `--disable-features=IsolateOrigins`, `--disable-features=NetworkServiceSandbox` | REFUSED 7/7: the browser's own security-key dialog, no card, no verified sign-in | – | – | – |
+| Message of a refused `--no-sandbox` | the tooltip says "Apassy: This browser was started with --no-sandbox, which turns off how it keeps websites apart, so the browser handles this request itself. Start the browser again without --no-sandbox." | – | – | – |
+| Debian Chromium 156 + system extension (title `… --enable-remote-extensions --load-extension=/usr/share/chromium/extensions/lwn4chrome`): passkey create and sign-in | – | PASS | – | – |
+| …the same with `--profile-directory=Default`: passkey create and sign-in | – | PASS (the chooser listed both passkeys, newest selected; the RP verified the sign-in) | – | – |
+| …the same with `--no-sandbox` / `--incognito` | – | REFUSED 2/2 | – | – |
+| Window under Wayland (sway): native start, unlock | PASS | – | – | – |
+| Copy under Wayland | NOT REACHED (below) | – | – | – |
+
+Not counted: the first run of the host switch matrix (Chrome's search-engine choice
+dialog covered the page, so even the default start failed; rerun after choosing an
+engine is the result above); a first polkit attempt with the right password (the click
+on "Use system authentication" did not reach egui, so no polkit request started;
+pkttyagent showed no prompt); a first OTP attempt that used the popup's Fill (it fills
+logins, not codes); the kit's `flow_save_and_fill` and `flow_otp_item` clicks, which hit
+the wrong fields or read a stale log in `/tmp/l4` of an earlier run (driven by hand
+instead, as above).
+
+### Copy under Wayland, one attempt
+
+The window ran as a native client of the headless sway with `DISPLAY` unset and unlocked
+with the passphrase typed through `wtype` (a first key of each `wtype` call is dropped, so
+each call starts with Shift). Ctrl+F, the search text, then Tab, Tab and Space opened a
+login by keyboard (screenshot `l9-wayland-01-item-by-keyboard`). sway's own
+`seat - cursor` commands moved no pointer into the window (the headless seat has no
+pointer device). From the open login, further Tab presses gave no visible focus, so the
+Copy button could not be reached with certainty, and no Copy was made. Copy under
+Wayland therefore stays not observed; the CI tests of the clipboard against a headless
+sway and wl-clipboard (`desktop::clipboard::`) remain the evidence.
+
+### Observed beyond the matrix
+
+- Settings › Updates of this release package says "Version 0.5.19 (development
+  build)", as the debug builds did: a PR package carries no release mark.
+- Settings › Tools on Linux still shows "Browser instances agents may fill in with
+  remote debugging (all profiles)" and "Protected device setting unavailable. Agent
+  fills are refused." (screenshot `wording/l9-15-settings-tools-browser-rows`): the
+  remote-debugging instance trust exists only on macOS. Not changed in this unit,
+  because the packages under test were already built.
+
+### Observed and assumed
+
+Observed: every PASS, REFUSED and the messages above, on the release build of
+`3631a751`. Assumed, not observed: arm64 (only CI's native arm64 `linux-vault-verify`
+jobs ran); Copy under Wayland; the peer check after the answer in a real race (the unit
+tests construct a changed PID, start time and browser; no browser was replaced while a
+card was open); real GNOME or KDE sessions.
+
+### Not run in this run
+
+arm64 on a real machine (`devbox-arm` needs the owner); Secret Service, polkit and the
+API refusals in the containers; on Debian 12 and Ubuntu 22.04 everything after passkey
+create and sign-in; Debian 13 Google Chrome; the tarball install; Flatpak browsers.
+
+### Host changes undone
+
+`cleanup-host.sh --packages` removed the automatic login on tty3, the accounts `l9owner`
+and `l9headless` with their homes, the copied Chrome, and sway, grim, wtype, wlrctl and
+wl-clipboard; the containers `l9-debian13`, `l9-debian12`, `l9-ubuntu2204` and the build
+containers and volumes `l9-target` and `l9-cargo` were deleted, and `/tmp/l4` (which
+also held stale logs of earlier runs) was removed. The host keeps the Apassy package of
+this release build (it replaced the debug package of L8) and Chrome, as after the
+earlier runs.
+
+### Screenshots
+
+In `docs/reviews/linux-acceptance-2026-11/` (1600x1000, synthetic data):
+`l9-ubuntu-01-create-card`, `l9-ubuntu-02-polkit-wrong-refused`,
+`l9-ubuntu-03-otp-card`, `l9-ubuntu-04-no-sandbox-refused-tooltip`,
+`l9-wayland-01-item-by-keyboard`, `l9-debian13-01-profile-directory-chooser`,
+`l9-debian13-02-no-sandbox-refused`, `l9-debian12-01-create-card`,
+`l9-ubuntu2204-01-sign-in-card`. The main views and every Settings section of the
+release build after the wording changes are in `wording/` (`l9-01` to `l9-16`).

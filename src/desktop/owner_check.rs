@@ -1347,9 +1347,16 @@ impl OwnerRequest {
                         "For {origin}: create a passkey for {} with the account {account}, and save it {place}. The page names the account; check it. The page gets the new public key.",
                         request.rp_id
                     ),
+                    #[cfg(not(target_os = "linux"))]
                     None => format!(
                         "macOS asks to create a passkey for {} with the account {account}, and save it {place}. The request comes from an app or a website through the macOS passkey sheet; macOS checked that it is for {}. If you did not ask for it just now, click Cancel.",
                         request.rp_id, request.rp_id
+                    ),
+                    // Linux has no system passkey sheet: a request without a page.
+                    #[cfg(target_os = "linux")]
+                    None => format!(
+                        "An app on this computer asks to create a passkey for {} with the account {account}, and save it {place}. The request has no page address, so Apassy cannot check where it comes from. If you did not ask for it just now, click Cancel.",
+                        request.rp_id
                     ),
                 }
             }
@@ -1594,13 +1601,23 @@ impl OwnerRequest {
                 relay_url,
                 team_id: Some(_),
             } => format!(
-                "Send the questions of this vault through the Apassy relay at {relay_url}. Your other devices of this vault can then answer them, and an Allow there needs Face ID or Touch ID. The relay sees no command and no credential."
+                concat!(
+                    "Send the questions of this vault through the Apassy relay at {relay_url}. Your other devices of this vault can then answer them, and ",
+                    crate::allow_there!(),
+                    ". The relay sees no command and no credential."
+                ),
+                relay_url = relay_url
             ),
             Self::EnableRelayQuestions {
                 relay_url,
                 team_id: None,
             } => format!(
-                "Connect this vault to the Apassy relay at {relay_url} for iPhone approvals. No account or subscription is needed. Your other devices of this vault can then answer the questions, and an Allow there needs Face ID or Touch ID. The relay sees no command and no credential."
+                concat!(
+                    "Connect this vault to the Apassy relay at {relay_url} for iPhone approvals. No account or subscription is needed. Your other devices of this vault can then answer the questions, and ",
+                    crate::allow_there!(),
+                    ". The relay sees no command and no credential."
+                ),
+                relay_url = relay_url
             ),
             Self::AnswerRemoteQuestion { choice, action, .. } => {
                 let (agent, asker) = match action {
@@ -1856,9 +1873,15 @@ fn describe_sign(
                 "For {origin}: sign in to {} with a passkey. The page gets one signature.{extras} Choose the account before you confirm.",
                 request.rp_id
             ),
+            #[cfg(not(target_os = "linux"))]
             None => format!(
                 "macOS asks to sign in to {} with a passkey. The request comes from an app or a website through the macOS passkey sheet; macOS checked that it is for {}.{extras} Choose the account before you confirm. If you did not just sign in, click Cancel.",
                 request.rp_id, request.rp_id
+            ),
+            #[cfg(target_os = "linux")]
+            None => format!(
+                "An app on this computer asks to sign in to {} with a passkey. The request has no page address, so Apassy cannot check where it comes from.{extras} Choose the account before you confirm. If you did not just sign in, click Cancel.",
+                request.rp_id
             ),
         };
     };
@@ -1870,9 +1893,15 @@ fn describe_sign(
             "For {origin}: sign in to {} as {who} with the passkey of the login \"{login}\". The page gets one signature.{extras}",
             request.rp_id
         ),
+        #[cfg(not(target_os = "linux"))]
         None => format!(
             "macOS asks to sign in to {} as {who} with the passkey of the login \"{login}\". The request comes from an app or a website through the macOS passkey sheet; macOS checked that it is for {}.{extras} If you did not just sign in, click Cancel.",
             request.rp_id, request.rp_id
+        ),
+        #[cfg(target_os = "linux")]
+        None => format!(
+            "An app on this computer asks to sign in to {} as {who} with the passkey of the login \"{login}\". The request has no page address, so Apassy cannot check where it comes from.{extras} If you did not just sign in, click Cancel.",
+            request.rp_id
         ),
     };
     let others: Vec<String> = accounts

@@ -46,6 +46,9 @@ struct DevicesSettingsView: View {
                         : "Questions via your Mac reach this iPhone on any network while Tailscale is on. Questions via Apassy relay reach it on any network. Runs from the Mac on Wi-Fi show while this iPhone and the Mac are on the same network. All show in Requests."
                 )
             }
+            if !root.isDemo, ConnectDevicesText.shows(connect) {
+                ConnectAccountSection(status: connect) { await loadConnect() }
+            }
         }
         .navigationTitle("Devices")
         .navigationBarTitleDisplayMode(.inline)
@@ -53,7 +56,72 @@ struct DevicesSettingsView: View {
         .task {
             // The Connect route shows only when the core reports its dial (plan s7 unit I2).
             guard !root.isDemo else { return }
-            connect = try? await root.vault?.service.connectStatus()
+            await loadConnect()
+        }
+    }
+
+    private func loadConnect() async {
+        connect = try? await root.vault?.service.connectStatus()
+    }
+}
+
+/// "Apassy Connect" of Settings > Devices (plan s7 unit I3), only while this iPhone is a device of an
+/// account (also one that removed it): one quiet line for the devices that this iPhone could not
+/// verify, and the one control of the account, "Forget This iPhone…" with a confirmation, which calls
+/// `connect_forget`. Leaving an account is no purchase action (plan section 6): no price, no plan
+/// choice, and no link here. After it, this iPhone can join an account again.
+struct ConnectAccountSection: View {
+    let status: ConnectStatus?
+    /// Reads `connect_status` again.
+    let reload: () async -> Void
+    @Environment(RootModel.self) private var root
+    @State private var confirming = false
+    @State private var working = false
+    @State private var failure: String?
+
+    var body: some View {
+        Section {
+            if status?.removed == true {
+                Text(verbatim: ConnectPlanRow.removedLine)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            if let line = ConnectDevicesText.notVerifiedLine(status) {
+                Text(verbatim: line)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("devices.connectNotVerified")
+            }
+            Button(ConnectDevicesText.forgetButton, role: .destructive) { confirming = true }
+                .disabled(working)
+                .accessibilityIdentifier("devices.connectForget")
+            if let failure {
+                Text(verbatim: failure).font(.footnote).foregroundStyle(.red)
+            }
+        } header: {
+            Text(verbatim: ConnectDevicesText.header)
+        } footer: {
+            Text(verbatim: ConnectDevicesText.footer)
+        }
+        .confirmationDialog(ConnectDevicesText.confirmTitle, isPresented: $confirming, titleVisibility: .visible) {
+            Button(ConnectDevicesText.confirmButton, role: .destructive) { forget() }
+        } message: {
+            Text(verbatim: ConnectDevicesText.confirmMessage(status))
+        }
+    }
+
+    private func forget() {
+        guard let service = root.vault?.service else { return }
+        working = true
+        Task {
+            defer { working = false }
+            do {
+                _ = try await service.connectForget()
+                failure = nil
+            } catch {
+                failure = ConnectDevicesText.forgetFailed
+            }
+            await reload()
         }
     }
 }
@@ -76,6 +144,13 @@ struct MacReachRow: View {
                 .foregroundStyle(.secondary)
                 .accessibilityIdentifier("devices.macReach")
         }
+        // A quiet state of the dial: no error, no hint (section 5.15).
+        if let line = MacReach.dialLine(connect) {
+            Text(verbatim: line)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("devices.macReachDial")
+        }
     }
 }
 
@@ -87,7 +162,10 @@ struct QuestionsStateRow: View {
 
     var body: some View {
         let routes = root.questions?.phase == .ready ? (root.questions?.questionRoutes ?? []) : []
-        if routes.isEmpty {
+        let ended = root.questions?.relayEnded == true
+        if routes.isEmpty, ended {
+            LabeledContent("Questions", value: RelayEndedNotice.value)
+        } else if routes.isEmpty {
             LabeledContent("Questions", value: state)
         } else if routes.count == 1, let only = routes.first {
             route(title: "Questions", only.route, words: only.nodeWordsLine)
@@ -108,6 +186,13 @@ struct QuestionsStateRow: View {
             Text(FreeRelayNotice.questions)
                 .font(.footnote)
                 .foregroundStyle(.secondary)
+        }
+        // Plan s7 R3: the hosted relay ended them. One calm line: no price, no link (3.1).
+        if ended {
+            Text(verbatim: RelayEndedNotice.line)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("devices.relayEnded")
         }
     }
 

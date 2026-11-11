@@ -254,6 +254,10 @@ enum ConnectPlanRow: Equatable {
     /// The core gave no status (no network and no earlier answer, or the Keychain is locked).
     case unavailable
     case notOnConnect
+    /// Connect says this iPhone is no device of its account any more (a Mac removed it, or the
+    /// account was deleted), or the Keychain lost the key. The key and the account file stay until
+    /// "Forget This iPhone…" in Settings > Devices.
+    case removed
     /// "Connect Personal · renews 3 Dec 2026" (or Team).
     case active(plan: String?, renews: Date?)
     /// "Connect Family · 3 of 4 people".
@@ -265,9 +269,10 @@ enum ConnectPlanRow: Equatable {
     static let title = "Apassy Connect"
     /// The only line about where the plan is managed: text, no link.
     static let managedLine = "Managed in Apassy on your Mac"
-    /// Shown when Connect says a Mac removed this iPhone, the account was deleted, or the Keychain
-    /// lost the key. The key and the account file stay until Forget.
-    static let removedLine = "This iPhone is no longer a device of its Apassy Connect account."
+    /// The line of `.removed`: what happened, and where this iPhone forgets the account (text, no
+    /// link).
+    static let removedLine =
+        "This iPhone is no longer a device of its Apassy Connect account. To join an account again, forget it in Settings > Devices."
 
     /// What the row shows: its value and the lines under it, all of them text.
     struct Content: Equatable {
@@ -279,7 +284,9 @@ enum ConnectPlanRow: Equatable {
     /// The row of `status`. `failed`: the last `connect_status` failed.
     static func of(_ status: ConnectStatus?, failed: Bool = false) -> ConnectPlanRow {
         guard let status else { return failed ? .unavailable : .checking }
-        if status.removed { return .notOnConnect }
+        // `removed` comes with an account; a core never sends it without one, but the row would say
+        // the same.
+        if status.removed { return .removed }
         guard status.state == .account else { return .notOnConnect }
         guard let plan = status.plan else { return .unavailable }
         switch plan.status {
@@ -321,6 +328,7 @@ enum ConnectPlanRow: Equatable {
         case .checking: "Checking"
         case .unavailable: "Not available"
         case .notOnConnect: "Not on Connect"
+        case .removed: "Removed from the account"
         case .active(let plan, let renews):
             renews.map { "\(Self.planName(plan)) · renews \(Self.day($0, timeZone: timeZone))" } ?? Self.planName(plan)
         case .family(let active, let of): "Connect Family · \(active) of \(of) people"
@@ -334,25 +342,71 @@ enum ConnectPlanRow: Equatable {
     var isOnAccount: Bool {
         switch self {
         case .active, .family, .pastDue, .ending: true
-        case .checking, .unavailable, .notOnConnect: false
+        case .checking, .unavailable, .notOnConnect, .removed: false
         }
     }
 
-    /// The one line that names the devices of the account that this iPhone could not verify.
-    static func notVerifiedLine(_ devices: [ConnectDevice]) -> String? {
-        guard !devices.isEmpty else { return nil }
-        return "Not verified: " + devices.map(\.name).joined(separator: ", ")
-    }
-
-    /// The whole row for `status`.
+    /// The whole row for `status`. The devices that are not verified have their line in Settings >
+    /// Devices (`ConnectDevicesText`), next to the account's control.
     static func content(_ status: ConnectStatus?, failed: Bool = false, timeZone: TimeZone = .current) -> Content {
         let row = of(status, failed: failed)
         var lines: [String] = []
         if row.isOnAccount { lines.append(managedLine) }
-        if status?.removed == true { lines.append(removedLine) }
-        if status?.removed != true, let line = notVerifiedLine(status?.unverifiedDevices ?? []) { lines.append(line) }
+        if row == .removed { lines.append(removedLine) }
         return Content(title: title, value: row.value(timeZone: timeZone), lines: lines)
     }
+}
+
+/// The section "Apassy Connect" of Settings > Devices (plan s7 unit I3): one quiet line for the
+/// devices of the account that this iPhone could not verify, and the one control "Forget This
+/// iPhone…". Leaving an account is no purchase action (plan section 6); no text here names a plan, a
+/// price, or a purchase.
+enum ConnectDevicesText {
+    static let header = "Apassy Connect"
+    static let forgetButton = "Forget This iPhone…"
+    static let confirmTitle = "Forget This iPhone?"
+    static let confirmButton = "Forget This iPhone"
+    /// The message of the confirmation while this iPhone is a device of the account.
+    static let confirmOnAccount =
+        "This iPhone forgets its Apassy Connect account and its account key. Your Mac lists this iPhone until you remove it there. To join again, use a new code from Apassy on your Mac."
+    /// The message of the confirmation after the removal.
+    static let confirmRemoved =
+        "This iPhone forgets its Apassy Connect account and its account key. To join an account again, use a new code from Apassy on your Mac."
+    /// The footer while the section shows.
+    static let footer = "Your vaults, approvals over Tailscale, and Wi-Fi stay on this iPhone."
+    /// After a forget that failed.
+    static let forgetFailed = "This iPhone could not forget the account. Try again."
+
+    /// Whether the section shows: only on an account (also a removed one). Without an account the
+    /// iPhone shows nothing here: no call to action.
+    static func shows(_ status: ConnectStatus?) -> Bool { status?.state == .account }
+
+    /// "1 device of the account is not verified. Check Apassy on your Mac.", or nil when every
+    /// device is verified. After a removal the list is not the iPhone's any more: nil.
+    static func notVerifiedLine(_ status: ConnectStatus?) -> String? {
+        guard let status, status.state == .account, !status.removed else { return nil }
+        let count = status.unverifiedDevices.count
+        switch count {
+        case 0: return nil
+        case 1: return "1 device of the account is not verified. Check Apassy on your Mac."
+        default: return "\(count) devices of the account are not verified. Check Apassy on your Mac."
+        }
+    }
+
+    /// The message of the confirmation for `status`.
+    static func confirmMessage(_ status: ConnectStatus?) -> String {
+        status?.removed == true ? confirmRemoved : confirmOnAccount
+    }
+}
+
+/// The end of the free approvals through the hosted relay (plan s7 section 5, R3): the hosted relay
+/// answers the questions, the feed, and the push of the team with 410, and the core calls it no
+/// more. One calm state in the place of "Questions": no price, no link, nothing to buy.
+enum RelayEndedNotice {
+    /// The value of the row "Questions".
+    static let value = "Ended"
+    static let line =
+        "Approvals through apassy-relay.wyderka.cc have ended. Pair this iPhone again from Apassy on your Mac."
 }
 
 /// The line "Reaches your Mac through: …" of Settings > Devices (plan s7 unit I1): how this
@@ -370,6 +424,18 @@ enum MacReach: Equatable, CaseIterable {
         }
     }
 
+    /// The quiet line of the dial when no route is in use through it (section 5.15): "Mac is offline"
+    /// (`mac_offline`) or "Not on Connect" (`not_on_connect`); nil for every other state, which the
+    /// app does not show. No hint, no plan, no purchase.
+    static func dialLine(_ connect: ConnectStatus?) -> String? {
+        guard let connect, !connect.dialRoute, !connect.removed else { return nil }
+        switch connect.dialState {
+        case .macOffline: return "Mac is offline"
+        case .notOnConnect: return "Not on Connect"
+        case .unused, .connected, .limit, .unreachable, .refused, .unknown: return nil
+        }
+    }
+
     /// "Reaches your Mac through: Tailscale", or nil when no route reaches a Mac.
     static func line(_ routes: [MacReach]) -> String? {
         let ordered = allCases.filter(routes.contains)
@@ -378,8 +444,8 @@ enum MacReach: Equatable, CaseIterable {
     }
 
     /// The routes: Tailscale for a vault or a questions team on a node (the relay inside the Mac
-    /// app, over the tailnet), Apassy Connect when the core dials through it, Wi-Fi for a paired
-    /// companion.
+    /// app, over the tailnet) while the tailnet reaches it, Apassy Connect in its place when the core
+    /// dials through it (`dial_route`: the tailnet did not answer), Wi-Fi for a paired companion.
     static func routes(
         vaults: [VaultEntry], questionRoutes: [DeviceRoute], wifiPaired: Bool, connect: ConnectStatus?
     ) -> [MacReach] {
@@ -387,8 +453,12 @@ enum MacReach: Equatable, CaseIterable {
         let onNode =
             vaults.contains(where: \.isNode)
             || questionRoutes.contains { if case .viaYourMac = $0 { true } else { false } }
-        if onNode { routes.append(.tailscale) }
-        if connect?.state == .account, connect?.dialRoute == true { routes.append(.connect) }
+        let dialing = connect?.state == .account && connect?.removed != true && connect?.dialRoute == true
+        if dialing {
+            routes.append(.connect)
+        } else if onNode {
+            routes.append(.tailscale)
+        }
         if wifiPaired { routes.append(.wifi) }
         return routes
     }
