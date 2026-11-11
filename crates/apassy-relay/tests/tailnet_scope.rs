@@ -330,14 +330,16 @@ fn serve_without_peer_addresses_shares_a_higher_limit() {
 }
 
 /// One request on a new connection to `listener`, written down as the front writes down
-/// a stream of the Connect tunnel (`front_peers::register_tunnel`) when `tunnel`, else as
-/// a connection without the front. Returns the status.
+/// a stream of the Connect tunnel with the node's public name
+/// (`front_peers::register_tunnel_named`) when `tunnel`, else as a connection without the
+/// front. Returns the status.
 fn request_via(listener: SocketAddr, tunnel: bool, head: &str, body: &str) -> u16 {
     let mut stream = TcpStream::connect(listener).expect("connect");
     let _entry = tunnel.then(|| {
-        front_peers::register_tunnel(
+        front_peers::register_tunnel_named(
             stream.local_addr().expect("local"),
             stream.peer_addr().expect("peer"),
+            Some(node::CONNECT_NAME),
         )
     });
     write!(

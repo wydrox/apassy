@@ -113,6 +113,7 @@ pub(crate) struct FakeState {
     pub(crate) starts: usize,
     pub(crate) stopped: bool,
     pub(crate) public_url: String,
+    pub(crate) public_origins: Vec<String>,
     pub(crate) public_listen: Option<SocketAddr>,
     pub(crate) teams: Vec<String>,
     /// uid -> (item, archived).
@@ -210,6 +211,7 @@ impl NodeBackend for FakeBackend {
         state.starts += 1;
         state.stopped = false;
         state.public_url = config.public_url;
+        state.public_origins = config.public_origins;
         state.public_listen = config.public_listen;
         // A restart ends every session and drops every pending run, as the relay does.
         state.pending.clear();
@@ -857,6 +859,7 @@ fn start_turns_the_route_on_and_a_lock_stops_the_node_and_turns_funnel_off() {
         let state = fx.state();
         assert_eq!(state.starts, 1);
         assert_eq!(state.public_url, "https://mac.example-tailnet.ts.net:8443");
+        assert!(state.public_origins.is_empty(), "Funnel alone: one origin");
         let listen = state.public_listen.expect("a public listener");
         assert!(listen.ip().is_loopback());
         assert!((49152..=65535).contains(&listen.port()));
@@ -1841,6 +1844,112 @@ fn a_start_on_connect_alone_without_connect_fails_and_is_tried_again() {
     );
 }
 
+/// An account seam whose Connect answers only the registration of the node (contract
+/// 3.1): the node `node_aaaaaaaaaa`, public name `aaaaaaaaaa.node.example.test`. Every
+/// other request (the tunnel's WebSocket) is closed unanswered.
+struct RegisteringConnect {
+    origin: String,
+}
+
+impl RegisteringConnect {
+    fn start() -> Self {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") && head.len() < 16 * 1024 {
+                    match stream.read(&mut byte) {
+                        Ok(1) => head.push(byte[0]),
+                        _ => break,
+                    }
+                }
+                let head = String::from_utf8_lossy(&head).to_string();
+                if !head.starts_with("POST /v1/tunnel/nodes ") {
+                    continue;
+                }
+                let length: usize = head
+                    .split("\r\n")
+                    .filter_map(|line| line.split_once(':'))
+                    .find(|(name, _)| name.trim().eq_ignore_ascii_case("content-length"))
+                    .and_then(|(_, value)| value.trim().parse().ok())
+                    .unwrap_or(0);
+                let mut body = vec![0u8; length];
+                let _ = stream.read_exact(&mut body);
+                let request: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+                let answer = serde_json::json!({"ok": true, "result": {
+                    "node_id": "node_aaaaaaaaaa", "account_id": "acc_aaaaaaaaaa",
+                    "device_id": "dev_aaaaaaaaaa", "name": request["name"], "pin": request["pin"],
+                    "public_name": "aaaaaaaaaa.node.example.test", "online": false,
+                    "created_at": 1_790_000_000u64,
+                }})
+                .to_string();
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                        answer.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        Self { origin }
+    }
+}
+
+impl super::tunnel::TunnelAuth for RegisteringConnect {
+    fn origin(&self) -> String {
+        self.origin.clone()
+    }
+
+    fn with_token(
+        &self,
+        call: &mut dyn FnMut(&str) -> Result<(), super::tunnel::Failure>,
+    ) -> Result<(), super::tunnel::Failure> {
+        call("tok-synthetic")
+    }
+
+    fn entitled(&self) -> Result<(), super::tunnel::Failure> {
+        Ok(())
+    }
+
+    fn has_account(&self) -> bool {
+        true
+    }
+
+    fn device_id(&self) -> Option<String> {
+        None
+    }
+
+    fn sign_out(&self) {}
+}
+
+/// With Funnel up and the Connect route on, the node has two public origins: Funnel's
+/// first, then its public name at Connect (relay docs/SPEC.md section 31.1).
+#[test]
+fn a_connect_route_beside_funnel_gives_the_node_its_public_name_as_a_second_origin() {
+    let fx = fixture();
+    let mut setup = super::tunnel::ConnectSetup::new(Arc::new(RegisteringConnect::start()));
+    setup.acme = None;
+    setup.zone = "node.example.test".to_owned();
+    fx.node.set_connect(Some(setup));
+    fx.node.set_connect_route(true).unwrap();
+    fx.running();
+    {
+        let state = fx.state();
+        assert_eq!(state.public_url, "https://mac.example-tailnet.ts.net:8443");
+        assert_eq!(
+            state.public_origins,
+            ["https://aaaaaaaaaa.node.example.test"]
+        );
+    }
+    fx.node.stop();
+}
+
 #[test]
 fn a_connect_route_beside_funnel_keeps_funnel_and_a_stop_ends_the_tunnel() {
     let fx = fixture();
@@ -1856,8 +1965,10 @@ fn a_connect_route_beside_funnel_keeps_funnel_and_a_stop_ends_the_tunnel() {
         super::tunnel::TunnelState::On,
         "nothing serves Connect"
     );
-    // Agents keep the Funnel route: its MCP URL is there.
+    // Agents keep the Funnel route: its MCP URL is there. Connect named no public name
+    // yet, so Funnel's is the only origin.
     assert!(fx.node.status(&fx.vault).url.is_some());
+    assert!(fx.state().public_origins.is_empty());
     fx.node.stop();
     assert!(
         fx.node.connect_status().tunnel.is_none(),

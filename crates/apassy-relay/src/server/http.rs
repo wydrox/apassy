@@ -1530,6 +1530,14 @@ fn handle(hub: &Hub, proxy: Option<&Proxy>, listener: &Listener, mut request: Re
         respond_error(request, &RelayError::new(codes::NOT_FOUND, "No such path."));
         return;
     }
+    // The public origin of this request (docs/SPEC.md section 31.1), from the listener and
+    // the tunnel stream, never from a header. A tunnel stream whose server name is no
+    // origin of the node is not served.
+    let Some(arrival) = arrival_origin(&hub.config, listener, &request) else {
+        request.abort_input();
+        respond_error(request, &RelayError::new(codes::NOT_FOUND, "No such path."));
+        return;
+    };
     if method == "GET" && path == paths::HEALTH {
         // Health has no request body. Do not let destructor draining occupy its
         // reserved seats; guarded connections cannot have a pipelined successor.
@@ -1589,7 +1597,7 @@ fn handle(hub: &Hub, proxy: Option<&Proxy>, listener: &Listener, mut request: Re
     // The flow has its own count for each client (31.5): a stranger's bad tokens on
     // `/mcp` never hold the owner's client away from its metadata, page, or refresh.
     if let Some(route) = oauth_route {
-        respond_oauth(hub, request, route, &method, &path, &query, now);
+        respond_oauth(hub, request, route, &method, &path, &query, arrival, now);
         return;
     }
     let counted = listener.counted(&request, &path);
@@ -1637,6 +1645,17 @@ fn handle(hub: &Hub, proxy: Option<&Proxy>, listener: &Listener, mut request: Re
             .filter(|parsed| parsed.kind == TokenKind::Session)
             .and_then(|parsed| parsed.team)
             .and_then(|team| hub.team(&team));
+        // A session works only on the origin that it was made for: on another origin of the
+        // node its key is answered as one that names no session.
+        if let (Some(core), Some(key)) = (&core, key)
+            && core
+                .sessions
+                .origin_of(key)
+                .is_some_and(|origin| origin != arrival)
+        {
+            proxy.refuse_unknown_session(request, now);
+            return;
+        }
         let _guard = if let Some(core) = core {
             match TeamSlotGuard::take(&core, now, false) {
                 Some(guard) => Some(guard),
@@ -1805,6 +1824,7 @@ fn handle(hub: &Hub, proxy: Option<&Proxy>, listener: &Listener, mut request: Re
             request,
             &RelayError::unauthenticated(),
             token.is_some(),
+            arrival,
         );
         return;
     };
@@ -1822,7 +1842,15 @@ fn handle(hub: &Hub, proxy: Option<&Proxy>, listener: &Listener, mut request: Re
                     &json!({"code": error.code, "path_kind": endpoint_kind(endpoint)}),
                 );
             }
-            respond_auth_error(hub, listener.scope, endpoint, request, &error, true);
+            respond_auth_error(
+                hub,
+                listener.scope,
+                endpoint,
+                request,
+                &error,
+                true,
+                arrival,
+            );
             return;
         }
     };
@@ -1899,7 +1927,15 @@ fn handle(hub: &Hub, proxy: Option<&Proxy>, listener: &Listener, mut request: Re
         match authenticate(&core, need, token, after_body) {
             Ok(principal) => principal,
             Err(error) => {
-                respond_auth_error(hub, listener.scope, endpoint, request, &error, true);
+                respond_auth_error(
+                    hub,
+                    listener.scope,
+                    endpoint,
+                    request,
+                    &error,
+                    true,
+                    arrival,
+                );
                 return;
             }
         }
@@ -1924,7 +1960,15 @@ fn handle(hub: &Hub, proxy: Option<&Proxy>, listener: &Listener, mut request: Re
         now
     };
     if endpoint == Endpoint::Mcp {
-        respond_mcp(hub, listener.scope, &core, request, principal, &body);
+        respond_mcp(
+            hub,
+            listener.scope,
+            &core,
+            request,
+            principal,
+            &body,
+            arrival,
+        );
         return;
     }
     match dispatch(
@@ -2588,6 +2632,41 @@ fn feed_length(request: &Request) -> RelayResult<()> {
     }
 }
 
+/// The public origin that `request` arrived on (docs/SPEC.md section 31.1), one of
+/// `RelayConfig::public_origins`. On the public listener, a stream of the Connect tunnel
+/// has the origin whose host is the TLS server name that the node's public certificate
+/// answered: the front writes it down in process (`apassy::net::front_peers`), keyed by
+/// the loopback addresses of its connection to this listener. Every other connection
+/// (Funnel's from `tailscaled`, a program of this Mac) and every other listener has the
+/// first origin, `public_url`. `None`: a tunnel stream whose server name is no origin of
+/// the node, or that has none; the request is refused, never given a guessed origin. No
+/// header of the request (`Host`, `X-Forwarded-*`, `Forwarded`) is read.
+fn arrival_origin<'a>(
+    config: &'a crate::config::RelayConfig,
+    listener: &Listener,
+    request: &Request,
+) -> Option<&'a str> {
+    let first = config.public_url.as_str();
+    if listener.scope != Scope::Public {
+        return Some(first);
+    }
+    let (Some(remote), Some(listen)) = (request.remote_addr(), listener.listen) else {
+        return Some(first);
+    };
+    match apassy::net::front_peers::tunnel_stream(*remote, listen) {
+        None => Some(first),
+        Some(stream) => stream
+            .server_name
+            .as_deref()
+            .and_then(|name| config.public_origin_named(name)),
+    }
+}
+
+/// `POST /mcp` of an authenticated caller. `arrival` is the public origin of the request
+/// (`arrival_origin`): a browser's `Origin` must be it, and an access token of the MCP
+/// authorization flow works only on the origin that its client registered at
+/// (`oauth::agent_origin`); elsewhere it is 401 with the challenge of this origin, so the
+/// client can connect here.
 fn respond_mcp(
     hub: &Hub,
     scope: Scope,
@@ -2595,10 +2674,11 @@ fn respond_mcp(
     request: Request,
     principal: Option<Principal>,
     body: &[u8],
+    arrival: &str,
 ) {
     let origin = header_value(&request, "Origin");
     if let Some(origin) = origin
-        && origin.trim_end_matches('/') != core.config.public_url
+        && origin.trim_end_matches('/') != arrival
     {
         respond_error(
             request,
@@ -2614,9 +2694,29 @@ fn respond_mcp(
             request,
             &RelayError::unauthenticated(),
             true,
+            arrival,
         );
         return;
     };
+    match oauth::agent_origin(hub, &core.team, agent.id) {
+        Ok(Some(bound)) if bound != arrival => {
+            respond_auth_error(
+                hub,
+                scope,
+                Endpoint::Mcp,
+                request,
+                &RelayError::unauthenticated(),
+                true,
+                arrival,
+            );
+            return;
+        }
+        Ok(_) => {}
+        Err(error) => {
+            respond_error(request, &error);
+            return;
+        }
+    }
     match mcp::handle(core, &agent, body) {
         mcp::Reply::Accepted => {
             let response = Response::empty(202).with_header(no_store_header());
@@ -2644,9 +2744,10 @@ fn respond_auth_error(
     request: Request,
     error: &RelayError,
     token_sent: bool,
+    arrival: &str,
 ) {
     let challenge = (endpoint == Endpoint::Mcp && error.status() == 401 && scope.serves_oauth())
-        .then(|| oauth::www_authenticate(&hub.config, token_sent))
+        .then(|| oauth::www_authenticate(&hub.config, arrival, token_sent))
         .flatten()
         .and_then(|value| Header::from_bytes(&b"WWW-Authenticate"[..], value.as_bytes()).ok());
     respond_json_with(
@@ -2669,6 +2770,7 @@ fn respond_oauth(
     method: &str,
     path: &str,
     query: &str,
+    arrival: &str,
     now: u64,
 ) {
     let body = if oauth::has_body(route) {
@@ -2691,7 +2793,16 @@ fn respond_oauth(
     let content_type = header_value(&request, "Content-Type");
     // A bad code or refresh token counts for its client only (`oauth::ClientFailures`),
     // never in the listener's limiter: one stranger must not lock every client out.
-    let reply = oauth::handle(hub, route, path, query, &body, content_type.as_deref(), now);
+    let reply = oauth::handle(
+        hub,
+        route,
+        path,
+        query,
+        &body,
+        content_type.as_deref(),
+        arrival,
+        now,
+    );
     write_oauth(request, reply, false);
 }
 

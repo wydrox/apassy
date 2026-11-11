@@ -192,6 +192,27 @@ impl Proxy {
         }
     }
 
+    /// Answers `request` as a request whose session key names no live session (the answer
+    /// and the audit of `handle`), without looking the key up: the HTTP layer found the
+    /// session, but on another public origin of the node than the one it was made for.
+    pub fn refuse_unknown_session(&self, request: tiny_http::Request, now: u64) {
+        let context = Context {
+            at: now,
+            method: request.method().as_str().to_owned(),
+            host: String::new(),
+            session: None,
+        };
+        let error = session_invalid();
+        respond_error(request, &error);
+        self.sessions.record(context.event(
+            error.status(),
+            ProxyOutcome::Refused,
+            Some(error.code),
+            None,
+            Vec::new(),
+        ));
+    }
+
     /// Every check, then the upstream exchange. `Ok` is a response to send.
     fn serve(
         &self,

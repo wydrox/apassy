@@ -78,6 +78,7 @@ impl NodeBackend for EmbeddedRelay {
             data_dir,
             master_key,
             public_url,
+            public_origins,
             public_listen,
         } = config;
         let (node_origin, tailnet_listen, tailnet_agents, push_gateway) = match tailnet {
@@ -99,6 +100,7 @@ impl NodeBackend for EmbeddedRelay {
             tailnet_agents,
             push_gateway,
         })
+        .and_then(|relay| relay.with_public_origins(&public_origins))
         .map_err(node_error)?;
         relay.upstream = self.upstream.clone();
         // The connect page keeps `EMBEDDED_MAC_NAME` ("your Mac"): it is public, so it
@@ -143,6 +145,29 @@ impl EmbeddedNode {
             .and_then(|id| self.hub.team(&id))
             .ok_or_else(|| RelayError::not_found("team"))
     }
+}
+
+/// The public origin of the session of `run`: the origin of its agent's connection of the
+/// MCP authorization flow (`oauth::agent_origin`), else `public_url`, the first.
+fn session_origin(hub: &Hub, core: &Core, run: RunId) -> RelayResult<String> {
+    let first = || core.config.public_url.clone();
+    if hub.config.public_origins().len() < 2 {
+        return Ok(first());
+    }
+    let agent: Option<i64> = core.store.with(|conn| {
+        conn.query_row(
+            "SELECT agent_id FROM run WHERE id = ?1",
+            params![to_i(run.0)],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(db)
+    })?;
+    let Some(agent) = agent else {
+        return Ok(first());
+    };
+    Ok(oauth::agent_origin(hub, &core.team, AgentId(to_u(agent)))?
+        .map_or_else(first, str::to_string))
 }
 
 /// The owner member of a personal team, as the in-process host acts for it.
@@ -713,7 +738,10 @@ impl RunningNode for EmbeddedNode {
                 .iter()
                 .map(|value| SecretString::new(value.expose().to_owned()))
                 .collect();
-            host::release_values(&core, RunId(run.0), values, reason, now_unix())?;
+            // The session is for the origin that the run's agent uses (`oauth::agent_origin`),
+            // read before the release takes the team file.
+            let origin = session_origin(&self.hub, &core, RunId(run.0))?;
+            host::release_values_at(&core, RunId(run.0), values, reason, &origin, now_unix())?;
             host::embedded_run(&core, RunId(run.0), now_unix()).map(state_of)
         })()
         .map_err(node_error)

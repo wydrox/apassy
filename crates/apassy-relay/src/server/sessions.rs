@@ -25,6 +25,9 @@ use crate::session::{LiveSession, ProxyEvent, SessionSecret, SessionSource};
 struct Entry {
     session: Arc<LiveSession>,
     view: SessionView,
+    /// The public origin that the session was made for: its base URLs start with it, and
+    /// the proxy serves its key only on it (docs/SPEC.md section 31.2).
+    origin: String,
 }
 
 /// The table of live sessions of one team.
@@ -51,8 +54,9 @@ impl SessionTable {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Makes a session for a run: the placeholders, the key, the environment. The
-    /// returned hash is the handle for `remove_hash`, if the caller must undo it.
+    /// Makes a session for a run: the placeholders, the key, the environment. Its base URLs
+    /// start with `public_url`, the public origin that the session is for. The returned
+    /// hash is the handle for `remove_hash`, if the caller must undo it.
     pub fn create(
         &self,
         public_url: &str,
@@ -106,9 +110,17 @@ impl SessionTable {
             Entry {
                 session,
                 view: view.clone(),
+                origin: public_url.trim_end_matches('/').to_string(),
             },
         );
         Ok((view, hash))
+    }
+
+    /// The public origin that the session of `session_key` was made for, while it is in
+    /// the table.
+    pub fn origin_of(&self, session_key: &str) -> Option<String> {
+        let hash = token_hash(session_key);
+        self.lock().get(&hash).map(|entry| entry.origin.clone())
     }
 
     /// Removes one session by its handle, without an audit row.

@@ -845,6 +845,11 @@ pub struct RelayConfig {
     pub tailnet_agents: bool,
     /// For example `https://apassy-relay.wyderka.cc`. Base URLs start with it.
     pub public_url: String,
+    /// The origins of the public listener, `public_url` first (docs/SPEC.md section 31.1):
+    /// a node with Funnel and the Connect route both on has two, and answers each request
+    /// with the one it arrived on. Empty: `public_url` alone. Set it with
+    /// `RelayConfig::with_public_origins`, read it with `RelayConfig::public_origins`.
+    pub public_origins: Vec<String>,
     /// The origins that a device may sign at sign-in (docs/SPEC.md section 23.2, 32.3).
     /// Empty: `public_url` alone, as the hosted relay. A node: its node origin first, and
     /// with the public route on, the Funnel `public_url`. Read it with
@@ -1136,6 +1141,55 @@ impl RelayConfig {
         }
     }
 
+    /// The origins of the public listener, in order: `public_origins`, or `public_url`
+    /// alone when it is empty. The first is the origin of every request that did not come
+    /// through a stream of the Connect tunnel (docs/SPEC.md section 31.1).
+    pub fn public_origins(&self) -> Vec<&str> {
+        if self.public_origins.is_empty() {
+            vec![self.public_url.as_str()]
+        } else {
+            self.public_origins.iter().map(String::as_str).collect()
+        }
+    }
+
+    /// The origin of `public_origins` whose host is `server_name` (the TLS server name of
+    /// a stream of the Connect tunnel), compared without case and without a final dot.
+    pub fn public_origin_named(&self, server_name: &str) -> Option<&str> {
+        let name = server_name.trim_end_matches('.').to_ascii_lowercase();
+        if name.is_empty() {
+            return None;
+        }
+        self.public_origins()
+            .into_iter()
+            .find(|origin| crate::decision::public_host(origin) == name)
+    }
+
+    /// Adds `further` origins of the public listener after `public_url` (an embedded node:
+    /// the public name at Connect, `https://<label>.node.<zone>`, while Funnel is up too).
+    /// Each is checked as `public_url` is (`checked_public_url`); one that is already in
+    /// the set is left out. With none left, the set stays `public_url` alone. Further
+    /// origins need the public listener (400 `invalid_request`).
+    pub fn with_public_origins(mut self, further: &[String]) -> RelayResult<Self> {
+        let mut origins = vec![self.public_url.clone()];
+        for origin in further {
+            let origin = checked_public_url(origin)?;
+            if !origins.contains(&origin) {
+                origins.push(origin);
+            }
+        }
+        if origins.len() > 1 && self.public_listen.is_none() {
+            return Err(RelayError::invalid(
+                "Further public origins need the public listener.",
+            ));
+        }
+        self.public_origins = if origins.len() > 1 {
+            origins
+        } else {
+            Vec::new()
+        };
+        Ok(self)
+    }
+
     /// True for a node on the tailnet: a relay with a tailnet listener. Only a node takes
     /// a node pairing code (directory 1005).
     pub fn is_node(&self) -> bool {
@@ -1279,6 +1333,7 @@ impl RelayConfig {
             tailnet_listen: options.tailnet_listen,
             tailnet_agents: options.tailnet_agents,
             public_url,
+            public_origins: Vec::new(),
             sign_in_origins,
             edge: EdgeMode::Off,
             master_key: options.master_key,
@@ -1434,6 +1489,7 @@ impl RelayConfig {
             tailnet_listen: None,
             tailnet_agents: false,
             public_url,
+            public_origins: Vec::new(),
             sign_in_origins: Vec::new(),
             edge: EdgeMode::Required(edge_secret),
             master_key,
@@ -2065,6 +2121,56 @@ mod tests {
         .unwrap();
         assert_eq!(hosted.sign_in_origins(), ["https://relay.example.test"]);
         assert!(hosted.tailnet_listen.is_none() && !hosted.is_node());
+    }
+
+    #[test]
+    fn a_node_with_funnel_and_connect_has_two_public_origins_funnel_first() {
+        let funnel = "https://mac.example.ts.net:8443";
+        let connect = "https://k7m2q4x3ca.node.example.test";
+        // One origin: `public_url` alone, as before.
+        let one = RelayConfig::embedded(embedded_options(Some("127.0.0.1:49200"))).unwrap();
+        assert!(one.public_origins.is_empty());
+        assert_eq!(one.public_origins(), [funnel]);
+        let same = one
+            .clone()
+            .with_public_origins(&[format!("{funnel}/")])
+            .unwrap();
+        assert!(same.public_origins.is_empty(), "a repeat is left out");
+        // Two: Funnel first, then the public name at Connect.
+        let two = one
+            .clone()
+            .with_public_origins(&[format!("{connect}/"), connect.to_string()])
+            .unwrap();
+        assert_eq!(two.public_origins(), [funnel, connect]);
+        assert_eq!(two.public_url, funnel);
+        // A server name finds the origin of its host, without case or a final dot.
+        assert_eq!(
+            two.public_origin_named("K7M2Q4X3CA.node.example.test."),
+            Some(connect)
+        );
+        assert_eq!(two.public_origin_named("mac.example.ts.net"), Some(funnel));
+        assert_eq!(two.public_origin_named("other.node.example.test"), None);
+        assert_eq!(two.public_origin_named(""), None);
+        assert_eq!(two.public_origin_named("."), None);
+        // Not an origin, or no public listener: refused.
+        assert!(
+            one.clone()
+                .with_public_origins(&["k7m2q4x3ca".into()])
+                .is_err()
+        );
+        assert!(
+            one.clone()
+                .with_public_origins(&[format!("{connect}/mcp")])
+                .is_err()
+        );
+        let private = RelayConfig::embedded(embedded_options(None)).unwrap();
+        assert_eq!(
+            private
+                .with_public_origins(&[connect.into()])
+                .unwrap_err()
+                .code,
+            crate::error::codes::INVALID_REQUEST
+        );
     }
 
     #[test]

@@ -153,6 +153,7 @@ pub fn test_config(dir: &std::path::Path, upstream: UpstreamOptions) -> RelayCon
         tailnet_listen: None,
         tailnet_agents: false,
         public_url: format!("http://127.0.0.1:{port}"),
+        public_origins: Vec::new(),
         sign_in_origins: Vec::new(),
         edge: EdgeMode::Required(SecretString::new(EDGE_SECRET.to_string())),
         master_key: SecretString::new(VAULT_KEY.to_string()),
