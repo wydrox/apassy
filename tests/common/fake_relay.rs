@@ -182,6 +182,9 @@ struct Team {
     /// setting when it was made; `None` for a team of a team code (the relay's
     /// `max_bytes`). `Some(0)`: a push and a receipt are 403 `plan_required`.
     sync_bytes: Option<u64>,
+    /// The head view serves no head below this version in its chain (a relay that cut
+    /// the history it serves, [`FakeRelay::cut_chain_below`]).
+    cut_below: u64,
 }
 
 /// The feed of one device: the envelope as the text that came.
@@ -673,6 +676,24 @@ impl FakeRelay {
     pub fn heads(&self) -> Vec<StoredHead> {
         let id = self.team_id();
         lock(&self.shared.0).teams[&id].heads.clone()
+    }
+
+    /// The store `team_id` serves the chain of its head view only from `version` on: the
+    /// heads below are kept, and no device can read them.
+    pub fn cut_chain_below(&self, team_id: &str, version: u64) {
+        lock(&self.shared.0)
+            .teams
+            .get_mut(team_id)
+            .expect("store")
+            .cut_below = version;
+    }
+
+    /// The store `team_id` restored from an older backup: every head after `version` goes.
+    pub fn roll_back_store(&self, team_id: &str, version: u64) {
+        let mut relay = lock(&self.shared.0);
+        let team = relay.teams.get_mut(team_id).expect("store");
+        team.heads.retain(|head| head.version <= version);
+        team.snapshots.retain(|stored, _| *stored <= version);
     }
 
     /// A relay restored from an older backup: every head after `version` goes.
@@ -1235,7 +1256,7 @@ fn head_view(team: &Team, since: u64) -> Value {
     let page: Vec<&StoredHead> = team
         .heads
         .iter()
-        .filter(|head| head.version > since)
+        .filter(|head| head.version > since && head.version >= team.cut_below)
         .take(1000)
         .collect();
     let mut signed: Vec<u64> = page.iter().map(|head| head.device_id).collect();
@@ -1259,7 +1280,7 @@ fn head_view(team: &Team, since: u64) -> Value {
         "receipts": receipts,
         "signers": signers(team, &signed),
     });
-    if let Some(first) = team.heads.iter().find(|head| head.version > since) {
+    if let Some(first) = page.first() {
         view["chain_from"] = json!(first.version);
     }
     view

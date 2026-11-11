@@ -949,13 +949,12 @@ fn start_path(app: &mut DesktopApp, ctx: &egui::Context) {
     }
 }
 
-/// The start-screen step ends: a join that holds the account key of its session goes (a
-/// vault that its passphrase opens already is not stopped: it opens in a moment), and so
-/// does the sheet of a join of this device (its join is cancelled with the session).
+/// The start-screen step ends: a join that holds the account key of its session goes, also
+/// when the step ends because a vault was unlocked (a store download that runs, a copy that
+/// waits for its passphrase); only a vault that its passphrase opens already is not stopped
+/// (`relay_join_cancel` keeps a running adoption or merge: it opens in a moment). The sheet
+/// of a join of this device goes too (its join is cancelled with the session).
 fn end_start_holders(app: &mut DesktopApp) {
-    if app.owner_ui.session.epoch().is_some() {
-        return;
-    }
     if app.sync.relay.join_with_account().is_some() {
         app.relay_join_cancel();
     }

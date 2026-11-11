@@ -3615,6 +3615,110 @@ mod connect_sync {
         );
     }
 
+    /// A relay that serves the chain of a vault store only from its head on, over a history
+    /// that holds an entry by a key that the device list never held: a new device checks
+    /// only what the relay serves, so it refuses a chain that does not start at version 1,
+    /// and downloads nothing. With the whole chain served, the foreign entry is refused too.
+    #[test]
+    fn a_new_device_refuses_a_chain_cut_to_the_head_over_a_foreign_entry() {
+        let cloud = cloud();
+        let a = connect_mac(&cloud, "a");
+        let mut account_a = new_account(&cloud, &a, "Rafal", true);
+        let mut vault_a = a.mac.create();
+        vault_a.add(item("Alpha", "SYNTH-alpha")).expect("add");
+        let team = a
+            .mac
+            .sync
+            .enable_on_connect(&mut vault_a, &mut account_a, "Personal")
+            .expect("enable")
+            .team_id;
+        let first = cloud.relay.heads_of(&team)[0].clone();
+        let stranger = AccountSigner::open_or_create(&MemoryKeyStore::new()).unwrap();
+        let stranger_number =
+            cloud
+                .relay
+                .add_store_device(&team, "Mac Studio", stranger.public_key());
+        let a_signer = account_a.signer().expect("A's key");
+        let a_number = cloud
+            .relay
+            .team_devices(&team)
+            .into_iter()
+            .find(|(_, key)| key.as_slice() == a_signer.public_key())
+            .map(|(number, _)| number)
+            .expect("A in the store");
+        let entry = forged_after(&first, stranger_number, &stranger);
+        let top = forged_after(&entry.0, a_number, &a_signer);
+        let top_version = top.0.version;
+        cloud.relay.replace_store_from(&team, vec![entry, top]);
+        let d = connect_mac(&cloud, "d");
+        let mut account_d = join_account(&cloud, &mut account_a, &d, "Synthetic iMac");
+        a.mac
+            .sync
+            .register_account_devices(&mut account_a)
+            .expect("register D");
+        let store = account_d
+            .vault_stores()
+            .expect("stores")
+            .into_iter()
+            .find(|store| store.team_id == team)
+            .expect("D is in the store");
+        let work = d.mac.data.join("sync");
+        let joined = RelaySync::joined_from_store(&mut account_d, &store).expect("joined");
+        assert_eq!(
+            joined.download(&work).unwrap_err(),
+            SyncError::Damaged,
+            "the whole chain holds the foreign entry"
+        );
+        // The relay serves the head alone: the entries below it cannot be checked.
+        cloud.relay.cut_chain_below(&team, top_version);
+        let joined = RelaySync::joined_from_store(&mut account_d, &store).expect("joined");
+        assert_eq!(
+            joined.download(&work).unwrap_err(),
+            SyncError::Damaged,
+            "a chain that does not start at version 1 is refused"
+        );
+        assert_eq!(joined.waiting_head(), None);
+    }
+
+    /// The one exception to a chain that starts at version 1: the head of a device that left
+    /// the account, served alone, that the owner takes with the owner check of a new device.
+    #[test]
+    fn a_new_device_takes_a_cut_chain_only_for_the_head_that_the_owner_took() {
+        let mut left = b_pushed_last_and_left();
+        let last = left
+            .cloud
+            .relay
+            .heads_of(&left.team)
+            .last()
+            .cloned()
+            .unwrap();
+        left.cloud.relay.cut_chain_below(&left.team, last.version);
+        let d = connect_mac(&left.cloud, "d");
+        let mut account_d = join_account(&left.cloud, &mut left.account_a, &d, "Synthetic iMac");
+        left.a
+            .mac
+            .sync
+            .register_account_devices(&mut left.account_a)
+            .expect("register D");
+        let store = account_d
+            .vault_stores()
+            .expect("stores")
+            .into_iter()
+            .find(|store| store.team_id == left.team)
+            .expect("D is in the store");
+        let joined = RelaySync::joined_from_store(&mut account_d, &store).expect("joined");
+        let work = d.mac.data.join("sync");
+        assert_eq!(
+            joined.download(&work).unwrap_err(),
+            SyncError::WaitsForAccountDevice
+        );
+        let head = joined.waiting_head().expect("the waiting head");
+        assert_eq!(head.version, last.version);
+        joined
+            .download_departed(&work, &head)
+            .expect("the head that the owner took, served alone");
+    }
+
     /// A head by a key that the device list never held stays refused: no waiting head is
     /// kept, and the core refuses to take it, for a vault and at a download.
     #[test]

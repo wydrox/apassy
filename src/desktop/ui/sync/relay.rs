@@ -695,6 +695,9 @@ pub(crate) struct RelayUi {
     /// The vault whose step on the copy of a device that left waits for its owner check,
     /// with the exact action that the check names.
     departed_check: Option<(String, OwnerAction)>,
+    /// The vault whose "Use the relay copy…" of a vault store of the Connect account waits
+    /// for its owner check, with the exact action that the check names.
+    use_copy_check: Option<(String, OwnerAction)>,
     /// "Use the Copy That … Left…" of a device that joins (the start screen) waits for its
     /// owner check: the exact action that the check names.
     join_departed_check: Option<OwnerAction>,
@@ -1349,6 +1352,7 @@ impl DesktopApp {
         }
         self.relay_undo_step();
         self.relay_departed_step();
+        self.relay_use_copy_step();
         self.relay_connect_tick();
     }
 
@@ -3311,7 +3315,8 @@ impl DesktopApp {
 
     /// "Use the relay copy" for the open vault `id` after this Mac refused the relay
     /// copy: the copy as it is now merges into the vault, and the vault goes up. On its
-    /// own thread.
+    /// own thread. A vault store of the Connect account takes this step only after an
+    /// owner check that names the copy ([`Self::relay_ask_use_copy`]).
     pub(crate) fn relay_use_copy(&mut self, id: &str) {
         if self.relay_busy(id, Job::UseCopy) {
             return;
@@ -3320,9 +3325,126 @@ impl DesktopApp {
             self.set_err("Unlock the vault first. Nothing changed.");
             return;
         };
+        if relay.uses_account_key() {
+            self.set_err("Confirm which copy to use first. Nothing changed.");
+            return;
+        }
         let slot = self.relay_slot();
         self.relay_spawn_with(id, Job::UseCopy, Some(relay.clone()), move || {
             Reply::UsedCopy(relay.use_relay_copy_shared(&slot, same_file(&relay)))
+        });
+    }
+
+    /// The signed name of the device of `key` in the account: a device that the verified
+    /// device list removed, or a device of that list.
+    fn relay_signed_name(&self, key: &[u8]) -> Option<String> {
+        if let Some(name) = self.sync.relay.departed_names.get(key) {
+            return Some(name.clone());
+        }
+        let slot = self.ui.connect.live.session().slot();
+        let guard = slot.try_lock().ok()?;
+        guard
+            .as_ref()?
+            .verified_list()?
+            .name_of(key)
+            .map(str::to_owned)
+    }
+
+    /// The copy that "Use the relay copy…" of the vault store of `id` takes: the current
+    /// head that the relay served at the last check, and the signed name of its device.
+    pub(crate) fn relay_served_copy(&self, id: &str) -> Option<(DepartedHead, Option<String>)> {
+        let head = self.relay_of(id)?.served_head()?;
+        let name = self.relay_signed_name(&head.key);
+        Some((head, name))
+    }
+
+    /// "Use the relay copy…" of a vault store of the Connect account: a fresh owner check
+    /// first, for exactly the current head that the relay served
+    /// ([`OwnerAction::UseRelayCopy`]); its sheet names the version, the device that signed
+    /// it, and its time.
+    pub(crate) fn relay_ask_use_copy(&mut self, id: &str, ctx: Option<&egui::Context>) {
+        let Some((head, name)) = self.relay_served_copy(id) else {
+            self.set_err("Apassy cannot tell which copy the relay holds now. Sync again first. Nothing changed.");
+            return;
+        };
+        let Some(team_id) = self
+            .relay_of(id)
+            .and_then(|relay| relay.state().ok().flatten())
+            .and_then(|state| state.team_id)
+        else {
+            self.set_err("Unlock the vault first. Nothing changed.");
+            return;
+        };
+        let vault_name = self
+            .vault_list
+            .registry
+            .get(id)
+            .map(|entry| entry.name.clone())
+            .unwrap_or_default();
+        let request = OwnerRequest::UseRelayCopy {
+            team_id,
+            version: head.version,
+            head: head.head_hash.clone(),
+            device_name: name.map_or_else(
+                || concat!("a device that this ", crate::computer!(), " does not know").to_owned(),
+                |name| format!("“{name}”"),
+            ),
+            time: head.time,
+            vault_name,
+        };
+        self.sync.relay.use_copy_check = Some((id.to_owned(), request.action()));
+        self.ask_owner(request, ctx);
+    }
+
+    /// "Use the relay copy…" of a vault store after its owner check: the proof must name
+    /// exactly the head that the relay served last, in this vault session; then only that
+    /// head is taken ([`RelaySync::use_relay_copy_approved`]).
+    fn relay_use_copy_step(&mut self) {
+        let Some((id, action)) = self.sync.relay.use_copy_check.clone() else {
+            return;
+        };
+        if self.ui.connect.live.guarded.is_some()
+            || self.sync.relay.undo.is_some()
+            || self.sync.relay.departed_check.is_some()
+        {
+            return;
+        }
+        let Some(proof) = self.owner.take_connect_proof() else {
+            if self.owner.check.is_none() {
+                self.sync.relay.use_copy_check = None;
+            }
+            return;
+        };
+        self.sync.relay.use_copy_check = None;
+        let Some(epoch) = self.owner_ui.session.epoch() else {
+            self.set_err("Unlock the vault first. Nothing changed.");
+            return;
+        };
+        if let Err(refusal) = proof.check(&action, &epoch) {
+            self.set_err(refusal.message());
+            return;
+        }
+        drop(proof);
+        let OwnerAction::UseRelayCopy { version, head, .. } = action else {
+            return;
+        };
+        let Some((approved, _)) = self
+            .relay_served_copy(&id)
+            .filter(|(served, _)| served.version == version && served.head_hash == head)
+        else {
+            self.set_err("The copy on the relay changed. Nothing changed.");
+            return;
+        };
+        if self.relay_busy(&id, Job::UseCopy) {
+            return;
+        }
+        let Some(relay) = self.relay_of(&id).filter(|_| self.relay_open(&id)) else {
+            self.set_err("Unlock the vault first. Nothing changed.");
+            return;
+        };
+        let slot = self.relay_slot();
+        self.relay_spawn_with(&id, Job::UseCopy, Some(relay.clone()), move || {
+            Reply::UsedCopy(relay.use_relay_copy_approved(&slot, same_file(&relay), &approved))
         });
     }
 
@@ -6409,6 +6531,14 @@ pub(super) fn use_copy_sheet(
     entry: &VaultEntry,
 ) -> bool {
     let busy = app.relay_busy(&entry.id, Job::UseCopy);
+    // A vault store of the Connect account: the sheet names the copy, and an owner check
+    // names it again before anything is taken.
+    let connect = app
+        .relay_of(&entry.id)
+        .is_some_and(|relay| relay.uses_account_key());
+    if connect {
+        return use_store_copy_sheet(app, ctx, entry, busy);
+    }
     let mut use_copy = false;
     let mut cancel = false;
     let response = kit::sheet(ctx, "sync-relay-use-copy", 500.0, |ui| {
@@ -6454,6 +6584,88 @@ pub(super) fn use_copy_sheet(
     if use_copy {
         // The answer of the relay closes the sheet.
         app.relay_use_copy(&entry.id);
+    }
+    if cancel {
+        super::cancel_sheet(app, ctx);
+    }
+    response.escape
+}
+
+/// The text of "Use the relay copy…" for a vault store of the Connect account: which copy
+/// it takes (`version`, the signed name of the device that signed it, its time), and that
+/// the record of what this computer had merged is replaced.
+pub(crate) fn store_copy_text(
+    vault: &str,
+    version: u64,
+    device: Option<&str>,
+    time: u64,
+) -> String {
+    let device = device.map_or_else(
+        || concat!("a device that this ", crate::computer!(), " does not know").to_owned(),
+        |name| format!("“{name}”"),
+    );
+    format!(
+        concat!(
+            "This ",
+            crate::computer!(),
+            " refuses the copy of “{vault}” on the relay: it is older than the copy that this ",
+            crate::computer!(),
+            " saw last, or its history does not include the last change of this ",
+            crate::computer!(),
+            ". The relay holds version {version}, which {device} saved on {day}. Apassy can take that copy, merge it with the vault on this ",
+            crate::computer!(),
+            ", and upload the result; this ",
+            crate::computer!(),
+            "'s record of the copies it had merged is replaced by that version. Nothing in the vault on this ",
+            crate::computer!(),
+            " is lost. Use it only if you know that device."
+        ),
+        vault = vault,
+        version = version,
+        device = device,
+        day = crate::desktop::ui::connect::day(time),
+    )
+}
+
+/// "Use the relay copy…" of a vault store of the Connect account: the sheet names the
+/// copy that the relay holds now, and "Use This Copy…" asks for the owner check that names
+/// it ([`DesktopApp::relay_ask_use_copy`]).
+fn use_store_copy_sheet(
+    app: &mut DesktopApp,
+    ctx: &egui::Context,
+    entry: &VaultEntry,
+    busy: bool,
+) -> bool {
+    let served = app.relay_served_copy(&entry.id);
+    let mut use_copy = false;
+    let mut cancel = false;
+    let response = kit::sheet(ctx, "sync-relay-use-store-copy", 500.0, |ui| {
+        let lead = match &served {
+            Some((head, name)) => {
+                store_copy_text(&entry.name, head.version, name.as_deref(), head.time)
+            }
+            None => {
+                "Apassy cannot tell which copy the relay holds now. Sync again first.".to_owned()
+            }
+        };
+        kit::sheet_title(ui, "Use the copy on the relay?", Some(&lead));
+        progress(app, ui, &entry.id, Job::UseCopy);
+        kit::sheet_buttons(
+            ui,
+            |_| {},
+            |ui| {
+                use_copy = ui
+                    .add_enabled_ui(!busy && served.is_some(), |ui| {
+                        kit::button(ui, "Use This Copy…", Style::Prominent)
+                    })
+                    .inner
+                    .clicked();
+                cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();
+            },
+        );
+    });
+    if use_copy {
+        app.relay_ask_use_copy(&entry.id, Some(ctx));
     }
     if cancel {
         super::cancel_sheet(app, ctx);
