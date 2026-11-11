@@ -74,6 +74,6 @@ The node listens on port **8444** of the Tailscale address. The port is shown, n
 
 ## Development
 
-The demo build (`cargo run --features desktop`, no vault) shows every frame of the mockup in Settings > Devices: the menu at the top picks one, and `APASSY_DEMO_DEVICES` (1, 3a, 3b, 3c, 3d, 3f, 3g, 3h, 4, 5a, 5b, 5c, 6a, 6b, 6d, 7) opens it at start. 3e and 6c are frame 1 with the ⓘ open. The pairing and move sheets (frames 2 and 4b–4d) are those of the vault build.
+The demo build (`cargo run --features desktop`, no vault) shows every frame of the mockup in Settings > Devices: the menu at the top picks one, and `APASSY_DEMO_DEVICES` (1, 3a, 3b, 3c, 3d, 3f, 3g, 3h, 4, 5a, 5b, 5c, 6a, 6b, 6d, 7, 9a, 9b, 9c, 9d, 9d+, 9e) opens it at start. 3e and 6c are frame 1 with the ⓘ open. The pairing and move sheets (frames 2 and 4b–4d) are those of the vault build.
 
 The section never runs the Tailscale command line in a frame: a worker thread reads `Node::status` at most every 10 s while Devices shows and at once after a change (`NodeCache` in `src/desktop/ui/devices.rs`).
