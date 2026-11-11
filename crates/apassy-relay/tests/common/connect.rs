@@ -202,7 +202,18 @@ impl Connect {
 
     /// A new account with one Mac, signed in.
     pub fn account(&self, name: &str) -> Dev {
-        let key = DeviceKey::generate().unwrap();
+        self.try_account(name, &new_account_id(), DeviceKey::generate().unwrap())
+            .unwrap_or_else(|(status, error)| panic!("POST /v1/account: {status} {error}"))
+    }
+
+    /// `POST /v1/account` of a new account with the id `account` and the device key `key`:
+    /// the device, signed in, or the status and the body of the refusal.
+    pub fn try_account(
+        &self,
+        name: &str,
+        account: &str,
+        key: DeviceKey,
+    ) -> Result<Dev, (u16, Value)> {
         let public_key = key.public_key_b64();
         let recovery_key = device::RecoveryKey::from_code(&[9u8; 16])
             .unwrap()
@@ -215,12 +226,11 @@ impl Connect {
             ))
             .unwrap();
         // The device makes the account id and signs the root entry of the device list.
-        let account = new_account_id();
         let device_name = format!("{name}'s Mac");
         let statement = key
             .sign(&device::account_list_message(
                 self.origin(),
-                &account,
+                account,
                 1,
                 device::LIST_NONE,
                 "root",
@@ -230,7 +240,7 @@ impl Connect {
                 &public_key,
             ))
             .unwrap();
-        let made = self.ok(
+        let (status, answer) = self.call(
             "POST",
             "/v1/account",
             None,
@@ -241,6 +251,10 @@ impl Connect {
                          "statement": encode_b64(&statement)}),
             ),
         );
+        if status != 200 {
+            return Err((status, answer));
+        }
+        let made = &answer["result"];
         let mut dev = Dev {
             key,
             account: made["account_id"].as_str().unwrap().to_string(),
@@ -248,7 +262,7 @@ impl Connect {
             token: String::new(),
         };
         dev.token = self.sign_in(&dev);
-        dev
+        Ok(dev)
     }
 
     /// The account token of `dev`.

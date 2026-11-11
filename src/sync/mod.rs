@@ -57,11 +57,12 @@ pub use relay::connect::{
     waits_for_account,
 };
 pub use relay::{
-    DeviceView, JoinedDevice, KeySource, LINK_INVALID_TEXT, LINK_UPDATE_TEXT, LinkCode, LinkKind,
-    LinkRefusal, MAX_LINK_BYTES, MAX_NODE_NAME_CHARS, PIN_CHANGED_TEXT, PairedLink, PendingJoin,
-    PendingLink, Receipt, RelayAdoptReport, RelayCallError, RelayConfig, RelayDownload,
-    RelayEnableReport, RelayMember, RelayPoll, RelaySync, RelayTransport, SignerPolicy,
-    StoreSigners, clean_node_name, clear_relay_work, encode_node_name, membership_relay_url,
+    DepartedHead, DeviceView, JoinedDevice, KeySource, LINK_INVALID_TEXT, LINK_UPDATE_TEXT,
+    LinkCode, LinkKind, LinkRefusal, MAX_LINK_BYTES, MAX_NODE_NAME_CHARS, PIN_CHANGED_TEXT,
+    PairedLink, PendingJoin, PendingLink, Receipt, RelayAdoptReport, RelayCallError, RelayConfig,
+    RelayDownload, RelayEnableReport, RelayMember, RelayPoll, RelaySync, RelayTransport,
+    SignerPolicy, StoreSigners, clean_node_name, clear_relay_work, encode_node_name,
+    membership_relay_url,
 };
 pub use relay_crypto::{
     DeviceKey, HeadFields, MAX_SNAPSHOT_BYTES, NO_PREVIOUS, SignedHead, WORDS, decode_b64u,
@@ -314,14 +315,17 @@ pub enum SyncError {
     ForkedCopy,
     /// The head of a vault store of Apassy Connect was pushed by a device that left the
     /// account after this Mac's last sync: this Mac waits for a device of the account to
-    /// sync, which signs a head of its own over it. Nothing was changed.
+    /// sync, which signs a head of its own over it. Nothing was changed. The head is
+    /// [`RelaySync::waiting_head`]; the owner can take it ([`RelaySync::use_departed_copy`])
+    /// or replace it ([`RelaySync::replace_relay_copy`]).
     WaitsForAccountDevice,
-    /// A head of a vault store of Apassy Connect (the current head, or one of its chain)
-    /// is signed by a key that the trust store of this device does not hold: a device
-    /// that this device has not verified yet (a new device of the account or of a person
-    /// who shares the vault), or one that never was a device. The device reads the
-    /// signed lists again; nothing was changed.
-    SignerNotVerified,
+    /// The chain of a vault store holds an entry by a key that the device list of this
+    /// Mac does not hold: a device that this Mac has not learned yet. The window asks
+    /// Connect for the device list ([`RelaySync::note_device_list`]); nothing was changed.
+    ChecksDeviceList,
+    /// The chain of a vault store holds an entry by a key that a device list fetched after
+    /// the first refusal still does not hold. "Use the relay copy…" goes on from there.
+    UnknownSigner,
     /// Another sync of this vault runs now. The next sync tries again.
     Running,
     /// The copy is larger than the relay takes (64 MiB).
@@ -454,11 +458,14 @@ impl fmt::Display for SyncError {
             Self::WaitsForAccountDevice => f.write_str(
                 "waiting for another device of this account to sync. The last copy was saved by a device that left the account; nothing was changed",
             ),
-            Self::SignerNotVerified => f.write_str(concat!(
-                "the newest copy is signed by a device that this ",
+            Self::ChecksDeviceList => f.write_str(concat!(
+                "checking the device list of this account. The relay copy has a change by a device that this ",
                 crate::computer!(),
-                " has not verified yet. Apassy reads the signed device lists again; nothing was changed"
+                " does not know yet; nothing was changed"
             )),
+            Self::UnknownSigner => f.write_str(
+                "the relay copy has a change by a device that is not in the device list of this account. To go on, select “Use the relay copy…” in Settings > Vault > Sync",
+            ),
             Self::Running => f.write_str("another sync of this vault runs now. Apassy tries again"),
             Self::TooLarge => f.write_str("the vault is too large for the relay (64 MiB)"),
             Self::InvalidRelayAddress => f.write_str(

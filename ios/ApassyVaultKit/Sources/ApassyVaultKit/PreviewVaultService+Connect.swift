@@ -13,6 +13,8 @@ struct PreviewConnect {
     var links: [String] = []
     /// Test support: Connect says this iPhone is no device of the account any more.
     var removed = false
+    /// Test support: the account file is from an earlier version: this iPhone must join again.
+    var joinAgain = false
     /// Test support: the devices of the account, the dial route, and the dial state.
     var devices: [ConnectDevice] = []
     /// Test support: whether the signed device list verified (false: as the core, no device is).
@@ -70,6 +72,12 @@ extension PreviewVaultService {
             return ConnectStatus(
                 state: .none, dialRoute: false, dialState: connectState.dialState, join: connectState.join)
         }
+        // As the core: an account file of an earlier version gives no account details.
+        if connectState.joinAgain {
+            return ConnectStatus(
+                state: .account, joinAgain: true, dialRoute: false, dialState: connectState.dialState,
+                join: connectState.join)
+        }
         return ConnectStatus(
             state: .account, removed: connectState.removed, accountID: account, deviceName: "iPhone",
             plan: connectState.plan, dialRoute: connectState.dialRoute, dialState: connectState.dialState,
@@ -89,11 +97,14 @@ extension PreviewVaultService {
 
     /// Test support: this iPhone is a device of the synthetic account `accountID` (no join).
     /// With `listVerified` false the signed device list did not verify, and no device is verified.
+    /// With `joinAgain` the account file is from an earlier version of Apassy.
     public func setConnectAccount(
-        _ accountID: String?, removed: Bool = false, devices: [ConnectDevice] = [], listVerified: Bool = true
+        _ accountID: String?, removed: Bool = false, joinAgain: Bool = false, devices: [ConnectDevice] = [],
+        listVerified: Bool = true
     ) {
         connectState.accountID = accountID
         connectState.removed = removed
+        connectState.joinAgain = joinAgain
         connectState.listVerified = listVerified
         connectState.devices =
             listVerified

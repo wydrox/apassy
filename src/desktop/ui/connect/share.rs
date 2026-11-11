@@ -764,8 +764,8 @@ const MAX_CHECKS: usize = 64;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HeadCheck {
     pub(crate) team: String,
-    /// The version and the head hash (`RelaySync::unverified_head`).
-    pub(crate) head: (u64, String),
+    /// The head hash (`RelaySync::unlisted_head`).
+    pub(crate) head: String,
     /// When this device first met the head: the quiet time runs from it, once.
     pub(crate) since: Instant,
     /// When the lists were read for it last.
@@ -785,11 +785,11 @@ impl HeadChecks {
     /// whether the lists are due to be read again: at once for a new head, then after 30
     /// s, and after twice the last wait up to 10 minutes. A new head of the store starts
     /// its own quiet time; the same head keeps its first one.
-    pub(crate) fn due(&mut self, team: &str, head: &(u64, String), now: Instant) -> bool {
+    pub(crate) fn due(&mut self, team: &str, head: &str, now: Instant) -> bool {
         if let Some(check) = self
             .list
             .iter_mut()
-            .find(|check| check.team == team && check.head == *head)
+            .find(|check| check.team == team && check.head == head)
         {
             if now.saturating_duration_since(check.read_at) < check.wait {
                 return false;
@@ -804,7 +804,7 @@ impl HeadChecks {
         }
         self.list.push(HeadCheck {
             team: team.to_owned(),
-            head: head.clone(),
+            head: head.to_owned(),
             since: now,
             read_at: now,
             wait: CHECK_FIRST,
@@ -813,10 +813,10 @@ impl HeadChecks {
     }
 
     /// Whether `team` is checking `head` within its quiet time at `now`.
-    pub(crate) fn quiet(&self, team: &str, head: &(u64, String), now: Instant) -> bool {
+    pub(crate) fn quiet(&self, team: &str, head: &str, now: Instant) -> bool {
         self.list.iter().any(|check| {
             check.team == team
-                && check.head == *head
+                && check.head == head
                 && now.saturating_duration_since(check.since) < CHECK_QUIET
         })
     }
@@ -955,6 +955,17 @@ impl ShareUi {
             checks,
             ..Self::default()
         };
+    }
+
+    /// Read the lists again at the next frame.
+    pub(crate) fn refresh_now(&mut self) {
+        self.refreshed_at = None;
+    }
+
+    /// Whether a step of the section runs.
+    #[cfg(test)]
+    pub(crate) fn is_busy(&self) -> bool {
+        self.busy()
     }
 
     /// Whether `team_id` is a store shared between accounts, as the last status says.
@@ -1136,6 +1147,45 @@ fn take_status(app: &mut DesktopApp, status: ShareStatus) {
     }
     share.notes.extend(notes);
     share.status = Some(status);
+    lists_read(app, Instant::now());
+}
+
+/// The lists of the other accounts were read again: each vault of a shared store whose head
+/// has a signer not verified yet syncs again, and one past the quiet time of its head notes
+/// the read (`RelaySync::note_device_list`), so a signer that the lists still do not hold
+/// is refused from then on. (Settings › Connect notes the account's own list for the other
+/// stores.)
+fn lists_read(app: &mut DesktopApp, now: Instant) {
+    let ids: Vec<String> = app
+        .vault_list
+        .registry
+        .entries()
+        .iter()
+        .map(|entry| entry.id.clone())
+        .collect();
+    for id in ids {
+        let Some(team) = app.store_team(&id) else {
+            continue;
+        };
+        let checking = app
+            .sync
+            .statuses
+            .get(&id)
+            .is_some_and(super::super::sync::relay::is_unlisted_signer);
+        if !checking || !app.ui.connect.share.is_shared(&team) {
+            continue;
+        }
+        let Some(relay) = app.relay_of(&id) else {
+            continue;
+        };
+        let quiet = relay
+            .unlisted_head()
+            .is_some_and(|head| app.ui.connect.share.checks.quiet(&team, &head, now));
+        if !quiet {
+            relay.note_device_list();
+        }
+        app.relay_sync_now(&id);
+    }
 }
 
 fn ask(app: &mut DesktopApp, ctx: &egui::Context, guard: Guard, action: OwnerAction) {
@@ -1691,7 +1741,7 @@ fn watch_heads(app: &mut DesktopApp, now: Instant) {
         .statuses
         .iter()
         .filter_map(|(id, status)| {
-            if super::super::sync::relay::is_signer_not_verified(status) {
+            if super::super::sync::relay::is_unlisted_signer(status) {
                 Some((id.clone(), true))
             } else if matches!(status, crate::desktop::sync_worker::UiStatus::UpToDate(_)) {
                 Some((id.clone(), false))
@@ -1704,7 +1754,7 @@ fn watch_heads(app: &mut DesktopApp, now: Instant) {
         let Some(team) = app.store_team(&id) else {
             continue;
         };
-        let head = app.relay_of(&id).and_then(|relay| relay.unverified_head());
+        let head = app.relay_of(&id).and_then(|relay| relay.unlisted_head());
         let share = &mut app.ui.connect.share;
         if !share.is_shared(&team) {
             continue;
@@ -1727,6 +1777,13 @@ impl DesktopApp {
         self.relay_of(id)?.state().ok()??.team_id
     }
 
+    /// Whether the vault `id` syncs a store shared between accounts: Shared Vaults reads the
+    /// lists of the other accounts for it and notes them itself ([`lists_read`]).
+    pub(crate) fn share_reads_lists(&self, id: &str) -> bool {
+        self.store_team(id)
+            .is_some_and(|team| self.ui.connect.share.is_shared(&team))
+    }
+
     /// The sync line of a vault whose store is shared between accounts: "Checking who
     /// shares this vault…" while a head whose signer is not verified yet waits for the
     /// lists (10 minutes once for that head; then the error shows), and "Waiting for a
@@ -1743,8 +1800,8 @@ impl DesktopApp {
             return None;
         }
         match status {
-            status if super::super::sync::relay::is_signer_not_verified(status) => {
-                let head = self.relay_of(id)?.unverified_head()?;
+            status if super::super::sync::relay::is_unlisted_signer(status) => {
+                let head = self.relay_of(id)?.unlisted_head()?;
                 share
                     .checks
                     .quiet(&team, &head, Instant::now())

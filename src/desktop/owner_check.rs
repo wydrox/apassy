@@ -804,6 +804,17 @@ pub enum OwnerRequest {
         team_id: String,
         vault_name: String,
     },
+    /// Take the copy that the device "`device_name`" left on the vault store `team_id` of
+    /// the vault `vault_name` (the head `head` of version `version`) once, or replace it
+    /// with this device's vault (`replace`; connect-account-v1 section 7.5).
+    TakeDepartedCopy {
+        team_id: String,
+        version: u64,
+        head: String,
+        replace: bool,
+        device_name: String,
+        vault_name: String,
+    },
     /// Add the device `device_id` ("`device_name`") of the account `account_id` to the
     /// vault store `team_id` of the vault `vault_name` (section 8).
     AddStoreDevice {
@@ -1452,6 +1463,18 @@ impl OwnerRequest {
             Self::DeleteVaultStore { team_id, .. } => OwnerAction::DeleteVaultStore {
                 team_id: team_id.clone(),
             },
+            Self::TakeDepartedCopy {
+                team_id,
+                version,
+                head,
+                replace,
+                ..
+            } => OwnerAction::TakeDepartedCopy {
+                team_id: team_id.clone(),
+                version: *version,
+                head: head.clone(),
+                replace: *replace,
+            },
             Self::AddStoreDevice {
                 team_id,
                 device_id,
@@ -1951,6 +1974,34 @@ impl OwnerRequest {
             Self::DeleteVaultStore { vault_name, .. } => format!(
                 "Delete the relay copy of \"{}\" at Apassy Connect? Its snapshots go, and your devices stop syncing this vault through Connect. The vault stays on your devices.",
                 page_text(vault_name)
+            ),
+            Self::TakeDepartedCopy {
+                replace: false,
+                device_name,
+                vault_name,
+                ..
+            } => format!(
+                concat!(
+                    "Use the copy of \"{}\" that {} left on the relay? Apassy merges it with the vault on this ",
+                    crate::computer!(),
+                    " once, and uploads the result."
+                ),
+                page_text(vault_name),
+                page_text(device_name)
+            ),
+            Self::TakeDepartedCopy {
+                replace: true,
+                device_name,
+                vault_name,
+                ..
+            } => format!(
+                concat!(
+                    "Replace the copy of \"{}\" that {} left on the relay with the vault on this ",
+                    crate::computer!(),
+                    "? Changes that only that copy had are lost."
+                ),
+                page_text(vault_name),
+                page_text(device_name)
             ),
             Self::AddStoreDevice {
                 device_name,
@@ -3209,6 +3260,7 @@ impl DesktopApp {
             | OwnerRequest::DeleteConnectAccount { .. }
             | OwnerRequest::ForgetOldConnectAccount
             | OwnerRequest::DeleteVaultStore { .. }
+            | OwnerRequest::TakeDepartedCopy { .. }
             | OwnerRequest::AddStoreDevice { .. }
             | OwnerRequest::ChangeConnectGroup { .. }
             | OwnerRequest::ShareConnectVault { .. }

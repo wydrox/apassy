@@ -209,6 +209,12 @@ pub(crate) enum SyncSheet {
     /// "Use the relay copy…": this Mac refuses the relay copy (an older copy, or a
     /// history without its last change); it takes the copy as it is now and merges it.
     UseRelayCopy { id: String },
+    /// "Use the Copy That … Left…": a vault store waits on the head that a device that
+    /// left the account pushed; this Mac takes it once and merges it.
+    UseDepartedCopy { id: String },
+    /// "Replace It with This Mac's Copy…": this Mac pushes its vault over the head that a
+    /// device that left the account pushed.
+    ReplaceDepartedCopy { id: String },
     /// "Apassy relay": the relay address, the team code, and the name of this Mac; or a
     /// link from another Mac for a vault that is on the relay already.
     RelaySetup { id: String },
@@ -237,6 +243,8 @@ impl SyncSheet {
         | Self::TurnOff { id }
         | Self::ReplaceDamaged { id }
         | Self::UseRelayCopy { id }
+        | Self::UseDepartedCopy { id }
+        | Self::ReplaceDepartedCopy { id }
         | Self::RelaySetup { id }
         | Self::AddMac { id }
         | Self::Devices { id }
@@ -1690,6 +1698,13 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 // No other choice while relay sync turns on or off.
                 let changing = app.relay_changing(&entry.id);
                 let refused = on_relay && status.is_some_and(relay::refused_copy);
+                // A vault store that waits on the head of a device that left the account:
+                // the two steps of the owner, with the name of that device.
+                let departed = if on_relay && open_unlocked {
+                    app.relay_departed(&entry.id)
+                } else {
+                    None
+                };
                 // Removed from the relay: the line says to turn relay sync off.
                 let removed = on_relay && app.relay_removed(&entry.id);
                 g.row(|ui| {
@@ -1759,6 +1774,9 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                         }
                     };
                     ui.add(Label::new(super::settings::rows::note(&line)).wrap());
+                    if let Some(departed) = &departed {
+                        ui.add(Label::new(super::settings::rows::note(&departed.words())).wrap());
+                    }
                     // ADR 0037 D14: free relay sync on the hosted relay ends (plan s7 N1).
                     if let Some(notice) = link
                         .and_then(|link| link.relay.as_ref())
@@ -1796,7 +1814,8 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                     let actions = open_unlocked
                         && ((link.is_some() && !removed)
                             || status == Some(&UiStatus::NeedsPassphrase)
-                            || refused);
+                            || refused
+                            || departed.is_some());
                     if actions {
                         ui.add_space(2.0);
                         ui.horizontal_wrapped(|ui| {
@@ -1819,6 +1838,22 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                                 sheet = Some(SyncSheet::UseRelayCopy {
                                     id: entry.id.clone(),
                                 });
+                            }
+                            if let Some(departed) = &departed {
+                                if kit::small_button(ui, &departed.use_label(), Style::Prominent)
+                                    .clicked()
+                                {
+                                    sheet = Some(SyncSheet::UseDepartedCopy {
+                                        id: entry.id.clone(),
+                                    });
+                                }
+                                if kit::small_button(ui, relay::REPLACE_DEPARTED, Style::Bordered)
+                                    .clicked()
+                                {
+                                    sheet = Some(SyncSheet::ReplaceDepartedCopy {
+                                        id: entry.id.clone(),
+                                    });
+                                }
                             }
                             if link.is_some()
                                 && !removed
@@ -1931,6 +1966,8 @@ pub(super) fn sheet(app: &mut DesktopApp, ctx: &egui::Context, sheet: &SyncSheet
     | SyncSheet::TurnOff { id }
     | SyncSheet::ReplaceDamaged { id }
     | SyncSheet::UseRelayCopy { id }
+    | SyncSheet::UseDepartedCopy { id }
+    | SyncSheet::ReplaceDepartedCopy { id }
     | SyncSheet::RelaySetup { id }
     | SyncSheet::AddMac { id }
     | SyncSheet::Devices { id }
@@ -1950,6 +1987,8 @@ pub(super) fn sheet(app: &mut DesktopApp, ctx: &egui::Context, sheet: &SyncSheet
         SyncSheet::TurnOff { .. } => turn_off_sheet(app, ctx, &entry),
         SyncSheet::ReplaceDamaged { .. } => replace_sheet(app, ctx, &entry),
         SyncSheet::UseRelayCopy { .. } => relay::use_copy_sheet(app, ctx, &entry),
+        SyncSheet::UseDepartedCopy { .. } => relay::departed_sheet(app, ctx, &entry, false),
+        SyncSheet::ReplaceDepartedCopy { .. } => relay::departed_sheet(app, ctx, &entry, true),
         SyncSheet::RelaySetup { .. } => relay::setup_sheet(app, ctx, &entry),
         SyncSheet::AddMac { .. } => relay::add_mac_sheet(app, ctx, &entry, false),
         SyncSheet::AddIphone { .. } => relay::add_mac_sheet(app, ctx, &entry, true),

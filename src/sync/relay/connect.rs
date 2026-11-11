@@ -260,6 +260,12 @@ impl RelaySync {
         *lock(&self.account_keys) = policy;
     }
 
+    /// The signers that the running sessions of this vault take ([`Self::set_account_signers`]).
+    #[cfg(test)]
+    pub(crate) fn account_signers(&self) -> Option<super::SignerPolicy> {
+        lock(&self.account_keys).clone()
+    }
+
     /// Whether a vault store of this vault asked for the account key, and no account
     /// was signed in on this Mac (Settings › Connect › Sign In…). The sync waits.
     pub fn needs_account_key(&self) -> bool {
@@ -441,9 +447,10 @@ impl RelaySync {
                     SessionKey::Account(signer),
                     Some(store_device),
                 )
-                .with_shared_signers(Arc::new(Mutex::new(Some(policy)))),
+                .with_fixed_signers(policy),
             ),
             team: store.name.clone(),
+            notes: Arc::default(),
         })
     }
 

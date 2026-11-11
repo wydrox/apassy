@@ -371,3 +371,77 @@ fn a_device_behind_a_head_of_a_revoked_device_waits_until_a_live_device_signs_ov
     // C's store sign-in is refused from the revoke on.
     assert!(c.sync.sync(&mut vault_c).is_err());
 }
+
+/// Two devices of one account on this relay; B pushes last, and A revokes B before it
+/// merged that head. A waits, and the core names the head (B's key, version, and hash). The
+/// owner's "Use the Copy That … Left…" takes it once: A merges it and signs a head of its
+/// own over it, which this relay takes, and the next sync is a plain one.
+#[test]
+fn the_owner_takes_the_copy_that_a_revoked_device_pushed_last() {
+    let (relay, plans) = connect();
+    let owner = owner();
+    let (a, b) = (app_device(&relay.url), app_device(&relay.url));
+    let (mut account_a, _) = ConnectAccount::create(
+        client(&relay),
+        &a.store,
+        &a.path,
+        "Rafal",
+        "Synthetic MacBook",
+    )
+    .expect("create");
+    plans
+        .0
+        .lock()
+        .unwrap()
+        .insert(account_a.state().account_id.clone(), entitled());
+    let mut account_b = join(&relay, &owner, &mut account_a, &b, "Synthetic Mac mini");
+
+    let mut vault_a = Vault::create(&a.vault_path, PASS).unwrap();
+    vault_a.unlock(PASS).unwrap();
+    vault_a.add(item("Alpha")).unwrap();
+    drop(vault_a);
+    let mut vault_b = copy_of(&a.vault_path, &b.vault_path);
+    let mut vault_a = Vault::open(&a.vault_path).unwrap();
+    vault_a.unlock(PASS).unwrap();
+    a.sync
+        .enable_on_connect(&mut vault_a, &mut account_a, "Personal")
+        .expect("enable on A");
+    b.sync
+        .enable_on_connect(&mut vault_b, &mut account_b, "Personal")
+        .expect("enable on B");
+
+    // B pushes last; A has not merged it. Then A revokes B.
+    vault_b.add(item("Beta")).unwrap();
+    assert!(b.sync.sync(&mut vault_b).expect("B").pushed);
+    let b_id = account_b.state().device_id.clone();
+    revoke(&owner, &mut account_a, &b_id);
+    hand_over(&a, &account_a);
+
+    assert_eq!(
+        a.sync.sync(&mut vault_a).unwrap_err(),
+        SyncError::WaitsForAccountDevice
+    );
+    let head = a.sync.waiting_head().expect("the waiting head");
+    assert_eq!(
+        head.key,
+        account_b.signer().expect("signer").public_key().to_vec()
+    );
+    // The signed name of B, from the list that A verified at its last view.
+    account_a.view().expect("A views");
+    assert_eq!(
+        account_a
+            .verified_list()
+            .and_then(|list| list.removed_name(&head.key)),
+        Some("Synthetic Mac mini")
+    );
+    let outcome = a
+        .sync
+        .use_departed_copy(&mut vault_a, &head)
+        .expect("the owner takes the copy");
+    assert!(outcome.pushed, "A signs over B's head");
+    assert_eq!(titles(&vault_a), vec!["Alpha", "Beta"]);
+    assert_eq!(a.sync.waiting_head(), None);
+    let again = a.sync.sync(&mut vault_a).expect("a plain sync");
+    assert!(!again.pushed);
+    assert!(again.merge.is_none());
+}

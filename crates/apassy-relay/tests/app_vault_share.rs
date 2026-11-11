@@ -16,7 +16,9 @@ use std::sync::{Arc, Mutex};
 
 use apassy::broker::SharedVault;
 use apassy::broker::approvals::{OwnerAction, OwnerCheck, OwnerGate, OwnerProof};
-use apassy::connect::{ConnectAccount, ConnectClient, MemoryKeyStore, account_file, signer_policy};
+use apassy::connect::{
+    ConnectAccount, ConnectClient, MemoryKeyStore, ShareNames, account_file, signer_policy,
+};
 use apassy::contracts::CredentialKind;
 use apassy::sync::{RelayConfig as AppRelayConfig, RelaySync};
 use apassy::vault::{Field, ItemDraft, SecretValue, Vault};
@@ -253,21 +255,25 @@ fn two_accounts_of_a_family_share_a_vault_and_end_it() {
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].words, answer.words);
     assert_eq!(requests[0].account_id, x_id);
-    let (proof, epoch) = owner_a.proof(account_a.share_action(&link, &requests[0]));
+    let names = ShareNames::default();
+    let (proof, epoch) = owner_a.proof(account_a.share_action(&link, &requests[0], &names));
     let confirmed = account_a
-        .confirm_share(&link, &requests[0], proof, &epoch)
+        .confirm_share(&link, &requests[0], &names, proof, &epoch)
         .expect("A confirms");
     assert_eq!(confirmed.added.len(), 1, "{confirmed:?}");
-    let (proof, epoch) = owner_x.proof(account_x.accept_action(&answer));
+    let (proof, epoch) = owner_x.proof(account_x.accept_action(&answer, &names));
     account_x
-        .accept_share(&answer, proof, &epoch)
+        .accept_share(&answer, &names, proof, &epoch)
         .expect("X accepts");
 
     // X sees the offer and joins it.
-    let status = account_x.refresh_shares().expect("X refreshes");
+    let status = account_x.refresh_shares(&[]).expect("X refreshes");
     assert_eq!(status.offers.len(), 1, "{status:?}");
     assert_eq!(status.offers[0].team_id, team);
-    account_x.join_shared_store(&team, &a_id).expect("X joins");
+    let (proof, epoch) = owner_x.proof(account_x.join_action(&team, &a_id, &names));
+    account_x
+        .join_shared_store(&team, &a_id, &[], &names, proof, &epoch)
+        .expect("X joins");
     let store = account_x
         .vault_stores()
         .expect("stores")
@@ -285,7 +291,7 @@ fn two_accounts_of_a_family_share_a_vault_and_end_it() {
     assert_eq!(titles(&vault_x), vec!["Alpha"]);
 
     // Both sync in both directions.
-    account_a.refresh_shares().expect("A refreshes");
+    account_a.refresh_shares(&[]).expect("A refreshes");
     hand_over(&a, &account_a);
     vault_x.add(item("Beta")).unwrap();
     assert!(x.sync.sync(&mut vault_x).expect("X").pushed);
@@ -297,9 +303,9 @@ fn two_accounts_of_a_family_share_a_vault_and_end_it() {
     assert_eq!(titles(&vault_x), vec!["Alpha", "Beta", "Gamma"]);
 
     // A stops sharing with X: the relay removes X from the store in the same step.
-    let (proof, epoch) = owner_a.proof(account_a.end_share_action(&team, &x_id, "Ola", false));
+    let (proof, epoch) = owner_a.proof(account_a.end_share_action(&team, &x_id, &names, false));
     account_a
-        .stop_sharing(&team, &x_id, "Ola", Some(proof), &epoch)
+        .stop_sharing(&team, &x_id, &names, proof, &epoch)
         .expect("unshare");
     hand_over(&a, &account_a);
     let policy = signer_policy(account_a.state()).for_team(&team);

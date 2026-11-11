@@ -577,7 +577,7 @@ fn directory_1001_migrates_to_the_current_version_without_losing_teams_codes_or_
     conn.execute_batch(
         "BEGIN IMMEDIATE;
          DROP TABLE account_peer_join; DROP TABLE account_peer_link; DROP TABLE account_join; DROP TABLE account_link; DROP TABLE account_store_device; DROP TABLE account_store_removal;
-         DROP TABLE account_list; DROP TABLE account_device; DROP TABLE account; DROP TABLE account_key;
+         DROP TABLE account_list; DROP TABLE account_device; DROP TABLE account; DROP TABLE account_key; DROP TABLE account_id_used;
          DROP TABLE brain_event; DROP TABLE \"group\"; DROP TABLE group_member;
          DROP TABLE group_invite; DROP TABLE stripe_customer; DROP TABLE stripe_subscription;
          DROP TABLE stripe_event; DROP TABLE billing_problem; DROP TABLE billing_clock; DROP TABLE tunnel_node; DROP TABLE tunnel_grant;

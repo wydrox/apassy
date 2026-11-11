@@ -155,6 +155,8 @@ pub(crate) const REMOVED_NOTE: &str = concat!(
     " until you forget the account here."
 );
 pub(crate) const FORGET_THIS_MAC: &str = concat!("Forget This ", crate::computer_cap!(), "…");
+/// The title of an account file of an earlier version of Apassy.
+pub(crate) const OLD_FILE_TITLE: &str = "Join the account again";
 /// The account file is from an earlier version of Apassy.
 pub(crate) const OLD_FILE: &str = concat!(
     "This ",
@@ -265,6 +267,7 @@ pub(crate) const TEXTS: &[&str] = &[
     REMOVED,
     REMOVED_NOTE,
     FORGET_THIS_MAC,
+    OLD_FILE_TITLE,
     OLD_FILE,
     FORGET_OLD_FILE,
     FORGET_REMOVED_LEAD,
@@ -623,7 +626,8 @@ impl ConnectView {
         let Shown::Account(account) = &self.shown else {
             return match &self.shown {
                 Shown::None => NOT_ON_CONNECT.to_owned(),
-                Shown::Removed { .. } | Shown::OldFile => REMOVED.to_owned(),
+                Shown::Removed { .. } => REMOVED.to_owned(),
+                Shown::OldFile => OLD_FILE_TITLE.to_owned(),
                 Shown::Unreachable { .. } => UNREACHABLE.to_owned(),
                 _ => SIGNED_OUT.to_owned(),
             };
@@ -834,7 +838,7 @@ pub(crate) fn draw(ui: &mut Ui, view: &ConnectView) -> Option<Action> {
         }
         Shown::OldFile => {
             rows::group(ui, Some(GROUP_LABEL), |g| {
-                g.line_note(REMOVED, None, Some(rows::note(OLD_FILE)), |ui| {
+                g.line_note(OLD_FILE_TITLE, None, Some(rows::note(OLD_FILE)), |ui| {
                     if ui
                         .add_enabled_ui(!view.locked, |ui| {
                             kit::small_button(ui, FORGET_OLD_FILE, Style::Bordered)

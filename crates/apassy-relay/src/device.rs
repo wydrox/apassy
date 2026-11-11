@@ -109,13 +109,16 @@ pub fn account_sign_in_message(
     ])
 }
 
-/// `"apassy-connect join v1" 0x00 origin 0x00 account 0x00 link_hash 0x00 public_key_b64`:
-/// the request of a new device (`POST /v1/account/devices/join`).
+/// `"apassy-connect join v1" 0x00 origin 0x00 account 0x00 link_hash 0x00 public_key_b64
+/// 0x00 device_name`: the request of a new device (`POST /v1/account/devices/join`). It
+/// names the device name in its canonical form ([`canonical_name`]): the confirming
+/// device signs that name into the device list only when this signature verifies.
 pub fn account_join_message(
     origin: &str,
     account: &str,
     link_hash: &str,
     public_key_b64: &str,
+    device_name: &str,
 ) -> Vec<u8> {
     joined(&[
         ACCOUNT_JOIN_DOMAIN,
@@ -123,7 +126,22 @@ pub fn account_join_message(
         account,
         link_hash,
         public_key_b64,
+        device_name,
     ])
+}
+
+/// The canonical form of a person's name or a device name (connect-account-v1 section 2):
+/// trimmed of white space, 1 to [`crate::api::MAX_NAME_BYTES`] bytes of UTF-8, no control character
+/// (so no NUL, the separator of the signed messages), and never `-` (the placeholder of
+/// the device-list message). `None` for any other text. Both sides sign and compare only
+/// this form.
+pub fn canonical_name(text: &str) -> Option<&str> {
+    let name = text.trim();
+    (!name.is_empty()
+        && name.len() <= crate::api::MAX_NAME_BYTES
+        && name != LIST_NONE
+        && !name.chars().any(char::is_control))
+    .then_some(name)
 }
 
 /// `"apassy-connect join-cancel v1" 0x00 origin 0x00 account 0x00 link_hash 0x00
@@ -680,6 +698,33 @@ mod tests {
 
     fn team() -> TeamId {
         TeamId::parse("t_abcdefgh23").unwrap()
+    }
+
+    #[test]
+    fn names_have_one_canonical_form() {
+        // The same table as the app's `connect::trust::canonical_name`.
+        let zoe = "Zoë’s iPhone";
+        assert_eq!(canonical_name(&format!("\t {zoe} \n")), Some(zoe));
+        let at_limit = format!("{}é", "a".repeat(62));
+        assert_eq!(at_limit.len(), 64);
+        assert_eq!(
+            canonical_name(&format!(" {at_limit} ")),
+            Some(at_limit.as_str())
+        );
+        let over = format!("{}é", "a".repeat(63));
+        assert_eq!(over.len(), 65);
+        for bad in [
+            "",
+            "   ",
+            "-",
+            " - ",
+            "Mac\u{0}mini",
+            "Mac\u{7}",
+            over.as_str(),
+        ] {
+            assert_eq!(canonical_name(bad), None, "{bad:?}");
+        }
+        assert_eq!(canonical_name("-Mac-"), Some("-Mac-"));
     }
 
     #[test]

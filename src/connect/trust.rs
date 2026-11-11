@@ -87,12 +87,23 @@ pub struct ListEntry {
     pub team_id: Option<String>,
 }
 
-/// A device name of section 2: 1 to 64 bytes of UTF-8, trimmed, no control character.
-pub(super) fn valid_name(name: &str) -> bool {
-    !name.is_empty()
+/// The canonical form of a person's name or a device name (section 2): trimmed of white
+/// space, 1 to 64 bytes of UTF-8, no control character (so no NUL, the separator of the
+/// signed messages), and never `-` (the placeholder of the device-list message). `None`
+/// for any other text. A device signs, sends, and compares only this form; Connect keeps
+/// the same form.
+pub fn canonical_name(text: &str) -> Option<&str> {
+    let name = text.trim();
+    (!name.is_empty()
         && name.len() <= MAX_NAME_BYTES
-        && name.trim() == name
-        && !name.chars().any(char::is_control)
+        && name != LIST_NONE
+        && !name.chars().any(char::is_control))
+    .then_some(name)
+}
+
+/// A name that is already in its canonical form ([`canonical_name`]).
+pub fn valid_name(name: &str) -> bool {
+    canonical_name(name) == Some(name)
 }
 
 /// Whether `bytes` is a P-256 public key in X9.63 uncompressed form whose point is on the
@@ -140,6 +151,9 @@ pub struct Verified {
     pub shares: ListShares,
     /// The device name that the root signed in version 1 (also after the root left).
     pub root_name: String,
+    /// The name that each key of [`Self::removed`] was signed with in its `root` or `add`
+    /// (the same order).
+    pub removed_names: Vec<String>,
 }
 
 impl Verified {
@@ -151,6 +165,14 @@ impl Verified {
     /// The signed name of the live device `key`.
     pub fn name_of(&self, key: &[u8]) -> Option<&str> {
         self.position(key).map(|index| self.names[index].as_str())
+    }
+
+    /// The signed name of `key` when the list removed it: the name of its `root` or `add`.
+    pub fn removed_name(&self, key: &[u8]) -> Option<&str> {
+        self.removed
+            .iter()
+            .position(|held| held == key)
+            .map(|index| self.removed_names[index].as_str())
     }
 
     /// Whether `key` is a live device that `by` added with the link `link_hash`.
@@ -193,6 +215,7 @@ pub fn verify_list(
         removed: Vec::new(),
         shares: ListShares::default(),
         root_name: String::new(),
+        removed_names: Vec::new(),
     };
     // Every key that was in the list: none is added again.
     let mut ever: Vec<Vec<u8>> = Vec::new();
@@ -282,10 +305,11 @@ pub fn verify_list(
                 ("remove", None, None) if list.live.contains(&key) => {
                     let at = list.live.iter().position(|held| *held == key)?;
                     list.live.remove(at);
-                    list.names.remove(at);
+                    let name = list.names.remove(at);
                     list.added_by.remove(at);
                     list.links.remove(at);
                     list.removed.push(key);
+                    list.removed_names.push(name);
                 }
                 _ => return None,
             }

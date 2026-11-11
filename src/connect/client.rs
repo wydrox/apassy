@@ -80,6 +80,7 @@ pub(super) fn connect_error(error: ApiError) -> ConnectError {
             (403, "forbidden") => ConnectError::Forbidden,
             (404 | 405, _) => ConnectError::NotFound,
             (409, "conflict") => ConnectError::Conflict,
+            (409, "account_id_taken") => ConnectError::AccountIdTaken,
             (409, "seat_limit") => ConnectError::SeatLimit,
             (429, _) => ConnectError::RateLimited(retry_after.unwrap_or(60).max(1)),
             _ => ConnectError::Refused { status, code },
@@ -406,6 +407,10 @@ pub(super) struct PendingView {
     pub device_name: String,
     pub platform: String,
     pub public_key: String,
+    /// The joining key's signature over the `apassy-connect join v1` message, which names
+    /// `device_name`. A join whose signature does not verify is not offered.
+    #[serde(default)]
+    pub signature: String,
     pub created_at: u64,
     pub expires_at: u64,
 }

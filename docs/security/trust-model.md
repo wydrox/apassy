@@ -148,10 +148,10 @@ the contracts allow, and it becomes true when units C1 to C5 ship. The security 
 
 | Part | Holds | Sees | Cannot see or do |
 | --- | --- | --- | --- |
-| Account directory (`relay.db`) | Account ids, person names, device names, platforms, device public keys, the signed device list of each account (each change signed by a device of the list), the hashes of link codes, the public recovery key of each account, the last-seen hour of each device, groups and roles, vault store ids and vault names, nodes (names, certificate pins, public names), tunnel grants, the public keys of the entitlement signing key | — | Private keys, link codes, recovery codes, tokens (memory only), passphrases, vault keys |
+| Account directory (`relay.db`) | Account ids (every id that Connect ever made, kept so that an id is used once: a new account never meets the Stripe customer or other records of a deleted account of that id), person names, device names, platforms, device public keys, the signed device list of each account (each change signed by a device of the list), the hashes of link codes, the public recovery key of each account, the last-seen hour of each device, groups and roles, vault store ids and vault names, nodes (names, certificate pins, public names), tunnel grants, the public keys of the entitlement signing key | — | Private keys, link codes, recovery codes, tokens (memory only), passphrases, vault keys |
 | Plain files at rest | In `APASSY_RELAY_MODE=connect` there is no master key: `relay.db` and the vault store files are plain SQLite. They hold the directory above and, in the stores, SQLCipher snapshots under the user's passphrase, signed heads, and receipts | — | Nothing in them opens a vault. Disk encryption of the host is the owner's choice; backups go through the encrypted pull of today |
 | Vault stores (blind sync store) | One relay-sync-v1 team for each vault: the current and the previous snapshot | Ciphertext, sizes, times, which device pushed | Vault contents. The passphrase never reaches Connect |
-| Account sign-in, the device list, and the safety words | Public keys, signed challenges, and the signed device list; a 15-minute account token in memory | Which device signs in, and when | It cannot add or remove a device for an Apassy client, or rename one: each change of the device list is an entry signed by a device of the list over the hash of the entry before (an `add` also over the new device's name), back to the account's first key, which each client pinned when it made or joined the account and which signed its own name, and each client pins the highest version it verified that holds its own key. A row that Connect adds, a key it swaps, or a removed device it lists again is not in the list: the client shows it as "Not verified" and never uses it as an account device (no store, no sync head, no later confirmation). A list older than the pinned one, or another history, verifies no device. A device that Connect only hides stays a device until a device of the list signs its removal. A new device needs the confirmation of a verified device with six safety words and an owner check; the link code names the confirming device's key and the account's first key, and Connect never sees the code, so it can neither compute the words nor answer with other keys. Connect can refuse a sign-in, but a refusal never removes a device: the device forgets its key only when its owner confirms on it |
+| Account sign-in, the device list, and the safety words | Public keys, signed challenges, and the signed device list; a 15-minute account token in memory | Which device signs in, and when | It cannot add or remove a device for an Apassy client, or rename one: each change of the device list is an entry signed by a device of the list over the hash of the entry before (an `add` also over the new device's name), back to the account's first key, which each client pinned when it made or joined the account and which signed its own name, and each client pins the highest version it verified that holds its own key. A row that Connect adds, a key it swaps, or a removed device it lists again is not in the list: the client shows it as "Not verified" and never uses it as an account device (no store, no sync head, no later confirmation). A list older than the pinned one, or another history, verifies no device. A device that Connect only hides stays a device until a device of the list signs its removal. The joining device chooses its own name and signs it in its join request (one canonical form on both sides: trimmed, 1 to 64 bytes, no control character, never `-`); the confirming device shows, and signs into the list, only a name whose join signature verifies, and the joining device pins only a list whose `add` names it as it asked, so Connect can neither choose nor change the name of a device. A new device needs the confirmation of a verified device with six safety words and an owner check; the link code names the confirming device's key and the account's first key, and Connect never sees the code, so it can neither compute the words nor answer with other keys. Connect can refuse a sign-in, but a refusal never removes a device: the device forgets its key only when its owner confirms on it |
 | The email | A copy of the Stripe customer's email, for the devices list and support | — | Connect sends no mail in stage 7. Account deletion deletes the copy |
 | Stripe (payment processor) | The customer: email, billing address, payment method, tax id; subscriptions and invoices (kept for legal retention) | The checkout and portal sessions, and the account id in `client_reference_id` and metadata | A device key, a token, a vault id, a device name, a value. Connect never sees card data or the address |
 | The webhook | Event ids for 30 days | Stripe events, checked with the endpoint secret | A forged or replayed event changes nothing: signature, 300 s tolerance, idempotency by event id |
@@ -194,7 +194,10 @@ account), but it gains no vault content: the vault stores hold ciphertext under 
 when the vault locks and at a sign-out. **One account session for the app** (plan s7 unit M5b): the
 vault unlock opens it, and Settings › Connect, the sync of the vault stores, and the node's tunnel use
 its one key and token; no part reads the key store on its own. It closes at a lock, at a quit, at another
-vault session, and when the auto-lock rule locks the vault at a screen lock or sleep. On the Mac the Touch ID
+vault session, and when the auto-lock rule locks the vault at a screen lock or sleep. One step opens
+it without a vault: "Use a vault from another Mac › Apassy Connect" on the start screen of a computer
+without a vault, which the owner starts (the key is read once, with Touch ID on the Mac, to join the
+account or list its vault stores); leaving that step, a lock, or the first vault session closes it. On the Mac the Touch ID
 unlock reads the key with the vault's unlock key under one Touch ID (both items have the same access
 control); a passphrase unlock reads it with a Touch ID of its own. A Connect that cannot be reached never
 blocks the unlock: the session needs only the account file and the key, and each part shows its own
@@ -210,7 +213,9 @@ account to a store that it turned on without one (each still needs the vault pas
 verified device can be added to a store. A vault store has no device link: a device of the account
 gets the copy from the store that lists it, with the passphrase of the copy. A store that holds
 devices of another account opens only with a share of it that the device verified (below), else it
-is refused before any request. Sharing a vault, accepting a share, ending a share, and leaving a
+is refused before any request. That early refusal relies on Connect's `shared` mark; against a
+Connect that hides the mark, the signer policy alone refuses: no head of a device of another account
+that no verified share names is accepted, and nothing is merged. Sharing a vault, accepting a share, ending a share, and leaving a
 shared vault each need a fresh owner check, and so does joining a vault that another account
 shares; each check names the vault by its name on this computer, the person by the name that their
 verified device list signed with the short fingerprint of their pinned root (Connect's name for
@@ -241,7 +246,12 @@ left, as the current head only for the versions of that store that the client ha
 learned of the removal (a key that the verified list removed, also one that left before the client joined), and below a head that a device of the list signed (that device had taken
 it). A live device whose own last head is one of a device that left signs a head of its own over it
 at its next sync, so a device that is behind takes the copy again; until then that device waits and
-says so. A key that was never a device of the verified list signs nothing; the decision never comes from
+says so. When no live device will sign over that head (the device that left pushed last), the owner
+ends the wait on the waiting device behind a fresh owner check that names that head, with the device that left named by its
+signed name and the time of its head: take exactly that head once ("Use the Copy That … Left…",
+only for a key that the verified list removed), or replace it with the device's own copy. A head or
+a chain entry of a signer that the client does not know yet makes it read the device list again
+before it calls the copy refused or damaged. A key that was never a device of the verified list signs nothing; the decision never comes from
 Connect's answers (a group, a store marked shared, a device it lists). What a client cannot detect: a
 newer list that Connect withholds (the client keeps the last list it verified, so a removal it has
 not seen yet does not reach it); entries after its own `add` that Connect withholds at a join (the

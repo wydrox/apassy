@@ -103,12 +103,9 @@ pub const STORE_DEVICES_PER_ACCOUNT: u64 = 10;
 pub const RECOVERY_TRIES_PER_HOUR: u32 = 5;
 /// Failed recovery signatures of one client prefix in one hour at most (`429`).
 pub const RECOVERY_PREFIX_TRIES_PER_HOUR: u32 = 20;
-/// Accounts, unknown account ids, and prefixes with counted recovery failures at once,
-/// each; a new one beyond it is 503 `busy` until the hour of the oldest ends.
+/// Account ids (of an account or of none) and prefixes with counted recovery failures at
+/// once, each; a new one beyond it is 503 `busy` until the hour of the oldest ends.
 pub const MAX_RECOVERY_ENTRIES: usize = 10_000;
-/// A repeat of `POST /v1/account` with the same body within this time answers the same
-/// result (a retry after a lost answer).
-pub const CREATE_RETRY_SECS: u64 = 600;
 /// A repeat of `POST /v1/account/recover` with the same body within this time, while the
 /// device it made is live, answers the same result.
 pub const RECOVER_RETRY_SECS: u64 = 600;
@@ -388,17 +385,29 @@ fn new_id(prefix: &str) -> RelayResult<String> {
     Ok(text)
 }
 
-/// A person's name or a device name: 1 to 64 bytes of UTF-8 without a control character,
-/// trimmed.
+/// A person's name or a device name in its canonical form ([`device::canonical_name`]):
+/// trimmed, 1 to 64 bytes of UTF-8, no control character, not `-`.
 fn checked_name(text: &str, what: &str) -> RelayResult<String> {
+    device::canonical_name(text)
+        .map(str::to_string)
+        .ok_or_else(|| {
+            RelayError::invalid(format!(
+                "The {what} is 1 to 64 bytes with no control character, and not “-”."
+            ))
+        })
+}
+
+/// A vault name: trimmed, 1 to 64 bytes of UTF-8 without a control character. It is
+/// signed into no message, so `-` is a vault name too.
+fn checked_vault_name(text: &str) -> RelayResult<String> {
     let text = text.trim();
     if text.is_empty()
         || text.len() > crate::api::MAX_NAME_BYTES
         || text.chars().any(char::is_control)
     {
-        return Err(RelayError::invalid(format!(
-            "The {what} is 1 to 64 bytes with no control character."
-        )));
+        return Err(RelayError::invalid(
+            "The vault name is 1 to 64 bytes with no control character.",
+        ));
     }
     Ok(text.to_string())
 }
@@ -631,13 +640,12 @@ impl AuthState {
 }
 
 /// The failed recoveries of the last hour, in memory only, apart from the sign-in state:
-/// of each existing account, of each unknown account id (a table of its own, so unknown
-/// ids never fill the table of accounts), and of each proven client prefix (by its HMAC
+/// of each account id, existing or not, in one table (so no state of the tables answers
+/// a known id and an unknown one apart), and of each proven client prefix (by its HMAC
 /// under a salt of this process, never as text).
 #[derive(Default)]
 struct RecoveryState {
-    accounts: HashMap<String, (u64, u32)>,
-    unknown: HashMap<String, (u64, u32)>,
+    ids: HashMap<String, (u64, u32)>,
     prefixes: HashMap<[u8; 32], (u64, u32)>,
 }
 
@@ -650,19 +658,17 @@ enum Tried<'a> {
 
 impl RecoveryState {
     fn purge(&mut self, now: u64) {
-        self.accounts
-            .retain(|_, (start, _)| now < start.saturating_add(3600));
-        self.unknown
+        self.ids
             .retain(|_, (start, _)| now < start.saturating_add(3600));
         self.prefixes
             .retain(|_, (start, _)| now < start.saturating_add(3600));
     }
 
     /// Counts one failed recovery of the id `tried`: a wrong recovery signature of an
-    /// existing account (`Tried::Known`, in the table of accounts) or a recovery of an id
-    /// that names no account (`Tried::Unknown`, in the table of unknown ids), and of the
-    /// client prefix. Both kinds have the same rule and the same answers: only a failure is
-    /// ever counted or limited (a valid recovery signature never comes here); 429
+    /// existing account (`Tried::Known`) or a recovery of an id that names no account
+    /// (`Tried::Unknown`), both in the one table of ids, and of the client prefix. Both
+    /// kinds have the same rule and the same answers in every state of the tables: only a
+    /// failure is ever counted or limited (a valid recovery signature never comes here); 429
     /// `rate_limited` when the id or the source already failed too often this hour (nothing
     /// more is counted); a new entry in a full table is 503 `busy`, and nothing is counted.
     /// Else the failure counts, and the answer stays the caller's 403.
@@ -674,10 +680,8 @@ impl RecoveryState {
         cap: usize,
     ) -> RelayResult<()> {
         self.purge(now);
-        let (table, id) = match tried {
-            Tried::Known(id) => (&mut self.accounts, id),
-            Tried::Unknown(id) => (&mut self.unknown, id),
-        };
+        let table = &mut self.ids;
+        let (Tried::Known(id) | Tried::Unknown(id)) = tried;
         let id_tries = table.get(id).map_or(0, |(_, count)| *count);
         let prefix_tries = self.prefixes.get(prefix).map_or(0, |(_, count)| *count);
         if id_tries >= RECOVERY_TRIES_PER_HOUR || prefix_tries >= RECOVERY_PREFIX_TRIES_PER_HOUR {
@@ -947,7 +951,7 @@ pub fn dispatch_edge(
     now: u64,
 ) -> RelayResult<Value> {
     match endpoint {
-        AccountEndpoint::Create => create(hub, &strict(body)?, prefix, now),
+        AccountEndpoint::Create => create(hub, body, prefix, now),
         AccountEndpoint::Challenge => challenge(hub, &strict(body)?, now),
         AccountEndpoint::Token => token(hub, &strict(body)?, now),
         AccountEndpoint::Join => join(hub, &strict(body)?, now),
@@ -1394,48 +1398,129 @@ fn check_account_room(conn: &Connection, hub: &Hub, now: u64) -> RelayResult<()>
     Ok(())
 }
 
-/// The answer of an earlier `POST /v1/account` of the same body and key within
-/// `CREATE_RETRY_SECS`; `None` when the key was never used; 409 when it was used otherwise.
+/// What Connect knows of the key of a `POST /v1/account`.
+enum EarlierCreate {
+    /// The key was never a device.
+    Fresh,
+    /// The same body made the account of this key, whose device is live: its answer.
+    Repeat(AccountCreated),
+    /// The key is or was a device otherwise (another body, a revoked device, a deleted
+    /// account): 409 `conflict`.
+    KeyUsed,
+}
+
+/// The earlier creation of the same body and key, at any time while the device that it
+/// made is live: a device repeats its pending creation until it has an answer, also after
+/// a restart.
 fn earlier_create(
     conn: &Connection,
     public_key: &[u8],
     hash: &[u8; 32],
-    now: u64,
-) -> RelayResult<Option<AccountCreated>> {
+) -> RelayResult<EarlierCreate> {
     if !key_used(conn, &key_hash(public_key))? {
-        return Ok(None);
+        return Ok(EarlierCreate::Fresh);
     }
     let earlier: Option<(String, String, i64)> = conn
         .query_row(
             "SELECT a.id, d.id, a.created_at FROM account a JOIN account_device d ON d.account_id = a.id \
-             WHERE d.public_key = ?1 AND a.create_hash = ?2 AND a.created_at > ?3 AND d.revoked_at IS NULL",
-            params![public_key, hash.as_slice(), to_i(now.saturating_sub(CREATE_RETRY_SECS))],
+             WHERE d.public_key = ?1 AND a.create_hash = ?2 AND d.revoked_at IS NULL",
+            params![public_key, hash.as_slice()],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()
         .map_err(db)?;
-    earlier
-        .map(|(account_id, device_id, at)| AccountCreated {
+    Ok(match earlier {
+        Some((account_id, device_id, at)) => EarlierCreate::Repeat(AccountCreated {
             account_id,
             device_id,
             created_at: to_u(at),
-        })
-        .map(Some)
-        .ok_or_else(|| conflict("This key is or was a device of an account."))
+        }),
+        None => EarlierCreate::KeyUsed,
+    })
+}
+
+fn key_used_error() -> RelayError {
+    conflict("This key is or was a device of an account.")
+}
+
+/// 409 `account_id_taken`: the id is held, or was held, by an account. The device makes
+/// a new id and signs again.
+fn account_id_taken() -> RelayError {
+    RelayError::new(
+        codes::ACCOUNT_ID_TAKEN,
+        "This account id is taken. Make a new id and sign again.",
+    )
+}
+
+/// Whether an account ever had the id `account` (`account_id_used`, never deleted).
+fn account_id_used(conn: &Connection, account: &str) -> RelayResult<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM account_id_used WHERE id = ?1) OR EXISTS(SELECT 1 FROM account WHERE id = ?1)",
+        params![account],
+        |row| row.get(0),
+    )
+    .map_err(db)
 }
 
 /// `POST /v1/account`: a new account with its first device, the account's root. The
-/// account id is the device's (`account_id`; an id that exists is 409 `conflict`). The
+/// account id is the device's (`account_id`); an id is used once: an id that an account
+/// has or ever had is 409 `account_id_taken` (`account_id_used`, never deleted). The
 /// signature over the `apassy-connect account v1` message of this origin proves the key
 /// and binds the recovery key; the statement is the key's signature over the root entry
 /// of the device list, with that id and the device name (400 otherwise, nothing made). A
-/// key is a device of at most one account, ever; the same body again within
-/// `CREATE_RETRY_SECS` answers the same result. New accounts have the caps of the relay
-/// (503 `busy`) and of the proven client prefix (429 `rate_limited`).
-fn create(
+/// key is a device of at most one account, ever (409 `conflict`); the same body again
+/// answers the same result while the device that it made is live, and counts nothing.
+/// Every other try counts for the proven client prefix, whatever its answer (also a body
+/// that does not parse; 429 `rate_limited` over the day's cap), and new accounts have the
+/// caps of the relay (503 `busy`).
+fn create(hub: &Hub, body: &[u8], prefix: Option<&str>, now: u64) -> RelayResult<Value> {
+    let request: RelayResult<AccountCreate> = strict(body);
+    // A repeat of the same body: the same answer, before any count.
+    if let Ok(request) = &request
+        && let Ok(public_key) = public_key_of(&request.public_key)
+    {
+        let hash = body_hash(request)?;
+        if let EarlierCreate::Repeat(earlier) = hub
+            .directory
+            .store
+            .with(|conn| earlier_create(conn, &public_key, &hash))?
+        {
+            return to_value(&earlier);
+        }
+    }
+    // Any other try counts for its prefix, whatever it answers below.
+    let ticket = prefix
+        .map(|prefix| {
+            hub.accounts
+                .prefixes
+                .reserve(prefix, hub.config.connect.accounts_per_day, now)
+                .map_err(|error| {
+                    if error.code == codes::RATE_LIMITED {
+                        RelayError::new(
+                            codes::RATE_LIMITED,
+                            "This network made its new accounts for today. Try again tomorrow.",
+                        )
+                    } else {
+                        error
+                    }
+                })
+        })
+        .transpose()?;
+    let answer = request.and_then(|request| {
+        let hash = body_hash(&request)?;
+        create_counted(hub, &request, &hash, now)
+    });
+    if let Some(ticket) = ticket {
+        ticket.keep();
+    }
+    answer
+}
+
+/// The checks and the creation of [`create`] after its prefix counted the try.
+fn create_counted(
     hub: &Hub,
     request: &AccountCreate,
-    prefix: Option<&str>,
+    hash: &[u8; 32],
     now: u64,
 ) -> RelayResult<Value> {
     if !is_connect_id(&request.account_id, "acc_") {
@@ -1468,56 +1553,32 @@ fn create(
         &device_name,
         &statement,
     )?;
-    let hash = body_hash(request)?;
-    // A retry of the same body: the same answer, before any count.
-    if let Some(earlier) = hub
-        .directory
-        .store
-        .with(|conn| earlier_create(conn, &public_key, &hash, now))?
-    {
-        return to_value(&earlier);
-    }
-    hub.directory
-        .store
-        .with(|conn| check_account_room(conn, hub, now))?;
-    let ticket = prefix
-        .map(|prefix| {
-            hub.accounts
-                .prefixes
-                .reserve(prefix, hub.config.connect.accounts_per_day, now)
-                .map_err(|error| {
-                    if error.code == codes::RATE_LIMITED {
-                        RelayError::new(
-                            codes::RATE_LIMITED,
-                            "This network made its new accounts for today. Try again tomorrow.",
-                        )
-                    } else {
-                        error
-                    }
-                })
-        })
-        .transpose()?;
-    let (created, made) = hub.directory.store.tx(|tx| {
-        // Again under the lock: another request may have used the key or the room.
-        if let Some(earlier) = earlier_create(tx, &public_key, &hash, now)? {
-            return Ok((earlier, false));
+    hub.directory.store.with(|conn| {
+        if let EarlierCreate::KeyUsed = earlier_create(conn, &public_key, hash)? {
+            return Err(key_used_error());
         }
-        if tx
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM account WHERE id = ?1)",
-                params![account],
-                |row| row.get::<_, bool>(0),
-            )
-            .map_err(db)?
-        {
-            return Err(conflict(
-                "This account id is taken. Make a new id and sign again.",
-            ));
+        check_account_room(conn, hub, now)
+    })?;
+    let created = hub.directory.store.tx(|tx| {
+        // Again under the lock: another request may have used the key, the id, or the
+        // room.
+        match earlier_create(tx, &public_key, hash)? {
+            EarlierCreate::Repeat(earlier) => return Ok(earlier),
+            EarlierCreate::KeyUsed => return Err(key_used_error()),
+            EarlierCreate::Fresh => {}
+        }
+        if account_id_used(tx, account)? {
+            return Err(account_id_taken());
         }
         check_account_room(tx, hub, now)?;
         tx.execute(
             "INSERT INTO account (id, name, created_at, recovery_key, create_hash) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![account, name, to_i(now), recovery_key.as_slice(), hash.as_slice()],
+        )
+        .map_err(db)?;
+        tx.execute(
+            "INSERT INTO account_id_used (id, created_at) VALUES (?1, ?2)",
+            params![account, to_i(now)],
         )
         .map_err(db)?;
         let device = insert_device(tx, account, &device_name, request.platform, &public_key, None, now)?;
@@ -1530,18 +1591,12 @@ fn create(
             None,
             &json!({"account_id": account, "device_id": device}),
         )?;
-        Ok((
-            AccountCreated {
-                account_id: account.to_string(),
-                device_id: device,
-                created_at: now,
-            },
-            true,
-        ))
+        Ok(AccountCreated {
+            account_id: account.to_string(),
+            device_id: device,
+            created_at: now,
+        })
     })?;
-    if made && let Some(ticket) = ticket {
-        ticket.keep();
-    }
     to_value(&created)
 }
 
@@ -1855,7 +1910,7 @@ fn pending(hub: &Hub, caller: &AccountCaller, now: u64) -> RelayResult<Value> {
     let joins = hub.directory.store.with(|conn| {
         let mut statement = conn
             .prepare(
-                "SELECT j.id, j.link_id, j.name, j.platform, j.public_key, j.created_at, j.expires_at \
+                "SELECT j.id, j.link_id, j.name, j.platform, j.public_key, j.created_at, j.expires_at, j.signature \
                  FROM account_join j JOIN account_link l ON l.id = j.link_id \
                  WHERE l.device_id = ?1 AND j.state = 'pending' AND j.expires_at > ?2 ORDER BY j.id",
             )
@@ -1864,12 +1919,14 @@ fn pending(hub: &Hub, caller: &AccountCaller, now: u64) -> RelayResult<Value> {
             .query_map(params![caller.device, to_i(now)], |row| {
                 let platform: String = row.get(3)?;
                 let key: Vec<u8> = row.get(4)?;
+                let signature: Vec<u8> = row.get(7)?;
                 Ok(AccountPendingJoin {
                     join_id: to_u(row.get(0)?),
                     link_id: to_u(row.get(1)?),
                     device_name: row.get(2)?,
                     platform: Platform::parse(&platform).ok_or(rusqlite::Error::InvalidQuery)?,
                     public_key: encode_b64(&key),
+                    signature: encode_b64(&signature),
                     created_at: to_u(row.get(5)?),
                     expires_at: to_u(row.get(6)?),
                 })
@@ -1912,15 +1969,18 @@ fn join(hub: &Hub, request: &AccountJoin, now: u64) -> RelayResult<Value> {
     }
     let public_key = public_key_of(&request.public_key)?;
     let signature = signature_of(&request.signature)?;
+    // The signature covers the canonical device name: the confirming device checks it
+    // again before it signs that name into the device list.
     let message = device::account_join_message(
         &hub.config.public_url,
         &request.account_id,
         &request.link_hash,
         &request.public_key,
+        &name,
     );
     if !device::verify(&public_key, &message, &signature) {
         return Err(RelayError::invalid(
-            "The signature is not one of the key over the join message of this Connect.",
+            "The signature is not one of the key over the join message of this Connect and this device name.",
         ));
     }
     let hash = body_hash(request)?;
@@ -1963,10 +2023,10 @@ fn join(hub: &Hub, request: &AccountJoin, now: u64) -> RelayResult<Value> {
         )
         .map_err(db)?;
         tx.execute(
-            "INSERT INTO account_join (link_id, account_id, name, platform, public_key, body_hash, state, created_at, expires_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7, ?8)",
+            "INSERT INTO account_join (link_id, account_id, name, platform, public_key, signature, body_hash, state, created_at, expires_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', ?8, ?9)",
             params![link_id, request.account_id, name, request.platform.as_str(), public_key.as_slice(),
-                    hash.as_slice(), to_i(now), expires_at],
+                    signature.as_slice(), hash.as_slice(), to_i(now), expires_at],
         )
         .map_err(db)?;
         let join_id = to_u(tx.last_insert_rowid());
@@ -2320,7 +2380,7 @@ fn vault_create(
             "The vault id is a UUID of 36 lowercase characters.",
         ));
     }
-    let name = checked_name(&request.name, "vault name")?;
+    let name = checked_vault_name(&request.name)?;
     let plans = hub.accounts.plans();
     if !plans
         .plan(&hub.directory.store, &caller.account, now)?
@@ -2601,8 +2661,8 @@ fn earlier_recovery(
 /// unknown account, and an account with a live device are the same 403. The recovery
 /// signature is checked first, and a valid one is never limited: only failures count and
 /// are limited, a wrong recovery signature of an existing account and a recovery of an
-/// unknown account id alike: `RECOVERY_TRIES_PER_HOUR` for the id (unknown ids in a table
-/// of their own) and `RECOVERY_PREFIX_TRIES_PER_HOUR` for the client prefix (429), in
+/// unknown account id alike: `RECOVERY_TRIES_PER_HOUR` for the id (known and unknown ids in
+/// one table) and `RECOVERY_PREFIX_TRIES_PER_HOUR` for the client prefix (429), in
 /// tables of `MAX_RECOVERY_ENTRIES` each (503 when full); an unknown id verifies its
 /// signature with a stand-in key, so both do the same work. The new device is the account's new
 /// root and starts a new device list, every vault store of the account is deleted (a new
@@ -2665,7 +2725,7 @@ fn recover(hub: &Hub, request: &AccountRecover, prefix: &str, now: u64) -> Relay
     )
     .unwrap_or_default();
     // An unknown account: the work, the checks, and the answers of a wrong recovery
-    // signature, counted in the table of unknown ids and for the client prefix.
+    // signature, counted in the table of ids and for the client prefix.
     let Some((recovery_key, live)) = stored else {
         let _ = device::verify_recovery(
             &hub.accounts.stand_in_recovery_key,
@@ -3082,6 +3142,11 @@ mod tests {
         assert_eq!(hour(7201), 7200);
         assert!(checked_name("  ", "name").is_err());
         assert_eq!(checked_name(" Rafal ", "name").unwrap(), "Rafal");
+        // `-` is the placeholder of the device-list message: never a person's or a
+        // device's name, but a vault name signs nothing.
+        assert!(checked_name("-", "name").is_err());
+        assert_eq!(checked_vault_name(" - ").unwrap(), "-");
+        assert!(checked_vault_name(" ").is_err());
     }
 
     const NOW: u64 = 1_790_000_000;
@@ -3419,7 +3484,7 @@ mod tests {
                 .code,
             codes::BUSY
         );
-        assert!(!state.accounts.contains_key("acc_b"));
+        assert!(!state.ids.contains_key("acc_b"));
         assert_eq!(
             state
                 .fail(Tried::Known("acc_a"), &[3u8; 32], NOW, 1)
@@ -3431,7 +3496,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_account_id_has_the_rule_of_an_existing_one_in_a_table_of_its_own() {
+    fn an_unknown_account_id_has_the_rule_of_an_existing_one() {
         // The same answers over 6 tries from fresh prefixes: 5 failures, then 429.
         let answers = |tried: Tried<'_>| {
             let mut state = RecoveryState::default();
@@ -3451,7 +3516,7 @@ mod tests {
             answers(Tried::Unknown("acc_b"))[5],
             Err(codes::RATE_LIMITED)
         );
-        // Unknown ids never enter the table of accounts, and the prefix limit is the same.
+        // The prefix limit is the same for both kinds.
         let mut state = RecoveryState::default();
         let prefix = [1u8; 32];
         let mut tries = 0;
@@ -3462,7 +3527,6 @@ mod tests {
             tries += 1;
         }
         assert_eq!(tries, RECOVERY_PREFIX_TRIES_PER_HOUR);
-        assert!(state.accounts.is_empty());
         assert_eq!(
             state
                 .fail(Tried::Known("acc_a"), &prefix, NOW, 100)
@@ -3471,29 +3535,56 @@ mod tests {
                 .fail(Tried::Unknown("acc_z"), &prefix, NOW, 100)
                 .unwrap_err()
         );
-        // A full table: a new id is 503 for both kinds, each in its own table.
+        // A full table: a new id is 503 for both kinds.
         let mut state = RecoveryState::default();
         state
             .fail(Tried::Unknown("acc_b"), &prefix, NOW, 1)
             .unwrap();
-        assert_eq!(
-            state
-                .fail(Tried::Unknown("acc_c"), &prefix, NOW, 1)
-                .unwrap_err()
-                .code,
-            codes::BUSY
-        );
-        state.fail(Tried::Known("acc_a"), &prefix, NOW, 1).unwrap();
-        assert_eq!(
-            state
-                .fail(Tried::Known("acc_d"), &prefix, NOW, 1)
-                .unwrap_err()
-                .code,
-            codes::BUSY
-        );
+        for tried in [Tried::Unknown("acc_c"), Tried::Known("acc_d")] {
+            assert_eq!(
+                state.fail(tried, &prefix, NOW, 1).unwrap_err().code,
+                codes::BUSY
+            );
+        }
         // The hour ends them.
         state
             .fail(Tried::Unknown("acc_c"), &prefix, NOW + 3600, 1)
             .unwrap();
+    }
+
+    #[test]
+    fn a_known_and_an_unknown_id_get_the_same_answer_in_every_table_state() {
+        // Each state of the table, filled by failures of known or of unknown ids from one
+        // client prefix: a new id of either kind gets the same answer, so no answer tells
+        // them apart.
+        fn tried(known: bool, id: &str) -> Tried<'_> {
+            if known {
+                Tried::Known(id)
+            } else {
+                Tried::Unknown(id)
+            }
+        }
+        for known in [true, false] {
+            for filled in 0..4u8 {
+                let state = || {
+                    let mut state = RecoveryState::default();
+                    for index in 0..filled {
+                        let id = format!("acc_fill{index}");
+                        state.fail(tried(known, &id), &[0u8; 32], NOW, 2).ok();
+                    }
+                    state
+                };
+                let answer = |tried: Tried<'_>| {
+                    state()
+                        .fail(tried, &[0u8; 32], NOW, 2)
+                        .map_err(|error| error.code)
+                };
+                assert_eq!(
+                    answer(Tried::Known("acc_known")),
+                    answer(Tried::Unknown("acc_unknown")),
+                    "{filled} entries"
+                );
+            }
+        }
     }
 }

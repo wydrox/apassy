@@ -96,6 +96,7 @@ struct ConnectPlanRowTests {
             "Not on Connect"
         ),
         ("stale without a plan", account(nil, stale: true), false, "Not available"),
+        ("account file of an earlier version", ConnectStatus(state: .account, joinAgain: true), false, "Join the account again"),
     ]
 
     /// Words and signs that would make the row a purchase surface (plan section 6, 3.1.1, 3.1.3(f)).
@@ -157,6 +158,22 @@ struct ConnectPlanRowTests {
         #expect(content.lines == [ConnectPlanRow.managedLine])
 
         for text in removedContent.lines + content.lines {
+            for word in Self.banned {
+                #expect(!text.contains(word), "\(word) in “\(text)”")
+            }
+        }
+    }
+
+    @Test("an account file of an earlier version is a text line that says to join again, with no control")
+    func joinAgain() {
+        let status = ConnectStatus(state: .account, joinAgain: true)
+        #expect(ConnectPlanRow.of(status) == .joinAgain)
+        #expect(!ConnectPlanRow.joinAgain.isOnAccount, "no “Managed in Apassy on your Mac” before the join")
+        let content = ConnectPlanRow.content(status, timeZone: Self.utc)
+        #expect(content.value == "Join the account again")
+        #expect(content.lines == [ConnectPlanRow.joinAgainLine])
+        #expect(ConnectPlanRow.joinAgainLine.contains("Settings > Devices"))
+        for text in content.lines {
             for word in Self.banned {
                 #expect(!text.contains(word), "\(word) in “\(text)”")
             }

@@ -133,6 +133,13 @@ pub enum ConnectError {
     NotFound,
     /// `409 conflict`.
     Conflict,
+    /// `409 account_id_taken`: an account creation names an id that Connect holds or held
+    /// already. The device makes a new id and signs again.
+    AccountIdTaken,
+    /// The account was made, but the recovery code that its creation made is no longer in
+    /// memory (Apassy was closed while the creation waited for Connect): it was never
+    /// shown. The account works; a second device of the account keeps it reachable.
+    RecoveryCodeNotShown,
     /// `409 seat_limit`: people or seats below the confirmed members, or above the
     /// maximum of the plan (connect-billing-v1 section 6).
     SeatLimit,
@@ -218,6 +225,14 @@ impl fmt::Display for ConnectError {
             Self::Conflict => {
                 "Apassy Connect has a different state for this. Reload and try again."
             }
+            Self::AccountIdTaken => {
+                "Apassy Connect holds that account id already. Apassy makes a new one; try again."
+            }
+            Self::RecoveryCodeNotShown => concat!(
+                "Your Connect account is made, but Apassy was closed before it could show its recovery code, so it was not shown. Add a second device in Settings › Connect › Add a Device…, so that you can reach the account from it if this ",
+                crate::computer!(),
+                " is lost."
+            ),
             Self::SeatLimit => {
                 "That number is below the members of your family or team, or above the most the plan allows. Remove members first, or choose another number."
             }

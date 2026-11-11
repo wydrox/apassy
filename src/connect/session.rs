@@ -15,9 +15,20 @@
 //!   every new vault session: the account, its key, and its token leave memory. A close
 //!   never waits for a call on its way: that call drops the account when it ends, and
 //!   [`AccountSession::tidy`] drops it at the next frame if nobody else did. So the key
-//!   is never in memory while Apassy is locked, and it closes exactly when the vault
-//!   does, also when the screen lock or sleep locks the vault (the auto-lock rule "When
+//!   is never in memory while Apassy is locked (outside the start-screen step below),
+//!   and it closes exactly when the vault does, also when the screen lock or sleep locks the vault (the auto-lock rule "When
 //!   the screen locks or the computer sleeps").
+//! - **The start-screen step.** While no vault is unlocked, the owner can choose "Use a
+//!   vault from another Mac" › "Apassy Connect" (or paste a link for the account's origin)
+//!   on the start screen. Only for that explicit step the desktop opens the session with
+//!   [`AccountSession::open_for_start`]: a random epoch of its own stands for the vault
+//!   session, and the key is read once (on the Mac the Keychain read asks for Touch ID; the
+//!   key file of Linux asks nothing). A join of this device in that step installs its
+//!   account for the same epoch. [`AccountSession::end_start`] closes it when the owner
+//!   leaves the step, a lock closes it as always, and the first vault session closes it
+//!   ([`AccountSession::follow`] with the vault's epoch): the vault's session then reads
+//!   the key for itself. So the key is in memory while Apassy is locked only during a
+//!   start-screen step that the owner started.
 //! - **Shared states.** [`SessionState`]: closed (locked), opening, open, signed out
 //!   (the key was not read now: cancelled, or unavailable; "Sign In…" reads it again),
 //!   and removed (Connect said `403 device_removed` to a valid signature, or the key
@@ -126,8 +137,12 @@ struct Config {
 }
 
 struct Inner {
-    /// The vault session that the session follows; `None` while locked.
+    /// The vault session that the session follows; `None` while locked. In a
+    /// start-screen step: the random epoch of that step.
     epoch: Option<[u8; 32]>,
+    /// The session follows a start-screen step ([`AccountSession::open_for_start`]), not
+    /// a vault session.
+    start: bool,
     state: SessionState,
     /// Counts each open and close: a read for an earlier one opens nothing.
     generation: u64,
@@ -209,6 +224,7 @@ impl AccountSession {
             slot: Arc::new(Mutex::new(None)),
             inner: Mutex::new(Inner {
                 epoch: None,
+                start: false,
                 state: SessionState::Closed,
                 generation: 0,
                 signer: None,
@@ -355,9 +371,57 @@ impl AccountSession {
         })
     }
 
+    /// Open the session for a start-screen step that the owner started while no vault is
+    /// unlocked ("Use a vault from another Mac" › "Apassy Connect", or a link for the
+    /// account's origin there). A random epoch of its own stands for the vault session:
+    /// with an account file and a key store the caller reads the key ([`Follow::Read`]);
+    /// without one the session waits closed for a join of this device
+    /// ([`Self::install`] with [`Self::start_epoch`]). A step that is on already does
+    /// nothing. [`Self::end_start`], a lock ([`Self::close`]), and the next vault session
+    /// ([`Self::follow`]) end it.
+    pub fn open_for_start(&self) -> Follow {
+        if lock(&self.inner).start {
+            return Follow::Nothing;
+        }
+        let mut epoch = [0u8; 32];
+        if getrandom::fill(&mut epoch).is_err() {
+            return Follow::Nothing;
+        }
+        self.close();
+        let has_account = self.has_account();
+        let has_store = self.store().is_some();
+        let mut inner = lock(&self.inner);
+        inner.start = true;
+        inner.epoch = Some(epoch);
+        if !has_account || !has_store {
+            inner.state = SessionState::Closed;
+            return Follow::Nothing;
+        }
+        inner.state = SessionState::Opening;
+        Follow::Read(OpenTicket {
+            generation: inner.generation,
+        })
+    }
+
+    /// The epoch of the start-screen step that the session follows; `None` when it
+    /// follows a vault session or nothing.
+    pub fn start_epoch(&self) -> Option<[u8; 32]> {
+        let inner = lock(&self.inner);
+        if inner.start { inner.epoch } else { None }
+    }
+
+    /// The owner left the start-screen step: the session closes. Nothing happens when the
+    /// session follows a vault session.
+    pub fn end_start(&self) {
+        if lock(&self.inner).start {
+            self.close();
+        }
+    }
+
     /// "Sign In…" after a cancelled or failed read: read the key again for the vault
-    /// session that the session follows. `None` while locked, without an account file,
-    /// or when the session is open, opening, or removed.
+    /// session (or the start-screen step) that the session follows. `None` while locked
+    /// outside such a step, without an account file, or when the session is open,
+    /// opening, or removed.
     pub fn retry(&self) -> Option<OpenTicket> {
         let has_account = self.has_account() && self.store().is_some();
         let mut inner = lock(&self.inner);
@@ -489,6 +553,7 @@ impl AccountSession {
     pub fn close(&self) {
         let mut inner = lock(&self.inner);
         inner.epoch = None;
+        inner.start = false;
         inner.state = SessionState::Closed;
         inner.generation += 1;
         inner.signer = None;
@@ -505,9 +570,14 @@ impl AccountSession {
     /// The account is forgotten on this device (the key and the account file are gone):
     /// nothing stays in memory, and the session follows the vault session without one.
     pub fn forget(&self) {
-        let epoch = self.epoch();
+        let (epoch, start) = {
+            let inner = lock(&self.inner);
+            (inner.epoch, inner.start)
+        };
         self.close();
-        lock(&self.inner).epoch = epoch;
+        let mut inner = lock(&self.inner);
+        inner.epoch = epoch;
+        inner.start = start;
     }
 
     /// Drop an account that a close left in the slot because a call held it, and put the
@@ -783,6 +853,80 @@ mod tests {
         let unconfigured = AccountSession::new();
         assert!(matches!(unconfigured.follow(Some(EPOCH)), Follow::Nothing));
         assert!(unconfigured.path().is_none());
+    }
+
+    #[test]
+    fn a_start_step_opens_without_a_vault_session_and_ends_with_one() {
+        let (_dir, store, session) = session_with_account();
+        let reads = store.reads();
+        let Follow::Read(ticket) = session.open_for_start() else {
+            panic!("a read for the step");
+        };
+        let start = session.start_epoch().expect("the epoch of the step");
+        assert_eq!(session.epoch(), Some(start));
+        assert_eq!(session.open_now(ticket), SessionState::Open);
+        assert_eq!(store.reads(), reads + 1, "one read for the step");
+        // The step again, and the same epoch, read nothing.
+        assert!(matches!(session.open_for_start(), Follow::Nothing));
+        assert!(matches!(session.follow(Some(start)), Follow::Nothing));
+        assert_eq!(store.reads(), reads + 1);
+        session
+            .with_account(|_| Ok(()))
+            .expect("a call in the step");
+        // A vault session ends the step and reads the key for itself.
+        assert!(matches!(session.follow(Some(EPOCH)), Follow::Read(_)));
+        assert!(session.start_epoch().is_none());
+        assert!(lock(&session.slot()).is_none());
+        // `end_start` leaves a vault session alone.
+        session.end_start();
+        assert_eq!(session.epoch(), Some(EPOCH));
+        session.close();
+
+        // Leaving the step closes it: nothing stays in memory.
+        let Follow::Read(ticket) = session.open_for_start() else {
+            panic!("a read for the step");
+        };
+        session.open_now(ticket);
+        assert!(session.is_open());
+        session.end_start();
+        assert_eq!(session.state(), SessionState::Closed);
+        assert!(session.epoch().is_none());
+        assert!(session.signer().is_none());
+        assert!(lock(&session.slot()).is_none());
+        // A lock ends it too, and a new step has a new epoch.
+        let Follow::Read(ticket) = session.open_for_start() else {
+            panic!("a read for the step");
+        };
+        let first = session.start_epoch();
+        session.open_now(ticket);
+        session.close();
+        assert!(session.start_epoch().is_none());
+        assert!(!session.is_open());
+        assert!(matches!(session.open_for_start(), Follow::Read(_)));
+        assert_ne!(session.start_epoch(), first);
+    }
+
+    #[test]
+    fn a_start_step_without_an_account_file_takes_the_joined_account() {
+        let dir = tempfile::tempdir().expect("dir");
+        let store = Arc::new(MemoryKeyStore::new());
+        let session = AccountSession::with(store.clone(), dir.path());
+        assert!(matches!(session.open_for_start(), Follow::Nothing));
+        assert_eq!(session.state(), SessionState::Closed);
+        let start = session.start_epoch().expect("the step");
+        // The join of this device writes the key and the account file; its account is the
+        // session of the step.
+        let signer = AccountSigner::open_or_create(store.as_ref()).expect("key");
+        account_file_of(dir.path(), &signer);
+        let account = ConnectAccount::open(store.as_ref(), &account_file(dir.path()))
+            .expect("open")
+            .expect("an account");
+        assert!(session.install(account, Some(start)));
+        assert!(session.is_open());
+        assert_eq!(session.start_epoch(), Some(start));
+        // "Sign In…" in the step after a cancel reads again; outside of it, nothing.
+        session.end_start();
+        assert!(session.retry().is_none(), "locked: no read");
     }
 
     #[test]

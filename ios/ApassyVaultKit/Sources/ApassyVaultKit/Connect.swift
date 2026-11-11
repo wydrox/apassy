@@ -182,6 +182,10 @@ public struct ConnectStatus: Codable, Sendable, Equatable {
     /// or the account was deleted), or the Keychain lost the key. It comes with state `account`:
     /// the key and the account file stay until `connectForget`. A refused sign-in is no removal.
     public var removed: Bool
+    /// True when the account file of this iPhone is from an earlier version of Apassy: this iPhone
+    /// must join its account again. It comes with state `account` and no account details;
+    /// `connectForget` deletes the file and the key, and then a join works.
+    public var joinAgain: Bool
     public var accountID: String?
     public var deviceName: String?
     /// Nil when Connect did not answer and no earlier answer is known.
@@ -206,12 +210,14 @@ public struct ConnectStatus: Codable, Sendable, Equatable {
     public var unverifiedDevices: [ConnectDevice] { devices.filter { !$0.verified } }
 
     public init(
-        state: State, removed: Bool = false, accountID: String? = nil, deviceName: String? = nil,
+        state: State, removed: Bool = false, joinAgain: Bool = false, accountID: String? = nil,
+        deviceName: String? = nil,
         plan: ConnectPlan? = nil, stale: Bool = false, dialRoute: Bool = false, dialState: ConnectDialState = .unused,
         join: ConnectJoin? = nil, devices: [ConnectDevice] = [], listVerified: Bool? = nil
     ) {
         self.state = state
         self.removed = removed
+        self.joinAgain = joinAgain
         self.accountID = accountID
         self.deviceName = deviceName
         self.plan = plan
@@ -227,6 +233,7 @@ public struct ConnectStatus: Codable, Sendable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         state = try container.decode(State.self, forKey: .state)
         removed = try container.decodeIfPresent(Bool.self, forKey: .removed) ?? false
+        joinAgain = try container.decodeIfPresent(Bool.self, forKey: .joinAgain) ?? false
         accountID = try container.decodeIfPresent(String.self, forKey: .accountID)
         deviceName = try container.decodeIfPresent(String.self, forKey: .deviceName)
         plan = try container.decodeIfPresent(ConnectPlan.self, forKey: .plan)
@@ -250,6 +257,7 @@ public struct ConnectStatus: Codable, Sendable, Equatable {
     enum CodingKeys: String, CodingKey {
         case state, removed, plan, stale, join, devices
         case accountID = "account_id"
+        case joinAgain = "join_again"
         case deviceName = "device_name"
         case dialRoute = "dial_route"
         case dialState = "dial_state"

@@ -26,6 +26,8 @@ public struct VaultError: Error, Sendable, Equatable, LocalizedError {
         case damaged
         case staleCopy = "stale_copy"
         case forkedCopy = "forked_copy"
+        /// A vault store of Apassy Connect waits for another device of the account to sync.
+        case waitsForDevice = "waits_for_device"
         case busy
         case tooLarge = "too_large"
         case io

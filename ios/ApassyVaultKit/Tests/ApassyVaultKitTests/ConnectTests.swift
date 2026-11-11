@@ -277,6 +277,45 @@ import Testing
         #expect(VaultError.Code(rawValue: "relay_ended") == .relayEnded)
     }
 
+    @Test func anAccountFileOfAnEarlierVersionDecodesAsJoinAgain() throws {
+        let again = try Self.decode(
+            #"{"state":"account","join_again":true,"plan":null,"dial_route":false,"dial_state":"unused"}"#)
+        #expect(again.state == .account && again.joinAgain && !again.removed)
+        #expect(again.accountID == nil && again.plan == nil && again.devices.isEmpty && again.listVerified == nil)
+        // Missing (every other status, an older core): false.
+        #expect(try Self.decode(Self.contract).joinAgain == false)
+        #expect(try Self.decode(#"{"state":"none","plan":null,"dial_route":false}"#).joinAgain == false)
+    }
+
+    @Test func thePreviewAsksToJoinAgainUntilForgetThenJoins() async throws {
+        let service = PreviewVaultService(empty: true)
+        await service.setConnectAccount("acc_k7m2q4x3ca", joinAgain: true)
+        let again = try await service.connectStatus()
+        #expect(again.state == .account && again.joinAgain && !again.removed)
+        #expect(again.accountID == nil && again.plan == nil && again.devices.isEmpty)
+        // As the core: a join waits for the forget.
+        await #expect(throws: VaultError.self) {
+            _ = try await service.connectJoin(link: ConnectTests.code, deviceName: "Test iPhone")
+        }
+        #expect(try await service.connectForget())
+        #expect(try await service.connectStatus().state == .none)
+        _ = try await service.connectJoin(link: ConnectTests.code, deviceName: "Test iPhone")
+        _ = try await service.connectJoinPoll()
+        #expect(try await service.connectJoinPoll().state == .confirmed)
+        let joined = try await service.connectStatus()
+        #expect(joined.state == .account && !joined.joinAgain)
+    }
+
+    @Test func aSyncThatWaitsForADeviceOfTheAccountDecodesAsItsOwnState() throws {
+        let status = try JSONDecoder().decode(
+            SyncStatus.self,
+            from: Data(
+                #"{"enabled":true,"state":"waits_for_device","message":"Waiting for another device of this account to sync. Nothing was changed.","version":4,"last_sync_at":null,"pushed":false,"merged":null}"#
+                    .utf8))
+        #expect(status.state == .waitsForDevice)
+        #expect(VaultError.Code(rawValue: "waits_for_device") == .waitsForDevice)
+    }
+
     @Test func thePreviewForgetsARemovedAccountAndJoinsAgain() async throws {
         let service = PreviewVaultService(empty: true)
         await service.setConnectAccount("acc_k7m2q4x3ca", removed: true)

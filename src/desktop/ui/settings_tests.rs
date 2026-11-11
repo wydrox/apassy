@@ -2537,7 +2537,10 @@ fn connect_move_texts_follow_the_rules_of_plans_section_5() {
         ended_line,
     };
     use super::super::sync::questions::CONNECT_MOVE_WAITS;
-    use super::super::sync::relay::{CONNECT_OPEN_EMPTY, CONNECT_OPEN_LEAD, CONNECT_SIGN_IN};
+    use super::super::sync::relay::{
+        CONNECT_OPEN_EMPTY, CONNECT_OPEN_JOIN, CONNECT_OPEN_LEAD, CONNECT_OPEN_LOADING,
+        CONNECT_OPEN_OLD_FILE, CONNECT_OPEN_SIGNING_IN, CONNECT_SIGN_IN,
+    };
     use crate::desktop::sync_worker::ended_copy_words;
     use crate::questions::worker::ended_text;
     use crate::relay::membership::PathEnded;
@@ -2549,6 +2552,10 @@ fn connect_move_texts_follow_the_rules_of_plans_section_5() {
         CONNECT_MOVE_WAITS,
         CONNECT_OPEN_EMPTY,
         CONNECT_OPEN_LEAD,
+        CONNECT_OPEN_JOIN,
+        CONNECT_OPEN_OLD_FILE,
+        CONNECT_OPEN_SIGNING_IN,
+        CONNECT_OPEN_LOADING,
         CONNECT_SIGN_IN,
     ]
     .iter()

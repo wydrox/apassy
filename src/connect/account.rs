@@ -45,10 +45,10 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use super::client::{
-    AccountDeleted, AccountView, Challenge, ChallengeRequest, CheckoutAnswer, CheckoutRequest,
-    ConnectClient, CreateAccount, DeviceView, GroupDetail, GroupJoined, GroupMember, InviteAnswer,
-    JoinBody, JoinCancel, MemberRemoved, PlanView, PortalAnswer, RecoverBody, RevokeAnswer,
-    SeatsAnswer, StoreDevice, TokenRequest, VaultStoreView,
+    AccountCreated, AccountDeleted, AccountView, Challenge, ChallengeRequest, CheckoutAnswer,
+    CheckoutRequest, ConnectClient, CreateAccount, DeviceView, GroupDetail, GroupJoined,
+    GroupMember, InviteAnswer, JoinBody, JoinCancel, MemberRemoved, PlanView, PortalAnswer,
+    RecoverBody, RevokeAnswer, SeatsAnswer, StoreDevice, TokenRequest, VaultStoreView,
 };
 use super::device_key::{AccountSigner, DeviceKeyStore, recover_message};
 use super::entitlement::Entitlement;
@@ -82,8 +82,6 @@ const SIGN_IN_ROUNDS: usize = 3;
 /// The waits before the second and the third round.
 const SIGN_IN_WAITS: [Duration; SIGN_IN_ROUNDS - 1] =
     [Duration::from_secs(1), Duration::from_secs(3)];
-/// A person's name or a device name: 1 to 64 bytes (section 2).
-const MAX_NAME_BYTES: usize = 64;
 
 /// The time source: Unix seconds. Tests move it.
 pub type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
@@ -109,18 +107,158 @@ fn system_clock() -> Clock {
     })
 }
 
+/// The waits between the tries of one account creation: the same body again after a lost
+/// answer, until Connect answers or the last try is lost too (the creation stays pending).
+const CREATE_WAITS: [Duration; 4] = [
+    Duration::from_millis(250),
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+];
+/// A creation signs a new id at most this many times (`409 account_id_taken`).
+const CREATE_ID_ROUNDS: usize = 4;
+
+/// The pending creation of an account on this device, next to the account file
+/// (`connect/pending-account.json`): the exact body of `POST /v1/account`, written before
+/// the first try and removed when Connect answered it. Public values only: ids, names,
+/// the public key, the public recovery key, and signatures; never the recovery code.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PendingCreation {
+    v: u8,
+    origin: String,
+    account_id: String,
+    name: String,
+    device_name: String,
+    platform: String,
+    public_key: String,
+    recovery_key: String,
+    signature: String,
+    statement: String,
+}
+
+impl PendingCreation {
+    fn path(account_file: &Path) -> PathBuf {
+        account_file.with_file_name("pending-account.json")
+    }
+
+    /// The pending creation of `account_file` for this origin and key; `None` when there is
+    /// none, or one of another shape, origin, or key (it goes).
+    fn load(account_file: &Path, origin: &str, public_key: &str) -> Option<Self> {
+        let path = Self::path(account_file);
+        let meta = fs::symlink_metadata(&path).ok()?;
+        let pending = (meta.is_file() && meta.permissions().mode() & 0o077 == 0)
+            .then(|| fs::read(&path).ok())
+            .flatten()
+            .filter(|text| text.len() as u64 <= MAX_STATE_BYTES)
+            .and_then(|text| serde_json::from_slice::<Self>(&text).ok())
+            .filter(|pending| {
+                pending.v == STATE_VERSION
+                    && pending.origin == origin
+                    && pending.public_key == public_key
+                    && valid_account_id(&pending.account_id)
+            });
+        if pending.is_none() {
+            let _ = fs::remove_file(&path);
+        }
+        pending
+    }
+
+    fn body(&self) -> CreateAccount<'_> {
+        CreateAccount {
+            account_id: &self.account_id,
+            name: &self.name,
+            device_name: &self.device_name,
+            platform: &self.platform,
+            public_key: &self.public_key,
+            recovery_key: &self.recovery_key,
+            signature: &self.signature,
+            statement: &self.statement,
+        }
+    }
+
+    /// Write it with mode 0600 next to the account file, before the first try.
+    fn save(&self, account_file: &Path) -> Result<(), ConnectError> {
+        let text = serde_json::to_vec_pretty(self).map_err(|_| ConnectError::Local)?;
+        write_private(&Self::path(account_file), &text)
+    }
+
+    fn remove(account_file: &Path) {
+        let _ = fs::remove_file(Self::path(account_file));
+    }
+}
+
+/// The recovery codes of the pending creations of this process, by the pending file and
+/// the account id: in memory only, so a creation that is repeated in the same run still
+/// shows its code once. A restart forgets them ([`ConnectError::RecoveryCodeNotShown`]).
+static PENDING_CODES: std::sync::Mutex<Vec<(PathBuf, String, RecoveryCode)>> =
+    std::sync::Mutex::new(Vec::new());
+
+fn pending_codes() -> std::sync::MutexGuard<'static, Vec<(PathBuf, String, RecoveryCode)>> {
+    PENDING_CODES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Take the recovery code of the pending creation `account_id` of `account_file` out of
+/// memory.
+fn take_pending_code(account_file: &Path, account_id: &str) -> Option<RecoveryCode> {
+    let mut codes = pending_codes();
+    let index = codes
+        .iter()
+        .position(|(path, id, _)| path == account_file && id == account_id)?;
+    Some(codes.swap_remove(index).2)
+}
+
+/// Forget the recovery codes of the pending creations of this process (tests: a restart).
+#[doc(hidden)]
+pub fn forget_pending_creation_codes() {
+    pending_codes().clear();
+}
+
+/// Write `text` at `path` with mode 0600, in a 0700 directory, through a temporary file
+/// and a rename.
+fn write_private(path: &Path, text: &[u8]) -> Result<(), ConnectError> {
+    let dir = path.parent().ok_or(ConnectError::Local)?;
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .map_err(|_| ConnectError::Local)?;
+    let meta = fs::symlink_metadata(dir).map_err(|_| ConnectError::Local)?;
+    if !meta.is_dir() {
+        return Err(ConnectError::Local);
+    }
+    if meta.permissions().mode() & 0o077 != 0 {
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+            .map_err(|_| ConnectError::Local)?;
+    }
+    let temporary = path.with_extension("json.new");
+    let _ = fs::remove_file(&temporary);
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temporary)
+        .map_err(|_| ConnectError::Local)?;
+    file.write_all(text)
+        .and_then(|()| file.sync_all())
+        .map_err(|_| ConnectError::Local)?;
+    drop(file);
+    fs::rename(&temporary, path).map_err(|_| ConnectError::Local)
+}
+
 /// The account file in `data_dir` (`crate::paths::data_dir()` in the app).
 pub fn account_file(data_dir: &Path) -> PathBuf {
     data_dir.join("connect").join("account.json")
 }
 
-/// A name of section 2: trimmed, 1 to 64 bytes of UTF-8, no control character.
+/// A name of section 2 in its canonical form ([`trust::canonical_name`]): trimmed, 1 to
+/// 64 bytes of UTF-8, no control character, not `-`.
 fn clean_name(text: &str) -> Result<String, ConnectError> {
-    let name = text.trim();
-    if name.is_empty() || name.len() > MAX_NAME_BYTES || name.chars().any(char::is_control) {
-        return Err(ConnectError::Invalid);
-    }
-    Ok(name.to_owned())
+    trust::canonical_name(text)
+        .map(str::to_owned)
+        .ok_or(ConnectError::Invalid)
 }
 
 /// What the account file holds. No secret: see the module documentation.
@@ -291,34 +429,8 @@ impl AccountState {
         if !self.is_valid() {
             return Err(ConnectError::Invalid);
         }
-        let dir = path.parent().ok_or(ConnectError::Local)?;
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)
-            .map_err(|_| ConnectError::Local)?;
-        let meta = fs::symlink_metadata(dir).map_err(|_| ConnectError::Local)?;
-        if !meta.is_dir() {
-            return Err(ConnectError::Local);
-        }
-        if meta.permissions().mode() & 0o077 != 0 {
-            fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
-                .map_err(|_| ConnectError::Local)?;
-        }
         let text = serde_json::to_vec_pretty(self).map_err(|_| ConnectError::Local)?;
-        let temporary = path.with_extension("json.new");
-        let _ = fs::remove_file(&temporary);
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temporary)
-            .map_err(|_| ConnectError::Local)?;
-        file.write_all(&text)
-            .and_then(|()| file.sync_all())
-            .map_err(|_| ConnectError::Local)?;
-        drop(file);
-        fs::rename(&temporary, path).map_err(|_| ConnectError::Local)
+        write_private(path, &text)
     }
 }
 
@@ -543,6 +655,10 @@ pub struct PendingJoin {
     pub platform: String,
     /// The joining key, X9.63 (65 bytes).
     pub public_key: Vec<u8>,
+    /// The joining key's signature over the `apassy-connect join v1` message of this
+    /// link, which names `device_name`: this Mac checked it before it showed the name, and
+    /// checks it again before it signs the name.
+    pub signature: Vec<u8>,
     /// The six words: `"iPhone" asks to join your Apassy Connect account. Both devices
     /// show: <words>.`
     pub words: String,
@@ -675,6 +791,17 @@ impl ConnectAccount {
     /// `path`. The recovery code comes back once: show it as 16 words with "Save it in
     /// another password manager"; Apassy never stores it. The first sign-in happens at
     /// the first call that needs the token.
+    ///
+    /// The body of the creation is written as the pending creation of this device before
+    /// the first try (public values only), and the same body goes again after a lost
+    /// answer, until Connect answers: a creation never ends with a key that Connect used
+    /// while this Mac has no account file. A later call with a pending creation of this
+    /// origin and key repeats its body (with its names) and Connect answers the account
+    /// that it made. Its recovery code is in memory until the creation is answered: after a
+    /// restart the account is still made and its file written, and the call answers
+    /// [`ConnectError::RecoveryCodeNotShown`]. An id that Connect holds or held (`409
+    /// account_id_taken`) gets a new id and a new body; a used key (`409 conflict`) and any
+    /// other refusal end the creation.
     pub fn create(
         client: ConnectClient,
         store: &dyn DeviceKeyStore,
@@ -688,53 +815,104 @@ impl ConnectAccount {
         let name = clean_name(name)?;
         let device_name = clean_name(device_name)?;
         let signer = AccountSigner::open_or_create(store)?;
-        let recovery = RecoveryCode::generate()?;
-        let recovery_key = recovery.key()?.public_key_b64u();
         let public_key = signer.public_key_b64u();
-        let signature = encode_b64u(&signer.sign_account(client.origin(), &recovery_key)?);
-        // This device makes the account id: the root entry of the device list names it. An
-        // id that Connect has already (`409 conflict`) gets one more try with a new id.
-        let mut made = None;
-        for round in 0..2 {
-            let account_id = new_account_id()?;
-            let (root, _) = signer.sign_root(client.origin(), &account_id, &device_name)?;
-            let statement = encode_b64u(&root);
-            let body = CreateAccount {
-                account_id: &account_id,
-                name: &name,
-                device_name: &device_name,
-                platform: PLATFORM,
-                public_key: &public_key,
-                recovery_key: &recovery_key,
-                signature: &signature,
-                statement: &statement,
+        let mut pending = PendingCreation::load(path, client.origin(), &public_key);
+        for _ in 0..CREATE_ID_ROUNDS {
+            let creation = match pending.take() {
+                Some(creation) => creation,
+                None => {
+                    // This device makes the account id: the root entry of the device list
+                    // names it.
+                    let recovery = RecoveryCode::generate()?;
+                    let recovery_key = recovery.key()?.public_key_b64u();
+                    let account_id = new_account_id()?;
+                    let (root, _) = signer.sign_root(client.origin(), &account_id, &device_name)?;
+                    let creation = PendingCreation {
+                        v: STATE_VERSION,
+                        origin: client.origin().to_owned(),
+                        signature: encode_b64u(
+                            &signer.sign_account(client.origin(), &recovery_key)?,
+                        ),
+                        account_id,
+                        name: name.clone(),
+                        device_name: device_name.clone(),
+                        platform: PLATFORM.to_owned(),
+                        public_key: public_key.clone(),
+                        recovery_key,
+                        statement: encode_b64u(&root),
+                    };
+                    // Nothing is sent before the pending creation is on disk.
+                    creation.save(path)?;
+                    pending_codes().push((path.to_owned(), creation.account_id.clone(), recovery));
+                    creation
+                }
             };
-            match twice(|| client.create_account(&body)) {
-                Ok(created) => {
-                    made = Some((account_id, created));
+            let mut answer = client.create_account(&creation.body());
+            for wait in CREATE_WAITS {
+                if !matches!(answer, Err(ConnectError::Offline | ConnectError::Broken)) {
                     break;
                 }
-                Err(ConnectError::Conflict) if round == 0 => {}
-                Err(error) => return Err(error),
+                std::thread::sleep(wait);
+                answer = client.create_account(&creation.body());
+            }
+            match answer {
+                Ok(created) => return Self::created(client, signer, path, &creation, &created),
+                Err(ConnectError::AccountIdTaken) => {
+                    // A new id and a new body; the code of this one is of no account.
+                    PendingCreation::remove(path);
+                    drop(take_pending_code(path, &creation.account_id));
+                }
+                // No answer: the creation stays pending, and the next call repeats it.
+                Err(error @ (ConnectError::Offline | ConnectError::Broken)) => return Err(error),
+                // Connect made nothing for now (a limit, a busy or failing service): the
+                // same body goes again later.
+                Err(
+                    error @ (ConnectError::RateLimited(_)
+                    | ConnectError::Refused {
+                        status: 500..=599, ..
+                    }),
+                ) => return Err(error),
+                Err(error) => {
+                    PendingCreation::remove(path);
+                    drop(take_pending_code(path, &creation.account_id));
+                    return Err(error);
+                }
             }
         }
-        let (account_id, created) = made.ok_or(ConnectError::Conflict)?;
-        if created.account_id != account_id || !valid_device_id(&created.device_id) {
+        Err(ConnectError::AccountIdTaken)
+    }
+
+    /// The account that Connect made for the pending creation `creation`: the account
+    /// file, then the end of the pending creation, and its recovery code when this process
+    /// still holds it.
+    fn created(
+        client: ConnectClient,
+        signer: AccountSigner,
+        path: &Path,
+        creation: &PendingCreation,
+        created: &AccountCreated,
+    ) -> Result<(Self, RecoveryCode), ConnectError> {
+        if created.account_id != creation.account_id || !valid_device_id(&created.device_id) {
             return Err(ConnectError::BadAnswer);
         }
         // This Mac is the account root: version 1 of the device list.
         let state = AccountState {
-            name: Some(name),
+            name: Some(creation.name.clone()),
             ..AccountState::for_root(
                 client.origin(),
                 &created.account_id,
                 &created.device_id,
-                &device_name,
-                &public_key,
+                &creation.device_name,
+                &creation.public_key,
                 created.created_at,
             )
         };
+        // A failed save keeps the creation pending (and its code in memory): the next call
+        // repeats it and writes the file.
         state.save(path)?;
+        PendingCreation::remove(path);
+        let recovery = take_pending_code(path, &creation.account_id)
+            .ok_or(ConnectError::RecoveryCodeNotShown)?;
         Ok((Self::build(client, state, path, Arc::new(signer)), recovery))
     }
 
@@ -1227,7 +1405,8 @@ impl ConnectAccount {
 
     /// The devices that ask to join through `link`, each with the safety words that this
     /// Mac computes from the code it holds, its own key, and the joining key. Ask every
-    /// 5 s while the sheet is open. An entry with a bad key is left out.
+    /// 5 s while the sheet is open. An entry with a bad key, or a name that the joining
+    /// key did not sign for this link ([`Self::join_signed`]), is left out.
     pub fn pending_joins(&mut self, link: &DeviceLink) -> Result<Vec<PendingJoin>, ConnectError> {
         let pending = self.with_token(|client, token| client.pending(token))?;
         let own_key = self.own_public_key();
@@ -1237,6 +1416,10 @@ impl ConnectAccount {
             .filter_map(|join| {
                 let public_key = point(&join.public_key)?;
                 let device_name = clean_name(&join.device_name).ok()?;
+                let signature = decode_b64u(&join.signature)?;
+                if !self.join_signed(link, &public_key, &device_name, &signature) {
+                    return None;
+                }
                 let words = safety_words(
                     &self.state.account_id,
                     link.code.expose(),
@@ -1249,6 +1432,7 @@ impl ConnectAccount {
                     device_name,
                     platform: join.platform,
                     public_key,
+                    signature,
                     words,
                     created_at: join.created_at,
                     expires_at: join.expires_at,
@@ -1257,13 +1441,39 @@ impl ConnectAccount {
             .collect())
     }
 
+    /// Whether `signature` is the joining key `public_key`'s over the `apassy-connect join
+    /// v1` message of `link` with the canonical device name `device_name`: the name that
+    /// the joining device asked for, whatever Connect reports.
+    fn join_signed(
+        &self,
+        link: &DeviceLink,
+        public_key: &[u8],
+        device_name: &str,
+        signature: &[u8],
+    ) -> bool {
+        trust::valid_name(device_name)
+            && crate::sync::verify_signature(
+                public_key,
+                &super::device_key::join_message(
+                    self.client.origin(),
+                    &self.state.account_id,
+                    &link.code.link_hash(),
+                    &encode_b64u(public_key),
+                    device_name,
+                ),
+                signature,
+            )
+    }
+
     /// Confirm `join` of `link` after a fresh owner check for
     /// [`PendingJoin::owner_action`] in the vault session `epoch`: this Mac signs the `add`
     /// entry of the device list for exactly the key for which it computed the words and the
     /// link of the join, after the head that it verified, and Connect adds that key. The
     /// words are computed again from the code and the key, so a changed entry is
-    /// [`ConnectError::WordsMismatch`] and nothing is sent. The key is then a device of the
-    /// list here. The proof is used up, also when the call fails.
+    /// [`ConnectError::WordsMismatch`] and nothing is sent; a name that the joining key did
+    /// not sign is [`ConnectError::NotVerified`], and nothing is sent. The key is then a
+    /// device of the list here, with the name that it signed. The proof is used up, also
+    /// when the call fails.
     pub fn confirm_join(
         &mut self,
         link: &DeviceLink,
@@ -1280,6 +1490,9 @@ impl ConnectAccount {
             ) != join.words
         {
             return Err(ConnectError::WordsMismatch);
+        }
+        if !self.join_signed(link, &join.public_key, &join.device_name, &join.signature) {
+            return Err(ConnectError::NotVerified);
         }
         proof
             .check(&join.owner_action(&self.state.account_id), epoch)
@@ -1424,9 +1637,13 @@ impl ConnectAccount {
         if !crate::sync::relay_crypto::valid_vault_id(vault_id) {
             return Err(ConnectError::Invalid);
         }
-        let name = clean_name(name)?;
+        // A vault name is signed into no message: `-` is a vault name too.
+        let name = name.trim();
+        if name.is_empty() || name.len() > 64 || name.chars().any(char::is_control) {
+            return Err(ConnectError::Invalid);
+        }
         let store =
-            self.with_token(|client, token| client.create_vault_store(token, vault_id, &name))?;
+            self.with_token(|client, token| client.create_vault_store(token, vault_id, name))?;
         if store.vault_id != vault_id || !crate::sync::relay_crypto::valid_team_id(&store.team_id) {
             return Err(ConnectError::BadAnswer);
         }
@@ -1884,7 +2101,14 @@ impl JoinRequest {
         let account_id = code.account_id().to_owned();
         let link_hash = code.link_hash();
         let public_key = signer.public_key_b64u();
-        let signature = encode_b64u(&signer.sign_join(client.origin(), &account_id, &link_hash)?);
+        // The signature covers the canonical device name; the confirming device signs that
+        // name into the device list only when it verifies.
+        let signature = encode_b64u(&signer.sign_join(
+            client.origin(),
+            &account_id,
+            &link_hash,
+            &device_name,
+        )?);
         let body = JoinBody {
             account_id: &account_id,
             link_hash: &link_hash,
@@ -1970,8 +2194,9 @@ impl JoinRequest {
     /// account, and writes the account file with the root of the code pinned and the
     /// device list that it verified: a list that goes on from the list of the join answer
     /// and holds this Mac's own `add`, made by the confirming device that the code named,
-    /// with the link of the code. Any other list (an older one, or one without that entry)
-    /// is [`ConnectError::LinkMismatch`], and no account file is written. A token call
+    /// with the link of the code, and with the device name that this Mac asked for. Any
+    /// other list (an older one, one without that entry, or one whose entry names this Mac
+    /// otherwise) is [`ConnectError::LinkMismatch`], and no account file is written. A token call
     /// refused with `401` or `503`, or a read of the account that fails on the way, waits
     /// for the next poll.
     pub fn poll(&mut self) -> Result<JoinPoll, ConnectError> {
@@ -2023,6 +2248,7 @@ impl JoinRequest {
         )
         .filter(|list| start.accepts(list))
         .filter(|list| list.added(self.signer.public_key(), &self.confirmer, &link_hash))
+        .filter(|list| list.name_of(self.signer.public_key()) == Some(self.device_name.as_str()))
         .ok_or(ConnectError::LinkMismatch)?;
         let state = AccountState {
             v: STATE_VERSION,
@@ -2247,5 +2473,21 @@ mod tests {
         assert!(clean_name("   ").is_err());
         assert!(clean_name(&"a".repeat(65)).is_err());
         assert!(clean_name("Mac\u{7}").is_err());
+        // The same canonical form as Connect's (`apassy_relay::device::canonical_name`):
+        // bytes, not characters, count; NUL and other control characters never pass; the
+        // placeholder `-` of the device-list message is never a name.
+        let zoe = "Zoë’s iPhone";
+        assert_eq!(clean_name(&format!("\t {zoe} \n")).unwrap(), zoe);
+        let at_limit = format!("{}é", "a".repeat(62));
+        assert_eq!(at_limit.len(), 64);
+        assert_eq!(clean_name(&format!(" {at_limit} ")).unwrap(), at_limit);
+        let over = format!("{}é", "a".repeat(63));
+        assert_eq!(over.len(), 65);
+        assert!(clean_name(&over).is_err());
+        assert!(clean_name("Mac\u{0}mini").is_err());
+        assert!(clean_name("-").is_err());
+        assert!(clean_name(" - ").is_err());
+        assert_eq!(clean_name("-Mac-").unwrap(), "-Mac-");
+        assert!(trust::valid_name(zoe) && !trust::valid_name(" Mac") && !trust::valid_name("-"));
     }
 }

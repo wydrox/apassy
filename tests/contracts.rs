@@ -3832,11 +3832,12 @@ mod connect_v1 {
 
     /// connect-account-v1 section 4: every Connect code with its status, and the
     /// relay-sync-v1 codes that the Connect examples use.
-    const CODES: [(&str, u16); 15] = [
+    const CODES: [(&str, u16); 16] = [
         ("account_required", 403),
         ("not_in_group", 403),
         ("plan_required", 403),
         ("account_limit", 403),
+        ("account_id_taken", 409),
         ("seat_limit", 409),
         ("tunnel_limit", 429),
         ("node_unknown", 404),
@@ -3864,7 +3865,7 @@ mod connect_v1 {
     ];
 
     pub fn check_error_table() {
-        for (code, status) in CODES.iter().take(10) {
+        for (code, status) in CODES.iter().take(11) {
             let row = format!("| {status} | `{code}` |");
             assert!(
                 ACCOUNT_CONTRACT.contains(&row),
@@ -4062,8 +4063,10 @@ mod connect_v1 {
     }
 
     /// A name of connect-account-v1 section 2.
+    /// A name of section 2 in its canonical form: trimmed, 1 to 64 bytes, no control
+    /// character, not the placeholder `-`.
     pub fn is_name(text: &str) -> bool {
-        !text.is_empty() && text.len() <= 64 && text.trim() == text && is_text(text)
+        !text.is_empty() && text.len() <= 64 && text.trim() == text && is_text(text) && text != "-"
     }
 
     pub fn is_text(text: &str) -> bool {
@@ -4332,6 +4335,7 @@ mod connect_v1 {
             device_name: String,
             platform: String,
             public_key: String,
+            signature: String,
             created_at: u64,
             expires_at: u64,
         }
@@ -4832,6 +4836,7 @@ mod connect_v1 {
                         is_public_key(&p.public_key)
                             && is_platform(&p.platform)
                             && is_name(&p.device_name)
+                            && is_signature(&p.signature)
                             && p.created_at < p.expires_at
                     }));
                 }
@@ -5243,7 +5248,16 @@ mod connect_v1 {
                 let expected = match m.name.as_str() {
                     "account" => joined(&[m.tag.as_bytes(), origin, a64, rec64]),
                     "sign_in" => joined(&[m.tag.as_bytes(), origin, account, a64, nonce]),
-                    "join" | "join_cancel" => {
+                    // The join signs the device name of the joining device.
+                    "join" => joined(&[
+                        m.tag.as_bytes(),
+                        origin,
+                        account,
+                        link_hash.as_bytes(),
+                        b64,
+                        v.device_b.name.as_bytes(),
+                    ]),
+                    "join_cancel" => {
                         joined(&[m.tag.as_bytes(), origin, account, link_hash.as_bytes(), b64])
                     }
                     "device_list_root" => joined(&[

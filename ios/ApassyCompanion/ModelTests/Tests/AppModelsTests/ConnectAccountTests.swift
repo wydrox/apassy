@@ -37,7 +37,7 @@ struct ConnectAccountTests {
             ConnectDevicesText.header, ConnectDevicesText.forgetButton, ConnectDevicesText.confirmTitle,
             ConnectDevicesText.confirmButton, ConnectDevicesText.confirmOnAccount, ConnectDevicesText.confirmRemoved,
             ConnectDevicesText.footer, ConnectDevicesText.forgetFailed, ConnectDevicesText.listNotVerifiedLine,
-            ConnectPlanRow.removedLine,
+            ConnectPlanRow.removedLine, ConnectPlanRow.joinAgainLine, ConnectDevicesText.confirmJoinAgain,
             RelayEndedNotice.value, RelayEndedNotice.line, JoinModel.connectCodeInvalid,
             ConnectDevicesText.notVerifiedLine(account(devices: [unverified("Mac Studio")]))!,
             ConnectDevicesText.notVerifiedLine(account(devices: [unverified("Mac Studio"), unverified("iMac")]))!,
@@ -63,6 +63,44 @@ struct ConnectAccountTests {
         #expect(ConnectDevicesText.shows(Self.account(removed: true)))
         #expect(!ConnectDevicesText.shows(ConnectStatus(state: .none)))
         #expect(!ConnectDevicesText.shows(nil))
+    }
+
+    @Test("an account file of an earlier version shows the section with its line and Forget This iPhone…")
+    func joinAgainSection() async throws {
+        let status = ConnectStatus(state: .account, joinAgain: true)
+        #expect(ConnectDevicesText.shows(status))
+        #expect(ConnectDevicesText.stateLine(status) == ConnectPlanRow.joinAgainLine)
+        #expect(ConnectDevicesText.stateLine(Self.account(removed: true)) == ConnectPlanRow.removedLine)
+        #expect(ConnectDevicesText.stateLine(Self.account()) == nil)
+        #expect(ConnectDevicesText.stateLine(nil) == nil)
+        #expect(ConnectDevicesText.notVerifiedLine(status) == nil, "no device list before the join")
+        #expect(ConnectDevicesText.confirmMessage(status) == ConnectDevicesText.confirmJoinAgain)
+
+        // "Forget This iPhone…" calls connect_forget; then this iPhone joins its account again.
+        let service = PreviewVaultService(empty: true)
+        await service.setConnectAccount("acc_k7m2q4x3ca", joinAgain: true)
+        let before = try await service.connectStatus()
+        #expect(before.joinAgain && ConnectDevicesText.shows(before))
+        #expect(try await service.connectForget())
+        let after = try await service.connectStatus()
+        #expect(after.state == .none && !after.joinAgain)
+        #expect(!ConnectDevicesText.shows(after))
+        let fixture = ConnectJoinModelTests.Fixture(service: service)
+        fixture.model.handleCode(ConnectJoinModelTests.code)
+        await fixture.model.start()
+        #expect(await waitUntil { fixture.model.step == .connectDone(confirmer: "MacBook Pro") })
+        let joined = try await service.connectStatus()
+        #expect(joined.state == .account && !joined.joinAgain)
+        #expect(ConnectDevicesText.stateLine(joined) == nil)
+    }
+
+    @Test("the section shows the line of its state from the shared text, once")
+    func stateLineSource() throws {
+        let code = try Self.source(
+            "Sources/Views/Settings/DevicesSettingsView.swift", from: "struct ConnectAccountSection",
+            to: "/// \"Reaches your Mac through")
+        #expect(code.contains("ConnectDevicesText.stateLine(status)"))
+        #expect(!code.contains("status?.removed"), "the state line comes from ConnectDevicesText")
     }
 
     @Test("one quiet line counts the devices that are not verified, and names none")

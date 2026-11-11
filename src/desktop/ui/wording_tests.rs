@@ -326,6 +326,14 @@ fn screens() -> Vec<Screen> {
     screens.push(render("welcome", &mut welcome, |_| {}));
     super::sync::begin_open(&mut welcome);
     screens.push(render("open a synced vault", &mut welcome, |_| {}));
+    // "Apassy Connect" on a computer without an account: the join of this computer.
+    welcome.sync.relay.source = super::sync::OpenSource::Connect;
+    screens.push(render("a vault from Apassy Connect", &mut welcome, |_| {}));
+    welcome.ui.connect.sheet = Some(super::connect::Sheet::JoinAccount {
+        code: zeroize::Zeroizing::new(String::new()),
+    });
+    screens.push(render("join from the start screen", &mut welcome, |_| {}));
+    welcome.ui.connect.sheet = None;
 
     let locked_dir = TempDir::new().expect("temp dir");
     let mut locked = locked_app(&locked_dir, "locked.db");

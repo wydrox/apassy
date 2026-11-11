@@ -488,6 +488,17 @@ pub enum OwnerAction {
     DeleteVaultStore {
         team_id: String,
     },
+    /// End the wait of a vault store of the Apassy Connect account on the head `head`
+    /// (version `version`) that a device that left the account pushed last
+    /// (connect-account-v1 section 7.5): take exactly that copy once (`replace` false), or
+    /// replace it with this device's vault (`replace` true). The proof names the store, the
+    /// head, and the choice.
+    TakeDepartedCopy {
+        team_id: String,
+        version: u64,
+        head: String,
+        replace: bool,
+    },
     /// Add a device of the Apassy Connect account, or of its group, to a vault store
     /// (section 8): the device can then read and write the relay copy of that vault. The
     /// proof names the store, the device, and the account of the device.
@@ -798,6 +809,10 @@ impl OwnerAction {
             Self::DeleteConnectAccount { .. } => "Delete the Apassy Connect account",
             Self::ForgetOldConnectAccount => "Forget the Apassy Connect account here",
             Self::DeleteVaultStore { .. } => "Delete a relay copy at Apassy Connect",
+            Self::TakeDepartedCopy { replace: false, .. } => "Use the copy of a device that left",
+            Self::TakeDepartedCopy { replace: true, .. } => {
+                "Replace the copy of a device that left"
+            }
             Self::AddStoreDevice { .. } => "Add a device to a relay copy",
             Self::ChangeConnectGroup { .. } => "Change your family or team",
             Self::ShareConnectVault { .. } => "Share a vault",
@@ -1039,6 +1054,12 @@ impl OwnerAction {
             Self::DeleteVaultStore { .. } => {
                 "delete the relay copy of this vault and its snapshots at Apassy Connect".to_owned()
             }
+            Self::TakeDepartedCopy { replace: false, .. } => {
+                "merge the relay copy that a device that left your Apassy Connect account saved last".to_owned()
+            }
+            Self::TakeDepartedCopy { replace: true, .. } => {
+                "replace the relay copy that a device that left your Apassy Connect account saved last".to_owned()
+            }
             Self::AddStoreDevice { .. } => {
                 "let another device sync the relay copy of this vault at Apassy Connect".to_owned()
             }
@@ -1196,6 +1217,7 @@ impl OwnerAction {
                 | Self::DeleteConnectAccount { .. }
                 | Self::ForgetOldConnectAccount
                 | Self::DeleteVaultStore { .. }
+                | Self::TakeDepartedCopy { .. }
                 | Self::AddStoreDevice { .. }
                 | Self::ChangeConnectGroup { .. }
                 | Self::ShareConnectVault { .. }
@@ -2495,6 +2517,18 @@ mod evaluation_tests {
             OwnerAction::DeleteVaultStore {
                 team_id: "t".repeat(32),
             },
+            OwnerAction::TakeDepartedCopy {
+                team_id: "t".repeat(32),
+                version: 7,
+                head: "a".repeat(64),
+                replace: false,
+            },
+            OwnerAction::TakeDepartedCopy {
+                team_id: "t".repeat(32),
+                version: 7,
+                head: "a".repeat(64),
+                replace: true,
+            },
             OwnerAction::AddStoreDevice {
                 team_id: "t".repeat(32),
                 device_id: "dev_p4n6r2t7bc".into(),
@@ -2614,6 +2648,22 @@ mod evaluation_tests {
             confirm_with(4, vec![4; 65], "blaze cable flute board seal tile"),
         ] {
             assert_ne!(other, confirm);
+        }
+        // The copy of a device that left: another head, or the other choice, is another
+        // action.
+        let departed = |version: u64, head: &str, replace: bool| OwnerAction::TakeDepartedCopy {
+            team_id: "t_abcdefgh23".into(),
+            version,
+            head: head.into(),
+            replace,
+        };
+        let take = departed(7, "aa", false);
+        for other in [
+            departed(8, "aa", false),
+            departed(7, "ab", false),
+            departed(7, "aa", true),
+        ] {
+            assert_ne!(other, take);
         }
     }
 

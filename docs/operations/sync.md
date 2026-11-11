@@ -477,7 +477,7 @@ Your other Macs (and the other person's) take the share from the signed lists at
 
 | The row says | What it means |
 | --- | --- |
-| "Checking who shares this vault…" | The newest copy (or one before it in the chain) was signed by a device that this Mac has not verified yet (for example a new Mac of the other person). Apassy reads the signed lists again after 30 s, then after twice the last wait, up to every 10 minutes, and shows no error for 10 minutes for that copy (a lock does not start the 10 minutes again). Then the sync line shows the error. |
+| "Checking who shares this vault…" | The newest copy (or one before it in the chain) was signed by a device that this Mac has not verified yet (for example a new Mac of the other person). Apassy reads the signed lists again after 30 s, then after twice the last wait, up to every 10 minutes, and shows no error for 10 minutes for that copy (a lock does not start the 10 minutes again). Only a read after those 10 minutes that still does not know the device refuses the copy, and the sync line shows the error. |
 | "Waiting for a device that shares this vault" | The newest copy was signed by a device that left (or a person whose share ended) after this Mac's last sync. A device that shares the vault signs a copy of its own over it at its next sync. |
 | "<name> reset the account. Share again." | The other person recovered their account (a new account key). Their devices sign nothing new until you compare new words: stop sharing, then share again with a new code. |
 | "<name> must verify this account again." | The owner recovered their account; ask them to share again with a new code. |

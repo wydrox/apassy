@@ -304,6 +304,8 @@ struct Join {
     name: String,
     platform: String,
     public_key: Vec<u8>,
+    /// The joining key's signature over the join message, which names `name`.
+    signature: Vec<u8>,
     state: JoinState,
     body: Value,
 }
@@ -341,6 +343,11 @@ struct State {
     next: u64,
     /// The bodies of `POST /v1/account` by key, for a retry after a lost answer.
     created: BTreeMap<Vec<u8>, (Value, Value)>,
+    /// Every account id that an account ever had: an id is used once, also after its
+    /// account was deleted (`409 account_id_taken`).
+    used_ids: std::collections::BTreeSet<String>,
+    /// The next creations answer `409 account_id_taken` whatever their id.
+    taken_ids: usize,
     lost_answers: Vec<(String, usize)>,
     /// Requests that start with the prefix answer this status and error code instead.
     route_errors: Vec<(String, u16, String)>,
@@ -441,6 +448,14 @@ fn text<'a>(body: &'a Value, key: &str) -> &'a str {
 
 fn point(text: &str) -> Option<Vec<u8>> {
     decode_b64u(text).filter(|key| key.len() == 65 && key[0] == 0x04)
+}
+
+/// A name in the canonical form of contract section 2: trimmed, 1 to 64 bytes, no
+/// control character, not `-`.
+fn canonical_name(text: &str) -> Option<&str> {
+    let name = text.trim();
+    (!name.is_empty() && name.len() <= 64 && name != "-" && !name.chars().any(char::is_control))
+        .then_some(name)
 }
 
 impl FakeConnect {
@@ -681,6 +696,25 @@ impl FakeConnect {
     /// Tokens live `seconds`.
     pub fn set_token_lifetime(&self, seconds: u64) {
         lock(&self.shared).token_seconds = seconds;
+    }
+
+    /// The next `count` creations answer `409 account_id_taken`, as for an id that an
+    /// account holds or held.
+    pub fn take_next_ids(&self, count: usize) {
+        lock(&self.shared).taken_ids = count;
+    }
+
+    /// Connect reports `name` as the device name of every pending join (a name that the
+    /// joining key did not sign).
+    pub fn rename_pending_joins(&self, name: &str) {
+        for join in &mut lock(&self.shared).joins {
+            join.name = name.to_owned();
+        }
+    }
+
+    /// Every answer arrives again: the lost answers of [`Self::lose_next_answers`] end.
+    pub fn keep_answers(&self) {
+        lock(&self.shared).lost_answers.clear();
     }
 
     /// The next `count` requests that start with `prefix` do their step and lose the
@@ -1362,9 +1396,14 @@ fn route(shared: &Arc<Mutex<State>>, request: &Incoming) -> Outgoing {
             {
                 return fail(409, "conflict");
             }
-            if state.accounts.contains_key(&account_id) {
-                return fail(409, "conflict");
+            if state.taken_ids > 0 {
+                state.taken_ids -= 1;
+                return fail(409, "account_id_taken");
             }
+            if state.accounts.contains_key(&account_id) || state.used_ids.contains(&account_id) {
+                return fail(409, "account_id_taken");
+            }
+            state.used_ids.insert(account_id.clone());
             state.next += 1;
             state.accounts.insert(
                 account_id.clone(),
@@ -1526,17 +1565,23 @@ fn route(shared: &Arc<Mutex<State>>, request: &Incoming) -> Outgoing {
             let Some(public_key) = point(text(&body, "public_key")) else {
                 return fail(400, "invalid_request");
             };
+            // The signature covers the device name in its canonical form.
+            let Some(name) = canonical_name(text(&body, "device_name")) else {
+                return fail(400, "invalid_request");
+            };
             let message = joined(&[
                 "apassy-connect join v1",
                 &origin,
                 &account,
                 text(&body, "link_hash"),
                 text(&body, "public_key"),
+                name,
             ]);
             let signature = decode_b64u(text(&body, "signature")).unwrap_or_default();
             if !verify(&public_key, &message, &signature) {
                 return fail(400, "invalid_request");
             }
+            let name = name.to_owned();
             // The same body again answers the same result.
             if let Some(join) = state.joins.iter().find(|join| join.body == body) {
                 let link_id = join.link_id;
@@ -1572,9 +1617,10 @@ fn route(shared: &Arc<Mutex<State>>, request: &Incoming) -> Outgoing {
                 id: join_id,
                 link_id,
                 account: account.clone(),
-                name: text(&body, "device_name").to_owned(),
+                name,
                 platform: text(&body, "platform").to_owned(),
                 public_key,
+                signature,
                 state: JoinState::Pending,
                 body: body.clone(),
             });
@@ -1842,6 +1888,7 @@ fn authenticated(
                     json!({"join_id": join.id, "link_id": join.link_id,
                            "device_name": join.name, "platform": join.platform,
                            "public_key": encode_b64u(&join.public_key),
+                           "signature": encode_b64u(&join.signature),
                            "created_at": now(), "expires_at": now() + 600})
                 })
                 .collect();

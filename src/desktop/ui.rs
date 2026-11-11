@@ -39,6 +39,9 @@ mod companion;
 mod companion_tests;
 /// Settings > Connect: the Apassy Connect account, plans, devices, and groups (plan s7 M2).
 mod connect;
+/// "Use a vault from another Mac" › "Apassy Connect" on the start screen.
+#[cfg(all(test, feature = "vault"))]
+mod connect_start_tests;
 #[cfg(all(test, feature = "vault"))]
 mod connect_tests;
 /// Decisions: the questions that wait for the owner (ADR 0026 §2).

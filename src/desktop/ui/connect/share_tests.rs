@@ -385,7 +385,7 @@ fn the_texts_name_nothing_of_one_platform() {
 #[test]
 fn the_check_of_a_head_keeps_its_start_across_a_lock() {
     let t0 = Instant::now();
-    let head = (7, "a".repeat(64));
+    let head = "a".repeat(64);
     let mut share = ShareUi::default();
     assert!(share.checks.due("t_familyaaaa", &head, t0));
     share.reset();
@@ -400,7 +400,7 @@ fn the_check_of_a_head_keeps_its_start_across_a_lock() {
             .quiet("t_familyaaaa", &head, t0 + Duration::from_secs(599))
     );
     assert!(!share.checks.quiet("t_familyaaaa", &head, t0 + CHECK_QUIET));
-    let next = (8, "b".repeat(64));
+    let next = "b".repeat(64);
     assert!(share.checks.due("t_familyaaaa", &next, t0 + CHECK_QUIET));
     assert!(share.checks.quiet("t_familyaaaa", &next, t0 + CHECK_QUIET));
     share.checks.passed("t_familyaaaa");
@@ -412,7 +412,7 @@ fn the_check_of_a_head_keeps_its_start_across_a_lock() {
 #[test]
 fn the_reads_of_a_head_not_verified_yet_back_off() {
     let t0 = Instant::now();
-    let head = (7, "a".repeat(64));
+    let head = "a".repeat(64);
     let mut checks = HeadChecks::default();
     let mut reads = Vec::new();
     for second in 0..3000 {

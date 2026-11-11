@@ -278,7 +278,7 @@ fn the_vectors_reproduce_the_words_hashes_keys_and_messages() {
         let (bytes, signer_public) = match name {
             "account" => (account_message(origin, a64, &recovery_key), &a_public),
             "sign_in" => (sign_in_message(origin, account, a64, nonce), &a_public),
-            "join" => (join_message(origin, account, &hash, b64), &b_public),
+            "join" => (join_message(origin, account, &hash, b64, name_b), &b_public),
             "join_cancel" => (join_cancel_message(origin, account, &hash, b64), &b_public),
             "device_list_root" => (
                 list_message(origin, account, 1, "-", "root", a64, "-", name_a, a64),
@@ -680,20 +680,205 @@ fn creating_an_account_keeps_the_key_in_the_store_and_no_secret_in_the_file() {
 
 /// A creation whose answer is lost is sent again with the same body, and Connect
 /// answers the same account: one account, one device.
+/// The bodies of `POST /v1/account` that `connect` received, in order.
+fn creation_bodies(connect: &FakeConnect) -> Vec<Value> {
+    connect
+        .bodies()
+        .iter()
+        .filter_map(|body| serde_json::from_str::<Value>(body).ok())
+        .filter(|body| body.get("recovery_key").is_some() && body.get("statement").is_some())
+        .filter(|body| body.get("recovery_signature").is_none())
+        .collect()
+}
+
 #[test]
 fn a_lost_creation_answer_is_retried_with_the_same_body() {
     let connect = FakeConnect::start();
-    connect.lose_next_answers("POST /v1/account", 1);
+    // Several lost answers in a row: the same body again until one arrives.
+    connect.lose_next_answers("POST /v1/account", 3);
     let a = device();
     let (account, _) = create(&connect, &a);
-    let creations = connect
-        .log()
-        .iter()
-        .filter(|line| *line == "POST /v1/account")
-        .count();
-    assert_eq!(creations, 2);
+    let bodies = creation_bodies(&connect);
+    assert_eq!(bodies.len(), 4);
+    assert!(bodies.iter().all(|body| *body == bodies[0]), "one body");
     assert_eq!(connect.accounts(), [account.state().account_id.clone()]);
     assert_eq!(connect.live_devices(&account.state().account_id).len(), 1);
+    // Nothing of the creation stays pending.
+    assert!(!a.path.with_file_name("pending-account.json").exists());
+}
+
+/// A creation that got no answer at all stays pending on this device (public values
+/// only), and the next try repeats the same body: Connect answers the account that the
+/// first one made, and the recovery code of that try is shown. After a restart the code of
+/// the pending creation is gone: the account is still made, and the step says that its
+/// recovery code was not shown.
+#[test]
+fn a_pending_creation_is_repeated_by_the_next_try() {
+    let connect = FakeConnect::start();
+    connect.lose_next_answers("POST /v1/account", 50);
+    let a = device();
+    let failed =
+        ConnectAccount::create(client(&connect), &a.store, &a.path, "Rafal", "MacBook Pro")
+            .expect_err("no answer");
+    assert!(
+        matches!(failed, ConnectError::Offline | ConnectError::Broken),
+        "{failed:?}"
+    );
+    let pending = a.path.with_file_name("pending-account.json");
+    let text = std::fs::read_to_string(&pending).expect("pending creation");
+    assert!(!text.contains("apassy_rec_"), "no recovery code: {text}");
+    let first = creation_bodies(&connect);
+    assert!(first.len() >= 2, "{}", first.len());
+    // Connect answers again: the same body, the account of the first try.
+    connect.keep_answers();
+    let made_before = connect.accounts();
+    assert_eq!(made_before.len(), 1, "the first try made the account");
+    let (account, _code) =
+        ConnectAccount::create(client(&connect), &a.store, &a.path, "Rafal", "MacBook Pro")
+            .expect("the pending creation");
+    assert_eq!(connect.accounts(), made_before);
+    assert_eq!(account.state().account_id, made_before[0]);
+    assert!(
+        creation_bodies(&connect)
+            .iter()
+            .all(|body| *body == first[0])
+    );
+    assert!(!pending.exists());
+
+    // A restart between the try and its answer: the code is not in memory any more.
+    let connect = FakeConnect::start();
+    connect.lose_next_answers("POST /v1/account", 50);
+    let b = device();
+    ConnectAccount::create(client(&connect), &b.store, &b.path, "Rafal", "MacBook Air")
+        .expect_err("no answer");
+    apassy::connect::account::forget_pending_creation_codes();
+    connect.keep_answers();
+    let refused =
+        ConnectAccount::create(client(&connect), &b.store, &b.path, "Rafal", "MacBook Air")
+            .expect_err("no code to show");
+    assert_eq!(refused, ConnectError::RecoveryCodeNotShown);
+    // The account is made and its file written: it opens, and no creation is pending.
+    assert_eq!(connect.accounts().len(), 1);
+    let opened = ConnectAccount::open(&b.store, &b.path)
+        .expect("open")
+        .expect("an account");
+    assert_eq!(opened.state().account_id, connect.accounts()[0]);
+    assert!(!b.path.with_file_name("pending-account.json").exists());
+}
+
+/// An id that Connect holds or held (`409 account_id_taken`) makes the device sign a new
+/// id and try again; a used key (`409 conflict`) is not tried again.
+#[test]
+fn a_taken_account_id_gets_a_new_id_and_a_used_key_stops() {
+    let connect = FakeConnect::start();
+    connect.take_next_ids(2);
+    let a = device();
+    let (account, _) = create(&connect, &a);
+    let bodies = creation_bodies(&connect);
+    assert_eq!(bodies.len(), 3);
+    let ids: Vec<&str> = bodies
+        .iter()
+        .map(|body| body["account_id"].as_str().unwrap())
+        .collect();
+    assert_ne!(ids[0], ids[1]);
+    assert_ne!(ids[1], ids[2]);
+    assert_eq!(account.state().account_id, ids[2]);
+    // A key that is a device already: one try, and the conflict.
+    let connect = FakeConnect::start();
+    connect.answer_route_error("POST /v1/account", 409, "conflict");
+    let b = device();
+    let refused =
+        ConnectAccount::create(client(&connect), &b.store, &b.path, "Rafal", "MacBook Air")
+            .expect_err("conflict");
+    assert_eq!(refused, ConnectError::Conflict);
+    assert_eq!(connect.count("POST /v1/account"), 1);
+}
+
+/// The join signs the device name: the confirming device shows and signs a name only when
+/// the joining key's signature over it verifies, so a name that Connect changed is never
+/// offered and never signed into the device list.
+#[test]
+fn a_confirmer_shows_and_signs_only_a_name_that_the_join_signed() {
+    let connect = FakeConnect::start();
+    let owner = owner();
+    let a = device();
+    let (mut account, _) = create(&connect, &a);
+    let b = device();
+    let link = account.start_link().expect("link");
+    let mut request = JoinRequest::start(
+        client(&connect),
+        &b.store,
+        &b.path,
+        link.code(),
+        "  iPhone ",
+    )
+    .expect("join");
+    assert!(matches!(request.poll().expect("poll"), JoinPoll::Waiting));
+    // The name went up in its canonical form, and it shows as signed.
+    let pending = account.pending_joins(&link).expect("pending");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].device_name, "iPhone");
+    // Connect reports another name than the join signed: nothing is offered.
+    connect.rename_pending_joins("Office Mac");
+    let pending_renamed = account.pending_joins(&link).expect("pending");
+    assert!(pending_renamed.is_empty(), "{pending_renamed:?}");
+    // A confirmation of the earlier entry with the changed name is refused before any
+    // request, and the list holds no `add`.
+    let mut changed = pending[0].clone();
+    changed.device_name = "Office Mac".to_owned();
+    let (proof, epoch) = owner.proof(changed.owner_action(&account.state().account_id));
+    let confirms = connect.count("POST /v1/account/devices/pending");
+    assert!(
+        account
+            .confirm_join(&link, &changed, proof, &epoch)
+            .is_err()
+    );
+    assert_eq!(connect.count("POST /v1/account/devices/pending"), confirms);
+    assert_eq!(connect.device_list(&account.state().account_id).len(), 1);
+}
+
+/// The new device pins only a list whose `add` of its key names the name that it asked
+/// for: an `add` that the confirmer signed with another name ends the join, and no account
+/// file is written.
+#[test]
+fn a_joiner_refuses_a_list_whose_add_names_it_otherwise() {
+    let connect = FakeConnect::start();
+    let owner = owner();
+    let a = device();
+    let (mut account, _) = create(&connect, &a);
+    let b = device();
+    let link = account.start_link().expect("link");
+    let mut request =
+        JoinRequest::start(client(&connect), &b.store, &b.path, link.code(), "iPhone")
+            .expect("join");
+    assert!(matches!(request.poll().expect("poll"), JoinPoll::Waiting));
+    let pending = account.pending_joins(&link).expect("pending");
+    let (proof, epoch) = owner.proof(pending[0].owner_action(&account.state().account_id));
+    account
+        .confirm_join(&link, &pending[0], proof, &epoch)
+        .expect("confirm");
+    // The confirmer's `add` of B, signed again by A with another name.
+    let account_id = account.state().account_id.clone();
+    let mut list = connect.device_list(&account_id);
+    assert_eq!(list.len(), 2);
+    let signer = AccountSigner::open(&a.store).expect("store").expect("key");
+    let root_hash = head_of(&connect, &account_id, &list[..1]);
+    let (signature, _) = signer
+        .sign_list_entry(
+            &connect.url,
+            &account_id,
+            (2, &root_hash),
+            "add",
+            list[1]["key"].as_str().unwrap(),
+            list[1]["link_hash"].as_str(),
+            Some("Office Mac"),
+        )
+        .expect("sign");
+    list[1]["name"] = json!("Office Mac");
+    list[1]["signature"] = json!(encode_b64u(&signature));
+    connect.set_device_list(&account_id, list);
+    assert_eq!(request.poll().unwrap_err(), ConnectError::LinkMismatch);
+    assert!(!b.path.exists(), "no account file");
 }
 
 /// The client stops when the challenge names another origin: nothing is signed for it.
