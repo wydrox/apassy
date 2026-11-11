@@ -9,6 +9,11 @@
 //! the contract's order and names the first failure; [`Sequencer`] keeps the state of
 //! each stream of one node WebSocket and names the first broken stream rule. Both are
 //! pure: no IO, no clock, no allocation beyond the payload and one entry per live stream.
+//!
+//! Each direction of a stream has a window: the payload bytes that its sender may still
+//! send. It starts at [`INITIAL_WINDOW`], data spends it, and a `window` frame of the
+//! receiver adds to it as the receiver's consumer drains the stream ([`Sequencer::credit`]).
+//! Data over the window is the stream rule `over_window`.
 
 use std::collections::HashMap;
 
@@ -25,7 +30,17 @@ pub const OPEN: u8 = 0x01;
 pub const CLOSE: u8 = 0x02;
 /// Flag bit 2: the stream ends now, in both directions.
 pub const RESET: u8 = 0x04;
-const KNOWN_FLAGS: u8 = OPEN | CLOSE | RESET;
+/// Flag bit 3: the receiver of a direction lets its sender send more: the payload is 4
+/// bytes, the added window (u32 BE, at least 1).
+pub const WINDOW: u8 = 0x08;
+const KNOWN_FLAGS: u8 = OPEN | CLOSE | RESET | WINDOW;
+/// The payload length of a `window` frame.
+pub const WINDOW_LEN: usize = 4;
+/// The window of each direction of a new stream, before any `window` frame: the bytes
+/// of payload (the `open`'s own included) that its sender may send.
+pub const INITIAL_WINDOW: u64 = 64 * 1024;
+/// The largest window that a direction holds; more is the stream rule `over_window`.
+pub const MAX_WINDOW: u64 = 16 * 1024 * 1024;
 
 /// What a stream carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -76,6 +91,14 @@ impl Frame {
     pub fn is_reset(&self) -> bool {
         self.flags & RESET != 0
     }
+    pub fn is_window(&self) -> bool {
+        self.flags & WINDOW != 0
+    }
+
+    /// The window that a `window` frame adds (0 for any other frame).
+    pub fn window_added(&self) -> u32 {
+        window_of(self.flags, &self.payload)
+    }
 
     /// The bytes of this frame. Panics never: a payload over [`MAX_PAYLOAD`] is a bug of
     /// the caller, and [`encode`] cuts nothing; callers split before.
@@ -98,6 +121,18 @@ pub fn encode(stream: u32, kind: Kind, flags: u8, payload: &[u8]) -> Vec<u8> {
     out
 }
 
+/// The bytes of a `window` frame that adds `added` bytes to the window of the other side.
+pub fn window(stream: u32, kind: Kind, added: u32) -> Vec<u8> {
+    encode(stream, kind, WINDOW, &added.to_be_bytes())
+}
+
+fn window_of(flags: u8, payload: &[u8]) -> u32 {
+    match <[u8; WINDOW_LEN]>::try_from(payload) {
+        Ok(bytes) if flags & WINDOW != 0 => u32::from_be_bytes(bytes),
+        _ => 0,
+    }
+}
+
 /// Why a message is not a frame. A receiver closes the WebSocket with 1002.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameError {
@@ -108,6 +143,7 @@ pub enum FrameError {
     UnknownKind,
     UnknownFlags,
     BadReset,
+    BadWindow,
     EmptyFrame,
 }
 
@@ -122,6 +158,7 @@ impl FrameError {
             FrameError::UnknownKind => "unknown_kind",
             FrameError::UnknownFlags => "unknown_flags",
             FrameError::BadReset => "bad_reset",
+            FrameError::BadWindow => "bad_window",
             FrameError::EmptyFrame => "empty_frame",
         }
     }
@@ -155,6 +192,11 @@ pub fn decode(message: &[u8]) -> Result<Frame, FrameError> {
     if flags & RESET != 0 && (flags != RESET || len != 0) {
         return Err(FrameError::BadReset);
     }
+    if flags & WINDOW != 0
+        && (flags != WINDOW || len != WINDOW_LEN || message[HEADER_LEN..] == [0; WINDOW_LEN])
+    {
+        return Err(FrameError::BadWindow);
+    }
     if flags == 0 && len == 0 {
         return Err(FrameError::EmptyFrame);
     }
@@ -184,6 +226,7 @@ pub enum StreamError {
     Reused,
     KindMismatch,
     Closed,
+    OverWindow,
 }
 
 impl StreamError {
@@ -196,6 +239,7 @@ impl StreamError {
             StreamError::Reused => "reused",
             StreamError::KindMismatch => "kind_mismatch",
             StreamError::Closed => "closed",
+            StreamError::OverWindow => "over_window",
         }
     }
 }
@@ -217,7 +261,29 @@ struct StreamState<T> {
     kind: Kind,
     to_node_closed: bool,
     to_connect_closed: bool,
+    /// The window of each direction: payload bytes its sender may still send.
+    to_node_window: u64,
+    to_connect_window: u64,
     value: T,
+}
+
+impl<T> StreamState<T> {
+    fn window_mut(&mut self, dir: Dir) -> &mut u64 {
+        match dir {
+            Dir::ToNode => &mut self.to_node_window,
+            Dir::ToConnect => &mut self.to_connect_window,
+        }
+    }
+}
+
+impl Dir {
+    /// The other direction.
+    pub fn back(self) -> Dir {
+        match self {
+            Dir::ToNode => Dir::ToConnect,
+            Dir::ToConnect => Dir::ToNode,
+        }
+    }
 }
 
 /// The state of the streams of one node WebSocket. Holds one entry for each live stream
@@ -273,6 +339,15 @@ impl<T: Clone> Sequencer<T> {
         }
     }
 
+    /// The window of a direction of a live stream: the payload bytes that its sender may
+    /// still send. `None`: the stream is not live.
+    pub fn credit(&self, stream: u32, dir: Dir) -> Option<u64> {
+        self.streams.get(&stream).map(|state| match dir {
+            Dir::ToNode => state.to_node_window,
+            Dir::ToConnect => state.to_connect_window,
+        })
+    }
+
     /// Applies one valid frame (after [`decode`]) in direction `dir`. `make` gives the
     /// value of a stream that this frame opens.
     pub fn apply(
@@ -281,10 +356,18 @@ impl<T: Clone> Sequencer<T> {
         frame: &Frame,
         make: impl FnOnce() -> T,
     ) -> Result<Applied<T>, StreamError> {
-        self.apply_head(dir, frame.stream, frame.kind, frame.flags, make)
+        self.apply_parts(
+            dir,
+            frame.stream,
+            frame.kind,
+            frame.flags,
+            &frame.payload,
+            make,
+        )
     }
 
-    /// [`Sequencer::apply`] on the header fields only.
+    /// [`Sequencer::apply`] of a frame without a payload (an `open`, a `close`, a
+    /// `reset`).
     pub fn apply_head(
         &mut self,
         dir: Dir,
@@ -293,6 +376,22 @@ impl<T: Clone> Sequencer<T> {
         flags: u8,
         make: impl FnOnce() -> T,
     ) -> Result<Applied<T>, StreamError> {
+        self.apply_parts(dir, stream, kind, flags, &[], make)
+    }
+
+    /// [`Sequencer::apply`] on the fields of a frame. The payload of data spends the
+    /// window of `dir`; a `window` frame adds to the window of the other direction (the
+    /// one that its sender receives), also after the sender's own direction closed.
+    pub fn apply_parts(
+        &mut self,
+        dir: Dir,
+        stream: u32,
+        kind: Kind,
+        flags: u8,
+        payload: &[u8],
+        make: impl FnOnce() -> T,
+    ) -> Result<Applied<T>, StreamError> {
+        let len = payload.len() as u64;
         if flags & OPEN != 0 {
             if dir == Dir::ToConnect {
                 return Err(StreamError::OpenByNode);
@@ -303,6 +402,9 @@ impl<T: Clone> Sequencer<T> {
             if stream <= self.last_opened {
                 return Err(StreamError::Reused);
             }
+            if len > INITIAL_WINDOW {
+                return Err(StreamError::OverWindow);
+            }
             let value = make();
             self.last_opened = stream;
             self.streams.insert(
@@ -311,6 +413,8 @@ impl<T: Clone> Sequencer<T> {
                     kind,
                     to_node_closed: flags & CLOSE != 0,
                     to_connect_closed: false,
+                    to_node_window: INITIAL_WINDOW - len,
+                    to_connect_window: INITIAL_WINDOW,
                     value: value.clone(),
                 },
             );
@@ -332,6 +436,18 @@ impl<T: Clone> Sequencer<T> {
                 ended: true,
             });
         }
+        if flags & WINDOW != 0 {
+            let window = state.window_mut(dir.back());
+            let added = u64::from(window_of(flags, payload));
+            if *window + added > MAX_WINDOW {
+                return Err(StreamError::OverWindow);
+            }
+            *window += added;
+            return Ok(Applied::Frame {
+                value: state.value.clone(),
+                ended: false,
+            });
+        }
         let closed = match dir {
             Dir::ToNode => &mut state.to_node_closed,
             Dir::ToConnect => &mut state.to_connect_closed,
@@ -339,8 +455,17 @@ impl<T: Clone> Sequencer<T> {
         if *closed {
             return Err(StreamError::Closed);
         }
-        if flags & CLOSE != 0 {
-            *closed = true;
+        let close = flags & CLOSE != 0;
+        let window = state.window_mut(dir);
+        if len > *window {
+            return Err(StreamError::OverWindow);
+        }
+        *window -= len;
+        if close {
+            match dir {
+                Dir::ToNode => state.to_node_closed = true,
+                Dir::ToConnect => state.to_connect_closed = true,
+            }
         }
         if state.to_node_closed && state.to_connect_closed {
             let state = self.streams.remove(&stream).expect("present");
@@ -403,5 +528,52 @@ mod tests {
             Ok(Applied::Dropped)
         );
         assert_eq!(seq.live(), 0);
+    }
+
+    #[test]
+    fn data_spends_the_window_and_a_window_frame_adds_to_the_other_direction() {
+        let mut seq: Sequencer<()> = Sequencer::new();
+        let first = vec![0u8; 1000];
+        seq.apply_parts(Dir::ToNode, 1, Kind::Device, OPEN, &first, || ())
+            .unwrap();
+        assert_eq!(seq.credit(1, Dir::ToNode), Some(INITIAL_WINDOW - 1000));
+        assert_eq!(seq.credit(1, Dir::ToConnect), Some(INITIAL_WINDOW));
+        let rest = vec![0u8; (INITIAL_WINDOW - 1000) as usize];
+        for piece in rest.chunks(MAX_PAYLOAD) {
+            seq.apply_parts(Dir::ToNode, 1, Kind::Device, 0, piece, || ())
+                .unwrap();
+        }
+        assert_eq!(seq.credit(1, Dir::ToNode), Some(0));
+        assert_eq!(
+            seq.apply_parts(Dir::ToNode, 1, Kind::Device, 0, b"x", || ()),
+            Err(StreamError::OverWindow)
+        );
+        // The node closes its side and still lets Connect send more.
+        seq.apply_head(Dir::ToConnect, 1, Kind::Device, CLOSE, || ())
+            .unwrap();
+        let grant = decode(&window(1, Kind::Device, 10)).unwrap();
+        assert_eq!(grant.window_added(), 10);
+        seq.apply(Dir::ToConnect, &grant, || ()).unwrap();
+        assert_eq!(seq.credit(1, Dir::ToNode), Some(10));
+        seq.apply_parts(Dir::ToNode, 1, Kind::Device, 0, &[1; 10], || ())
+            .unwrap();
+        // More than the largest window is a broken rule too.
+        let huge = decode(&window(1, Kind::Device, u32::MAX)).unwrap();
+        assert_eq!(
+            seq.apply(Dir::ToConnect, &huge, || ()),
+            Err(StreamError::OverWindow)
+        );
+        assert_eq!(
+            decode(&encode(1, Kind::Device, WINDOW, &[0, 0, 0, 0])),
+            Err(FrameError::BadWindow)
+        );
+        assert_eq!(
+            decode(&encode(1, Kind::Device, WINDOW | CLOSE, &[0, 0, 0, 1])),
+            Err(FrameError::BadWindow)
+        );
+        assert_eq!(
+            decode(&encode(1, Kind::Device, WINDOW, &[0, 0, 1])),
+            Err(FrameError::BadWindow)
+        );
     }
 }
