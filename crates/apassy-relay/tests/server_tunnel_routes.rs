@@ -12,6 +12,7 @@ mod relay;
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -44,10 +45,25 @@ const EXAMPLES: &str = include_str!("../../../tests/fixtures/connect-tunnel-v1/e
 
 // ---- The plans and groups of the tests: billing and groups fill the real ones. ----
 
+/// The plans of the accounts (entitled, people), and whether `people` fails (a store
+/// error of billing).
 #[derive(Default)]
-struct TestPlans(Mutex<HashMap<String, (bool, u64)>>);
+struct TestPlans(Mutex<HashMap<String, (bool, u64)>>, AtomicBool);
 
 impl TestPlans {
+    fn set_people(&self, account: &str, people: u64) {
+        self.0
+            .lock()
+            .unwrap()
+            .entry(account.to_string())
+            .or_insert((false, 1))
+            .1 = people;
+    }
+
+    fn fail_people(&self, failing: bool) {
+        self.1.store(failing, Ordering::SeqCst);
+    }
+
     fn set(&self, account: &str, entitled: bool) {
         self.0
             .lock()
@@ -81,6 +97,11 @@ impl Plans for TestPlans {
     }
 
     fn people(&self, _directory: &Store, account: &str, _now: u64) -> RelayResult<u64> {
+        if self.1.load(Ordering::SeqCst) {
+            return Err(apassy_relay::error::RelayError::internal(
+                "The store failed.",
+            ));
+        }
         Ok(self
             .0
             .lock()
@@ -246,6 +267,16 @@ impl Connect {
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap()
+    }
+
+    /// Runs one statement on `relay.db` beside the relay (a deletion of another unit, or a
+    /// table taken away to make the store fail).
+    fn directory_exec(&self, sql: &str) {
+        let conn = rusqlite::Connection::open(self.cfg.directory_path()).unwrap();
+        conn.execute_batch(&format!("PRAGMA key = '{}';", relay::VAULT_KEY))
+            .unwrap();
+        conn.busy_timeout(Duration::from_secs(10)).unwrap();
+        conn.execute_batch(sql).unwrap();
     }
 
     /// A WebSocket handshake through the edge to `path`; `Err` is the refusal.
@@ -1692,4 +1723,161 @@ fn a_bad_token_on_an_upgrade_route_counts_toward_the_failed_auth_limit() {
         c.upgrade(&dial, Some("apa_not_a_token")).err(),
         Some((429, "rate_limited".to_string()))
     );
+}
+
+// ---- Ids after a deletion, budgets and lookups that fail, usage of deleted accounts. ----
+
+#[test]
+fn a_node_registers_again_with_its_own_id_after_connect_deleted_its_row() {
+    let c = start();
+    let a = account(&c);
+    let (node_id, node) = online_node(&c, &a);
+    // The data deletion of an ended plan (billing): the account's node rows and their
+    // grants go, and their WebSockets close; the account device stays.
+    c.directory_exec(&format!(
+        "DELETE FROM tunnel_grant WHERE node_id IN \
+         (SELECT id FROM tunnel_node WHERE account_id = '{0}'); \
+         DELETE FROM tunnel_node WHERE account_id = '{0}';",
+        a.mac.account
+    ));
+    c.running().hub().tunnel().unwrap().remove_node(&node_id);
+    assert_eq!(node.closed(), Some(close::REVOKED));
+    assert_eq!(
+        c.node_socket(&a.mac_token).err(),
+        Some((404, "node_unknown".to_string()))
+    );
+    // The node registers again: the same id and public name for the same account device.
+    let again = c.register(&a.mac_token, "MacBook Pro");
+    assert_eq!(again["node_id"], node_id.as_str());
+    assert_eq!(
+        again["public_name"],
+        format!("{}.{ZONE}", &node_id[5..]).as_str()
+    );
+    let _node = echo_node(c.node_socket(&a.mac_token).expect("the node connects"));
+    wait_until("online", || c.online(&node_id));
+    // Another device of the account gets a node of its own.
+    let other = c.register(&a.phone_token, "iPhone node");
+    assert_ne!(other["node_id"], node_id.as_str());
+    assert!(tunnel_routes_valid_node(other["node_id"].as_str().unwrap()));
+}
+
+#[test]
+fn a_store_error_in_the_token_or_node_lookup_is_busy_never_401_or_404() {
+    let c = start();
+    let a = account(&c);
+    let (node_id, _node) = online_node(&c, &a);
+    let path = format!("/v1/tunnel/dial/{node_id}");
+    let busy = Some((503, "busy".to_string()));
+    // The node table fails: the dial and the node's WebSocket are 503 `busy`.
+    c.directory_exec("ALTER TABLE tunnel_node RENAME TO tunnel_node_away;");
+    assert_eq!(c.upgrade(&path, Some(&a.phone_token)).err(), busy);
+    assert_eq!(c.node_socket(&a.mac_token).err(), busy);
+    c.directory_exec("ALTER TABLE tunnel_node_away RENAME TO tunnel_node;");
+    // The device table fails: the token cannot be checked, 503 `busy` too.
+    c.directory_exec("ALTER TABLE account_device RENAME TO account_device_away;");
+    assert_eq!(c.upgrade(&path, Some(&a.phone_token)).err(), busy);
+    assert_eq!(c.node_socket(&a.mac_token).err(), busy);
+    c.directory_exec("ALTER TABLE account_device_away RENAME TO account_device;");
+    // A definite answer is still 401 and 404.
+    assert_eq!(
+        c.upgrade(&path, Some("not-a-token")).err(),
+        Some((401, "unauthenticated".to_string()))
+    );
+    assert_eq!(
+        c.upgrade("/v1/tunnel/dial/node_zzzzzzzzzz", Some(&a.phone_token))
+            .err(),
+        Some((404, "node_unknown".to_string()))
+    );
+    let mut dial = c.dial(&a.phone_token, &node_id).expect("a dial again");
+    dial.send(b"ok");
+    assert_eq!(dial.read_bytes(2), b"ok");
+}
+
+#[test]
+fn a_failed_budget_lookup_keeps_the_budget_and_a_known_one_counts_again() {
+    let c = connect_with(|cfg| cfg.connect.tunnel.bytes_per_month = 1000);
+    // Four people: a dial budget of 4000 bytes.
+    let a = account(&c);
+    c.plans.set_people(&a.mac.account, 4);
+    let (node_id, node) = online_node(&c, &a);
+    let mut dial = c.dial(&a.phone_token, &node_id).expect("101");
+    node.open();
+    dial.send(&[1u8; 800]);
+    assert_eq!(dial.read_bytes(800), vec![1u8; 800]);
+    // The plan store fails: a new dial keeps the budget of four people.
+    c.plans.fail_people(true);
+    let mut second = c
+        .dial(&a.phone_token, &node_id)
+        .expect("the known budget stays");
+    node.open();
+    second.send(&[2u8; 100]);
+    assert_eq!(second.read_bytes(100), vec![2u8; 100]);
+    c.plans.fail_people(false);
+    // One person spends the budget of one; with four people it counts again.
+    let b = account(&c);
+    let (b_node, b_echo) = online_node(&c, &b);
+    let mut over = c.dial(&b.phone_token, &b_node).expect("101");
+    b_echo.open();
+    over.send(&[3u8; 600]);
+    over.expect_close(close::TUNNEL_LIMIT);
+    assert_eq!(
+        c.dial(&b.phone_token, &b_node).err(),
+        Some((429, "tunnel_limit".to_string()))
+    );
+    c.plans.set_people(&b.mac.account, 4);
+    let mut back = c
+        .dial(&b.phone_token, &b_node)
+        .expect("four people: the budget is not spent");
+    b_echo.open();
+    back.send(b"x");
+    assert_eq!(back.read_bytes(1), b"x");
+    // The lookup fails at the first use: the stream is not refused or ended for a budget
+    // that is not known yet.
+    let d = account(&c);
+    c.plans.fail_people(true);
+    let (d_node, d_echo) = online_node(&c, &d);
+    let mut first = c.dial(&d.phone_token, &d_node).expect("not refused");
+    d_echo.open();
+    first.send(&[4u8; 700]);
+    assert_eq!(first.read_bytes(700), vec![4u8; 700]);
+}
+
+#[test]
+fn a_usage_snapshot_taken_before_an_account_deletion_writes_nothing_of_that_account() {
+    use apassy_relay::server::tunnel::{Usage, month_of};
+    let c = start();
+    let a = account(&c);
+    let b = account(&c);
+    let running_hub = c.running().hub();
+    let hub = &*running_hub;
+    let broker = hub.tunnel().unwrap();
+    let month = month_of(apassy_relay::now_unix());
+    let usage = Usage {
+        month,
+        bytes: 100,
+        dials: 1,
+        streams: 1,
+        ..Usage::default()
+    };
+    broker.restore_usage(&a.mac.account, &usage);
+    broker.restore_usage(&b.mac.account, &usage);
+    broker.restore_usage(&format!("{}/dial/{}", b.mac.account, a.mac.account), &usage);
+    // The writer takes its snapshot; the account is deleted before the writer writes it.
+    let mut written = HashMap::new();
+    let snapshot = tunnel_routes::usage_snapshot(broker, &written);
+    assert_eq!(snapshot.len(), 3);
+    tunnel_routes::account_deleted(hub, &a.mac.account);
+    tunnel_routes::write_usage(hub, broker, snapshot, &mut written).unwrap();
+    let rows = |c: &Connect| c.directory_rows("SELECT account_id FROM tunnel_usage ORDER BY 1");
+    assert_eq!(rows(&c), vec![b.mac.account.clone()]);
+    // The next flush writes the others as before, and still nothing of the deleted one.
+    broker.restore_usage(
+        &b.mac.account,
+        &Usage {
+            bytes: 200,
+            ..usage.clone()
+        },
+    );
+    tunnel_routes::flush_usage(hub, broker, &mut written).unwrap();
+    assert_eq!(rows(&c), vec![b.mac.account.clone()]);
 }

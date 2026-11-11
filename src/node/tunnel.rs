@@ -2020,6 +2020,36 @@ fn serve_link(
     }
 }
 
+/// What [`keep_issued`] did with an issued certificate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Kept {
+    /// The certificate state of the node after it.
+    pub state: CertState,
+    /// Stored and installed: nothing is left to retry.
+    pub done: bool,
+}
+
+/// Keeps an issued certificate: `store` writes it to the node directory, and the picker
+/// installs it for the `public` streams.
+pub fn keep_issued(
+    picker: &CertPicker,
+    issued: &acme::Issued,
+    store: impl FnOnce() -> io::Result<()>,
+) -> Kept {
+    match store().and_then(|()| picker.install_public(&issued.chain, &issued.key)) {
+        Ok(()) => Kept {
+            state: CertState::Valid {
+                not_after: issued.not_after,
+            },
+            done: true,
+        },
+        Err(error) => Kept {
+            state: CertState::Missing(format!("the certificate cannot be kept: {error}")),
+            done: false,
+        },
+    }
+}
+
 /// The certificate thread: order a certificate when there is none or it ends within the
 /// renewal window, through the tunnel once it is open; then look again every hour. A
 /// certificate that was issued but could not be stored or installed is kept in memory
@@ -2077,23 +2107,15 @@ fn renew_loop(
         };
         match issued {
             Some(issued) => {
-                let kept =
+                let kept = keep_issued(&picker, &issued, || {
                     public_cert::store_public(node_dir, &issued.chain_pem, &issued.key, seal)
-                        .and_then(|()| picker.install_public(&issued.chain, &issued.key));
-                match kept {
-                    Ok(()) => {
-                        failures = 0;
-                        shared.set_cert(CertState::Valid {
-                            not_after: issued.not_after,
-                        });
-                    }
-                    Err(error) => {
-                        failures += 1;
-                        shared.set_cert(CertState::Missing(format!(
-                            "the certificate cannot be kept: {error}"
-                        )));
-                        pending = Some(issued);
-                    }
+                });
+                shared.set_cert(kept.state);
+                if kept.done {
+                    failures = 0;
+                } else {
+                    failures += 1;
+                    pending = Some(issued);
                 }
             }
             None => failures += 1,
@@ -2413,5 +2435,59 @@ mod tests {
             "plan_required"
         );
         assert_eq!(refusal_code(b"not json"), "");
+    }
+
+    #[test]
+    fn only_the_relays_tunnel_limit_waits_long_and_an_edge_rate_limit_backs_off() {
+        let limit = |status: u16, code: &str| Failure::Refused {
+            status,
+            code: code.to_owned(),
+        };
+        assert_eq!(
+            after_refusal(&limit(429, "tunnel_limit")),
+            NextTry::Wait(LIMIT_WAIT)
+        );
+        // The edge's per-address limit (other clients behind the same address): the
+        // short backoff, never the long wait.
+        for code in ["rate_limited", ""] {
+            assert_eq!(
+                after_refusal(&limit(429, code)),
+                NextTry::Backoff { reset: false },
+                "{code}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_certificate_that_cannot_be_stored_is_installed_at_once_and_stored_again() {
+        let name = "aaaaaaaaaa.node.example.test";
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("key");
+        let cert = rcgen::CertificateParams::new(vec![name.to_owned()])
+            .expect("params")
+            .self_signed(&key)
+            .expect("cert");
+        let issued = acme::Issued {
+            chain_pem: cert.pem(),
+            chain: vec![cert.der().to_vec()],
+            key: Zeroizing::new(key.serialize_der()),
+            not_after: 1_800_000_000,
+        };
+        let node = NodeCertificate::generate("Synthetic Mac").expect("node certificate");
+        let picker = CertPicker::new(&node, name).expect("picker");
+        let kept = keep_issued(&picker, &issued, || Err(io::Error::other("disk full")));
+        assert!(picker.has_public(), "the certificate serves at once");
+        assert_eq!(
+            kept.state,
+            CertState::Valid {
+                not_after: 1_800_000_000
+            }
+        );
+        assert!(!kept.done, "the store is tried again");
+        let mut stored = false;
+        let kept = keep_issued(&picker, &issued, || {
+            stored = true;
+            Ok(())
+        });
+        assert!(stored && kept.done);
     }
 }

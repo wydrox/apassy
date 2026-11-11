@@ -1211,6 +1211,7 @@ function everyLimiter(success: boolean) {
       CONNECT_PREFIX_LIMITER: limiter("prefix"),
       ACCOUNT_LIMITER: limiter("account"),
       TUNNEL_LIMITER: limiter("tunnel"),
+      TUNNEL_NODE_LIMITER: limiter("node"),
     },
   };
 }
@@ -1550,8 +1551,11 @@ describe("tunnel", () => {
     assert.deepEqual(values(seen[0]!, "x-apassy-edge"), [SECRET]);
   });
 
-  it("uses TUNNEL_LIMITER, and no other, for GET /v1/tunnel/dial/* and GET /v1/tunnel/node, keyed by the address or the /64", async () => {
-    for (const path of ["/v1/tunnel/dial/node_k7m2q4x3ca", "/v1/tunnel/node"]) {
+  it("uses TUNNEL_LIMITER for GET /v1/tunnel/dial/* and TUNNEL_NODE_LIMITER for GET /v1/tunnel/node, and no other, keyed by the address or the /64", async () => {
+    for (const [path, name] of [
+      ["/v1/tunnel/dial/node_k7m2q4x3ca", "tunnel"],
+      ["/v1/tunnel/node", "node"],
+    ]) {
       for (const [address, key] of [
         ["198.51.100.7", "198.51.100.7"],
         ["2001:db8:1:2:3:4:5:6", "2001:db8:1:2::/64"],
@@ -1559,18 +1563,44 @@ describe("tunnel", () => {
         const label = `${path} ${address}`;
         const refused = everyLimiter(false);
         const { forwarded, relay } = upgradingRelay();
-        const response = await call(path, { headers: { ...UPGRADE, "cf-connecting-ip": address! } }, { ...refused.env, RELAY: relay });
+        const response = await call(path!, { headers: { ...UPGRADE, "cf-connecting-ip": address! } }, { ...refused.env, RELAY: relay });
         assert.equal(response.status, 429, label);
         assert.equal(response.headers.get("retry-after"), "60", label);
         assert.equal((await envelope(response)).error.code, "rate_limited", label);
-        assert.deepEqual(refused.used, [`tunnel:${key}`], label);
+        assert.deepEqual(refused.used, [`${name}:${key}`], label);
         assert.deepEqual(forwarded, [], label);
       }
       const allowed = everyLimiter(true);
-      const passed = await call(path, {}, allowed.env);
+      const passed = await call(path!, {}, allowed.env);
       assert.equal(passed.status, 201, path);
-      assert.deepEqual(allowed.used, ["tunnel:unknown"], path);
+      assert.deepEqual(allowed.used, [`${name}:unknown`], path);
     }
+  });
+
+  it("keeps the node's WebSocket out of the dial budget of its address, and the dials out of the node's", async () => {
+    const used: string[] = [];
+    const counting = (name: string, limit: number) => {
+      const seen = new Map<string, number>();
+      return {
+        async limit({ key }: { key: string }) {
+          const count = (seen.get(key) ?? 0) + 1;
+          seen.set(key, count);
+          used.push(`${name}:${key}`);
+          return { success: count <= limit };
+        },
+      };
+    };
+    const env = { TUNNEL_LIMITER: counting("tunnel", 60), TUNNEL_NODE_LIMITER: counting("node", 60) };
+    const headers = { "cf-connecting-ip": "198.51.100.7" };
+    // Sixty dials from the address (phones behind the node's NAT) spend the dial budget.
+    for (let n = 0; n < 60; n++) {
+      assert.equal((await call("/v1/tunnel/dial/node_k7m2q4x3ca", { headers }, env)).status, 201);
+    }
+    assert.equal((await call("/v1/tunnel/dial/node_k7m2q4x3ca", { headers }, env)).status, 429);
+    // The node's WebSocket from the same address still passes.
+    assert.equal((await call("/v1/tunnel/node", { headers }, env)).status, 201);
+    assert.equal(used.filter((entry) => entry === "node:198.51.100.7").length, 1);
+    assert.equal(used.filter((entry) => entry === "tunnel:198.51.100.7").length, 61);
   });
 
   it("does not limit the other tunnel routes, and passes a dial or a node when the limiter is missing or fails", async () => {
@@ -1590,8 +1620,8 @@ describe("tunnel", () => {
     }
     assert.deepEqual(refused.used, []);
     for (const path of ["/v1/tunnel/dial/node_k7m2q4x3ca", "/v1/tunnel/node"]) {
-      for (const TUNNEL_LIMITER of [undefined, { async limit() { throw new Error("limiter unavailable"); } }]) {
-        const response = await call(path, {}, { TUNNEL_LIMITER });
+      for (const limiter of [undefined, { async limit() { throw new Error("limiter unavailable"); } }]) {
+        const response = await call(path, {}, { TUNNEL_LIMITER: limiter, TUNNEL_NODE_LIMITER: limiter });
         assert.equal(response.status, 201, path);
       }
     }

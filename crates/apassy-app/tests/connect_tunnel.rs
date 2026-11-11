@@ -37,11 +37,14 @@ use apassy::broker::approvals::ApprovalQueue;
 use apassy::broker::decide::BrokerContext;
 use apassy::broker::http::TlsClient;
 use apassy::broker::prompts::PromptStore;
+use apassy::net::NodeCertificate;
+use apassy::net::sealed_key::{CONNECT_INFO, SealKey};
 use apassy::node::acme::AcmeOptions;
 use apassy::node::funnel::{CliOutput, TailscaleCli};
 use apassy::node::master_key::NoKeychain;
 use apassy::node::tunnel::{
-    CertState, Clock, ConnectSetup, Failure, SystemClock, TunnelAuth, TunnelState,
+    CertState, Clock, ConnectSetup, Failure, SystemClock, Targets, Tunnel, TunnelAuth,
+    TunnelOptions, TunnelState,
 };
 use apassy::node::{Node, NodeOptions};
 use apassy::questions::{QuestionsClient, Sealed};
@@ -1771,4 +1774,86 @@ fn a_stranger_that_keeps_its_side_open_holds_no_stream_at_the_node_or_at_connect
     let leaf = served_leaf(&mut dial, "device.example.test").expect("handshake");
     assert!(!leaf.is_empty());
     node.stop();
+}
+
+/// A TLS client over `transport` that accepts any certificate (the bytes are what this
+/// test looks at; the pin is checked by the main test), after the handshake.
+fn tls_client<S: Read + Write>(transport: S) -> StreamOwned<ClientConnection, S> {
+    let config = ClientConfig::builder_with_provider(provider())
+        .with_safe_default_protocol_versions()
+        .expect("versions")
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(Capture {
+            leaf: Arc::new(Mutex::new(None)),
+            provider: provider(),
+        }))
+        .with_no_client_auth();
+    let name = ServerName::try_from("device.example.test".to_owned()).expect("name");
+    let conn = ClientConnection::new(Arc::new(config), name).expect("client");
+    let mut tls = StreamOwned::new(conn, transport);
+    while tls.conn.is_handshaking() {
+        tls.conn.complete_io(&mut tls.sock).expect("handshake");
+    }
+    tls
+}
+
+/// The node's own tunnel code and the relay's own broker move several windows each way on
+/// one dial: the node grants Connect more as its target reads, and Connect grants the
+/// node more as the device reads.
+#[test]
+fn a_dial_carries_several_windows_each_way_between_the_real_node_and_the_real_broker() {
+    let dir = TempDir::new("windows");
+    let connect = Connect::start(Arc::new(ManualClock::new(now())));
+    // 600 KiB each way: more than two of the largest windows (256 KiB).
+    let total = 600 * 1024;
+    let target = TcpListener::bind("127.0.0.1:0").expect("target");
+    let target_addr = target.local_addr().expect("addr");
+    let server = thread::spawn(move || {
+        let (mut conn, _) = target.accept().expect("the node reaches its target");
+        conn.set_read_timeout(Some(WAIT)).expect("timeout");
+        let mut upload = vec![0u8; total];
+        conn.read_exact(&mut upload).expect("the whole upload");
+        let answer: Vec<u8> = (0..total).map(|i| (i % 241) as u8).collect();
+        conn.write_all(&answer).expect("the answer");
+        upload
+    });
+    let mut handle = Tunnel::start(TunnelOptions {
+        setup: setup(&connect, None, Arc::new(SystemClock::default())),
+        node_dir: dir.0.join("node"),
+        name: "Synthetic Mac".to_owned(),
+        certificate: NodeCertificate::generate("Synthetic Mac").expect("certificate"),
+        targets: Targets {
+            device: Some(target_addr),
+            public: None,
+        },
+        seal: Arc::new(SealKey::derive(&[5u8; 32], CONNECT_INFO).expect("seal")),
+    })
+    .expect("the tunnel starts");
+    wait_until("the node is online", || {
+        handle.status().state == TunnelState::On && connect.broker.online(NODE_ID)
+    });
+    let mut tls = tls_client(connect.dial().expect("dial"));
+    let upload: Vec<u8> = (0..total).map(|i| (i % 239) as u8).collect();
+    tls.write_all(&upload).expect("the upload");
+    tls.flush().expect("flush");
+    let mut answer = vec![0u8; total];
+    tls.read_exact(&mut answer).expect("the whole answer");
+    assert_eq!(
+        server.join().expect("target"),
+        upload,
+        "the target got every byte"
+    );
+    assert!(
+        answer
+            .iter()
+            .enumerate()
+            .all(|(i, byte)| *byte == (i % 241) as u8),
+        "the device got every byte, in order"
+    );
+    assert!(
+        connect.broker.peak_stream_buffer() <= Limits::default().stream_buffer,
+        "{}",
+        connect.broker.peak_stream_buffer()
+    );
+    handle.stop();
 }
