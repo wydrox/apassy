@@ -81,7 +81,8 @@ ALTER TABLE team_code ADD COLUMN kind TEXT NOT NULL DEFAULT 'operator' CHECK (ki
 ///   and `account_id`, `vault_id`. SQLite cannot widen a CHECK in place, so the table is
 ///   rebuilt with the same rows; the index `team_legacy` is made again.
 /// - `account` (with the public recovery key, the last recovery, for its retry, and the
-///   time of the last new recovery code from a device, `recovery_rotated_at`),
+///   time and the device of the last new recovery code from a device,
+///   `recovery_rotated_at` and `recovery_rotated_by`),
 ///   `account_id_used` (every account id that an account ever had, written with the
 ///   account and never deleted: an id is used once, so no later account meets the
 ///   billing, tunnel, or key rows of an earlier one),
@@ -126,7 +127,7 @@ CREATE TABLE account (
   id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL,
   recovery_key BLOB NOT NULL, create_hash BLOB NOT NULL, email TEXT, group_id TEXT,
   recover_hash BLOB, recovered_at INTEGER, recover_device TEXT, recover_deleted INTEGER,
-  recovery_rotated_at INTEGER);
+  recovery_rotated_at INTEGER, recovery_rotated_by TEXT);
 CREATE INDEX account_created ON account(created_at);
 CREATE TABLE account_id_used (id TEXT PRIMARY KEY, created_at INTEGER NOT NULL);
 CREATE TABLE account_device (
@@ -396,6 +397,7 @@ fn migrate_accounts(conn: &Connection) -> RelayResult<()> {
     if crate::server::store::has_column(conn, "team", "account_id")? {
         refuse_earlier_accounts_step(conn)?;
         add_share_marks(conn)?;
+        add_rotation_device(conn)?;
     } else {
         conn.execute_batch(MIGRATE_ACCOUNTS).map_err(db)?;
         conn.execute_batch(SHARE_MARKS).map_err(db)?;
@@ -409,6 +411,17 @@ fn migrate_accounts(conn: &Connection) -> RelayResult<()> {
 fn add_share_marks(conn: &Connection) -> RelayResult<()> {
     if !crate::server::store::has_column(conn, "account_share_void", "version")? {
         conn.execute_batch(SHARE_MARKS).map_err(db)?;
+    }
+    Ok(())
+}
+
+/// The device that set the recovery key last (`account.recovery_rotated_by`, section 9.1),
+/// when the file has no such column yet (a file of 1006 from a build before it): additive,
+/// and `NULL` for every key set before.
+fn add_rotation_device(conn: &Connection) -> RelayResult<()> {
+    if !crate::server::store::has_column(conn, "account", "recovery_rotated_by")? {
+        conn.execute_batch("ALTER TABLE account ADD COLUMN recovery_rotated_by TEXT;")
+            .map_err(db)?;
     }
     Ok(())
 }
@@ -1031,7 +1044,8 @@ impl Directory {
         match store.user_version()? {
             DIRECTORY_VERSION => store.tx(|tx| {
                 refuse_earlier_accounts_step(tx)?;
-                add_share_marks(tx)
+                add_share_marks(tx)?;
+                add_rotation_device(tx)
             })?,
             version @ (1001..=BEFORE_ACCOUNTS_VERSION) => store.tx(|tx| {
                 if version == 1001 {
