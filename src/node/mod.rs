@@ -901,12 +901,18 @@ impl Node {
         self.check_not_stopping()?;
         // The certificate key is sealed under the node key, which moves into the config.
         let certificate_key = Zeroizing::new(key.expose().as_bytes().to_vec());
-        // The Connect route: the node certificate (its pin) and the public name.
+        // The Connect route: the node certificate (its pin), the public name, and the key
+        // that seals the Connect files (derived from the node key, which is not kept).
         let (connect_certificate, connect_origin) = match &connect {
             Some(setup) => {
                 let (certificate, name) = self.connect_name(setup, &certificate_key)?;
+                let seal = crate::net::sealed_key::SealKey::derive(
+                    &certificate_key,
+                    crate::net::sealed_key::CONNECT_INFO,
+                )
+                .map_err(|failure| error("node_key", failure.to_string()))?;
                 (
-                    Some(certificate),
+                    Some((certificate, Arc::new(seal))),
                     name.map(|name| format!("https://{name}")),
                 )
             }
@@ -1104,8 +1110,8 @@ impl Node {
         }
         // The tunnel last: it connects by itself, and a stop closes it first.
         let tunnel = match (connect, connect_certificate) {
-            (Some(setup), Some(certificate)) => {
-                self.start_tunnel(setup, certificate, connect_targets)
+            (Some(setup), Some((certificate, seal))) => {
+                self.start_tunnel(setup, certificate, seal, connect_targets)
             }
             _ => None,
         };
@@ -1145,12 +1151,18 @@ impl Node {
         let (certificate, _) = tailnet::certificate(&self.data_dir, certificate_key, &name)?;
         let pin = certificate.pin.text();
         let origin = setup.auth.origin();
-        if let Some(file) =
-            tunnel::load_node_file(&self.data_dir, &origin).filter(|file| file.pin == pin)
+        if let Some(file) = tunnel::load_node_file(&self.data_dir, &origin, &setup.zone)
+            .filter(|file| file.pin == pin)
         {
             return Ok((certificate, Some(file.public_name)));
         }
-        match tunnel::register_now(setup.auth.as_ref(), &self.data_dir, &name, &pin) {
+        match tunnel::register_now(
+            setup.auth.as_ref(),
+            &self.data_dir,
+            &name,
+            &pin,
+            &setup.zone,
+        ) {
             Ok(view) => Ok((certificate, Some(view.public_name))),
             Err(failure) => {
                 lock(&self.notes)
@@ -1165,6 +1177,7 @@ impl Node {
         &self,
         setup: ConnectSetup,
         certificate: crate::net::NodeCertificate,
+        seal: Arc<crate::net::sealed_key::SealKey>,
         targets: Targets,
     ) -> Option<TunnelHandle> {
         match Tunnel::start(TunnelOptions {
@@ -1173,6 +1186,7 @@ impl Node {
             name: crate::sync::device_name(),
             certificate,
             targets,
+            seal,
         }) {
             Ok(tunnel) => Some(tunnel),
             Err(failure) => {
@@ -1235,7 +1249,7 @@ impl Node {
             .clone()
             .filter(|setup| setup.auth.has_account());
         let kept = setup.as_ref().and_then(|setup| {
-            tunnel::load_node_file(&self.data_dir, &setup.auth.origin())
+            tunnel::load_node_file(&self.data_dir, &setup.auth.origin(), &setup.zone)
                 .map(|file| file.public_name)
         });
         ConnectRouteStatus {

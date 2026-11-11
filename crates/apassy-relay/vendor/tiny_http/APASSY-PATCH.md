@@ -64,3 +64,15 @@ Open question settled: upstream `Request::upgrade` (and `upgrade_split`) keep by
 the read buffer, because the head and the upgraded stream share one
 `BufReader<RefinedTcpStream>` through `SequentialReader`. The regression test is
 `upgrade_keeps_bytes_sent_with_the_head` in `crates/apassy-relay/tests/server_tunnel.rs`.
+
+## One upgrade rule (2026-11-10, tunnel review)
+
+- `common.rs`: new `asks_upgrade(headers)`: an `Upgrade` header, or the token `upgrade`
+  (any case, comma-separated, SP/HTAB trimmed) in any `Connection` header. Exported as
+  `tiny_http::asks_upgrade`; the relay's guard (`http::wants_upgrade`) calls it.
+- `client.rs`: the guarded transport's refusal of an upgrade that is not a body-less
+  `GET`, and the end of connection reuse after an upgrade, use it (upstream read a
+  substring of the first `Connection` header for the latter).
+- `request.rs`: the raw upgrade reader is chosen by it, and only for a request without
+  `Content-Length` or `Transfer-Encoding`; upstream chose it on a substring of the first
+  `Connection` header and then ignored the body framing.

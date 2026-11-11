@@ -674,7 +674,8 @@ fn a_closed_stream_frees_its_slot_and_the_65th_stream_is_429() {
         h.dial("tok-a2", NODE_A).err(),
         Some((429, "tunnel_limit".into()))
     );
-    // The ingress counts against the same 64.
+    // The ingress has slots of its own: with every dial slot taken, an agent still gets
+    // its stream (the echo of its hello).
     let sni = ingress::serve_sni(
         TcpListener::bind("127.0.0.1:0").unwrap(),
         h.broker.clone(),
@@ -685,12 +686,16 @@ fn a_closed_stream_frees_its_slot_and_the_65th_stream_is_429() {
     agent
         .set_read_timeout(Some(Duration::from_secs(10)))
         .unwrap();
-    agent
-        .write_all(&client_hello("aaaaaaaaaa.node.example.test"))
-        .unwrap();
-    let mut rest = Vec::new();
-    let _ = agent.read_to_end(&mut rest);
-    assert!(rest.is_empty(), "a limited ingress connection is closed");
+    let hello = client_hello("aaaaaaaaaa.node.example.test");
+    agent.write_all(&hello).unwrap();
+    let mut echoed = vec![0u8; hello.len()];
+    agent.read_exact(&mut echoed).unwrap();
+    assert_eq!(echoed, hello);
+    assert_eq!(h.broker.ingress_usage("acc_a").open_streams, 1);
+    drop(agent);
+    wait_until("the ingress slot is free", || {
+        h.broker.ingress_usage("acc_a").open_streams == 0
+    });
     // A WebSocket close of one dial ends its stream; the node's echo closes the other way.
     let mut last = devices.pop().unwrap();
     client::send(
@@ -704,7 +709,7 @@ fn a_closed_stream_frees_its_slot_and_the_65th_stream_is_429() {
     let mut again = h.dial("tok-a2", NODE_A).expect("the freed slot");
     again.send(b"x");
     assert_eq!(again.read_bytes(1), b"x");
-    assert_eq!(h.broker.usage("acc_a").streams, 65);
+    assert_eq!(h.broker.usage("acc_a").streams, 66);
 }
 
 #[test]
@@ -1174,4 +1179,327 @@ fn usage_counts_bytes_and_streams_and_restores_after_a_restart() {
     let other = Harness::new();
     other.broker.restore_usage("acc_a", &stale);
     assert_eq!(other.broker.usage("acc_a").bytes, 0);
+}
+
+// ---------------------------------------------------------------------------
+// The review of the tunnel: stream ends, the ingress's own limits, other accounts'
+// dials, plans and grants that end without a hook, and the stored counters.
+
+fn hello_a() -> Vec<u8> {
+    client_hello("aaaaaaaaaa.node.example.test")
+}
+
+#[test]
+fn an_ingress_stream_ends_when_the_node_closes_it_and_later_client_bytes_are_not_counted() {
+    let h = Harness::new();
+    let mut node = h.node("tok-a1").unwrap();
+    let sni = sni_listener(&h, IngressConfig::default());
+    let mut agent = agent(sni.addr);
+    agent.write_all(&hello_a()).unwrap();
+    let open = node.next_frame();
+    assert_eq!((open.kind, open.flags), (Kind::Public, OPEN));
+    // The node answers and closes its side; the agent keeps its own side open.
+    node.send_frame(open.stream, Kind::Public, CLOSE, b"last bytes");
+    let mut answer = Vec::new();
+    agent.read_to_end(&mut answer).unwrap();
+    assert_eq!(answer, b"last bytes");
+    // Connect closes the client's direction too: the stream ends at once, as a dial.
+    let other_way = node.next_frame();
+    assert_eq!((other_way.stream, other_way.flags), (open.stream, CLOSE));
+    wait_until("the slot is free", || h.open_streams("acc_a") == 0);
+    // Bytes that the agent sends after the node's close are not counted.
+    let before = h.broker.usage("acc_a").bytes;
+    let _ = agent.write_all(b"more bytes after the end");
+    thread::sleep(Duration::from_millis(200));
+    assert_eq!(h.broker.usage("acc_a").bytes, before);
+}
+
+#[test]
+fn the_ingress_has_slots_an_open_rate_and_a_first_byte_deadline_of_its_own() {
+    let h = Harness::with(
+        Limits {
+            dials_per_minute: 1000,
+            ingress_streams: 2,
+            ingress_per_minute: 3,
+            ingress_first_byte: Duration::from_secs(1),
+            ..test_limits()
+        },
+        Duration::from_secs(30),
+    );
+    let mut node = h.node("tok-a1").unwrap();
+    // Every dial slot is taken: the ingress still opens, on its own slots.
+    let _dials: Vec<Peer> = (0..64)
+        .map(|_| h.dial("tok-a2", NODE_A).expect("a dial slot"))
+        .collect();
+    for _ in 0..64 {
+        assert!(node.next_frame().is_open());
+    }
+    let sni = sni_listener(&h, IngressConfig::default());
+    let mut first = agent(sni.addr);
+    first.write_all(&hello_a()).unwrap();
+    let first_open = node.next_frame();
+    assert_eq!(first_open.kind, Kind::Public);
+    let mut second = agent(sni.addr);
+    second.write_all(&hello_a()).unwrap();
+    let second_open = node.next_frame();
+    assert_eq!(second_open.kind, Kind::Public);
+    // A third is over the two ingress slots: closed. The dials are untouched.
+    let mut third = agent(sni.addr);
+    third.write_all(&hello_a()).unwrap();
+    let mut answer = Vec::new();
+    let _ = third.read_to_end(&mut answer);
+    assert!(answer.is_empty(), "over the ingress slots");
+    assert_eq!(h.broker.usage("acc_a").open_streams, 66);
+    // The node answers the first and never the second: the second is reset at the
+    // first-byte deadline; the first stays.
+    node.send_frame(first_open.stream, Kind::Public, 0, b"server hello");
+    let mut got = [0u8; 12];
+    first.read_exact(&mut got).unwrap();
+    assert_eq!(&got, b"server hello");
+    let reset = loop {
+        let frame = node.next_frame();
+        if frame.is_reset() {
+            break frame;
+        }
+    };
+    assert_eq!(reset.stream, second_open.stream);
+    let mut answer = Vec::new();
+    let _ = second.read_to_end(&mut answer);
+    assert!(answer.is_empty());
+    wait_until("one ingress stream", || {
+        h.broker.ingress_usage("acc_a").open_streams == 1
+    });
+    // Three streams opened this minute, the refused one too: a fourth waits for the next
+    // minute although a slot is free.
+    let mut fourth = agent(sni.addr);
+    fourth.write_all(&hello_a()).unwrap();
+    let mut answer = Vec::new();
+    let _ = fourth.read_to_end(&mut answer);
+    assert!(answer.is_empty(), "over the open rate");
+    h.clock.advance(60);
+    let mut fifth = agent(sni.addr);
+    fifth.write_all(&hello_a()).unwrap();
+    let fifth_open = node.next_frame();
+    assert!(fifth_open.is_open() && fifth_open.stream > reset.stream);
+    // The dials stay at their own limit all along.
+    assert_eq!(
+        h.dial("tok-a2", NODE_A).err(),
+        Some((429, "tunnel_limit".into()))
+    );
+}
+
+#[test]
+fn the_ingress_spends_a_budget_of_its_own_and_never_the_dials() {
+    let hello = hello_a();
+    let h = Harness::with(
+        Limits {
+            bytes_per_month: 10_000,
+            // The hello and its echo fit; 100 more bytes of the agent do not.
+            ingress_bytes_per_month: 2 * hello.len() as u64 + 100,
+            ..test_limits()
+        },
+        Duration::from_secs(30),
+    );
+    let _node = echo_node(&h, "tok-a1", 22);
+    let sni = sni_listener(&h, IngressConfig::default());
+    let mut device = h.dial("tok-a2", NODE_A).unwrap();
+    device.send(&[3u8; 100]);
+    assert_eq!(device.read_bytes(100), vec![3u8; 100]);
+    let mut agent = agent(sni.addr);
+    agent.write_all(&hello).unwrap();
+    let mut echoed = vec![0u8; hello.len()];
+    agent.read_exact(&mut echoed).unwrap();
+    assert_eq!(
+        h.broker.ingress_usage("acc_a").bytes,
+        2 * hello.len() as u64
+    );
+    agent.write_all(&[4u8; 100]).unwrap();
+    let mut rest = Vec::new();
+    let _ = agent.read_to_end(&mut rest);
+    let ingress = h.broker.ingress_usage("acc_a");
+    assert!(ingress.tripped, "the ingress budget is spent");
+    // A new agent is refused for the rest of the month; the dial goes on, and new dials
+    // open: the dial budget is not touched.
+    let mut late = TcpStream::connect(sni.addr).unwrap();
+    late.set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    late.write_all(&hello).unwrap();
+    let mut answer = Vec::new();
+    let _ = late.read_to_end(&mut answer);
+    assert!(answer.is_empty());
+    device.send(b"still here");
+    assert_eq!(device.read_bytes(10), b"still here");
+    let mut again = h.dial("tok-a2", NODE_A).expect("dials are not limited");
+    again.send(b"ok");
+    assert_eq!(again.read_bytes(2), b"ok");
+    let usage = h.broker.usage("acc_a");
+    assert!(!usage.tripped);
+    assert!(
+        usage.bytes > ingress.bytes,
+        "the account's bytes count both"
+    );
+}
+
+#[test]
+fn another_accounts_dials_count_apart_and_leave_the_owner_its_share() {
+    let h = Harness::with(
+        Limits {
+            dials_per_minute: 3,
+            streams_per_account: 4,
+            streams_per_grantee: 2,
+            grantee_streams: 2,
+            ..test_limits()
+        },
+        Duration::from_secs(30),
+    );
+    let _node = echo_node(&h, "tok-a1", 23);
+    h.directory.grant(NODE_A, "acc_b");
+    let _b: Vec<Peer> = (0..2)
+        .map(|_| h.dial("tok-b", NODE_A).expect("the grantee's slots"))
+        .collect();
+    // Its third dial is over its slots, its fourth over its own rate.
+    for _ in 0..2 {
+        assert_eq!(
+            h.dial("tok-b", NODE_A).err(),
+            Some((429, "tunnel_limit".into()))
+        );
+    }
+    // The owner's devices have their own rate and the rest of the slots.
+    let _own: Vec<Peer> = (0..2)
+        .map(|_| h.dial("tok-a2", NODE_A).expect("the owner's share"))
+        .collect();
+    assert_eq!(
+        h.dial("tok-a2", NODE_A).err(),
+        Some((429, "tunnel_limit".into())),
+        "the account's four slots are taken"
+    );
+    let grantee = h.broker.grantee_usage("acc_a", "acc_b");
+    assert_eq!((grantee.dials, grantee.open_streams), (3, 2));
+    let usage = h.broker.usage("acc_a");
+    assert_eq!((usage.dials, usage.open_streams), (6, 4));
+}
+
+#[test]
+fn the_dials_of_other_accounts_spend_only_their_share_of_the_dial_budget() {
+    let h = Harness::with(
+        Limits {
+            bytes_per_month: 1000,
+            grantee_bytes_percent: 50,
+            ..test_limits()
+        },
+        Duration::from_secs(30),
+    );
+    let _node = echo_node(&h, "tok-a1", 24);
+    h.directory.grant(NODE_A, "acc_b");
+    let mut own = h.dial("tok-a2", NODE_A).unwrap();
+    own.send(&[5u8; 100]);
+    assert_eq!(own.read_bytes(100), vec![5u8; 100]);
+    // 250 bytes each way: the grantees' half (500) is spent, its dial closes with 4002.
+    let mut granted = h.dial("tok-b", NODE_A).unwrap();
+    granted.send(&[6u8; 250]);
+    granted.expect_close(close::TUNNEL_LIMIT);
+    assert!(h.broker.grantee_usage("acc_a", "acc_b").tripped);
+    assert_eq!(
+        h.dial("tok-b", NODE_A).err(),
+        Some((429, "tunnel_limit".into()))
+    );
+    // The owner's dials go on with the rest of the budget.
+    own.send(b"mine");
+    assert_eq!(own.read_bytes(4), b"mine");
+    assert!(h.dial("tok-a2", NODE_A).is_ok());
+    assert!(!h.broker.usage("acc_a").tripped);
+}
+
+#[test]
+fn a_plan_or_a_grant_that_ends_without_a_hook_ends_its_open_streams() {
+    let h = Harness::with(
+        Limits {
+            recheck: Duration::from_millis(100),
+            ..test_limits()
+        },
+        Duration::from_secs(30),
+    );
+    let _node = echo_node(&h, "tok-a1", 25);
+    h.directory.grant(NODE_A, "acc_b");
+    let mut granted = h.dial("tok-b", NODE_A).unwrap();
+    let mut own = h.dial("tok-a2", NODE_A).unwrap();
+    granted.send(b"b");
+    assert_eq!(granted.read_bytes(1), b"b");
+    // The grant stops holding (the accounts no longer share a group): its dial ends.
+    h.directory.revoke(NODE_A, "acc_b");
+    granted.expect_close(close::REVOKED);
+    own.send(b"a");
+    assert_eq!(own.read_bytes(1), b"a");
+    // The plan ends by time, without billing's hook: the account's streams end.
+    h.directory.set_entitled("acc_a", false);
+    own.expect_close(close::REVOKED);
+    assert!(h.broker.online(NODE_A), "the node stays connected");
+    assert_eq!(
+        h.dial("tok-a2", NODE_A).err(),
+        Some((403, "plan_required".into()))
+    );
+}
+
+#[test]
+fn the_ingress_and_other_accounts_have_stored_counters_of_their_own() {
+    let h = Harness::new();
+    let _node = echo_node(&h, "tok-a1", 26);
+    h.directory.grant(NODE_A, "acc_b");
+    let mut granted = h.dial("tok-b", NODE_A).unwrap();
+    granted.send(&[1u8; 10]);
+    assert_eq!(granted.read_bytes(10), vec![1u8; 10]);
+    let sni = sni_listener(&h, IngressConfig::default());
+    let hello = hello_a();
+    let mut agent = agent(sni.addr);
+    agent.write_all(&hello).unwrap();
+    let mut echoed = vec![0u8; hello.len()];
+    agent.read_exact(&mut echoed).unwrap();
+    let all: HashMap<String, _> = h.broker.usage_all().into_iter().collect();
+    assert_eq!(all["acc_a"].bytes, 20 + 2 * hello.len() as u64);
+    assert_eq!(all["acc_a"].streams, 2);
+    assert_eq!(all["acc_a/ingress"].bytes, 2 * hello.len() as u64);
+    assert_eq!(all["acc_a/dial/acc_b"].bytes, 20);
+    assert_eq!(all["acc_a/dial/acc_b"].dials, 1);
+    let restarted = Harness::new();
+    for (key, usage) in &all {
+        restarted.broker.restore_usage(key, usage);
+    }
+    assert_eq!(restarted.broker.usage("acc_a").bytes, all["acc_a"].bytes);
+    assert_eq!(
+        restarted.broker.ingress_usage("acc_a").bytes,
+        2 * hello.len() as u64
+    );
+    assert_eq!(restarted.broker.grantee_usage("acc_a", "acc_b").bytes, 20);
+}
+
+#[test]
+fn a_substring_of_upgrade_is_not_an_upgrade_and_a_body_keeps_its_length() {
+    let server = tiny_http::Server::http_with_deadlines(
+        "127.0.0.1:0",
+        Duration::from_secs(10),
+        Duration::from_secs(10),
+        Duration::from_secs(10),
+    )
+    .unwrap();
+    let addr = server.server_addr().to_ip().unwrap();
+    let handler = thread::spawn(move || {
+        let mut request = server.recv().unwrap();
+        let mut body = Vec::new();
+        let read = request.as_reader().read_to_end(&mut body);
+        let _ = request.respond(tiny_http::Response::from_string("ok"));
+        (read.is_ok(), body)
+    });
+    let mut client = TcpStream::connect(addr).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    // A token that only contains "upgrade", and bytes after the body that are not its.
+    client
+        .write_all(
+            b"POST /x HTTP/1.1\r\nHost: relay.test\r\nConnection: keep-alive, x-upgraded\r\nContent-Length: 5\r\n\r\nhelloGET /y HTTP/1.1\r\n",
+        )
+        .unwrap();
+    let (read, body) = handler.join().unwrap();
+    assert!(read);
+    assert_eq!(body, b"hello", "the body is framed by its Content-Length");
 }

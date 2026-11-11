@@ -25,6 +25,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use apassy::net::NodeCertificate;
+use apassy::net::sealed_key::{CONNECT_INFO, SealKey};
 use apassy::node::tunnel::frame::{self, CLOSE, Dir, Kind, OPEN, RESET, Sequencer};
 use apassy::node::tunnel::ws::{self, Message};
 use apassy::node::tunnel::{
@@ -36,6 +37,7 @@ use serde_json::json;
 const TOKEN: &str = "tok-synthetic-node";
 const NODE_ID: &str = "node_aaaaaaaaaa";
 const PUBLIC_NAME: &str = "aaaaaaaaaa.node.example.test";
+const ZONE: &str = "node.example.test";
 
 fn hex(text: &str) -> Vec<u8> {
     (0..text.len())
@@ -208,6 +210,11 @@ fn read_head(stream: &mut TcpStream) -> String {
 /// A fake Connect on the loopback: it registers the node and hands each node WebSocket
 /// to the test.
 fn fake_connect() -> (SocketAddr, mpsc::Receiver<NodeSocket>) {
+    fake_connect_naming(PUBLIC_NAME)
+}
+
+/// [`fake_connect`] whose registration answer names `public_name`.
+fn fake_connect_naming(public_name: &'static str) -> (SocketAddr, mpsc::Receiver<NodeSocket>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().expect("addr");
     let (sender, sockets) = mpsc::channel();
@@ -235,7 +242,7 @@ fn fake_connect() -> (SocketAddr, mpsc::Receiver<NodeSocket>) {
                 let request: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
                 let answer = json!({"ok": true, "result": {
                     "node_id": NODE_ID, "account_id": "acc_aaaaaaaaaa", "device_id": "dev_aaaaaaaaaa",
-                    "name": request["name"], "pin": request["pin"], "public_name": PUBLIC_NAME,
+                    "name": request["name"], "pin": request["pin"], "public_name": public_name,
                     "online": false, "created_at": 1_790_000_000u64,
                 }})
                 .to_string();
@@ -295,12 +302,15 @@ fn tunnel(addr: SocketAddr, ping: Duration, idle: Duration) -> Running {
     setup.acme = None;
     setup.ping_interval = ping;
     setup.idle_limit = idle;
+    setup.close_grace = Duration::from_millis(300);
+    setup.zone = ZONE.to_owned();
     let handle = Tunnel::start(TunnelOptions {
         setup,
         node_dir: dir.path().to_path_buf(),
         name: "Synthetic Mac".to_owned(),
         certificate: NodeCertificate::generate("Synthetic Mac").expect("certificate"),
         targets: Targets::default(),
+        seal: Arc::new(SealKey::derive(&[3u8; 32], CONNECT_INFO).expect("seal")),
     })
     .expect("tunnel");
     Running {
@@ -348,7 +358,9 @@ fn the_node_follows_the_stream_rules_and_closes_bad_websockets() {
         Some("https://aaaaaaaaaa.node.example.test/mcp")
     );
 
-    // Data before an open: the node resets that stream and keeps the WebSocket.
+    // A reset for a stream that never opened is not answered; data before an open is
+    // reset, and the WebSocket stays.
+    socket.send_frame(8, Kind::Device, RESET, b"");
     socket.send_frame(9, Kind::Device, 0, b"x");
     let reset = socket.next_frame();
     assert_eq!((reset.stream, reset.flags), (9, RESET));
@@ -459,4 +471,61 @@ fn the_node_pings_and_ends_a_silent_websocket() {
         .recv_timeout(Duration::from_secs(20))
         .expect("the node connects again after the idle end");
     drop(running);
+}
+
+#[test]
+fn the_node_takes_only_its_own_public_name_in_the_zone() {
+    // Connect names another node's label: the node registers nothing and opens nothing.
+    let (addr, sockets) = fake_connect_naming("bbbbbbbbbb.node.example.test");
+    let running = tunnel(addr, Duration::from_secs(30), Duration::from_secs(90));
+    wait_for("the registration is refused", || {
+        matches!(
+            &running.handle.status().state,
+            TunnelState::Reconnecting { why } if why.contains("does not match this node")
+        )
+    });
+    assert_eq!(running.handle.status().public_name, None);
+    assert!(
+        sockets.recv_timeout(Duration::from_millis(500)).is_err(),
+        "no WebSocket for a name that is not the node's"
+    );
+    // The right label in another zone is refused the same way.
+    let (addr, sockets) = fake_connect_naming("aaaaaaaaaa.other.example.test");
+    let running = tunnel(addr, Duration::from_secs(30), Duration::from_secs(90));
+    wait_for("refused again", || {
+        matches!(
+            &running.handle.status().state,
+            TunnelState::Reconnecting { .. }
+        )
+    });
+    assert!(sockets.recv_timeout(Duration::from_millis(500)).is_err());
+}
+
+#[test]
+fn a_replaced_websocket_does_not_connect_again_at_once() {
+    let (addr, sockets) = fake_connect();
+    let running = tunnel(addr, Duration::from_secs(30), Duration::from_secs(90));
+    let mut socket = sockets
+        .recv_timeout(Duration::from_secs(20))
+        .expect("connects");
+    wait_for("on", || running.handle.status().state == TunnelState::On);
+    // Another process of this node took the WebSocket (4005): the node waits minutes,
+    // not a second, so two of them do not take turns.
+    ws::write_frame(
+        &mut socket.writer,
+        ws::OP_CLOSE,
+        &ws::close_payload(ws::close::REPLACED),
+        None,
+    )
+    .expect("close");
+    wait_for("reconnecting", || {
+        matches!(
+            &running.handle.status().state,
+            TunnelState::Reconnecting { why } if why.contains("another Apassy")
+        )
+    });
+    assert!(
+        sockets.recv_timeout(Duration::from_secs(3)).is_err(),
+        "no new WebSocket right after a replacement"
+    );
 }

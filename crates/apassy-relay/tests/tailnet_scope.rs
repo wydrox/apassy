@@ -328,3 +328,115 @@ fn serve_without_peer_addresses_shares_a_higher_limit() {
     );
     assert_eq!(bad_token_from(local, None), 401);
 }
+
+/// One request on a new connection to `listener`, written down as the front writes down
+/// a stream of the Connect tunnel (`front_peers::register_tunnel`) when `tunnel`, else as
+/// a connection without the front. Returns the status.
+fn request_via(listener: SocketAddr, tunnel: bool, head: &str, body: &str) -> u16 {
+    let mut stream = TcpStream::connect(listener).expect("connect");
+    let _entry = tunnel.then(|| {
+        front_peers::register_tunnel(
+            stream.local_addr().expect("local"),
+            stream.peer_addr().expect("peer"),
+        )
+    });
+    write!(
+        stream,
+        "{head}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+    .expect("write");
+    let mut answer = String::new();
+    let _ = stream.read_to_string(&mut answer);
+    answer
+        .split(' ')
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or_else(|| panic!("no status in {answer:?}"))
+}
+
+fn bad_mcp(forwarded_for: &str) -> String {
+    format!(
+        "POST /mcp HTTP/1.1\r\nHost: k7m2q4x3ca.node.example.test\r\nAuthorization: Bearer apr_bad\r\nContent-Type: application/json\r\nX-Forwarded-For: {forwarded_for}\r\n"
+    )
+}
+
+#[test]
+fn a_tunnel_stream_is_in_no_failed_auth_count_and_its_forwarded_for_is_not_read() {
+    let node = Node::start(NodeOptions::default());
+    let public = node
+        .node()
+        .running()
+        .public_addr
+        .expect("a public listener");
+    // More bad tokens through the tunnel than the shared count takes, with changing and
+    // with fixed X-Forwarded-For values: every one is answered, none is held at 429.
+    let shared = apassy_relay::server::http::AGENT_SHARED_FAILURES_MAX as usize;
+    for n in 0..shared + 20 {
+        let forwarded = if n % 2 == 0 {
+            "203.0.113.9".to_string()
+        } else {
+            format!("198.51.100.{}", n % 250)
+        };
+        assert_eq!(
+            request_via(public, true, &bad_mcp(&forwarded), "{}"),
+            401,
+            "{n}"
+        );
+    }
+    // Funnel's connections keep their count by source address: the tunnel's failures
+    // were in no count, so this source starts at zero and reaches 429 at its 21st.
+    for n in 0..AUTH_FAILURES_MAX {
+        assert_eq!(
+            request_via(public, false, &bad_mcp("203.0.113.9"), "{}"),
+            401,
+            "{n}"
+        );
+    }
+    assert_eq!(
+        request_via(public, false, &bad_mcp("203.0.113.9"), "{}"),
+        429
+    );
+    // A tunnel stream that names that source is still answered.
+    assert_eq!(
+        request_via(public, true, &bad_mcp("203.0.113.9"), "{}"),
+        401
+    );
+}
+
+#[test]
+fn a_device_stream_of_the_tunnel_reaches_no_team_code_invite_or_join_route() {
+    let node = Node::start(NodeOptions::default());
+    let tailnet = node.node().tailnet_addr().expect("a tailnet listener");
+    let head = |method: &str, path: &str| {
+        format!(
+            "{method} {path} HTTP/1.1\r\nHost: 100.64.0.7:8444\r\nContent-Type: application/json\r\n"
+        )
+    };
+    for (method, path) in [
+        ("POST", "/v1/teams"),
+        ("POST", "/v1/join"),
+        ("POST", "/v1/invites"),
+        ("GET", "/v1/invites"),
+    ] {
+        assert_eq!(
+            request_via(tailnet, true, &head(method, path), "{}"),
+            404,
+            "{method} {path} through the tunnel"
+        );
+        assert_ne!(
+            request_via(tailnet, false, &head(method, path), "{}"),
+            404,
+            "{method} {path} on the tailnet"
+        );
+    }
+    // The device routes stay: a sign-in challenge and a device link (pairing through
+    // Connect) are answered, not 404.
+    for (method, path) in [("POST", "/v1/auth/challenge"), ("POST", "/v1/devices/link")] {
+        assert_ne!(
+            request_via(tailnet, true, &head(method, path), "{}"),
+            404,
+            "{method} {path} through the tunnel"
+        );
+    }
+}

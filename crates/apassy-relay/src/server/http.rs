@@ -392,6 +392,13 @@ enum Counted {
     Agent(Option<Source>),
     /// Every path of the tailnet listener: the count of the tailnet peer (N8-1).
     Peer(IpAddr),
+    /// A request through a stream of the Connect tunnel (the front names it in process,
+    /// `apassy::net::front_peers::is_tunnel`), on any listener: in no count of the
+    /// listener, so a stranger's bad tokens through Connect never put a request with a
+    /// good token at 429, and no header of the client is read. Each stream carries one
+    /// request (the deadline transport), and Connect bounds the streams of a node
+    /// (docs/SPEC.md section 35.4): that bounds the tries.
+    Tunnel,
 }
 
 impl Counted {
@@ -412,9 +419,18 @@ impl Counted {
             Self::Agent(Some(_)) => "source",
             Self::Agent(None) => "shared",
             Self::Peer(_) => "peer",
+            Self::Tunnel => "tunnel",
         }
     }
 }
+
+/// Routes of the tailnet scope that a stream of the Connect tunnel never reaches (404,
+/// as an unknown path): a team code (`POST /v1/teams`), an invite, and a join with an
+/// invite. A device of the node's account, a device of an account with a grant, and
+/// Connect itself can open a `device` stream; none of them needs these through Connect
+/// (docs/SPEC.md section 35.3). Device links (`/v1/devices/link`, pairing through
+/// Connect) and every route that needs a device token stay.
+const TUNNEL_DEVICE_REFUSED: [&str; 3] = [paths::TEAMS, paths::INVITES, paths::JOIN];
 
 /// One listener: what it serves, and its failed-auth counts (`None` when
 /// `RelayConfig::auth_limiter` is off). The MCP authorization flow is in neither: it
@@ -426,6 +442,8 @@ pub struct Listener {
     pub keys: FailureKeys,
     /// The tailnet scope on the Mac's own local route (`Serving::local_route`).
     pub local_route: bool,
+    /// The bound address, to find the streams of the Connect tunnel (`front_peers`).
+    pub listen: Option<SocketAddr>,
 }
 
 impl Listener {
@@ -437,6 +455,7 @@ impl Listener {
             agent_failures: limiter.then(AgentAuthFailures::default),
             keys,
             local_route,
+            listen: None,
         }
     }
 
@@ -444,8 +463,20 @@ impl Listener {
         self.failures.is_some() || self.agent_failures.is_some()
     }
 
+    /// True when `request` came through a stream of the Connect tunnel that the front of
+    /// this process pumps.
+    fn via_tunnel(&self, request: &Request) -> bool {
+        match (request.remote_addr(), self.listen) {
+            (Some(remote), Some(listen)) => apassy::net::front_peers::is_tunnel(*remote, listen),
+            _ => false,
+        }
+    }
+
     /// The failed-auth count of `request` to `path`.
     fn counted(&self, request: &Request, path: &str) -> Counted {
+        if self.via_tunnel(request) {
+            return Counted::Tunnel;
+        }
         let FailureKeys::PerPeer(listen) = self.keys else {
             let forwarded = header_value(request, "X-Forwarded-For");
             return Counted::of(path, forwarded.as_deref());
@@ -475,6 +506,7 @@ impl Listener {
                     failures.record(source, now);
                 }
             }
+            Counted::Tunnel => {}
         }
     }
 
@@ -492,6 +524,7 @@ impl Listener {
                 .agent_failures
                 .as_ref()
                 .is_some_and(|failures| failures.limited(source, now)),
+            Counted::Tunnel => false,
         }
     }
 
@@ -1115,12 +1148,10 @@ pub fn serve(serving: Serving) -> RelayResult<()> {
         (Scope::Tailnet { .. }, Some(addr)) if !local_route => FailureKeys::PerPeer(addr),
         _ => FailureKeys::Whole,
     };
-    let listener = Arc::new(Listener::new(
-        scope,
-        hub.config.auth_limiter,
-        keys,
-        local_route,
-    ));
+    let listener = Arc::new(Listener {
+        listen,
+        ..Listener::new(scope, hub.config.auth_limiter, keys, local_route)
+    });
     let agent_max = limits.max_active.saturating_sub(limits.member_reserve);
     let slots = Arc::new(Slots {
         all: AtomicUsize::new(0),
@@ -1483,6 +1514,14 @@ fn handle(hub: &Hub, proxy: Option<&Proxy>, listener: &Listener, mut request: Re
     // The public listener knows two routes and the flow. Anything else is not there,
     // before any other check.
     if oauth_route.is_none() && !listener.scope.serves(&method, &path) {
+        respond_error(request, &RelayError::new(codes::NOT_FOUND, "No such path."));
+        return;
+    }
+    if matches!(listener.scope, Scope::Tailnet { .. })
+        && TUNNEL_DEVICE_REFUSED.contains(&path.as_str())
+        && listener.via_tunnel(&request)
+    {
+        request.abort_input();
         respond_error(request, &RelayError::new(codes::NOT_FOUND, "No such path."));
         return;
     }
@@ -2124,18 +2163,11 @@ fn respond_billing(hub: &Hub, mut request: Request, method: &str, path: &str, no
     }
 }
 
-/// A request that asks to upgrade its connection: an `Upgrade` header, or a `Connection`
-/// header with the token `upgrade`.
+/// A request that asks to upgrade its connection: the one rule of the vendored HTTP
+/// server (`tiny_http::asks_upgrade`: an `Upgrade` header, or the token `upgrade` in any
+/// `Connection` header), which also picks the transport's raw reader.
 fn wants_upgrade(request: &Request) -> bool {
-    request.headers().iter().any(|header| {
-        header.field.equiv("Upgrade")
-            || (header.field.equiv("Connection")
-                && header
-                    .value
-                    .as_str()
-                    .split(',')
-                    .any(|token| token.trim().eq_ignore_ascii_case("upgrade")))
-    })
+    tiny_http::asks_upgrade(request.headers())
 }
 
 /// An upgrade may go on: one of the two tunnel routes, on the node listener of a relay
@@ -2169,13 +2201,25 @@ fn respond_tunnel(
         respond_error(request, &RelayError::new(codes::NOT_FOUND, "No such path."));
         return;
     };
+    let upgrade_refused = |error: Option<crate::server::tunnel::TunnelError>| {
+        // A bad token on an upgrade route counts as on the JSON routes.
+        if error.is_some_and(|error| error.code == codes::UNAUTHENTICATED) {
+            listener.record_failure(counted, now);
+            hub.refusal(
+                now,
+                "account_token",
+                "auth_failed",
+                &json!({"code": codes::UNAUTHENTICATED, "path_kind": "tunnel"}),
+            );
+        }
+    };
     match &endpoint {
         tunnel_routes::TunnelEndpoint::NodeSocket => {
-            broker.serve_node(request);
+            upgrade_refused(broker.serve_node(request));
             return;
         }
         tunnel_routes::TunnelEndpoint::Dial(node_id) => {
-            broker.serve_dial(request, node_id);
+            upgrade_refused(broker.serve_dial(request, node_id));
             return;
         }
         _ => {}

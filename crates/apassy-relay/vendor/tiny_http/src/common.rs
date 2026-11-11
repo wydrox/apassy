@@ -147,6 +147,22 @@ impl PartialOrd<StatusCode> for u16 {
     }
 }
 
+/// Apassy: whether a request asks to upgrade its connection: an `Upgrade` header, or the
+/// token `upgrade` (any case, comma-separated, with optional whitespace) in any
+/// `Connection` header. The one rule of the guarded transport, the raw upgrade reader,
+/// and the relay's upgrade guard.
+pub fn asks_upgrade(headers: &[Header]) -> bool {
+    headers.iter().any(|header| {
+        header.field.equiv("Upgrade")
+            || (header.field.equiv("Connection")
+                && header.value.as_str().split(',').any(|token| {
+                    token
+                        .trim_matches(|c| c == ' ' || c == '\t')
+                        .eq_ignore_ascii_case("upgrade")
+                }))
+    })
+}
+
 /// Represents a HTTP header.
 #[derive(Debug, Clone)]
 pub struct Header {
@@ -418,6 +434,28 @@ mod test {
         assert!(header.value.as_str() == "text/html");
 
         assert!("hello world".parse::<Header>().is_err());
+    }
+
+    #[test]
+    fn upgrade_is_a_token_of_any_connection_header() {
+        let headers = |lines: &[&str]| -> Vec<Header> {
+            lines.iter().map(|line| line.parse().unwrap()).collect()
+        };
+        assert!(super::asks_upgrade(&headers(&["Connection: Upgrade"])));
+        assert!(super::asks_upgrade(&headers(&[
+            "Connection: keep-alive, upgrade"
+        ])));
+        assert!(super::asks_upgrade(&headers(&[
+            "Connection: keep-alive",
+            "Connection: UPGRADE"
+        ])));
+        assert!(super::asks_upgrade(&headers(&["Upgrade: websocket"])));
+        assert!(!super::asks_upgrade(&headers(&["Connection: keep-alive"])));
+        assert!(!super::asks_upgrade(&headers(&["Connection: x-upgraded"])));
+        assert!(!super::asks_upgrade(&headers(&[
+            "Connection: upgrades, close"
+        ])));
+        assert!(!super::asks_upgrade(&headers(&["X-Upgrade: websocket"])));
     }
 
     #[test]

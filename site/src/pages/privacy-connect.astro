@@ -44,7 +44,13 @@ const doc = (path: string) => `${REPO}/blob/main/${path}`;
     </li>
     <li>
       The iPhone and the Apple Watch reach your Mac on your local network, over your tailnet, or, with Connect, through
-      its byte relay. With the relay, the connection stays encrypted with TLS between your devices.
+      its byte relay. With the relay, the connection stays encrypted with TLS between your devices, checked against your
+      Mac's own certificate.
+    </li>
+    <li>
+      Agents in the cloud can reach your Mac at its public name through the relay. That connection uses an ordinary
+      public certificate for the name, as a Tailscale Funnel name does: whoever runs Connect, or controls the DNS of the
+      name, could get a certificate for it and read those agents' requests. Your own devices do not depend on this.
     </li>
     <li>
       The bouncer brain runs on your Mac or on a server of yours. Only if you turn on the hosted brain of Connect does it
@@ -84,8 +90,8 @@ const doc = (path: string) => `${REPO}/blob/main/${path}`;
       </tr>
       <tr>
         <td>The byte relay: counts of bytes and connections of your account</td>
-        <td>For the limits of the plan. The relay carries TLS records that it cannot read, and stores none of them.</td>
-        <td>For the current period of the limit</td>
+        <td>For the limits of the plan. The relay carries TLS records, and stores none of them.</td>
+        <td>13 months</td>
       </tr>
       <tr>
         <td>The hosted bouncer brain, only if you turn it on: the command and the task of each question to the brain, never a credential value</td>
