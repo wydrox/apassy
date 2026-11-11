@@ -14,7 +14,7 @@ use std::net::{IpAddr, SocketAddr, TcpStream};
 
 use apassy::net::front_peers;
 use apassy::node::backend::{NewCloudAgent, RunningNode, TokenIssue};
-use apassy_relay::server::http::{AUTH_FAILURES_MAX, listener_alive};
+use apassy_relay::server::http::{AUTH_FAILURES_MAX, TUNNEL_DEVICE_FAILURES_MAX, listener_alive};
 use node::{Node, NodeOptions, code};
 use serde_json::json;
 
@@ -439,4 +439,54 @@ fn a_device_stream_of_the_tunnel_reaches_no_team_code_invite_or_join_route() {
             "{method} {path} through the tunnel"
         );
     }
+}
+
+/// `GET /v1/me` with `token` on a new connection to `listener`, written down as a `device`
+/// stream of the Connect tunnel. Returns the status.
+fn me_via_tunnel(listener: SocketAddr, token: &str) -> u16 {
+    let head = format!(
+        "GET /v1/me HTTP/1.1\r\nHost: 100.64.0.7:8444\r\nAuthorization: Bearer {token}\r\n"
+    );
+    request_via(listener, true, &head, "")
+}
+
+#[test]
+fn the_device_streams_of_the_tunnel_have_a_count_of_the_node_apart_from_the_peers() {
+    let node = Node::start(NodeOptions::default());
+    let (_team, mac) = node.device_team("Approvals");
+    let tailnet = node.node().tailnet_addr().expect("a tailnet listener");
+    // Each request here is a stream of its own, far below the count of one stream
+    // (TUNNEL_STREAM_FAILURES_MAX): only the count of the node holds them.
+    for n in 0..TUNNEL_DEVICE_FAILURES_MAX {
+        assert_eq!(me_via_tunnel(tailnet, "apr_bad"), 401, "{n}");
+    }
+    // At it every device stream of the tunnel is held, a good token too, until the
+    // window ends.
+    assert_eq!(me_via_tunnel(tailnet, "apr_bad"), 429);
+    assert_eq!(me_via_tunnel(tailnet, &mac.token), 429);
+    // The tailnet peers and the Mac's local route keep their own counts: the tunnel's
+    // failures are in none of them.
+    let peer: IpAddr = "100.64.0.21".parse().unwrap();
+    assert_eq!(bad_token_from(tailnet, Some(peer)), 401);
+    let base = node.local_route();
+    let me = node.ok(&base, "GET", "/v1/me", Some(&mac.token), None);
+    assert_eq!(me["device_id"].as_u64(), Some(mac.id));
+    // The audit row names the count of the node, and no address.
+    let limited: Vec<_> = node
+        .relay_audit()
+        .into_iter()
+        .filter(|(action, _)| action == "rate_limited")
+        .collect();
+    assert!(
+        limited
+            .iter()
+            .any(|(_, detail)| detail.contains("\"bucket\":\"tunnel_node\"")),
+        "{limited:?}"
+    );
+    assert!(
+        limited
+            .iter()
+            .all(|(_, detail)| !detail.contains("\"peer\"")),
+        "{limited:?}"
+    );
 }

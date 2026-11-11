@@ -1825,9 +1825,8 @@ fn members_beyond_the_paid_seats_are_read_only_until_the_quantity_is_raised() {
     assert!(!setup.plan("acc_b2c3d4e5fg", START + 3).entitled);
 }
 
-#[test]
-fn the_maintenance_pass_raises_the_quantity_to_the_members() {
-    let setup = Setup::new();
+/// A Team group of three active members on a subscription that pays for one.
+fn team_with_unpaid_members(setup: &Setup) -> String {
     setup.deliver(
         &event(
             "evt_TeamCheckout",
@@ -1852,6 +1851,55 @@ fn the_maintenance_pass_raises_the_quantity_to_the_members() {
             .store()
             .add_member(&group, account, GroupRole::Member, MemberState::Active);
     }
+    group
+}
+
+#[test]
+fn the_maintenance_pass_leaves_the_quantity_to_the_owner_by_default() {
+    let setup = Setup::new();
+    assert!(!setup.billing.config.auto_raise_seats);
+    let group = team_with_unpaid_members(&setup);
+    assert!(setup.plan(ACCOUNT, START + 3).entitled);
+    assert!(!setup.plan(THIRD, START + 3).entitled);
+    for now in [START + 3, START + 3 + DAY] {
+        let report = setup.billing.reconcile(now).unwrap();
+        assert!(report.raised.is_empty(), "{now}");
+        assert_eq!(report.failed, 0);
+    }
+    // No charge without the owner: Stripe saw no quantity change.
+    assert!(
+        setup
+            .stripe
+            .calls_to("POST", "/v1/subscription_items/")
+            .is_empty()
+    );
+    // The members beyond the paid quantity stay read-only, without a deletion day.
+    let unpaid = setup.plan(THIRD, START + 4);
+    assert_eq!(unpaid.status, PlanStatus::ReadOnly);
+    assert_eq!(unpaid.delete_at, None);
+    // The owner raises the seats: the same call that the pass makes with the setting.
+    let answer = setup
+        .billing
+        .change_seats(ACCOUNT, br#"{"quantity":3}"#, START + 5)
+        .unwrap();
+    assert!(answer.pending);
+    let calls = setup.stripe.calls_to("POST", "/v1/subscription_items/");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].field("quantity"), Some("3"));
+    assert!(setup.plan(THIRD, START + 6).entitled);
+    assert_eq!(
+        setup.plan(OTHER, START + 6).group_id.as_deref(),
+        Some(group.as_str())
+    );
+}
+
+#[test]
+fn the_maintenance_pass_raises_the_quantity_to_the_members() {
+    let setup = Setup::with_config(BillingConfig {
+        auto_raise_seats: true,
+        ..BillingConfig::default()
+    });
+    let group = team_with_unpaid_members(&setup);
     assert!(!setup.plan(THIRD, START + 3).entitled);
     let report = setup.billing.reconcile(START + 3).unwrap();
     assert_eq!(report.raised, [(group.clone(), 3)]);

@@ -83,6 +83,19 @@ pub const AGENT_SHARED_FAILURES_MAX: u32 = 600;
 /// The source addresses whose failures one listener keeps. A failure of a further
 /// source counts in the shared window until a window of the table ends.
 pub const AUTH_SOURCES_MAX: usize = 4096;
+/// Bad bearer tokens and session keys that one `device` stream of the Connect tunnel
+/// takes in one window (`TunnelDeviceFailures`). One more request on that stream in the
+/// window gets 429 `rate_limited`; a new stream (a new dial) has its own count.
+pub const TUNNEL_STREAM_FAILURES_MAX: u32 = 10;
+/// Bad bearer tokens and session keys that all `device` streams of the Connect tunnel
+/// on one listener take together in one window. Connect names no dialing account to the
+/// node (connect-tunnel-v1 section 5), so this is the count of the node: above what the
+/// dials of one account can bring in a window at Connect's dial rate (60 a minute, times
+/// `TUNNEL_STREAM_FAILURES_MAX`), so one account alone never holds the others at 429.
+pub const TUNNEL_DEVICE_FAILURES_MAX: u32 = 1200;
+// One account at Connect's default dial rate (60 dials a minute) cannot reach the count of
+// the node alone.
+const _: () = assert!(60 * TUNNEL_STREAM_FAILURES_MAX < TUNNEL_DEVICE_FAILURES_MAX);
 
 /// What a listener serves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -383,6 +396,63 @@ impl AgentAuthFailures {
     }
 }
 
+/// The failed authentications of the `device` streams of the Connect tunnel on one
+/// listener: a window for each stream (`TUNNEL_STREAM_FAILURES_MAX`), keyed by the serial
+/// that the node's front gives the stream in process (`apassy::net::front_peers`), and
+/// one window for all of them together (`TUNNEL_DEVICE_FAILURES_MAX`). The node cannot
+/// tell the dialing account (Connect names none in the stream's `open`), so a stream is
+/// the finest key and the node the coarsest. A stream that the full table
+/// (`AUTH_SOURCES_MAX`) cannot take counts in the shared window only. In memory only.
+#[derive(Debug, Default)]
+pub struct TunnelDeviceFailures {
+    state: Mutex<TunnelFailureState>,
+}
+
+#[derive(Debug, Default)]
+struct TunnelFailureState {
+    streams: HashMap<u64, Window>,
+    node: Window,
+}
+
+/// Which window of a tunnel `device` stream is at its limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TunnelLimit {
+    /// The stream's own window.
+    Stream,
+    /// The window of every `device` stream of the listener.
+    Node,
+}
+
+impl TunnelDeviceFailures {
+    /// The window at its limit for a request on stream `serial`, if any.
+    pub fn limited(&self, serial: u64, now: u64) -> Option<TunnelLimit> {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.node.count(now) >= TUNNEL_DEVICE_FAILURES_MAX {
+            return Some(TunnelLimit::Node);
+        }
+        let stream = state.streams.get_mut(&serial)?;
+        if stream.ended(now) {
+            state.streams.remove(&serial);
+            return None;
+        }
+        (stream.count >= TUNNEL_STREAM_FAILURES_MAX).then_some(TunnelLimit::Stream)
+    }
+
+    /// Counts one bad bearer token or session key on stream `serial`: in its window and
+    /// in the window of every `device` stream.
+    pub fn record(&self, serial: u64, now: u64) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.node.record(now);
+        if !state.streams.contains_key(&serial) && state.streams.len() >= AUTH_SOURCES_MAX {
+            state.streams.retain(|_, window| !window.ended(now));
+            if state.streams.len() >= AUTH_SOURCES_MAX {
+                return;
+            }
+        }
+        state.streams.entry(serial).or_default().record(now);
+    }
+}
+
 /// Which failed-auth count a request is in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Counted {
@@ -392,13 +462,18 @@ enum Counted {
     Agent(Option<Source>),
     /// Every path of the tailnet listener: the count of the tailnet peer (N8-1).
     Peer(IpAddr),
-    /// A request through a stream of the Connect tunnel (the front names it in process,
-    /// `apassy::net::front_peers::is_tunnel`), on any listener: in no count of the
-    /// listener, so a stranger's bad tokens through Connect never put a request with a
-    /// good token at 429, and no header of the client is read. Each stream carries one
-    /// request (the deadline transport), and Connect bounds the streams of a node
-    /// (docs/SPEC.md section 35.4): that bounds the tries.
+    /// A request through a `public` stream of the Connect tunnel (the front names it in
+    /// process, `apassy::net::front_peers`), on a listener other than the tailnet one: in
+    /// no count of the listener, so a stranger's bad tokens through Connect never put a
+    /// cloud agent with a good token at 429, and no header of the client is read. Connect
+    /// bounds the streams of a node (docs/SPEC.md section 35.4), and each carries one
+    /// request (the deadline transport): that bounds the tries.
     Tunnel,
+    /// A request through a `device` stream of the Connect tunnel (on the tailnet
+    /// listener), with the stream's serial: the count of that stream and the count of
+    /// every `device` stream of the listener (`TunnelDeviceFailures`). Never the count of
+    /// a tailnet peer, and no header of the client is read.
+    TunnelDevice(u64),
 }
 
 impl Counted {
@@ -420,6 +495,7 @@ impl Counted {
             Self::Agent(None) => "shared",
             Self::Peer(_) => "peer",
             Self::Tunnel => "tunnel",
+            Self::TunnelDevice(_) => "tunnel_stream",
         }
     }
 }
@@ -439,6 +515,8 @@ pub struct Listener {
     pub scope: Scope,
     pub failures: Option<AuthFailures>,
     pub agent_failures: Option<AgentAuthFailures>,
+    /// The counts of the `device` streams of the Connect tunnel (the tailnet listener).
+    pub tunnel_failures: Option<TunnelDeviceFailures>,
     pub keys: FailureKeys,
     /// The tailnet scope on the Mac's own local route (`Serving::local_route`).
     pub local_route: bool,
@@ -453,6 +531,7 @@ impl Listener {
             scope,
             failures: limiter.then(AuthFailures::default),
             agent_failures: limiter.then(AgentAuthFailures::default),
+            tunnel_failures: limiter.then(TunnelDeviceFailures::default),
             keys,
             local_route,
             listen: None,
@@ -460,22 +539,36 @@ impl Listener {
     }
 
     fn counts(&self) -> bool {
-        self.failures.is_some() || self.agent_failures.is_some()
+        self.failures.is_some() || self.agent_failures.is_some() || self.tunnel_failures.is_some()
+    }
+
+    /// The serial of the Connect tunnel stream that `request` came through, when the
+    /// front of this process pumps it.
+    fn tunnel_serial(&self, request: &Request) -> Option<u64> {
+        match (request.remote_addr(), self.listen) {
+            (Some(remote), Some(listen)) => {
+                apassy::net::front_peers::tunnel_stream(*remote, listen).map(|stream| stream.serial)
+            }
+            _ => None,
+        }
     }
 
     /// True when `request` came through a stream of the Connect tunnel that the front of
     /// this process pumps.
     fn via_tunnel(&self, request: &Request) -> bool {
-        match (request.remote_addr(), self.listen) {
-            (Some(remote), Some(listen)) => apassy::net::front_peers::is_tunnel(*remote, listen),
-            _ => false,
-        }
+        self.tunnel_serial(request).is_some()
     }
 
     /// The failed-auth count of `request` to `path`.
     fn counted(&self, request: &Request, path: &str) -> Counted {
-        if self.via_tunnel(request) {
-            return Counted::Tunnel;
+        if let Some(serial) = self.tunnel_serial(request) {
+            // A `device` stream reaches the tailnet listener; a `public` stream the public
+            // listener (docs/SPEC.md section 35.3).
+            return if matches!(self.scope, Scope::Tailnet { .. }) {
+                Counted::TunnelDevice(serial)
+            } else {
+                Counted::Tunnel
+            };
         }
         let FailureKeys::PerPeer(listen) = self.keys else {
             let forwarded = header_value(request, "X-Forwarded-For");
@@ -507,6 +600,11 @@ impl Listener {
                 }
             }
             Counted::Tunnel => {}
+            Counted::TunnelDevice(serial) => {
+                if let Some(failures) = &self.tunnel_failures {
+                    failures.record(serial, now);
+                }
+            }
         }
     }
 
@@ -525,7 +623,19 @@ impl Listener {
                 .as_ref()
                 .is_some_and(|failures| failures.limited(source, now)),
             Counted::Tunnel => false,
+            Counted::TunnelDevice(serial) => self
+                .tunnel_failures
+                .as_ref()
+                .is_some_and(|failures| failures.limited(serial, now).is_some()),
         }
+    }
+
+    /// The window of a tunnel `device` stream that holds `counted` at 429, for the audit.
+    fn tunnel_limit(&self, counted: Counted, now: u64) -> Option<TunnelLimit> {
+        let Counted::TunnelDevice(serial) = counted else {
+            return None;
+        };
+        self.tunnel_failures.as_ref()?.limited(serial, now)
     }
 
     /// The kind of the audit row of a listener (or one of its peers) at its limit.
@@ -1461,6 +1571,9 @@ fn respond_auth_limited(
     });
     if let Counted::Peer(peer) = counted {
         detail["peer"] = json!(peer.to_string());
+    }
+    if listener.tunnel_limit(counted, now) == Some(TunnelLimit::Node) {
+        detail["bucket"] = json!("tunnel_node");
     }
     if listener.local_route {
         detail["listener"] = json!("local_route");
@@ -3656,6 +3769,58 @@ mod tests {
     }
 
     #[test]
+    fn a_tunnel_device_stream_counts_alone_and_with_every_stream_of_the_node() {
+        let failures = TunnelDeviceFailures::default();
+        let start = 20_000;
+        for n in 0..TUNNEL_STREAM_FAILURES_MAX {
+            assert_eq!(failures.limited(1, start), None, "{n}");
+            failures.record(1, start);
+        }
+        // Stream 1 is held; stream 2 (another dial) is not.
+        assert_eq!(failures.limited(1, start + 1), Some(TunnelLimit::Stream));
+        assert_eq!(failures.limited(2, start + 1), None);
+        // The window of a stream ends like every window.
+        assert_eq!(failures.limited(1, start + AUTH_FAILURE_WINDOW_SECS), None);
+        // Every stream together: at the node's count every stream is held, also a new one.
+        let failures = TunnelDeviceFailures::default();
+        let streams = u64::from(TUNNEL_DEVICE_FAILURES_MAX / TUNNEL_STREAM_FAILURES_MAX);
+        for serial in 0..streams {
+            for _ in 0..TUNNEL_STREAM_FAILURES_MAX {
+                failures.record(serial + 100, start);
+            }
+        }
+        assert_eq!(failures.limited(99_999, start + 1), Some(TunnelLimit::Node));
+        assert_eq!(
+            failures.limited(99_999, start + AUTH_FAILURE_WINDOW_SECS),
+            None
+        );
+    }
+
+    #[test]
+    fn a_full_stream_table_still_counts_for_the_node() {
+        let failures = TunnelDeviceFailures::default();
+        let start = 30_000;
+        for serial in 0..AUTH_SOURCES_MAX as u64 {
+            failures.record(serial, start);
+        }
+        // A further stream has no window of its own, but its failures count for the node.
+        let late = AUTH_SOURCES_MAX as u64 + 1;
+        for _ in 0..TUNNEL_STREAM_FAILURES_MAX {
+            failures.record(late, start);
+        }
+        assert!(!failures.state.lock().unwrap().streams.contains_key(&late));
+        assert_eq!(
+            failures.state.lock().unwrap().node.count,
+            AUTH_SOURCES_MAX as u32 + TUNNEL_STREAM_FAILURES_MAX
+        );
+        // That many failures are far above the node's count: every stream is held.
+        assert_eq!(failures.limited(late, start), Some(TunnelLimit::Node));
+        // When the windows of the table end, the late stream gets one.
+        failures.record(late, start + AUTH_FAILURE_WINDOW_SECS);
+        assert!(failures.state.lock().unwrap().streams.contains_key(&late));
+    }
+
+    #[test]
     fn only_mcp_and_the_proxy_count_by_source() {
         let forwarded = Some("203.0.113.9");
         let source = Source::from_forwarded(forwarded);
@@ -3670,6 +3835,7 @@ mod tests {
         assert_eq!(Counted::Agent(source).bucket(), "source");
         assert_eq!(Counted::Listener.bucket(), "listener");
         assert_eq!(Counted::Peer(WHOLE_LISTENER).bucket(), "peer");
+        assert_eq!(Counted::TunnelDevice(7).bucket(), "tunnel_stream");
     }
 
     /// N8-1: the keys of the tailnet listener (its peers) have windows of their own, and

@@ -189,6 +189,11 @@ pub struct Limits {
     pub max_nodes: usize,
     /// All open streams of this broker.
     pub max_streams: usize,
+    /// The share of [`Limits::max_streams`], in percent, that the public and ACME streams
+    /// of all nodes may hold together ([`Limits::ingress_cap`]): the rest stays for the
+    /// dials, so the ingress of many nodes together never takes every stream of the
+    /// broker.
+    pub ingress_share_percent: u64,
     /// How often the maintenance thread looks at idle streams.
     pub tick: Duration,
 }
@@ -216,8 +221,20 @@ impl Default for Limits {
             close_grace: Duration::from_secs(10),
             max_nodes: 4096,
             max_streams: 4096,
+            ingress_share_percent: 50,
             tick: Duration::from_secs(1),
         }
+    }
+}
+
+impl Limits {
+    /// The public and ACME streams that the whole broker holds at once: the ingress share
+    /// of [`Limits::max_streams`], at least 1 and always fewer than all of them (default
+    /// 2048 of 4096). The dials keep at least `max_streams - ingress_cap`.
+    pub fn ingress_cap(&self) -> usize {
+        let share = u128::from(self.ingress_share_percent.min(90));
+        let cap = (self.max_streams as u128 * share / 100) as usize;
+        cap.clamp(1, self.max_streams.saturating_sub(1).max(1))
     }
 }
 
@@ -508,7 +525,10 @@ impl Account {
 #[derive(Default)]
 struct Accounts {
     by_id: HashMap<String, Account>,
+    /// Open streams of the broker, every class.
     open_total: usize,
+    /// Of them, the public and ACME streams (at most [`Limits::ingress_cap`]).
+    ingress_total: usize,
 }
 
 /// An open-stream slot of an account; released once, when its stream ends.
@@ -523,6 +543,9 @@ impl Drop for Slot {
         if let Some(inner) = self.inner.upgrade() {
             let mut accounts = lock(&inner.accounts);
             accounts.open_total = accounts.open_total.saturating_sub(1);
+            if self.class == Class::Ingress {
+                accounts.ingress_total = accounts.ingress_total.saturating_sub(1);
+            }
             if let Some(account) = accounts.by_id.get_mut(&self.account) {
                 match &self.class {
                     Class::Own => account.open = account.open.saturating_sub(1),
@@ -1451,6 +1474,7 @@ impl Inner {
         let limits = &self.limits;
         let mut accounts = lock(&self.accounts);
         let full = accounts.open_total >= limits.max_streams;
+        let ingress_full = accounts.ingress_total >= limits.ingress_cap();
         let account = accounts.by_id.entry(account_id.to_string()).or_default();
         account.roll(now);
         account.budget = budget;
@@ -1495,7 +1519,10 @@ impl Inner {
                 account.open += 1;
             }
             Class::Ingress => {
-                if full || account.ingress_open >= limits.ingress_streams || account.ingress_spent()
+                if full
+                    || ingress_full
+                    || account.ingress_open >= limits.ingress_streams
+                    || account.ingress_spent()
                 {
                     return Err(TunnelError::TUNNEL_LIMIT);
                 }
@@ -1503,6 +1530,9 @@ impl Inner {
             }
         }
         accounts.open_total += 1;
+        if *class == Class::Ingress {
+            accounts.ingress_total += 1;
+        }
         Ok(Slot {
             inner: Arc::downgrade(self),
             account: account_id.to_string(),

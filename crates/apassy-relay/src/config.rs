@@ -34,6 +34,7 @@
 //! | `APASSY_CONNECT_GRACE_DAYS` | Entitled days after the first failed payment, 1 to 60 | `14` |
 //! | `APASSY_CONNECT_READ_ONLY_DAYS` | Read-only days after the end of a plan, 1 to 365 | `30` |
 //! | `APASSY_CONNECT_DELETE_DAYS` | Days from the end of a plan to the deletion of its vault stores, above the read-only days, at most 730 | `90` |
+//! | `APASSY_CONNECT_AUTO_RAISE_SEATS` | `1`: the maintenance pass raises the quantity of a Family or Team plan at Stripe to its active members, with a proration (a charge without an action of the owner); `0`: the members beyond the paid quantity stay read-only until the owner raises the seats | `0` |
 //! | `APASSY_CONNECT_INGRESS_LISTEN` | With the account routes: the address of the SNI ingress of the tunnel (connect-tunnel-v1 section 7.1; hosted `0.0.0.0:443`) | none: no ingress |
 //! | `APASSY_CONNECT_ACME_LISTEN` | With the account routes: the address of the ACME HTTP-01 listener of the tunnel (section 7.2; hosted `0.0.0.0:80`) | none: no ACME listener |
 //! | `APASSY_CONNECT_NODE_ZONE` | The DNS zone of the nodes' public names (`<10 characters>.<zone>`) | `node.apassy.wyderka.cc` |
@@ -45,6 +46,15 @@
 //! | `APASSY_CONNECT_TUNNEL_IDLE_SECS` | A tunnel WebSocket with no message for this long closes, 10 to 3600 seconds and above the ping interval | `90` |
 //! | `APASSY_CONNECT_TUNNEL_STREAM_IDLE_SECS` | A stream with no byte for this long is reset, 60 to 86400 seconds | `900` |
 //! | `APASSY_CONNECT_TUNNEL_STREAM_BUFFER_KIB` | KiB buffered toward one client of a stream; over it the stream is reset, 64 to 16384 | `256` |
+//! | `APASSY_CONNECT_TUNNEL_GRANTEE_STREAMS` | Open dials of one other account (with a grant) to the nodes of one account, 1 to `APASSY_CONNECT_TUNNEL_GRANTEE_STREAMS_TOTAL` | `16`, at most the total |
+//! | `APASSY_CONNECT_TUNNEL_GRANTEE_STREAMS_TOTAL` | Open dials of all other accounts together to the nodes of one account, of its `APASSY_CONNECT_TUNNEL_STREAMS`; the rest stays for its own devices; 1 to `APASSY_CONNECT_TUNNEL_STREAMS` | `32`, at most half of the streams (at least 1) |
+//! | `APASSY_CONNECT_TUNNEL_GRANTEE_BYTES_PERCENT` | The share of an account's dial bytes that the dials of other accounts may spend together, 1 to 90 percent | `50` |
+//! | `APASSY_CONNECT_TUNNEL_INGRESS_STREAMS` | Open `public` and `acme` streams of one account, slots of their own apart from the dials, 1 to 4096 | `16` |
+//! | `APASSY_CONNECT_TUNNEL_INGRESS_PER_MINUTE` | New `public` and `acme` streams of one node in one minute (refused ones count), 1 to 6000 | `60` |
+//! | `APASSY_CONNECT_TUNNEL_INGRESS_FIRST_BYTE_SECS` | The node sends its first frame on a `public` or `acme` stream within this, else a reset, 1 to 120 seconds | `10` |
+//! | `APASSY_CONNECT_TUNNEL_INGRESS_GIB_PER_MONTH` | GiB of the `public` and `acme` streams of one account in one UTC month for each person or member, a budget apart from the dial bytes, 1 to 10240 | `5` |
+//! | `APASSY_CONNECT_TUNNEL_MAX_STREAMS` | Open streams of the whole broker (every account), 64 to 65536 | `4096` |
+//! | `APASSY_CONNECT_TUNNEL_INGRESS_SHARE_PERCENT` | The share of `APASSY_CONNECT_TUNNEL_MAX_STREAMS` that the `public` and `acme` streams of all nodes may hold together; the rest stays for device dials, 1 to 90 percent | `50` |
 //!
 //! Push needs all three push values; none of them turns it off. Some but not all is a
 //! configuration error, so a typo does not turn push off without a word.
@@ -663,6 +673,26 @@ pub struct TunnelSettings {
     pub stream_idle: Duration,
     /// Bytes buffered toward one client of a stream.
     pub stream_buffer: usize,
+    /// Open dials of one other account to the nodes of one account.
+    pub streams_per_grantee: usize,
+    /// Open dials of all other accounts together to the nodes of one account.
+    pub grantee_streams: usize,
+    /// The share of the dial budget, in percent, that other accounts may spend together.
+    pub grantee_bytes_percent: u64,
+    /// Open public and ACME streams of one account.
+    pub ingress_streams: usize,
+    /// New public and ACME streams of one node in one minute.
+    pub ingress_per_minute: u32,
+    /// The node's first frame on a public or ACME stream comes within this.
+    pub ingress_first_byte: Duration,
+    /// Bytes of the public and ACME streams of one account in one UTC month for each
+    /// person or member.
+    pub ingress_bytes_per_month: u64,
+    /// Open streams of the whole broker.
+    pub max_streams: usize,
+    /// The share of `max_streams`, in percent, that the public and ACME streams of all
+    /// nodes may hold together; the rest stays for device dials.
+    pub ingress_share_percent: u64,
 }
 
 impl Default for TunnelSettings {
@@ -680,6 +710,15 @@ impl Default for TunnelSettings {
             idle_timeout: Duration::from_secs(90),
             stream_idle: Duration::from_secs(15 * 60),
             stream_buffer: 256 * 1024,
+            streams_per_grantee: 16,
+            grantee_streams: 32,
+            grantee_bytes_percent: 50,
+            ingress_streams: 16,
+            ingress_per_minute: 60,
+            ingress_first_byte: Duration::from_secs(10),
+            ingress_bytes_per_month: 5 * 1024 * 1024 * 1024,
+            max_streams: 4096,
+            ingress_share_percent: 50,
         }
     }
 }
@@ -752,6 +791,66 @@ fn tunnel_from(lookup: &impl Fn(&str) -> Option<String>) -> RelayResult<TunnelSe
         64,
         16_384,
     )?;
+    // The other accounts' slots are of the account's own: by default at most half of them
+    // (contract section 8: 32 of 64, 16 for each), so that its own devices keep the rest.
+    let fitting_total = (streams_per_account / 2).clamp(1, 32) as u64;
+    let grantee_streams = number(
+        lookup,
+        "APASSY_CONNECT_TUNNEL_GRANTEE_STREAMS_TOTAL",
+        fitting_total,
+        1,
+        streams_per_account as u64,
+    )?;
+    let streams_per_grantee = number(
+        lookup,
+        "APASSY_CONNECT_TUNNEL_GRANTEE_STREAMS",
+        grantee_streams.min(16),
+        1,
+        grantee_streams,
+    )?;
+    let grantee_bytes_percent = number(
+        lookup,
+        "APASSY_CONNECT_TUNNEL_GRANTEE_BYTES_PERCENT",
+        50,
+        1,
+        90,
+    )?;
+    let ingress_streams = number(lookup, "APASSY_CONNECT_TUNNEL_INGRESS_STREAMS", 16, 1, 4096)?;
+    let ingress_per_minute = number(
+        lookup,
+        "APASSY_CONNECT_TUNNEL_INGRESS_PER_MINUTE",
+        60,
+        1,
+        6000,
+    )?;
+    let ingress_first_byte = number(
+        lookup,
+        "APASSY_CONNECT_TUNNEL_INGRESS_FIRST_BYTE_SECS",
+        10,
+        1,
+        120,
+    )?;
+    let ingress_gib = number(
+        lookup,
+        "APASSY_CONNECT_TUNNEL_INGRESS_GIB_PER_MONTH",
+        5,
+        1,
+        10_240,
+    )?;
+    let max_streams = number(
+        lookup,
+        "APASSY_CONNECT_TUNNEL_MAX_STREAMS",
+        4096,
+        64,
+        65_536,
+    )?;
+    let ingress_share_percent = number(
+        lookup,
+        "APASSY_CONNECT_TUNNEL_INGRESS_SHARE_PERCENT",
+        50,
+        1,
+        90,
+    )?;
     Ok(TunnelSettings {
         ingress_listen,
         acme_listen,
@@ -764,6 +863,15 @@ fn tunnel_from(lookup: &impl Fn(&str) -> Option<String>) -> RelayResult<TunnelSe
         idle_timeout: Duration::from_secs(idle),
         stream_idle: Duration::from_secs(stream_idle),
         stream_buffer: buffer_kib as usize * 1024,
+        streams_per_grantee: streams_per_grantee as usize,
+        grantee_streams: grantee_streams as usize,
+        grantee_bytes_percent,
+        ingress_streams: ingress_streams as usize,
+        ingress_per_minute: ingress_per_minute as u32,
+        ingress_first_byte: Duration::from_secs(ingress_first_byte),
+        ingress_bytes_per_month: ingress_gib * 1024 * 1024 * 1024,
+        max_streams: max_streams as usize,
+        ingress_share_percent,
     })
 }
 
@@ -2251,6 +2359,120 @@ mod tests {
         assert_eq!(set.idle_timeout, Duration::from_secs(40));
         assert_eq!(set.stream_idle, Duration::from_secs(120));
         assert_eq!(set.stream_buffer, 64 * 1024);
+        // Unset, the other accounts' slots fit the smaller account limit: half of 16.
+        assert_eq!((set.grantee_streams, set.streams_per_grantee), (8, 8));
+        assert_eq!(
+            (
+                none.streams_per_grantee,
+                none.grantee_streams,
+                none.grantee_bytes_percent
+            ),
+            (16, 32, 50)
+        );
+        assert_eq!(
+            (
+                none.ingress_streams,
+                none.ingress_per_minute,
+                none.ingress_first_byte,
+                none.ingress_bytes_per_month
+            ),
+            (16, 60, Duration::from_secs(10), 5 * 1024 * 1024 * 1024)
+        );
+        assert_eq!((none.max_streams, none.ingress_share_percent), (4096, 50));
+        let one = with(&[("APASSY_CONNECT_TUNNEL_STREAMS", "1")]).unwrap();
+        assert_eq!((one.grantee_streams, one.streams_per_grantee), (1, 1));
+        let others = with(&[
+            ("APASSY_CONNECT_TUNNEL_GRANTEE_STREAMS", "4"),
+            ("APASSY_CONNECT_TUNNEL_GRANTEE_STREAMS_TOTAL", "12"),
+            ("APASSY_CONNECT_TUNNEL_GRANTEE_BYTES_PERCENT", "25"),
+            ("APASSY_CONNECT_TUNNEL_INGRESS_STREAMS", "8"),
+            ("APASSY_CONNECT_TUNNEL_INGRESS_PER_MINUTE", "30"),
+            ("APASSY_CONNECT_TUNNEL_INGRESS_FIRST_BYTE_SECS", "5"),
+            ("APASSY_CONNECT_TUNNEL_INGRESS_GIB_PER_MONTH", "2"),
+            ("APASSY_CONNECT_TUNNEL_MAX_STREAMS", "1000"),
+            ("APASSY_CONNECT_TUNNEL_INGRESS_SHARE_PERCENT", "20"),
+        ])
+        .unwrap();
+        assert_eq!(
+            (
+                others.streams_per_grantee,
+                others.grantee_streams,
+                others.grantee_bytes_percent
+            ),
+            (4, 12, 25)
+        );
+        assert_eq!(
+            (
+                others.ingress_streams,
+                others.ingress_per_minute,
+                others.ingress_first_byte,
+                others.ingress_bytes_per_month
+            ),
+            (8, 30, Duration::from_secs(5), 2 * 1024 * 1024 * 1024)
+        );
+        assert_eq!(
+            (others.max_streams, others.ingress_share_percent),
+            (1000, 20)
+        );
+        let limits = crate::server::tunnel_routes::limits_of(&others);
+        assert_eq!(
+            (
+                limits.streams_per_grantee,
+                limits.grantee_streams,
+                limits.grantee_bytes_percent,
+                limits.ingress_streams,
+                limits.ingress_per_minute,
+                limits.ingress_first_byte,
+                limits.ingress_bytes_per_month,
+                limits.max_streams,
+                limits.ingress_share_percent,
+            ),
+            (
+                4,
+                12,
+                25,
+                8,
+                30,
+                Duration::from_secs(5),
+                2 * 1024 * 1024 * 1024,
+                1000,
+                20
+            )
+        );
+        // A total above the account's streams, or one other account above the total.
+        assert!(
+            with(&[
+                ("APASSY_CONNECT_TUNNEL_STREAMS", "16"),
+                ("APASSY_CONNECT_TUNNEL_GRANTEE_STREAMS_TOTAL", "17"),
+            ])
+            .is_err()
+        );
+        assert!(
+            with(&[
+                ("APASSY_CONNECT_TUNNEL_GRANTEE_STREAMS_TOTAL", "8"),
+                ("APASSY_CONNECT_TUNNEL_GRANTEE_STREAMS", "9"),
+            ])
+            .is_err()
+        );
+        for bad in [
+            ("APASSY_CONNECT_TUNNEL_GRANTEE_STREAMS", "0"),
+            ("APASSY_CONNECT_TUNNEL_GRANTEE_STREAMS_TOTAL", "0"),
+            ("APASSY_CONNECT_TUNNEL_GRANTEE_BYTES_PERCENT", "0"),
+            ("APASSY_CONNECT_TUNNEL_GRANTEE_BYTES_PERCENT", "91"),
+            ("APASSY_CONNECT_TUNNEL_INGRESS_STREAMS", "0"),
+            ("APASSY_CONNECT_TUNNEL_INGRESS_STREAMS", "4097"),
+            ("APASSY_CONNECT_TUNNEL_INGRESS_PER_MINUTE", "0"),
+            ("APASSY_CONNECT_TUNNEL_INGRESS_FIRST_BYTE_SECS", "0"),
+            ("APASSY_CONNECT_TUNNEL_INGRESS_FIRST_BYTE_SECS", "121"),
+            ("APASSY_CONNECT_TUNNEL_INGRESS_GIB_PER_MONTH", "0"),
+            ("APASSY_CONNECT_TUNNEL_MAX_STREAMS", "63"),
+            ("APASSY_CONNECT_TUNNEL_MAX_STREAMS", "65537"),
+            ("APASSY_CONNECT_TUNNEL_INGRESS_SHARE_PERCENT", "0"),
+            ("APASSY_CONNECT_TUNNEL_INGRESS_SHARE_PERCENT", "91"),
+            ("APASSY_CONNECT_TUNNEL_INGRESS_SHARE_PERCENT", "x"),
+        ] {
+            assert!(with(&[bad]).is_err(), "{bad:?}");
+        }
         for bad in [
             ("APASSY_CONNECT_INGRESS_LISTEN", "443"),
             ("APASSY_CONNECT_ACME_LISTEN", "localhost:80"),
