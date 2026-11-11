@@ -136,6 +136,9 @@ pub mod codes {
     /// A signed sign-in of a key that was a device of the account and is not any more
     /// (revoked, or the account was deleted). Only the device's own signature gets it.
     pub const DEVICE_REMOVED: &str = "device_removed";
+    /// An account creation names an account id that Connect holds or held: an id is used
+    /// once, also after its account was deleted. The device makes a new id.
+    pub const ACCOUNT_ID_TAKEN: &str = "account_id_taken";
     // Connect billing and groups (docs/contracts/connect-billing-v1.md).
     /// A count of people or seats outside `1 ≤ n ≤ max` of the plan, or below the
     /// active members of the group.
@@ -193,7 +196,7 @@ pub fn status_of(code: &str) -> u16 {
         METHOD_NOT_ALLOWED => 405,
         CONFLICT | RUN_NOT_PENDING | QUESTION_SETTLED | QUESTION_EXPIRED | PUSH_UNAVAILABLE
         | PUSH_GATEWAY_REFUSED | CONNECT_KEY_USED | SEQ_NOT_NEWER | ACTION_SETTLED
-        | ACTION_EXPIRED | SEAT_LIMIT => 409,
+        | ACTION_EXPIRED | SEAT_LIMIT | ACCOUNT_ID_TAKEN => 409,
         TEAM_VAULTS_RETIRED | FREE_CONNECT_ENDED | HOSTED_RETIRED => 410,
         PRECONDITION_FAILED => 412,
         PAYLOAD_TOO_LARGE => 413,

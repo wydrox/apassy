@@ -507,6 +507,7 @@ fn add_device(c: &Connect, a: &Dev, token: &str, name: &str) -> Dev {
             &a.account,
             &hash,
             &public_key,
+            name,
         ))
         .unwrap();
     let joined = c.ok(

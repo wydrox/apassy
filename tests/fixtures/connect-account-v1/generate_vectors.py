@@ -166,7 +166,9 @@ def main():
 
         create = join("apassy-connect account v1", ORIGIN, a64, rec64)
         sign_in = join("apassy-connect sign-in v1", ORIGIN, ACCOUNT, a64, nonce)
-        join_msg = join("apassy-connect join v1", ORIGIN, ACCOUNT, link_hash, b64)
+        # The join signs the device name in its canonical form: the confirming device signs
+        # that name into the device list only when this signature verifies.
+        join_msg = join("apassy-connect join v1", ORIGIN, ACCOUNT, link_hash, b64, NAME_B)
         cancel = join("apassy-connect join-cancel v1", ORIGIN, ACCOUNT, link_hash, b64)
         # The signed device list: A is the root (version 1, signed by A over its own name),
         # A adds B with B's name (2), A removes B (3). Each entry signs the device name of a

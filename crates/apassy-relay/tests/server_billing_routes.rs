@@ -519,6 +519,69 @@ fn deleting_the_account_cancels_the_subscription_at_once_and_keeps_the_customer(
     );
 }
 
+/// An account id is used once: after the account paid and was deleted, its Stripe
+/// customer stays for the invoices, and the id is refused to another key (`409
+/// account_id_taken`, told apart from the `409 conflict` of a used key). The other key's
+/// own account sees no customer and no plan of the deleted one.
+#[test]
+fn a_deleted_account_id_is_never_made_again_and_its_customer_stays_unreachable() {
+    let c = start();
+    let a = c.account("Rafal");
+    let subscription = c.subscribe(&a, "connect_personal_month", 1);
+    let customer = c.customer_of(&a);
+    assert_eq!(c.plan(&a)["status"], "active");
+    c.ok("DELETE", "/v1/account", Some(&a.token), Some(&json!({})));
+    assert!(c.rows("SELECT id FROM account").is_empty());
+    // The same id with another key: refused, and nothing is made.
+    let key = apassy_relay::device::DeviceKey::generate().unwrap();
+    let refused = c
+        .try_account("Mallory", &a.account, key)
+        .err()
+        .expect("refused");
+    assert_eq!(
+        (refused.0, refused.1["error"]["code"].as_str()),
+        (409, Some("account_id_taken")),
+        "{}",
+        refused.1
+    );
+    assert!(c.rows("SELECT id FROM account").is_empty());
+    // Another account, under a new id, has no plan, no customer, and no portal of the
+    // deleted account.
+    let b = c.account("Mallory");
+    assert_ne!(b.account, a.account);
+    assert_eq!(c.plan(&b)["status"], "none");
+    assert_eq!(c.plan(&b)["entitled"], false);
+    c.fails(
+        "POST",
+        "/v1/account/portal",
+        Some(&b.token),
+        Some(&json!({})),
+        404,
+        "not_found",
+    );
+    // The deleted account's customer and subscription stay under its own id only.
+    assert_eq!(
+        c.rows(&format!(
+            "SELECT customer_id FROM stripe_customer WHERE account_id = '{}'",
+            a.account
+        )),
+        [customer]
+    );
+    assert!(
+        c.rows(&format!(
+            "SELECT subscription_id FROM stripe_subscription WHERE account_id = '{}'",
+            b.account
+        ))
+        .is_empty()
+    );
+    assert_eq!(
+        c.rows(&format!(
+            "SELECT account_id FROM stripe_subscription WHERE subscription_id = '{subscription}'"
+        )),
+        [a.account.clone()]
+    );
+}
+
 #[test]
 fn without_stripe_files_the_billing_routes_are_busy_and_no_account_has_a_plan() {
     let c = start_with_config(|cfg| cfg.connect.billing = None);

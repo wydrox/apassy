@@ -287,6 +287,7 @@ fn the_iphone_joins_with_its_own_key_and_the_mac_confirms() {
         &mac.id(),
         &apassy::connect::link_hash(link.code()),
         body["public_key"].as_str().unwrap(),
+        "Synthetic iPhone",
     );
     let signature = decode_b64u(body["signature"].as_str().unwrap()).unwrap();
     assert!(verify_signature(&key, &message, &signature));

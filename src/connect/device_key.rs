@@ -113,14 +113,24 @@ pub fn sign_in_message(
     joined(&[SIGN_IN_TAG, origin, account_id, public_key_b64u, nonce_b64u])
 }
 
-/// The `apassy-connect join v1` message.
+/// The `apassy-connect join v1` message: it names the device name in its canonical form
+/// (`super::trust::canonical_name`), so the confirming device signs that name into the
+/// device list only when this signature verifies.
 pub fn join_message(
     origin: &str,
     account_id: &str,
     link_hash: &str,
     public_key_b64u: &str,
+    device_name: &str,
 ) -> Vec<u8> {
-    joined(&[JOIN_TAG, origin, account_id, link_hash, public_key_b64u])
+    joined(&[
+        JOIN_TAG,
+        origin,
+        account_id,
+        link_hash,
+        public_key_b64u,
+        device_name,
+    ])
 }
 
 /// The `apassy-connect join-cancel v1` message.
@@ -481,18 +491,21 @@ impl AccountSigner {
         ))
     }
 
-    /// The signature of `POST /v1/account/devices/join`.
+    /// The signature of `POST /v1/account/devices/join`, over the canonical
+    /// `device_name`.
     pub fn sign_join(
         &self,
         origin: &str,
         account_id: &str,
         link_hash: &str,
+        device_name: &str,
     ) -> Result<Vec<u8>, ConnectError> {
         self.sign(&join_message(
             origin,
             account_id,
             link_hash,
             &self.public_key_b64u(),
+            device_name,
         ))
     }
 
@@ -667,7 +680,7 @@ mod tests {
         for signature in [
             signer.sign_account(origin, recovery).unwrap(),
             signer.sign_sign_in(origin, account, nonce).unwrap(),
-            signer.sign_join(origin, account, "K6tgKp").unwrap(),
+            signer.sign_join(origin, account, "K6tgKp", "Synthetic").unwrap(),
             signer.sign_join_cancel(origin, account, "K6tgKp").unwrap(),
             signer
                 .sign_list_entry(

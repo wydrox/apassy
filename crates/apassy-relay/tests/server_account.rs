@@ -341,12 +341,14 @@ fn link_code(account: &str) -> String {
 
 fn join_body(c: &Connect, account: &str, link_hash: &str, key: &DeviceKey, name: &str) -> Value {
     let public_key = key.public_key_b64();
+    // The signature covers the name in its canonical form (trimmed).
     let signature = key
         .sign(&device::account_join_message(
             c.origin(),
             account,
             link_hash,
             &public_key,
+            device::canonical_name(name).unwrap_or(name),
         ))
         .unwrap();
     json!({"account_id": account, "link_hash": link_hash, "device_name": name,
@@ -738,17 +740,34 @@ fn an_account_needs_a_valid_signature_and_one_key_makes_one_account() {
     let account = made["account_id"].as_str().unwrap();
     // The account has the id that the device made.
     assert_eq!(account, account_id);
-    // A retry of the same body (a lost answer) answers the same result.
+    // A retry of the same body (a lost answer) answers the same result, also long after
+    // the first answer (a device that kept its pending creation across a restart).
     assert_eq!(c.ok("POST", "/v1/account", None, Some(&body)), made);
+    c.edit_directory(&format!(
+        "UPDATE account SET created_at = created_at - 86400 WHERE id = '{account}'"
+    ));
+    let later = c.ok("POST", "/v1/account", None, Some(&body));
+    assert_eq!(
+        (&later["account_id"], &later["device_id"]),
+        (&made["account_id"], &made["device_id"])
+    );
     // The same key with another body is a conflict, and makes nothing.
     let other = account_body(&c, &key, &[2u8; 16]);
     c.fails("POST", "/v1/account", None, Some(&other), 409, "conflict");
-    // Another key with an id that exists: 409, nothing made (the device makes a new id).
+    // Another key with an id that exists: 409 `account_id_taken`, told apart from the
+    // conflict of a used key, and nothing made (the device makes a new id).
     let taken_key = DeviceKey::generate().unwrap();
     let mut taken = account_body(&c, &taken_key, &[2u8; 16]);
     taken["account_id"] = json!(account);
     taken["statement"] = json!(root_statement(&c, account, &taken_key, "MacBook Pro"));
-    c.fails("POST", "/v1/account", None, Some(&taken), 409, "conflict");
+    c.fails(
+        "POST",
+        "/v1/account",
+        None,
+        Some(&taken),
+        409,
+        "account_id_taken",
+    );
     assert_eq!(
         c.directory_rows("SELECT id FROM account"),
         [account.to_string()]
@@ -1099,6 +1118,41 @@ fn a_join_needs_the_confirmation_of_a_live_device_and_both_sides_show_the_same_w
         Some(&json!({"link_hash": hash})),
     );
     let b = DeviceKey::generate().unwrap();
+    // The join signs the device name: a signature over another name, or over a name that is
+    // not canonical (untrimmed), is 400, and the link stays usable.
+    let mut other_name = join_body(&c, &a.account, &hash, &b, "iPad");
+    other_name["signature"] = join_body(&c, &a.account, &hash, &b, "iPad Pro")["signature"].clone();
+    let mut untrimmed = join_body(&c, &a.account, &hash, &b, "iPad");
+    untrimmed["device_name"] = json!("  iPad ");
+    untrimmed["signature"] = json!(encode_b64(
+        &b.sign(&device::account_join_message(
+            c.origin(),
+            &a.account,
+            &hash,
+            &b.public_key_b64(),
+            "  iPad "
+        ))
+        .unwrap()
+    ));
+    for bad in [&other_name, &untrimmed] {
+        c.fails(
+            "POST",
+            "/v1/account/devices/join",
+            None,
+            Some(bad),
+            400,
+            "invalid_request",
+        );
+    }
+    // The placeholder `-` is never a name.
+    c.fails(
+        "POST",
+        "/v1/account/devices/join",
+        None,
+        Some(&join_body(&c, &a.account, &hash, &b, "-")),
+        400,
+        "invalid_request",
+    );
     let joined = c.ok(
         "POST",
         "/v1/account/devices/join",
@@ -1119,6 +1173,32 @@ fn a_join_needs_the_confirmation_of_a_live_device_and_both_sides_show_the_same_w
     let pending = c.ok("GET", "/v1/account/devices/pending", Some(&token), None);
     assert_eq!(pending.as_array().unwrap().len(), 1);
     let joiner_key = decode_b64(pending[0]["public_key"].as_str().unwrap(), 65).unwrap();
+    // The pending join carries the joiner's signature over its name: the confirming device
+    // checks it before it shows or signs the name.
+    assert_eq!(pending[0]["device_name"], "iPad");
+    let join_signature = decode_b64(pending[0]["signature"].as_str().unwrap(), 72).unwrap();
+    assert!(device::verify(
+        &joiner_key,
+        &device::account_join_message(
+            c.origin(),
+            &a.account,
+            &hash,
+            pending[0]["public_key"].as_str().unwrap(),
+            "iPad"
+        ),
+        &join_signature
+    ));
+    assert!(!device::verify(
+        &joiner_key,
+        &device::account_join_message(
+            c.origin(),
+            &a.account,
+            &hash,
+            pending[0]["public_key"].as_str().unwrap(),
+            "iPad Pro"
+        ),
+        &join_signature
+    ));
     assert_eq!(
         device::account_safety_words(&a.account, &code, &confirmer_key, &b.public_key()),
         device::account_safety_words(&a.account, &code, &a.key.public_key(), &joiner_key)
@@ -1177,7 +1257,8 @@ fn a_join_needs_the_confirmation_of_a_live_device_and_both_sides_show_the_same_w
                 c.origin(),
                 &a.account,
                 &hash,
-                &b.public_key_b64()
+                &b.public_key_b64(),
+                "iPad"
             ))
             .unwrap()
     ));
@@ -2813,6 +2894,52 @@ fn new_accounts_have_the_relay_caps_and_a_cap_for_each_proven_prefix() {
         assert_eq!(create_from(&c, Some("192.0.2.0/24"), &body).0, 200);
     }
     assert_eq!(c.directory_rows("SELECT id FROM account").len(), 7);
+    // Every try that is not a repeat counts for its prefix, whatever the answer: an id
+    // that is taken, a key that is used, a body that is refused.
+    let c = start();
+    let prefix = Some("198.51.100.0/24");
+    let first_key = DeviceKey::generate().unwrap();
+    let first = account_body(&c, &first_key, &[1u8; 16]);
+    let first_id = first["account_id"].as_str().unwrap().to_string();
+    assert_eq!(create_from(&c, prefix, &first).0, 200);
+    let taken = |c: &Connect| {
+        let key = DeviceKey::generate().unwrap();
+        let mut body = account_body(c, &key, &[2u8; 16]);
+        body["account_id"] = json!(first_id);
+        body["statement"] = json!(root_statement(c, &first_id, &key, "MacBook Pro"));
+        body
+    };
+    let mut refused = new_body(&c);
+    refused.as_object_mut().unwrap().remove("statement");
+    let answers: Vec<(u16, Option<String>)> = [
+        taken(&c),
+        account_body(&c, &first_key, &[3u8; 16]),
+        refused,
+        taken(&c),
+    ]
+    .iter()
+    .map(|body| {
+        let (status, code, _) = create_from(&c, prefix, body);
+        (status, code)
+    })
+    .collect();
+    assert_eq!(
+        answers,
+        [
+            (409, Some("account_id_taken".to_string())),
+            (409, Some("conflict".to_string())),
+            (400, Some("invalid_request".to_string())),
+            (409, Some("account_id_taken".to_string())),
+        ]
+    );
+    let (status, code, _) = create_from(&c, prefix, &new_body(&c));
+    assert_eq!((status, code.as_deref()), (429, Some("rate_limited")));
+    // A repeat of a creation is no new try: it still answers.
+    assert_eq!(create_from(&c, prefix, &first).0, 200);
+    assert_eq!(
+        c.directory_rows("SELECT id FROM account"),
+        [first_id.clone()]
+    );
     // The day's cap of the relay: 503 busy for an hour.
     let c = connect_with(|cfg| {
         accounts_on(cfg);
@@ -3766,4 +3893,93 @@ fn the_app_client_works_against_the_relay() {
     let (deleted, _) = account.delete(&a.store, owner, &epoch).expect("delete");
     assert_eq!(deleted.deleted_stores, 0);
     assert!(c.directory_rows("SELECT id FROM account").is_empty());
+}
+
+/// Names end to end, between the real app client and this relay: one canonical form on
+/// both sides. A non-ASCII name of exactly 64 bytes, sent untrimmed, is kept and signed
+/// trimmed by the creation and by the join, the confirming device signs the name that the
+/// joining device signed, and both devices see that name in the signed device list; `-`
+/// and a name of 65 bytes are refused before anything is sent.
+#[test]
+fn names_have_one_canonical_form_from_the_app_to_the_device_list() {
+    use apassy::broker::approvals::{OwnerCheck, OwnerGate};
+    use apassy::connect::{ConnectAccount, ConnectClient, ConnectError, JoinPoll, JoinRequest};
+
+    let c = connect_with(|cfg| {
+        accounts_on(cfg);
+        cfg.edge = EdgeMode::Off;
+    });
+    let vault_dir = tempfile::tempdir().unwrap();
+    let mut vault = apassy::vault::Vault::create(&vault_dir.path().join("owner.db"), PASS).unwrap();
+    vault.unlock(PASS).unwrap();
+    let shared: apassy::broker::SharedVault = Arc::new(Mutex::new(Some(vault)));
+    let gate = OwnerGate::new(Arc::clone(&shared), None);
+    let client = || ConnectClient::new(&c.relay.url).unwrap();
+
+    // 64 bytes with non-ASCII characters; 65 bytes is one too many.
+    let mac_name = format!("Zoë’s Mac {}", "m".repeat(64 - "Zoë’s Mac ".len()));
+    assert_eq!(mac_name.len(), 64);
+    let phone_name = "Zoë’s iPhone";
+    let (a, b, d) = (app_device(), app_device(), app_device());
+    for bad in ["-".to_string(), format!("{mac_name}x")] {
+        assert_eq!(
+            ConnectAccount::create(client(), &d.store, &d.path, "Zoë", &bad).unwrap_err(),
+            ConnectError::Invalid
+        );
+    }
+    assert!(c.directory_rows("SELECT id FROM account").is_empty());
+    let (mut account, _) = ConnectAccount::create(
+        client(),
+        &a.store,
+        &a.path,
+        " Zoë ",
+        &format!("  {mac_name}\t"),
+    )
+    .expect("create");
+    let account_id = account.state().account_id.clone();
+    assert_eq!(account.state().device_name, mac_name);
+    assert_eq!(
+        c.directory_rows("SELECT name FROM account_device"),
+        [mac_name.clone()]
+    );
+
+    let link = account.start_link().expect("link");
+    let mut request = JoinRequest::start(
+        client(),
+        &b.store,
+        &b.path,
+        link.code(),
+        &format!(" {phone_name} "),
+    )
+    .expect("join");
+    assert!(matches!(request.poll().expect("poll"), JoinPoll::Waiting));
+    let pending = account.pending_joins(&link).expect("pending");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].device_name, phone_name);
+    let owner = gate
+        .authorize(
+            pending[0].owner_action(&account_id),
+            OwnerCheck::passphrase(PASS),
+        )
+        .unwrap();
+    let epoch = shared.lock().unwrap().as_ref().unwrap().epoch();
+    account
+        .confirm_join(&link, &pending[0], owner, &epoch)
+        .expect("confirm");
+    let mut phone = match request.poll().expect("poll") {
+        JoinPoll::Confirmed(joined) => *joined,
+        other => panic!("not confirmed: {other:?}"),
+    };
+    assert_eq!(phone.state().device_name, phone_name);
+    // The signed list names each device with its canonical name, on both devices.
+    for device in [&mut account, &mut phone] {
+        let view = device.view().expect("view");
+        let names: Vec<Option<&str>> = view
+            .device_list
+            .iter()
+            .map(|entry| entry.name.as_deref())
+            .collect();
+        assert_eq!(names, [Some(mac_name.as_str()), Some(phone_name)]);
+        assert!(view.devices.iter().all(|row| row.verified));
+    }
 }

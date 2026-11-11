@@ -81,6 +81,9 @@ ALTER TABLE team_code ADD COLUMN kind TEXT NOT NULL DEFAULT 'operator' CHECK (ki
 ///   and `account_id`, `vault_id`. SQLite cannot widen a CHECK in place, so the table is
 ///   rebuilt with the same rows; the index `team_legacy` is made again.
 /// - `account` (with the public recovery key and the last recovery, for its retry),
+///   `account_id_used` (every account id that an account ever had, written with the
+///   account and never deleted: an id is used once, so no later account meets the
+///   billing, tunnel, or key rows of an earlier one),
 ///   `account_device` (with the device that added it, `added_by`; none for a root),
 ///   `account_list` (the signed device list of each account: one row for each entry,
 ///   from the root at version 1, with the device name it signs and its signature; a
@@ -119,6 +122,7 @@ CREATE TABLE account (
   recovery_key BLOB NOT NULL, create_hash BLOB NOT NULL, email TEXT, group_id TEXT,
   recover_hash BLOB, recovered_at INTEGER, recover_device TEXT, recover_deleted INTEGER);
 CREATE INDEX account_created ON account(created_at);
+CREATE TABLE account_id_used (id TEXT PRIMARY KEY, created_at INTEGER NOT NULL);
 CREATE TABLE account_device (
   id TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES account(id) ON DELETE CASCADE,
   name TEXT NOT NULL, platform TEXT NOT NULL CHECK (platform IN ('mac','iphone','linux')),
@@ -147,7 +151,7 @@ CREATE TABLE account_join (
   id INTEGER PRIMARY KEY, link_id INTEGER NOT NULL REFERENCES account_link(id) ON DELETE CASCADE,
   account_id TEXT NOT NULL REFERENCES account(id) ON DELETE CASCADE,
   name TEXT NOT NULL, platform TEXT NOT NULL CHECK (platform IN ('mac','iphone','linux')),
-  public_key BLOB NOT NULL, body_hash BLOB NOT NULL UNIQUE,
+  public_key BLOB NOT NULL, signature BLOB NOT NULL, body_hash BLOB NOT NULL UNIQUE,
   state TEXT NOT NULL CHECK (state IN ('pending','confirmed','refused','cancelled','expired')),
   created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, decided_at INTEGER,
   device_id TEXT);
@@ -353,14 +357,25 @@ fn migrate_accounts(conn: &Connection) -> RelayResult<()> {
 }
 
 /// The tables of the accounts step from an earlier, unreleased build of it (no
-/// `account_list.name`: the device lists whose entries sign no device name): this build
-/// does not read them, and does not change them.
+/// `account_list.name`: the device lists whose entries sign no device name; no
+/// `account_id_used`; no `account_join.signature`): this build does not read them, and
+/// does not change them.
 fn refuse_earlier_accounts_step(conn: &Connection) -> RelayResult<()> {
-    if crate::server::store::has_column(conn, "account_list", "name")? {
+    let used: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'account_id_used')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(db)?;
+    if used
+        && crate::server::store::has_column(conn, "account_list", "name")?
+        && crate::server::store::has_column(conn, "account_join", "signature")?
+    {
         return Ok(());
     }
     Err(RelayError::internal(
-        "relay.db holds the accounts tables of an earlier, unreleased build of directory 1006 (no account_list.name). This build cannot open it: restore relay.db from the backup taken before that build, or start that build's image again.",
+        "relay.db holds the accounts tables of an earlier, unreleased build of directory 1006 (no account_list.name, account_id_used, or account_join.signature). This build cannot open it: restore relay.db from the backup taken before that build, or start that build's image again.",
     ))
 }
 

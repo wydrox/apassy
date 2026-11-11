@@ -40,9 +40,9 @@
       "name": "join",
       "tag": "apassy-connect join v1",
       "signer": "device_b",
-      "message_b64u": "YXBhc3N5LWNvbm5lY3Qgam9pbiB2MQBodHRwczovL2Nvbm5lY3QuZXhhbXBsZS50ZXN0AGFjY19rN20ycTR4M2NhAFA2eURHdng1ZVprd3psZEd4aHVYMWdLY2FpZ043ZEZIdzItcTI2RWI5VG8AQkhUMG40Rm01OUowM1pzaVc5MG05UWR1WUJlbFd0UlYzVUNXblZhdC00dmhNVndyRzZZYjFONDlkTWRBb01qeWJxN0VGOFZIaUt2dzJZQURYYWwwVjhV",
-      "sha256": "4b65718b680100e085e55bc67781acc0bc802cb561baa2e624eea9bdbc885f7c",
-      "signature_b64u": "MEUCIEolekXovYiPZWub5r3w-RRj_LKwA6NfHyOp3huAPK4iAiEApuvnSJP1FoOxd4oXDhAhLuA7XKQG54Vp869DOrYuLmM"
+      "message_b64u": "YXBhc3N5LWNvbm5lY3Qgam9pbiB2MQBodHRwczovL2Nvbm5lY3QuZXhhbXBsZS50ZXN0AGFjY19rN20ycTR4M2NhAFA2eURHdng1ZVprd3psZEd4aHVYMWdLY2FpZ043ZEZIdzItcTI2RWI5VG8AQkhUMG40Rm01OUowM1pzaVc5MG05UWR1WUJlbFd0UlYzVUNXblZhdC00dmhNVndyRzZZYjFONDlkTWRBb01qeWJxN0VGOFZIaUt2dzJZQURYYWwwVjhVAGlQaG9uZQ",
+      "sha256": "6a33469d0b373c119960b65348a214f412a0e301a6b24ac9856ed8c203cbc0c3",
+      "signature_b64u": "MEUCIQD-8-1mMgPFPZRIg1TcpGSS-xCdn0E5AMXJNzH9OaUQKAIgcRwHkUQECGAMNGIA4UH5sksuxlkls8Ezv0mquGCx_h8"
     },
     {
       "name": "join_cancel",

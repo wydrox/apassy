@@ -224,7 +224,7 @@
         "device_name": "iPhone",
         "platform": "iphone",
         "public_key": "BHT0n4Fm59J03ZsiW90m9QduYBelWtRV3UCWnVat-4vhMVwrG6Yb1N49dMdAoMjybq7EF8VHiKvw2YADXal0V8U",
-        "signature": "MEUCIEolekXovYiPZWub5r3w-RRj_LKwA6NfHyOp3huAPK4iAiEApuvnSJP1FoOxd4oXDhAhLuA7XKQG54Vp869DOrYuLmM"
+        "signature": "MEUCIQD-8-1mMgPFPZRIg1TcpGSS-xCdn0E5AMXJNzH9OaUQKAIgcRwHkUQECGAMNGIA4UH5sksuxlkls8Ezv0mquGCx_h8"
       }
     },
     {
@@ -283,6 +283,7 @@
           "device_name": "iPhone",
           "platform": "iphone",
           "public_key": "BHT0n4Fm59J03ZsiW90m9QduYBelWtRV3UCWnVat-4vhMVwrG6Yb1N49dMdAoMjybq7EF8VHiKvw2YADXal0V8U",
+          "signature": "MEUCIQD-8-1mMgPFPZRIg1TcpGSS-xCdn0E5AMXJNzH9OaUQKAIgcRwHkUQECGAMNGIA4UH5sksuxlkls8Ezv0mquGCx_h8",
           "created_at": 1790000100,
           "expires_at": 1790000600
         }
@@ -559,6 +560,16 @@
       "body": {
         "code": "account_limit",
         "message": "This account has 10 vault stores."
+      }
+    },
+    {
+      "name": "error_account_id_taken",
+      "route": "POST /v1/account",
+      "part": "error",
+      "status": 409,
+      "body": {
+        "code": "account_id_taken",
+        "message": "This account id is taken. Make a new id and sign again."
       }
     },
     {

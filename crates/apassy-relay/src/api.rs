@@ -1522,6 +1522,10 @@ pub struct AccountPendingJoin {
     pub device_name: String,
     pub platform: Platform,
     pub public_key: String,
+    /// The joining key's signature over the `apassy-connect join v1` message, which names
+    /// the device name: the confirming device shows and signs that name only when it
+    /// verifies.
+    pub signature: String,
     pub created_at: u64,
     pub expires_at: u64,
 }
