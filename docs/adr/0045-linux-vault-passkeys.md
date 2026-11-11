@@ -35,21 +35,93 @@ browsers, stale processes, mismatched users and writable browser binaries.
 This is defense in depth, not an equivalent to macOS signing. Preserve origin,
 RP ID, challenge, approval and user-verification checks in the shared flow.
 
-Unsafe browser switches are refused: `--remote-debugging-*`,
-`--disable-extensions-except`, `--type` and `--load-extension`, read from every word
-of the browser's rewritten process title. One exception, added 2026-11-10 after the
-acceptance run: Debian's `chromium` package starts every browser with
-`--load-extension=` and the folders in `/usr/share/chromium/extensions` that its
-`webext-*` packages install (`/etc/chromium.d/extensions`). That switch is accepted
-when its one value lists only absolute paths that, after resolving symlinks, are
-directories strictly inside that folder, and that folder, each listed directory and
-every folder up to `/` are owned by root and not writable by group or others. Then
-only root chose what the switch loads, from the same root-owned tree as the browser
-executable that this check already trusts; a user process cannot add an extension
-there. Everything else stays refused: a path elsewhere, a relative, missing or empty
-path, an empty value (Debian's default when no system extension is installed), a
-second `--load-extension` with another value, and, because the title hides where an
-argument ends, a comma in any other word while the switch is present.
+Unsafe browser switches are refused, read from every word of the browser's
+rewritten process title: `--remote-debugging-*`, `--load-extension` (one exception,
+below), and, since 2026-11-11, every switch of the current Chromium switch list that
+loads code or apps by path or gives extensions more power (`--disable-extensions-except`,
+`--load-apps`, `--allowlisted-extension-id`, `--extensions-on-chrome-urls`,
+`--extensions-on-extension-urls`, `--extension-test-api-on-web-pages`,
+`--install-isolated-web-app-from-file`, `--install-isolated-web-app-from-url`,
+`--custom-devtools-frontend`, `--load-webui-from-disk`), automates the browser
+(`--remote-allow-origins`, `--enable-automation`, `--dom-automation`, `--test-type`,
+`--silent-debugger-extension-api`), replaces the programs it starts (`--type`,
+`--browser-subprocess-path`, `--renderer-cmd-prefix`, `--utility-cmd-prefix`,
+`--zygote-cmd-prefix`, `--gpu-launcher`, `--enable-service-binary-launcher`), or
+silently weakens how it treats pages, certificates and names
+(`--disable-web-security`, `--allow-file-access-from-files`, `--allow-insecure-localhost`,
+`--use-mock-cert-verifier-for-testing`, `--mock-cert-verifier-default-result-for-testing`,
+`--ignore-certificate-errors`, `--ignore-certificate-errors-spki-list`,
+`--unsafely-treat-insecure-origin-as-secure`, `--ssl-key-log-file`,
+`--allow-running-insecure-content`, `--host-resolver-rules`, `--host-rules`). The
+source files are named in `src/browser/caller_linux.rs`. Switches for the display,
+the GPU, the language, the profile folder, the password store and a proxy stay
+accepted (for example `--ozone-platform=wayland`, `--enable-features=…Wayland…`,
+`--force-device-scale-factor`, `--password-store`, `--user-data-dir`,
+`--proxy-server`): a false refusal breaks real users.
+
+The exception, added 2026-11-10 after the acceptance run: Debian's `chromium` package
+starts every browser with `--load-extension=` and the folders in
+`/usr/share/chromium/extensions` that its `webext-*` packages install
+(`/etc/chromium.d/extensions`). That switch is accepted when its one value lists only
+absolute paths that, after resolving symlinks, are directories strictly inside that
+folder, and that folder, each listed directory and every folder up to `/` are owned
+by root and not writable by group or others. Then only root chose what the switch
+loads, from the same root-owned tree as the browser executable that this check
+already trusts; a user process cannot add an extension there. Everything else stays
+refused: a path elsewhere, a relative, missing or empty path, an empty value
+(Debian's default when no system extension is installed), a second
+`--load-extension` with another value, and, because the title hides where an
+argument ends, a comma in any other word while the switch is present. Since
+2026-11-11 the rest of such a title is an allow list, not a block list: the browser
+executable as the first word, the switches that Debian's wrapper and
+`/etc/chromium.d/*` add (`--show-component-extension-options`,
+`--enable-gpu-rasterization`, `--no-default-browser-check`, `--disable-pings`,
+`--media-router`, `--disable-dev-shm-usage`, `--enable-remote-extensions`,
+`--disable-background-networking`), display, GPU and language switches
+(`--ozone-platform`, `--ozone-platform-hint`, `--enable-wayland-ime`,
+`--wayland-text-input-version`, `--gtk-version`, `--force-device-scale-factor`,
+`--force-dark-mode`, `--start-maximized`, `--disable-gpu`, `--disable-gpu-compositing`,
+`--disable-gpu-rasterization`, `--ignore-gpu-blocklist`, `--enable-zero-copy`,
+`--use-gl`, `--use-angle`, `--num-raster-threads`, `--lang`, `--accept-lang`,
+`--enable-features` and `--disable-features` with one plain feature name that
+contains Wayland, Ozone, Vaapi, Vulkan or AcceleratedVideo), and `http://` or
+`https://` page addresses. Any other word refuses the browser.
+
+The browser process must be in Apassy's mount namespace and user namespace
+(`/proc/PID/ns/mnt` and `/proc/PID/ns/user`, compared by device and inode with
+`/proc/thread-self/ns/*` of the checking thread). Apassy checks executable paths,
+owners and `--load-extension` folders in its own view of the files, at the time of
+the request; a browser in another mount namespace read other files, and in another
+user namespace owners and user IDs mean something else. The namespaces are read
+between the two reads of the browser's process identity, like the executable, and
+once more after the title. Such a browser is "not supported", with the same
+explanation as a snap or a Flatpak in Settings > Tools and `apassy setup browser`
+(`SANDBOX_REASON` in `src/browser/install.rs`): this covers snaps, Flatpaks,
+firejail, bubblewrap, `unshare` and a browser in another container.
+
+### What the switch check sees
+
+The check reads `/proc/PID/cmdline` of the browser process: the browser's own
+process title, which lists the switches of its command line. That covers the
+switches of a desktop file, of a wrapper script such as `/usr/bin/chromium` and
+`/etc/chromium.d/*`, and of a terminal. It cannot see:
+
+- the environment of the browser (for example `LD_PRELOAD`, `GTK_MODULES`,
+  `GTK_PATH`, `SSLKEYLOGFILE`, `http_proxy`, `GOOGLE_API_KEY`);
+- what a wrapper does other than add switches, and what `/etc/chromium.d/*` exports;
+- the profile: `Preferences`, `Local State` and so `chrome://flags`, the installed
+  and unpacked extensions and their files, the NSS certificate database
+  (`~/.pki/nssdb`), all of them files of the same user;
+- policy files (`/etc/opt/chrome/policies`, `/etc/chromium/policies`) and other
+  configuration the browser reads after its start;
+- whether the title is the browser's real command line: a process can rewrite its
+  own title.
+
+So against another program of the same user the switch check is best effort: such a
+program can change the profile, the environment of the next start or the files of
+the user, which the Linux boundary does not protect. The check stops the common
+ways a browser is started for automation or with extra code, which leave a switch
+in the title.
 
 Secret and code Copy is offered only where Apassy itself owns the X11 or Wayland
 (ext/wlr data-control) clipboard, learns of foreign replacement, and clears only
