@@ -107,6 +107,14 @@
       "message_b64u": "YXBhc3N5LWJvdW5jZXIgc2lnbi1pbiB2MQBodHRwczovL2JyYWluLmV4YW1wbGUudGVzdABhY2NfazdtMnE0eDNjYQBCT3BIa0I1VnZUSFhhd3BVWFp4Z3U0NFE5N0kyYnpxOUdfdUk2dEZNOW1qOERlMDQ3ZTFmTldJOE1JRVJEc2F4aEJDMGloMURQZlhhTTRtZEJiRXhqckEAQUFFQ0F3UUZCZ2NJQ1FvTERBME9EeEFSRWhNVUZSWVhHQmthR3h3ZEhoOA",
       "sha256": "00300bab39c17bf919f9413f075a20f1ff8f4b29d9bb7f12408c71889fca3ce7",
       "signature_b64u": "MEUCIAWO2Jhtrgr51CRSB3OX5BjqdAioH2dqjoxTK2VjGhFOAiEAwe2k0flsjTVgX1dlmwQkM4CYbHlb1_SId1c_6vo_Wdk"
+    },
+    {
+      "name": "recovery_rotate",
+      "tag": "apassy-connect recovery-rotate v1",
+      "signer": "device_a",
+      "message_b64u": "YXBhc3N5LWNvbm5lY3QgcmVjb3Zlcnktcm90YXRlIHYxAGh0dHBzOi8vY29ubmVjdC5leGFtcGxlLnRlc3QAYWNjX2s3bTJxNHgzY2EAQk9wSGtCNVZ2VEhYYXdwVVhaeGd1NDRROTdJMmJ6cTlHX3VJNnRGTTltajhEZTA0N2UxZk5XSThNSUVSRHNheGhCQzBpaDFEUGZYYU00bWRCYkV4anJBAFAzVlpnUWtLd3JVMDFJS2lhU3NuYkNrRERBbkZtTTRRdXpvOHMxcE1fdzAAcjJSNVF0VTdmcDNqekk3RUREMW5iZVZ1bjdnd3Npdng2Rzc4a3RPR1Bzcw",
+      "sha256": "676e77ab2740742c57281f07db5454e33e2a7852f1f9b6bce96bdb8325acbb78",
+      "signature_b64u": "MEYCIQCsgnTlEufIhJ0T6QOJGVJXzC4KC0nRIk_xfQIb5rHVGQIhANDjpAeRs6LNhcXVXLNp-c-neKtQGfYY6hJGrPkgAj_s"
     }
   ],
   "link": {
@@ -181,6 +189,11 @@
     "bytes_hex": "404142434445464748494a4b4c4d4e4f",
     "seed_hex": "81c16db90dfea3c373e7a06bbd903cba3fa6b3106dcad60fd5c8cb26b92c191b",
     "public_b64u": "Rm63i8k0aVY1Ue7s6R-B6veiHsYyxRzhNiJ_0vk8tO0"
+  },
+  "rotated_recovery": {
+    "bytes_hex": "505152535455565758595a5b5c5d5e5f",
+    "seed_hex": "713e6dbfc39d6a7f7b354faa53307916afcc04cf9e21265f9d2a31ef93d4fffd",
+    "public_b64u": "r2R5QtU7fp3jzI7EDD1nbeVun7gwsivx6G78ktOGPss"
   },
   "entitlement": {
     "kid": "ek_test_1",

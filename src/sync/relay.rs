@@ -54,7 +54,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Seek;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
 
@@ -1122,9 +1122,9 @@ pub struct DepartedHead {
 pub(crate) struct HeadNotes {
     waiting: Mutex<Option<DepartedHead>>,
     unlisted: Mutex<Option<UnlistedEntry>>,
-    /// How many device lists that this Mac fetched from Connect reached the policy
-    /// ([`RelaySync::note_device_list`]).
-    lists: AtomicU64,
+    /// When the newest device list that verified on this Mac was asked of Connect
+    /// ([`RelaySync::note_device_list`]); `None` before one.
+    listed: Mutex<Option<Instant>>,
 }
 
 impl HeadNotes {
@@ -1136,11 +1136,11 @@ impl HeadNotes {
 }
 
 /// The current head whose chain holds an entry by a key that the policy does not hold, and
-/// the count of fetched device lists at its first refusal.
+/// when it was first refused.
 #[derive(Debug, Clone)]
 struct UnlistedEntry {
     head: String,
-    lists: u64,
+    since: Instant,
 }
 
 /// The X9.63 key that the relay lists for the device `device_id` among `signers`.
@@ -1267,6 +1267,9 @@ pub struct RelayTransport {
     /// The one head of a device that left that the owner accepted, once
     /// ([`RelaySync::use_departed_copy`]).
     departed: Option<DepartedHead>,
+    /// The download of a new device ([`JoinedDevice::download`]): with no anchor, the chain
+    /// below the head of a vault store is checked too ([`Self::check_first_chain`]).
+    first_chain: bool,
 }
 
 impl RelayTransport {
@@ -1292,7 +1295,16 @@ impl RelayTransport {
             signer_keys,
             notes: Arc::default(),
             departed: None,
+            first_chain: false,
         }
+    }
+
+    /// The transport of the download of a new device: with no anchor, the chain below the
+    /// head of a vault store is checked as well. "Use the relay copy…" of a device that
+    /// has the vault keeps its trust in the current head alone.
+    pub(crate) fn with_first_chain_check(mut self) -> Self {
+        self.first_chain = true;
+        self
     }
 
     /// The transport with the notes `notes` of its relay sync.
@@ -1346,8 +1358,10 @@ impl RelayTransport {
 
     /// The refusal of the current head `head` (its hash), or of a chain entry below it, by
     /// a key that the policy does not hold: [`SyncError::ChecksDeviceList`] until a device
-    /// list that this Mac fetched after the first refusal of that head still refuses it,
-    /// then [`SyncError::UnknownSigner`] (for the current head itself, `Damaged`).
+    /// list that verified on this Mac, asked of Connect after the first refusal of that
+    /// head, still refuses it, then [`SyncError::UnknownSigner`] (for the current head
+    /// itself, `Damaged`). A list that did not verify, or one asked before the refusal,
+    /// ends nothing.
     ///
     /// A policy of its own ([`SignerSource::Fixed`]: a join or an adoption, which verified
     /// the list just before) waits for no list: its refusal is final at once.
@@ -1355,15 +1369,17 @@ impl RelayTransport {
         if matches!(self.signer_keys, Some(SignerSource::Fixed(_))) {
             return SyncError::UnknownSigner;
         }
-        let lists = self.notes.lists.load(Ordering::SeqCst);
+        let listed = *lock(&self.notes.listed);
         let mut held = lock(&self.notes.unlisted);
         match held.as_ref() {
-            Some(seen) if seen.head == head && lists > seen.lists => SyncError::UnknownSigner,
+            Some(seen) if seen.head == head && listed.is_some_and(|asked| asked > seen.since) => {
+                SyncError::UnknownSigner
+            }
             Some(seen) if seen.head == head => SyncError::ChecksDeviceList,
             _ => {
                 *held = Some(UnlistedEntry {
                     head: head.to_owned(),
-                    lists,
+                    since: Instant::now(),
                 });
                 SyncError::ChecksDeviceList
             }
@@ -1479,6 +1495,86 @@ impl RelayTransport {
         }
     }
 
+    /// The chain below `head` at the first download of a new device of a vault store of an
+    /// account (no anchor), from the answer `view` of `since=0` on: the entries link to each other and
+    /// end at `head`, each is of this team and vault, and each is signed by a device of the
+    /// list or a key that left it, as at any later check. A chain that starts later than
+    /// version 1 (the relay keeps the newest heads only) is checked from its first entry.
+    /// A signer that this device does not know yet waits for the device list
+    /// ([`Self::unlisted`]); any other break is `Damaged`.
+    fn check_first_chain(&self, head: &SignedHead, mut view: HeadView) -> Result<(), SyncError> {
+        let mut since = 0;
+        let mut link: Option<String> = None;
+        for _ in 0..MAX_CHAIN_PAGES {
+            let mut entries = Vec::with_capacity(view.chain.len());
+            for entry in &view.chain {
+                let parsed = SignedHead::from_wire(&entry.head, &entry.signature)
+                    .filter(|parsed| parsed.fields.version == entry.version)
+                    .ok_or(SyncError::Damaged)?;
+                entries.push(parsed);
+            }
+            let first = entries.first().ok_or(SyncError::Damaged)?;
+            let (from, anchor) = match &link {
+                Some(hash) => (since, hash.clone()),
+                None if view.chain_from == Some(1) => (0, NO_PREVIOUS.to_owned()),
+                None => (
+                    first.fields.version.saturating_sub(1),
+                    first.fields.previous.clone(),
+                ),
+            };
+            let linked = link_chain(from, &anchor, view.chain_from, &entries, |entry| {
+                let same_vault = self
+                    .vault_id
+                    .as_ref()
+                    .is_none_or(|vault_id| &entry.fields.vault_id == vault_id)
+                    && entry.fields.vault_id == head.fields.vault_id;
+                if entry.fields.team_id != self.session.team_id || !same_vault {
+                    return Ok(false);
+                }
+                let role = if entry.text == head.text {
+                    Role::Head(entry.fields.version)
+                } else {
+                    Role::Below
+                };
+                match self.signing(entry, &view.signers, role, 0) {
+                    Signing::Accepted | Signing::Left => Ok(true),
+                    // A first download offers no relay copy to take instead: a signer that a
+                    // fresh list still does not hold makes the copy damaged.
+                    Signing::Unlisted => Err(match self.unlisted(&head.hash()) {
+                        SyncError::UnknownSigner => SyncError::Damaged,
+                        waiting => waiting,
+                    }),
+                    // The head itself passed `check_identity`, also a head of a device that
+                    // left that the owner took.
+                    Signing::LeftAfterAnchor if entry.text == head.text => Ok(true),
+                    Signing::LeftAfterAnchor | Signing::No => Ok(false),
+                }
+            });
+            let (last, hash) = match linked {
+                Ok(linked) => linked,
+                Err(SyncError::ForkedCopy) => return Err(SyncError::Damaged),
+                Err(error) => return Err(error),
+            };
+            if last == head.fields.version {
+                return match entries.last() {
+                    Some(entry) if entry.text == head.text => Ok(()),
+                    _ => Err(SyncError::Damaged),
+                };
+            }
+            if last > head.fields.version {
+                return Err(SyncError::Damaged);
+            }
+            since = last;
+            link = Some(hash);
+            view = self.head_view(since, Duration::ZERO).map_err(sync_error)?;
+            if view.version != head.fields.version {
+                // The copy moved on meanwhile: the next check starts again.
+                return Err(SyncError::RelayBusy);
+            }
+        }
+        Err(SyncError::Damaged)
+    }
+
     /// Accept `head`, signed as `signing`, as the current copy.
     fn accept(&self, head: SignedHead, signing: Signing) -> Result<Remote, SyncError> {
         if head.fields.size > self.max_bytes {
@@ -1529,7 +1625,11 @@ impl SyncTransport for RelayTransport {
                 .ok_or(SyncError::Damaged)?;
             let signing = self.check_identity(&head, &view.signers, anchor.version)?;
             if anchor.version == 0 {
-                // No anchor: trust on first use, behind the owner's action.
+                // No anchor: trust on first use, behind the owner's action. The download of
+                // a new device of an account checks the chain below the head first.
+                if self.first_chain && self.signer_keys.is_some() {
+                    self.check_first_chain(&head, view)?;
+                }
                 return self.accept(head, signing);
             }
             let version = head.fields.version;
@@ -2298,12 +2398,31 @@ impl RelaySync {
         lock(&self.notes.waiting).clone()
     }
 
-    /// A device list that this Mac fetched from Connect reached the policy
-    /// ([`Self::set_account_signers`]): a chain entry by a key that the policy still does
-    /// not hold is refused from the next check on ([`SyncError::UnknownSigner`]), instead of
-    /// waiting for the list ([`SyncError::ChecksDeviceList`]).
-    pub fn note_device_list(&self) {
-        self.notes.lists.fetch_add(1, Ordering::SeqCst);
+    /// A device list that verified on this Mac reached the policy
+    /// ([`Self::set_account_signers`]); `asked` is when this Mac asked Connect for it. A
+    /// head refused before `asked` by a key that the policy still does not hold is refused
+    /// from the next check on ([`SyncError::UnknownSigner`]), instead of waiting for the
+    /// list ([`SyncError::ChecksDeviceList`]). Only a verified list counts, and an older
+    /// one changes nothing.
+    pub fn note_device_list(&self, asked: Instant) {
+        let mut listed = lock(&self.notes.listed);
+        if listed.is_none_or(|held| asked > held) {
+            *listed = Some(asked);
+        }
+    }
+
+    /// Since when this vault store checks the device list for the head that it refused
+    /// ([`SyncError::ChecksDeviceList`]); `None` while it does not.
+    pub fn checking_since(&self) -> Option<Instant> {
+        lock(&self.notes.unlisted).as_ref().map(|seen| seen.since)
+    }
+
+    /// Tests: the check of the device list began `ago` earlier.
+    #[doc(hidden)]
+    pub fn backdate_check_for_test(&self, ago: Duration) {
+        if let Some(seen) = lock(&self.notes.unlisted).as_mut() {
+            seen.since = seen.since.checked_sub(ago).unwrap_or(seen.since);
+        }
     }
 
     /// "Use the Copy That … Left…": take `head`, the head that this vault store waits on
@@ -3684,6 +3803,11 @@ impl JoinedDevice {
         &self.team
     }
 
+    /// The relay team id (for a vault store of an account, the store).
+    pub fn team_id(&self) -> &str {
+        &self.session.team_id
+    }
+
     /// The device number of this Mac on the relay.
     pub fn device_id(&self) -> u64 {
         self.session.device_id().unwrap_or_default()
@@ -3725,7 +3849,8 @@ impl JoinedDevice {
     ) -> Result<RelayDownload, SyncError> {
         let mut transport =
             RelayTransport::new(Arc::clone(&self.session), None, 0, None, MAX_SNAPSHOT_BYTES)
-                .with_notes(Arc::clone(&self.notes));
+                .with_notes(Arc::clone(&self.notes))
+                .with_first_chain_check();
         if let Some(head) = departed {
             transport = transport.with_departed(head.clone());
         }

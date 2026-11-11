@@ -15,7 +15,7 @@
 //! Secure Enclave `sign`, [`DeviceKeyStore`] is the seam: a store that signs inside the
 //! Enclave replaces the read, and the allow-list of [`AccountSigner::sign`] stays.
 //!
-//! The key signs **only** messages that begin with one of the eleven ECDSA tags of
+//! The key signs **only** messages that begin with one of the twelve ECDSA tags of
 //! sections 5 and 16 ([`SIGNING_TAGS`]), each followed by its separator (`0x00`, or `\n` for the
 //! head of relay-sync-v1 section 8). It refuses any other message, also the tags of the
 //! free Connect (`apassy-relay connect v1`) and of the entitlement token, which only
@@ -62,6 +62,8 @@ pub const LIST_TAG: &str = "apassy-connect device-list v1";
 pub const LIST_NONE: &str = "-";
 /// `POST /v1/account/recover`.
 pub const RECOVER_TAG: &str = "apassy-connect recover v1";
+/// `POST /v1/account/recovery`: a live device replaces the recovery key (section 9.1).
+pub const RECOVERY_ROTATE_TAG: &str = "apassy-connect recovery-rotate v1";
 /// The sign-in of the hosted bouncer brain (bouncer-brain-v2, plan 0035 A and H).
 pub const BRAIN_SIGN_IN_TAG: &str = "apassy-bouncer sign-in v1";
 /// The relay-sync-v1 team sign-in of a vault store.
@@ -74,15 +76,16 @@ pub const SHARE_LIST_TAG: &str = "apassy-connect share-list v1";
 /// `POST /v1/account/peers/join`: the device of another account that answers a share code.
 pub const PEER_JOIN_TAG: &str = "apassy-connect peer-join v1";
 
-/// The eleven tags that the account device key signs (sections 5 and 16), and nothing
+/// The twelve tags that the account device key signs (sections 5 and 16), and nothing
 /// else.
-pub const SIGNING_TAGS: [&str; 11] = [
+pub const SIGNING_TAGS: [&str; 12] = [
     ACCOUNT_TAG,
     SIGN_IN_TAG,
     JOIN_TAG,
     JOIN_CANCEL_TAG,
     LIST_TAG,
     RECOVER_TAG,
+    RECOVERY_ROTATE_TAG,
     BRAIN_SIGN_IN_TAG,
     RELAY_SIGN_IN_TAG,
     SYNC_HEAD_TAG,
@@ -138,6 +141,25 @@ pub fn join_message(
         link_hash,
         public_key_b64u,
         device_name,
+    ])
+}
+
+/// The `apassy-connect recovery-rotate v1` message: the device that signs it, the
+/// recovery key that Connect stores now (`previous`), and the new one (section 9.1).
+pub fn recovery_rotate_message(
+    origin: &str,
+    account_id: &str,
+    public_key_b64u: &str,
+    previous_b64u: &str,
+    recovery_key_b64u: &str,
+) -> Vec<u8> {
+    joined(&[
+        RECOVERY_ROTATE_TAG,
+        origin,
+        account_id,
+        public_key_b64u,
+        previous_b64u,
+        recovery_key_b64u,
     ])
 }
 
@@ -572,6 +594,23 @@ impl AccountSigner {
     }
 
     /// The signature of `POST /v1/account/devices/join/cancel`.
+    pub fn sign_recovery_rotate(
+        &self,
+        origin: &str,
+        account_id: &str,
+        previous_b64u: &str,
+        recovery_key_b64u: &str,
+    ) -> Result<Vec<u8>, ConnectError> {
+        self.sign(&recovery_rotate_message(
+            origin,
+            account_id,
+            &self.public_key_b64u(),
+            previous_b64u,
+            recovery_key_b64u,
+        ))
+    }
+
+    /// The signature of `POST /v1/account/devices/join/cancel`.
     pub fn sign_join_cancel(
         &self,
         origin: &str,
@@ -781,7 +820,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_eleven_tags_are_signed() {
+    fn only_the_twelve_tags_are_signed() {
         let store = MemoryKeyStore::new();
         let signer = AccountSigner::open_or_create(&store).unwrap();
         let origin = "https://connect.example.test";

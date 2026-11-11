@@ -4146,13 +4146,14 @@ mod connect_v1 {
         const RELAY_SYNC_PUBLIC_KEY: &str = "BOpHkB5VvTHXawpUXZxgu44Q97I2bzq9G_uI6tFM9mj8De047e1fNWI8MIERDsaxhBC0ih1DPfXaM4mdBbExjrA";
 
         /// Section 5: the only messages that an account device key signs.
-        pub const DEVICE_KEY_TAGS: [&str; 9] = [
+        pub const DEVICE_KEY_TAGS: [&str; 10] = [
             "apassy-connect account v1",
             "apassy-connect sign-in v1",
             "apassy-connect join v1",
             "apassy-connect join-cancel v1",
             "apassy-connect device-list v1",
             "apassy-connect recover v1",
+            "apassy-connect recovery-rotate v1",
             "apassy-bouncer sign-in v1",
             "apassy-relay sign-in v1",
             "apassy-relay-sync-head-v1",
@@ -4256,6 +4257,7 @@ mod connect_v1 {
             devices: Vec<DeviceView>,
             group: Option<GroupRef>,
             device_list: Vec<ListEntry>,
+            recovery_key: String,
         }
 
         #[derive(Debug, Deserialize)]
@@ -4420,6 +4422,22 @@ mod connect_v1 {
             account_id: String,
             device_id: String,
             deleted_stores: u32,
+        }
+
+        /// A new recovery code from a live device (section 9.1).
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RecoveryRotate {
+            previous: String,
+            recovery_key: String,
+            signature: String,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RecoveryRotated {
+            account_id: String,
+            rotated_at: u64,
         }
 
         #[derive(Debug, Deserialize)]
@@ -4786,6 +4804,7 @@ mod connect_v1 {
                     assert!(plan_view_is_valid(&body.plan));
                     assert!(body.devices.iter().all(device_view));
                     assert!(list_is_valid(&body.device_list));
+                    assert!(is_recovery_key(&body.recovery_key));
                     if let Some(group) = &body.group {
                         assert!(is_id(&group.group_id, "grp_"));
                         assert!(["family", "team"].contains(&group.kind.as_str()));
@@ -4895,6 +4914,16 @@ mod connect_v1 {
                     let body: RecoverAnswer = strict(example);
                     assert!(is_id(&body.device_id, "dev_"));
                 }
+                "recovery_rotate" => {
+                    let body: RecoveryRotate = strict(example);
+                    assert!(is_recovery_key(&body.previous) && is_recovery_key(&body.recovery_key));
+                    assert_ne!(body.previous, body.recovery_key);
+                    assert!(is_signature(&body.signature));
+                }
+                "recovery_rotated" => {
+                    let body: RecoveryRotated = strict(example);
+                    assert!(is_id(&body.account_id, "acc_") && body.rotated_at > 0);
+                }
                 "entitlement" => {
                     let body: EntitlementAnswer = strict(example);
                     let (payload, signature) = body.token.split_once('.').expect("two parts");
@@ -4965,6 +4994,9 @@ mod connect_v1 {
             safety: VectorSafety,
             recovery: VectorRecovery,
             new_recovery: VectorNewRecovery,
+            /// The new recovery code that device A makes in the place of `recovery`
+            /// (section 9.1).
+            rotated_recovery: VectorNewRecovery,
             entitlement: VectorEntitlement,
         }
 
@@ -5237,9 +5269,19 @@ mod connect_v1 {
                 &v.new_recovery.seed_hex,
                 &v.new_recovery.public_b64u,
             );
-            let (rec64, new64) = (
+            recovery_public(
+                &v.rotated_recovery.bytes_hex,
+                &v.rotated_recovery.seed_hex,
+                &v.rotated_recovery.public_b64u,
+            );
+            assert_eq!(
+                hex_decode(&v.rotated_recovery.bytes_hex),
+                (80u8..96).collect::<Vec<u8>>()
+            );
+            let (rec64, new64, rotated64) = (
                 v.recovery.public_b64u.as_bytes(),
                 v.new_recovery.public_b64u.as_bytes(),
+                v.rotated_recovery.public_b64u.as_bytes(),
             );
 
             // The messages of section 5.
@@ -5321,6 +5363,10 @@ mod connect_v1 {
                         b64,
                     ]),
                     "recover" => joined(&[m.tag.as_bytes(), origin, account, b64, new64]),
+                    // A live device names the key that Connect holds now and the new one.
+                    "recovery_rotate" => {
+                        joined(&[m.tag.as_bytes(), origin, account, a64, rec64, rotated64])
+                    }
                     "brain_sign_in" => joined(&[
                         m.tag.as_bytes(),
                         v.brain_origin.as_bytes(),
@@ -5364,7 +5410,8 @@ mod connect_v1 {
                     "recover",
                     "device_list_member_root",
                     "device_list_recovery_root",
-                    "brain_sign_in"
+                    "brain_sign_in",
+                    "recovery_rotate"
                 ]
             );
             let tag_of = |name: &str| {
@@ -5376,6 +5423,10 @@ mod connect_v1 {
             };
             assert_eq!(tag_of("join_cancel"), "apassy-connect join-cancel v1");
             assert_eq!(tag_of("device_list_add"), "apassy-connect device-list v1");
+            assert_eq!(
+                tag_of("recovery_rotate"),
+                "apassy-connect recovery-rotate v1"
+            );
 
             // The device list: A is the root, A adds B, A removes B. Each hash is the
             // SHA-256 of its message, and the next entry names it.
@@ -5643,6 +5694,26 @@ mod connect_v1 {
             assert_eq!(
                 body("recover")["recovery_signature"],
                 v.recovery.recover_signature_b64u.as_str()
+            );
+            assert_eq!(
+                body("account_view")["recovery_key"],
+                v.recovery.public_b64u.as_str()
+            );
+            assert_eq!(
+                body("recovery_rotate")["signature"],
+                signature("recovery_rotate").as_str()
+            );
+            assert_eq!(
+                body("recovery_rotate")["previous"],
+                v.recovery.public_b64u.as_str()
+            );
+            assert_eq!(
+                body("recovery_rotate")["recovery_key"],
+                v.rotated_recovery.public_b64u.as_str()
+            );
+            assert_eq!(
+                body("recovery_rotated")["account_id"],
+                v.account_id.as_str()
             );
             // The recovery code is never on the wire.
             assert!(!EXAMPLES.contains(&v.recovery.code));

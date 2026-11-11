@@ -2164,7 +2164,7 @@ mod connect_sync {
     /// fetched after that (`note_device_list`) the refusal of the next sync is returned.
     fn refused_after_a_fresh_list(sync: &RelaySync, vault: &mut Vault) -> SyncError {
         assert_eq!(sync.sync(vault).unwrap_err(), SyncError::ChecksDeviceList);
-        sync.note_device_list();
+        sync.note_device_list(std::time::Instant::now());
         sync.sync(vault).unwrap_err()
     }
     use serde_json::json;
@@ -3533,6 +3533,86 @@ mod connect_sync {
         // A, which was behind, takes the copy now as usual.
         left.a.mac.sync.sync(&mut left.vault_a).expect("A goes on");
         assert_eq!(titles(&left.vault_a), vec!["Alpha", "Beta"]);
+        // A later head of the removed device (a store that still lists it) waits again:
+        // the owner took one head, not the device.
+        let b_signer = left.account_b.signer().expect("B's key");
+        let b_number = left
+            .cloud
+            .relay
+            .team_devices(&left.team)
+            .into_iter()
+            .find(|(_, key)| key.as_slice() == b_signer.public_key())
+            .map(|(number, _)| number)
+            .expect("B in the store");
+        let last = left
+            .cloud
+            .relay
+            .heads_of(&left.team)
+            .last()
+            .cloned()
+            .unwrap();
+        let later = forged_after(&last, b_number, &b_signer);
+        left.cloud.relay.replace_store_from(&left.team, vec![later]);
+        assert_eq!(
+            d.mac.sync.sync(&mut vault_d).unwrap_err(),
+            SyncError::WaitsForAccountDevice,
+            "a later head of the removed device waits again"
+        );
+        assert_eq!(titles(&vault_d), vec!["Alpha", "Beta"]);
+    }
+
+    /// A new device that takes the copy that a removed device left checks the chain below
+    /// that head as at any first download: an entry by a key that the device list never
+    /// held is refused, and nothing is downloaded.
+    #[test]
+    fn a_new_device_checks_the_chain_below_the_copy_that_a_removed_device_left() {
+        let mut left = b_pushed_last_and_left();
+        let heads = left.cloud.relay.heads_of(&left.team);
+        let below = heads[heads.len() - 2].clone();
+        let stranger = AccountSigner::open_or_create(&MemoryKeyStore::new()).unwrap();
+        let stranger_number =
+            left.cloud
+                .relay
+                .add_store_device(&left.team, "Mac Studio", stranger.public_key());
+        let b_signer = left.account_b.signer().expect("B's key");
+        let b_number = left
+            .cloud
+            .relay
+            .team_devices(&left.team)
+            .into_iter()
+            .find(|(_, key)| key.as_slice() == b_signer.public_key())
+            .map(|(number, _)| number)
+            .expect("B in the store");
+        let entry = forged_after(&below, stranger_number, &stranger);
+        let top = forged_after(&entry.0, b_number, &b_signer);
+        left.cloud
+            .relay
+            .replace_store_from(&left.team, vec![entry, top]);
+        let d = connect_mac(&left.cloud, "d");
+        let mut account_d = join_account(&left.cloud, &mut left.account_a, &d, "Synthetic iMac");
+        left.a
+            .mac
+            .sync
+            .register_account_devices(&mut left.account_a)
+            .expect("register D");
+        let store = account_d
+            .vault_stores()
+            .expect("stores")
+            .into_iter()
+            .find(|store| store.team_id == left.team)
+            .expect("D is in the store");
+        let joined = RelaySync::joined_from_store(&mut account_d, &store).expect("joined");
+        let work = d.mac.data.join("sync");
+        assert_eq!(
+            joined.download(&work).unwrap_err(),
+            SyncError::WaitsForAccountDevice
+        );
+        let head = joined.waiting_head().expect("the waiting head");
+        assert_eq!(
+            joined.download_departed(&work, &head).unwrap_err(),
+            SyncError::Damaged,
+            "the chain below the head holds a key that was never a device"
+        );
     }
 
     /// A head by a key that the device list never held stays refused: no waiting head is
@@ -3661,7 +3741,7 @@ mod connect_sync {
         a.mac
             .sync
             .set_account_signers(Some(signer_policy(account_a.state())));
-        a.mac.sync.note_device_list();
+        a.mac.sync.note_device_list(std::time::Instant::now());
         a.mac
             .sync
             .sync(&mut vault_a)
@@ -3715,15 +3795,24 @@ mod connect_sync {
         );
         cloud.relay.replace_store_from(&team, vec![entry, head]);
 
+        let asked_before = std::time::Instant::now();
         assert_eq!(
             a.mac.sync.sync(&mut vault_a).unwrap_err(),
             SyncError::ChecksDeviceList
+        );
+        assert!(a.mac.sync.checking_since().is_some());
+        // A list asked of Connect before the refusal ends nothing.
+        a.mac.sync.note_device_list(asked_before);
+        assert_eq!(
+            a.mac.sync.sync(&mut vault_a).unwrap_err(),
+            SyncError::ChecksDeviceList,
+            "a list older than the refusal"
         );
         account_a.view().expect("A views the account");
         a.mac
             .sync
             .set_account_signers(Some(signer_policy(account_a.state())));
-        a.mac.sync.note_device_list();
+        a.mac.sync.note_device_list(std::time::Instant::now());
         assert_eq!(
             a.mac.sync.sync(&mut vault_a).unwrap_err(),
             SyncError::UnknownSigner,

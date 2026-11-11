@@ -107,6 +107,18 @@ pub(crate) const REPLACE_DEPARTED: &str =
 /// The click of "Use the Copy That … Left…" on a screen of a device that joins: the next
 /// step of the join takes it ([`DesktopApp::relay_join_step`]).
 const TAKE_DEPARTED: &str = "sync-relay-take-departed";
+/// A vault store that checks the device list this long says that Connect cannot be reached
+/// to check it, with "Try Again" (connect-account-v1 section 7.5).
+pub(crate) const CHECK_LIST_LONG: Duration = Duration::from_secs(10 * 60);
+/// The line of such a store.
+pub(crate) const CHECK_LIST_UNREACHABLE: &str = concat!(
+    "Apassy Connect cannot be reached to check the device list. Apassy keeps checking. The changes on this ",
+    crate::computer!(),
+    " stay on it until then; nothing is lost."
+);
+/// What to do instead of taking the copy of a removed device.
+pub(crate) const DEPARTED_ADVICE: &str =
+    "Ask on another device of the account instead, or replace the copy from a device you trust.";
 
 /// "Use a vault from another Mac" › "Apassy Connect" while the key of the account was not
 /// read (cancelled, or unavailable): "Sign In…" reads it again.
@@ -656,6 +668,9 @@ pub(crate) struct RelayUi {
     /// The join runs from a vault store of the Connect account: its device stays in the
     /// store at a cancel or a failure (it is this Mac's account device, not a new one).
     store_join: bool,
+    /// The source of "Use a vault from another Mac" that started the join: a join that
+    /// holds the account key ends when the owner leaves that source.
+    join_source: OpenSource,
     /// The vault stores of the account that this Mac can use and does not have, for "Use
     /// a vault from another Mac" › "Apassy Connect"; `None` until read.
     stores: Option<Result<Vec<crate::connect::VaultStoreView>, String>>,
@@ -680,16 +695,39 @@ pub(crate) struct RelayUi {
     /// The vault whose step on the copy of a device that left waits for its owner check,
     /// with the exact action that the check names.
     departed_check: Option<(String, OwnerAction)>,
+    /// "Use the Copy That … Left…" of a device that joins (the start screen) waits for its
+    /// owner check: the exact action that the check names.
+    join_departed_check: Option<OwnerAction>,
     /// The signed names of the devices that the verified device list of the account
     /// removed, by key, for the steps of a vault store that waits on one of them.
     departed_names: BTreeMap<Vec<u8>, String>,
-    /// When Connect answered the refresh of the device list that the relay syncs have,
-    /// as of the last hand-over (`None` inside: no answer in the session view); `None`
-    /// before the first hand-over.
-    listed: Option<Option<Instant>>,
+    /// The same names, read by the worker of a join from a vault store while it holds the
+    /// account (the window takes them when the join goes on).
+    join_names: Arc<Mutex<RemovedNames>>,
+    /// When the newest device list that verified was asked of Connect, as of the last
+    /// hand-over to the relay syncs; `None` before one.
+    listed: Option<Instant>,
 }
 
 impl RelayUi {
+    /// The source that started a join that holds the account key of the Connect session:
+    /// one that resolves a link for the account's origin, takes this device's own device
+    /// in a vault store, or goes on from it. `None` without such a join.
+    pub(crate) fn join_with_account(&self) -> Option<OpenSource> {
+        let join = self.join.as_ref()?;
+        let holds = match &join.phase {
+            Phase::Resolving(_) | Phase::FromStore(_) => true,
+            Phase::Downloading { .. }
+            | Phase::Departed { .. }
+            | Phase::Ready { .. }
+            | Phase::Passphrase { .. }
+            | Phase::Adopting(_)
+            | Phase::Merging { .. } => self.store_join,
+            Phase::Requesting(_) | Phase::Waiting { .. } => false,
+        };
+        holds.then_some(self.join_source)
+    }
+
     /// Whether the sheet of "Add a device…" (any mode) is open for the vault `id`.
     pub(crate) fn add_open_for(&self, id: &str) -> bool {
         self.add.as_ref().is_some_and(|add| add.id == id)
@@ -750,6 +788,22 @@ impl RelayUi {
                 team: join.team.clone(),
             },
         })
+    }
+}
+
+/// The signed names of removed devices, by key.
+type RemovedNames = Vec<(Vec<u8>, String)>;
+
+/// Keep the signed names of the devices that the verified device list of `account` removed
+/// in `names`, for the window: a worker of a join from a vault store holds the account.
+fn keep_removed_names(account: &crate::connect::ConnectAccount, names: &Mutex<RemovedNames>) {
+    if let Some(list) = account.verified_list() {
+        *lock(names) = list
+            .removed
+            .iter()
+            .cloned()
+            .zip(list.removed_names.iter().cloned())
+            .collect();
     }
 }
 
@@ -3059,11 +3113,11 @@ impl DesktopApp {
     }
 
     /// The device list of the account session reached the relay syncs (after their
-    /// policy): keep the signed names of the removed devices; and when Connect answered a
-    /// refresh since the last hand-over, tell each relay sync that a fetched list is in its
-    /// policy ([`RelaySync::note_device_list`]), and check again a vault store that waits for
-    /// it. The first hand-over of the app notes nothing: its list may be older than a
-    /// refusal, which then waits for the next refresh.
+    /// policy): keep the signed names of the removed devices; and tell each relay sync
+    /// when the newest list that verified was asked ([`RelaySync::note_device_list`]): it
+    /// ends the check of a head refused before that time. When that list is newer than at
+    /// the last hand-over, check again a vault store that waits for it. A refresh whose
+    /// list did not verify, and the end of any other step, change nothing here.
     fn relay_take_list(&mut self, account: &crate::desktop::ui::connect::live::SyncAccount) {
         for (key, name) in &account.removed_names {
             self.sync
@@ -3071,12 +3125,9 @@ impl DesktopApp {
                 .departed_names
                 .insert(key.clone(), name.clone());
         }
-        let before = self.sync.relay.listed.replace(account.listed_at);
-        let fresh =
-            matches!((before, account.listed_at), (Some(before), Some(now)) if before != Some(now));
-        if !fresh {
+        let Some(asked) = account.verified_at else {
             return;
-        }
+        };
         let ids: Vec<String> = lock(&self.sync.relay.cache).keys().cloned().collect();
         for id in ids {
             // A store shared between accounts: Shared Vaults reads the lists of the other
@@ -3086,8 +3137,11 @@ impl DesktopApp {
                 continue;
             }
             if let Some(relay) = self.relay_of(&id) {
-                relay.note_device_list();
+                relay.note_device_list(asked);
             }
+        }
+        if self.sync.relay.listed.replace(asked) == Some(asked) {
+            return;
         }
         let checking: Vec<String> = self
             .sync
@@ -3102,6 +3156,26 @@ impl DesktopApp {
         for id in checking {
             self.relay_sync_now(&id);
         }
+    }
+
+    /// Whether the vault store `id` has checked the device list for at least
+    /// [`CHECK_LIST_LONG`]: its line then says that Connect cannot be reached to check it.
+    pub(crate) fn relay_checks_list_long(&self, id: &str) -> bool {
+        let checking = matches!(self.sync.statuses.get(id), Some(UiStatus::Problem(text))
+            if problem(text) == Some(SyncError::ChecksDeviceList));
+        checking
+            && self
+                .relay_of(id)
+                .and_then(|relay| relay.checking_since())
+                .is_some_and(|since| since.elapsed() >= CHECK_LIST_LONG)
+    }
+
+    /// "Try Again" of a vault store that checks the device list: ask Connect for the
+    /// account now, and sync the store again; the check goes on until a verified list
+    /// that was asked after the refusal decides it.
+    pub(crate) fn relay_check_list_again(&mut self, id: &str) {
+        self.ui.connect.live.refresh_now();
+        self.relay_sync_now(id);
     }
 
     /// The head that the vault store `id` waits on, with the signed name of its device,
@@ -3151,6 +3225,7 @@ impl DesktopApp {
             replace,
             device_name: departed.who_in(),
             vault_name,
+            start: false,
         };
         self.sync.relay.departed_check = Some((id.to_owned(), request.action()));
         self.ask_owner(request, ctx);
@@ -3191,28 +3266,33 @@ impl DesktopApp {
         else {
             return;
         };
-        let same = self.relay_departed(&id).is_some_and(|departed| {
-            departed.head.version == version && departed.head.head_hash == head
-        });
-        if !same {
+        let Some(approved) = self
+            .relay_departed(&id)
+            .map(|departed| departed.head)
+            .filter(|waiting| waiting.version == version && waiting.head_hash == head)
+        else {
             self.set_err("The copy on the relay changed. Nothing changed.");
             return;
-        }
+        };
         if replace {
             self.relay_replace(&id);
         } else {
-            self.relay_use_departed(&id);
+            self.relay_use_departed(&id, &approved);
         }
     }
 
-    /// "Use the Copy That … Left…" for the open vault `id`: the head that it waits on
-    /// merges into the vault once, and the vault goes up over it. The relay copy is checked
-    /// again first. On its own thread.
-    pub(crate) fn relay_use_departed(&mut self, id: &str) {
+    /// "Use the Copy That … Left…" for the open vault `id`: `approved`, the head that the
+    /// owner check named, merges into the vault once, and the vault goes up over it. The
+    /// store must still wait on exactly that head; another one is refused and nothing
+    /// changes. The relay copy is checked again first. On its own thread.
+    pub(crate) fn relay_use_departed(&mut self, id: &str, approved: &DepartedHead) {
         if self.relay_busy(id, Job::UseDeparted) {
             return;
         }
-        let Some(departed) = self.relay_departed(id) else {
+        let Some(departed) = self
+            .relay_departed(id)
+            .filter(|departed| departed.head == *approved)
+        else {
             self.set_err("The copy on the relay changed. Nothing changed.");
             return;
         };
@@ -3784,6 +3864,7 @@ impl DesktopApp {
         let relay = &mut self.sync.relay;
         relay.join_error = None;
         relay.store_join = false;
+        relay.join_source = relay.source;
         let text = Zeroizing::new(relay.link_input.trim().to_owned());
         if text.is_empty() {
             relay.join_error =
@@ -3858,6 +3939,7 @@ impl DesktopApp {
         self.relay_join_cancel();
         if let Some(account) = account {
             self.sync.relay.store_join = false;
+            let names = Arc::clone(&self.sync.relay.join_names);
             let task = Task::spawn(ctx.cloned(), move || {
                 let store = {
                     let mut guard = lock(&account.account);
@@ -3870,10 +3952,13 @@ impl DesktopApp {
                         .into_iter()
                         .find(|store| store.team_id == team);
                     match store {
-                        Some(store) => Some(
-                            RelaySync::joined_from_store(account, &store)
-                                .map_err(|error| error.to_string())?,
-                        ),
+                        Some(store) => {
+                            keep_removed_names(account, &names);
+                            Some(
+                                RelaySync::joined_from_store(account, &store)
+                                    .map_err(|error| error.to_string())?,
+                            )
+                        }
                         None => None,
                     }
                 };
@@ -4062,6 +4147,7 @@ impl DesktopApp {
             Phase::Resolving(task) => match task.poll() {
                 TaskPoll::Waiting => Some(Phase::Resolving(task)),
                 TaskPoll::Done(Ok(Resolved::Store(joined))) => {
+                    self.relay_take_join_names();
                     // A store of the account: the copy downloads; no link was used.
                     self.sync.relay.link_input.zeroize();
                     self.sync.relay.join_key = None;
@@ -4106,6 +4192,7 @@ impl DesktopApp {
             Phase::FromStore(task) => match task.poll() {
                 TaskPoll::Waiting => Some(Phase::FromStore(task)),
                 TaskPoll::Done(Ok(joined)) => {
+                    self.relay_take_join_names();
                     let joined = Arc::new(joined);
                     let work = self.vault_list.data_dir.join("sync");
                     let device = Arc::clone(&joined);
@@ -4246,6 +4333,9 @@ impl DesktopApp {
                         .is_some()
                 });
                 if take {
+                    self.relay_ask_join_departed(&joined, &head, ctx);
+                }
+                if self.relay_join_departed_approved(&head) {
                     Some(self.relay_join_departed(joined, head, ctx))
                 } else {
                     Some(Phase::Departed { joined, head })
@@ -4274,6 +4364,13 @@ impl DesktopApp {
             safety,
             phase,
         });
+    }
+
+    /// The signed names that the worker of a join from a vault store read
+    /// ([`keep_removed_names`]).
+    fn relay_take_join_names(&mut self) {
+        let names = std::mem::take(&mut *lock(&self.sync.relay.join_names));
+        self.sync.relay.departed_names.extend(names);
     }
 
     /// Forget the vault stores that "Use a vault from another Mac" › "Apassy Connect"
@@ -4357,14 +4454,17 @@ impl DesktopApp {
             return;
         };
         let team = store.name.clone();
+        let names = Arc::clone(&self.sync.relay.join_names);
         let task = Task::spawn(ctx.cloned(), move || {
             let mut guard = lock(&account.account);
             let account = guard
                 .as_mut()
                 .ok_or_else(|| crate::connect::ConnectError::SignedOut.to_string())?;
+            keep_removed_names(account, &names);
             RelaySync::joined_from_store(account, &store).map_err(|error| error.to_string())
         });
         self.sync.relay.store_join = true;
+        self.sync.relay.join_source = OpenSource::Connect;
         self.sync.relay.join = Some(Join {
             target: None,
             url: account.origin.clone(),
@@ -4534,9 +4634,85 @@ impl DesktopApp {
 }
 
 impl DesktopApp {
-    /// "Use the Copy That … Left…" of a device that joins: the download takes the head
-    /// that it waited on, once ([`JoinedDevice::download_departed`]); the adoption then
-    /// makes it the anchor, and the first sync pushes a head of this device over it.
+    /// "Use the Copy That … Left…" of a device that joins (the start screen): a fresh owner
+    /// check first, for exactly the store, the version, and the head that the download
+    /// waits on ([`OwnerAction::TakeDepartedCopy`]), as in the window with an open vault.
+    /// With no vault unlocked it is Touch ID, or system authentication on Linux, bound to
+    /// the session of the start-screen step.
+    fn relay_ask_join_departed(
+        &mut self,
+        joined: &JoinedDevice,
+        head: &DepartedHead,
+        ctx: Option<&egui::Context>,
+    ) {
+        let departed = Departed {
+            head: head.clone(),
+            name: self.sync.relay.departed_names.get(&head.key).cloned(),
+        };
+        let request = OwnerRequest::TakeDepartedCopy {
+            team_id: joined.team_id().to_owned(),
+            version: head.version,
+            head: head.head_hash.clone(),
+            replace: false,
+            device_name: departed.who_in(),
+            vault_name: joined.team().to_owned(),
+            start: true,
+        };
+        self.sync.relay.join_departed_check = Some(request.action());
+        self.ask_owner(request, ctx);
+    }
+
+    /// Whether the owner check of [`Self::relay_ask_join_departed`] passed for exactly
+    /// `head`, the head that the download still waits on, in the session that asked it
+    /// (the vault session, or else the start-screen step). A cancelled or refused check
+    /// drops the step; a proof for another head or session changes nothing.
+    fn relay_join_departed_approved(&mut self, head: &DepartedHead) -> bool {
+        let Some(action) = self.sync.relay.join_departed_check.clone() else {
+            return false;
+        };
+        if self.ui.connect.live.guarded.is_some() {
+            return false;
+        }
+        let Some(proof) = self.owner.take_connect_proof() else {
+            if self.owner.check.is_none() {
+                self.sync.relay.join_departed_check = None;
+            }
+            return false;
+        };
+        self.sync.relay.join_departed_check = None;
+        let Some(epoch) = self
+            .owner_ui
+            .session
+            .epoch()
+            .or_else(|| self.connect_session().start_epoch())
+        else {
+            self.set_err("The step ended. Nothing changed.");
+            return false;
+        };
+        if let Err(refusal) = proof.check(&action, &epoch) {
+            self.set_err(refusal.message());
+            return false;
+        }
+        drop(proof);
+        let same = matches!(
+            &action,
+            OwnerAction::TakeDepartedCopy {
+                version,
+                head: hash,
+                replace: false,
+                ..
+            } if *version == head.version && *hash == head.head_hash
+        );
+        if !same {
+            self.set_err("The copy on the relay changed. Nothing changed.");
+        }
+        same
+    }
+
+    /// "Use the Copy That … Left…" of a device that joins, after its owner check: the
+    /// download takes the head that it waited on, once
+    /// ([`JoinedDevice::download_departed`]); the adoption then makes it the anchor, and
+    /// the first sync pushes a head of this device over it.
     fn relay_join_departed(
         &mut self,
         joined: Arc<JoinedDevice>,
@@ -4575,6 +4751,12 @@ impl DesktopApp {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    /// "Use the Copy That … Left…" of a device that joins, as a click, and one look.
+    pub(crate) fn relay_take_departed_for_test(&mut self, ctx: &egui::Context) {
+        ctx.data_mut(|data| data.insert_temp(egui::Id::new(TAKE_DEPARTED), true));
+        self.relay_join_step(Some(ctx));
     }
 
     /// Look at a Mac that joins until no worker thread runs for it.
@@ -4676,7 +4858,7 @@ fn join_progress(ui: &mut egui::Ui, view: &JoinView) {
             kit::tone_note(
                 ui,
                 format!(
-                    "{words} No device of the account has saved a copy over it yet. Apassy can take this copy once, and the vault of this {} starts from it. Take it only if you know the change.",
+                    "{words} No device of the account has saved a copy over it yet. This copy comes from a device that was removed from the account. Do not use it if that device was lost or stolen. {DEPARTED_ADVICE} Apassy can take this copy once, and the vault of this {} starts from it.",
                     crate::computer!()
                 ),
                 Tone::Warning,

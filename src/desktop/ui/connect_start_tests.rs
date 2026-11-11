@@ -237,7 +237,10 @@ fn a_computer_without_a_vault_joins_the_account_and_gets_a_vault_from_connect() 
         assert!(error.is_none(), "the join failed: {error:?}");
         matches!(app.ui.connect.sheet, Some(Sheet::JoinWaiting { .. }))
     });
-    let Some(Sheet::JoinWaiting { confirmer, words }) = &b.ui.connect.sheet else {
+    let Some(Sheet::JoinWaiting {
+        confirmer, words, ..
+    }) = &b.ui.connect.sheet
+    else {
         unreachable!();
     };
     let (confirmer, words) = (confirmer.clone(), words.clone());
@@ -543,4 +546,500 @@ fn an_old_account_file_says_join_the_account_again() {
     assert!(text.contains(OLD_FILE), "{text}");
     assert!(text.contains(FORGET_OLD_FILE), "{text}");
     assert!(!text.contains(REMOVED), "{text}");
+}
+
+// ---- Round 5: the copy of a removed device, joins that outlive their step, and the
+// ---- ways out of the Connect path.
+
+/// Join the device of `store` and the account file `path` to the account of A with the
+/// core join of `name`, confirmed in A's window with the words and the owner check; then
+/// A's store takes the new device.
+fn join_with_core(
+    a: &mut DesktopApp,
+    a_ctx: &egui::Context,
+    connect: &FakeConnect,
+    store: &MemoryKeyStore,
+    path: &std::path::Path,
+    name: &str,
+) -> crate::connect::ConnectAccount {
+    use crate::connect::{ConnectClient, JoinPoll, JoinRequest};
+    let devices = shown_devices(a);
+    pass(a_ctx, a, |app, ctx| live::act(app, ctx, Action::AddDevice));
+    until(a_ctx, a, "the code", |app| {
+        matches!(app.ui.connect.sheet, Some(Sheet::AddDevice { .. }))
+    });
+    let Some(Sheet::AddDevice { code, .. }) = &a.ui.connect.sheet else {
+        unreachable!();
+    };
+    let code = code.as_str().to_owned();
+    let mut request = JoinRequest::start(
+        ConnectClient::new(&connect.url).expect("client"),
+        store,
+        path,
+        &code,
+        name,
+    )
+    .expect("join");
+    until(a_ctx, a, "the words", |app| {
+        matches!(app.ui.connect.sheet, Some(Sheet::Words { .. }))
+    });
+    pass(a_ctx, a, |app, ctx| live::choose(app, ctx, SheetChoice::Go));
+    confirm_with(a, a_ctx, PASS);
+    until(a_ctx, a, "the device", |app| {
+        matches!(app.ui.connect.sheet, Some(Sheet::DeviceAdded { .. }))
+    });
+    pass(a_ctx, a, |app, ctx| {
+        live::choose(app, ctx, SheetChoice::Done)
+    });
+    until(a_ctx, a, "one more device", |app| {
+        shown_devices(app) == devices + 1
+    });
+    a.relay_settle_for_test();
+    match request.poll() {
+        Ok(JoinPoll::Confirmed(account)) => *account,
+        other => panic!("not confirmed: {other:?}"),
+    }
+}
+
+/// A with its store; B (no vault) in the account through the core join, on the start
+/// screen's Connect path with the store listed.
+struct OnStart {
+    _dir: TempDir,
+    connect: FakeConnect,
+    relay: Arc<FakeRelay>,
+    /// Device A stays for the whole test.
+    _a: DesktopApp,
+    team: String,
+    b: DesktopApp,
+    ctx: egui::Context,
+    store: crate::connect::VaultStoreView,
+}
+
+/// [`OnStart`]; `after_b` runs on A after B joined and before B opens the Connect path.
+fn on_start(
+    after_b: impl FnOnce(&mut DesktopApp, &egui::Context, &FakeConnect, &FakeRelay, &str),
+) -> OnStart {
+    let dir = TempDir::new().expect("temp dir");
+    let relay = Arc::new(FakeRelay::start());
+    let connect = FakeConnect::with_relay(Arc::clone(&relay) as _);
+    let (mut a, a_ctx, team) = device_a(&dir, &connect, &relay);
+    let b_store = Arc::new(MemoryKeyStore::new());
+    let b_file = crate::connect::account_file(&dir.path().join("data-b"));
+    drop(join_with_core(
+        &mut a,
+        &a_ctx,
+        &connect,
+        &b_store,
+        &b_file,
+        "Synthetic Mac mini",
+    ));
+    let b_key = crate::connect::AccountSigner::open(b_store.as_ref())
+        .expect("key")
+        .expect("B's key")
+        .public_key()
+        .to_vec();
+    assert!(
+        relay
+            .team_devices(&team)
+            .iter()
+            .any(|(_, key)| *key == b_key),
+        "B is in the store"
+    );
+    after_b(&mut a, &a_ctx, &connect, &relay, &team);
+    let mut b = device_b(&dir, &connect, b_store);
+    let ctx = egui::Context::default();
+    open_connect_path(&mut b);
+    // The session of the step read the account: its trust store is that of Connect now.
+    frames_until(&ctx, &mut b, "a verified device list", |_| true);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while b
+        .ui
+        .connect
+        .live
+        .sync_account()
+        .and_then(|account| account.verified_at)
+        .is_none()
+    {
+        assert!(Instant::now() < deadline, "the step read the account");
+        frame(&ctx, &mut b);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    frames_until(&ctx, &mut b, "the store", |text| {
+        text.contains(CONNECT_OPEN_USE) && text.contains("Personal")
+    });
+    let Some(Ok(stores)) = b.relay_connect_stores(&ctx).cloned() else {
+        panic!("the stores are listed");
+    };
+    let store = stores
+        .into_iter()
+        .find(|store| store.team_id == team)
+        .expect("the store of A");
+    OnStart {
+        _dir: dir,
+        connect,
+        relay,
+        _a: a,
+        team,
+        b,
+        ctx,
+        store,
+    }
+}
+
+/// A head over the last head of `team` signed by `signer` (its store device), with a copy
+/// of A's vault that holds one more item, "From the removed iMac".
+fn removed_device_push(
+    s_a: &DesktopApp,
+    relay: &FakeRelay,
+    team: &str,
+    signer: &crate::connect::AccountSigner,
+    work: &std::path::Path,
+) {
+    use crate::sync::{HeadFields, sha256_hex};
+    let number = relay
+        .team_devices(team)
+        .into_iter()
+        .find(|(_, key)| key.as_slice() == signer.public_key())
+        .map(|(number, _)| number)
+        .expect("the device is in the store");
+    let entry = s_a.current_vault().expect("A's vault").clone();
+    let copy_path = work.join(format!("removed-copy-{}.db", relay.version_of(team)));
+    std::fs::copy(&entry.path, &copy_path).expect("copy");
+    let mut copy = crate::vault::Vault::open(&copy_path).expect("open");
+    copy.unlock(PASS).expect("unlock");
+    copy.add(crate::vault::ItemDraft {
+        title: format!("From the removed iMac {}", relay.version_of(team)),
+        kind: crate::contracts::CredentialKind::ApiKey,
+        notes: String::new(),
+        tags: Vec::new(),
+        fields: vec![crate::vault::Field {
+            name: "token".to_owned(),
+            value: crate::vault::SecretValue::new("SYNTH-removed".to_owned()),
+            secret: true,
+        }],
+    })
+    .expect("add");
+    let synced = work.join(format!("removed-copy-{}.sync", relay.version_of(team)));
+    copy.write_sync_copy(&synced, "Synthetic iMac")
+        .expect("sync copy");
+    let bytes = std::fs::read(&synced).expect("bytes");
+    let last = relay.heads_of(team).last().cloned().expect("a head");
+    let fields = HeadFields {
+        version: last.version + 1,
+        previous: last.hash(),
+        snapshot_sha256: sha256_hex(&bytes),
+        size: bytes.len() as u64,
+        device_id: number,
+        ..HeadFields::parse(&last.text).expect("head")
+    };
+    let signed = signer.sign_head(fields).expect("sign");
+    relay.replace_store_from(
+        team,
+        vec![(
+            crate::desktop::fake_relay::StoredHead {
+                version: last.version + 1,
+                text: signed.text,
+                signature: signed.signature,
+                device_id: number,
+            },
+            bytes,
+        )],
+    );
+}
+
+/// On the start screen, the copy that a removed device left is taken only after an owner
+/// check bound to the store, the version, the head, and the session of the step; the
+/// screen names the device and warns not to use the copy of a lost or stolen device; a
+/// vault passphrase cannot confirm with no vault unlocked; and after the copy is taken, a
+/// later head of the same removed device waits again.
+#[test]
+fn the_start_screen_takes_the_copy_of_a_removed_device_only_after_an_owner_check() {
+    let imac = Arc::new(std::sync::Mutex::new(None));
+    let held = Arc::clone(&imac);
+    let mut s = on_start(move |a, a_ctx, connect, relay, team| {
+        let dir = TempDir::new().expect("dir");
+        let store = MemoryKeyStore::new();
+        let file = crate::connect::account_file(dir.path());
+        let account = join_with_core(a, a_ctx, connect, &store, &file, "Synthetic iMac");
+        let signer = account.signer().expect("the iMac's key");
+        // The iMac pushes last, then A removes it.
+        removed_device_push(a, relay, team, &signer, dir.path());
+        let index = match live::view(a).shown {
+            Shown::Account(account) => account
+                .devices
+                .iter()
+                .position(|device| device.name == "Synthetic iMac")
+                .expect("the iMac"),
+            _ => panic!("the account of A"),
+        };
+        pass(a_ctx, a, |app, ctx| {
+            live::act(app, ctx, Action::Revoke(index))
+        });
+        pass(a_ctx, a, |app, ctx| live::choose(app, ctx, SheetChoice::Go));
+        confirm_with(a, a_ctx, PASS);
+        until(a_ctx, a, "the iMac is removed", |app| {
+            shown_devices(app) == 2
+        });
+        *held.lock().unwrap() = Some((dir, signer));
+    });
+    let (imac_dir, imac_signer) = imac.lock().unwrap().take().expect("the iMac");
+    let version = s.relay.version_of(&s.team);
+    let store = s.store.clone();
+    s.b.relay_connect_use(store, None);
+    s.b.relay_settle_for_test();
+    assert!(
+        matches!(
+            s.b.sync.relay.join_view(None),
+            Some(JoinView::Departed { .. })
+        ),
+        "{:?} {:?}",
+        s.b.sync.relay.join_view(None),
+        s.b.sync.relay.join_error
+    );
+    let ctx = s.ctx.clone();
+    let text = frames_until(
+        &ctx,
+        &mut s.b,
+        "the signed name of the removed device",
+        |text| text.contains("“Synthetic iMac”"),
+    );
+    assert!(
+        text.contains("Do not use it if that device was lost or stolen."),
+        "{text}"
+    );
+    assert!(text.contains(super::sync::relay::DEPARTED_ADVICE), "{text}");
+
+    // The click asks for the owner check; nothing is downloaded before it.
+    s.b.relay_take_departed_for_test(&ctx);
+    let action =
+        s.b.owner
+            .check
+            .as_ref()
+            .map(|check| check.request.action())
+            .expect("an owner check");
+    assert!(
+        matches!(
+            &action,
+            crate::broker::approvals::OwnerAction::TakeDepartedCopy {
+                team_id,
+                version: v,
+                replace: false,
+                ..
+            } if *team_id == s.team && *v == version
+        ),
+        "{action:?}"
+    );
+    assert!(action.allowed_without_vault());
+    s.b.relay_settle_for_test();
+    assert!(matches!(
+        s.b.sync.relay.join_view(None),
+        Some(JoinView::Departed { .. })
+    ));
+    // No vault is unlocked: the passphrase cannot confirm it.
+    let refused =
+        s.b.owner_gate()
+            .authorize(
+                action.clone(),
+                crate::broker::approvals::OwnerCheck::passphrase(PASS),
+            )
+            .expect_err("no vault to confirm with");
+    assert!(
+        refused.message().contains("No vault is unlocked"),
+        "{}",
+        refused.message()
+    );
+    // A proof of another session changes nothing.
+    s.b.finish_owner_check_with(crate::broker::approvals::OwnerProof::issue_for_test(
+        action.clone(),
+        [9; 32],
+        Instant::now(),
+    ));
+    s.b.relay_settle_for_test();
+    assert!(matches!(
+        s.b.sync.relay.join_view(None),
+        Some(JoinView::Departed { .. })
+    ));
+    // The proof of the step: the copy downloads.
+    s.b.relay_take_departed_for_test(&ctx);
+    let epoch = s.b.connect_session().start_epoch().expect("the step");
+    s.b.finish_owner_check_with(crate::broker::approvals::OwnerProof::issue_for_test(
+        action,
+        epoch,
+        Instant::now(),
+    ));
+    s.b.relay_settle_for_test();
+    assert_eq!(
+        s.b.sync.relay.join_view(None),
+        Some(JoinView::Ready {
+            team: "Personal".to_owned()
+        }),
+        "{:?}",
+        s.b.sync.relay.join_error
+    );
+    s.b.owner_ui.passphrase.push_str(PASS);
+    s.b.relay_open_vault(None);
+    s.b.relay_settle_for_test();
+    assert!(!s.b.owner_ui.session.is_locked(), "{}", s.b.status_text);
+    let entry = s.b.current_vault().expect("the new vault").clone();
+    pass(&ctx, &mut s.b, live::step);
+    until(&ctx, &mut s.b, "the session of the vault", |app| {
+        app.connect_session().is_open() && app.connect_session().start_epoch().is_none()
+    });
+    // A later head of the same device waits again: the engine test
+    // `a_new_device_takes_the_copy_that_a_removed_device_left` (tests/relay_sync.rs).
+    drop((imac_dir, imac_signer, entry));
+    drop(s.connect);
+}
+
+/// B on the start screen with the copy of the store downloaded (the account key held by
+/// the join).
+fn ready_on_start() -> OnStart {
+    let mut s = on_start(|_, _, _, _, _| {});
+    let store = s.store.clone();
+    s.b.relay_connect_use(store, None);
+    s.b.relay_settle_for_test();
+    assert_eq!(
+        s.b.sync.relay.join_view(None),
+        Some(JoinView::Ready {
+            team: "Personal".to_owned()
+        })
+    );
+    assert!(s.b.sync.relay.join_with_account().is_some());
+    s
+}
+
+/// What holds the account key on B after a way out of the Connect path: nothing.
+fn assert_nothing_holds_the_key(s: &mut OnStart) {
+    let ctx = s.ctx.clone();
+    frame(&ctx, &mut s.b);
+    frame(&ctx, &mut s.b);
+    assert!(
+        s.b.sync.relay.join_with_account().is_none(),
+        "the join went"
+    );
+    assert!(s.b.sync.relay.join_view(None).is_none());
+    let session = s.b.connect_session();
+    assert!(session.start_epoch().is_none(), "the step ended");
+    assert!(session.signer().is_none(), "no key in the session");
+    assert!(session.slot().lock().unwrap().is_none());
+}
+
+/// The segment "Synced folder" ends the step and drops the store's join.
+#[test]
+fn the_folder_segment_drops_what_holds_the_account_key() {
+    let mut s = ready_on_start();
+    s.b.sync.relay.source = OpenSource::Folder;
+    assert_nothing_holds_the_key(&mut s);
+}
+
+/// The segment "Apassy relay" ends the step too: a join from the Connect list goes, and
+/// the relay segment keeps no session of its own.
+#[test]
+fn the_relay_segment_drops_what_holds_the_account_key() {
+    let mut s = ready_on_start();
+    s.b.sync.relay.source = OpenSource::Relay;
+    assert_nothing_holds_the_key(&mut s);
+}
+
+/// Back to the start screen's home ends the step and drops the join.
+#[test]
+fn back_home_drops_what_holds_the_account_key() {
+    let mut s = ready_on_start();
+    s.b.ui.start = super::start::Step::Home;
+    assert_nothing_holds_the_key(&mut s);
+}
+
+/// B joins the account on the start screen, and its step ends before the other device
+/// confirms (a way out of the step, or a quit) while Connect does not take the cancel: the
+/// join stays on disk, the other device confirms, and the next visit of the step resumes
+/// the join, which ends with this device in the account.
+fn a_join_outlives_its_step(quit: bool) {
+    let dir = TempDir::new().expect("temp dir");
+    let relay = Arc::new(FakeRelay::start());
+    let connect = FakeConnect::with_relay(Arc::clone(&relay) as _);
+    let (mut a, a_ctx, _team) = device_a(&dir, &connect, &relay);
+    let b_store = Arc::new(MemoryKeyStore::new());
+    let mut b = device_b(&dir, &connect, Arc::clone(&b_store));
+    let ctx = egui::Context::default();
+    open_connect_path(&mut b);
+    frame(&ctx, &mut b);
+    pass(&ctx, &mut b, |app, ctx| {
+        live::act(app, ctx, Action::AddThisMac)
+    });
+    pass(&a_ctx, &mut a, |app, ctx| {
+        live::act(app, ctx, Action::AddDevice)
+    });
+    until(&a_ctx, &mut a, "the code", |app| {
+        matches!(app.ui.connect.sheet, Some(Sheet::AddDevice { .. }))
+    });
+    let Some(Sheet::AddDevice { code, .. }) = &a.ui.connect.sheet else {
+        unreachable!();
+    };
+    let code = code.as_str().to_owned();
+    if let Some(Sheet::JoinAccount { code: typed }) = &mut b.ui.connect.sheet {
+        typed.push_str(&code);
+    }
+    pass(&ctx, &mut b, |app, ctx| {
+        live::choose(app, ctx, SheetChoice::Go)
+    });
+    until(&ctx, &mut b, "the words", |app| {
+        matches!(app.ui.connect.sheet, Some(Sheet::JoinWaiting { .. }))
+    });
+    let pending = dir.path().join("data-b/connect/pending-join.json");
+    assert!(pending.exists(), "the join is on disk");
+    // Connect does not take the cancel.
+    connect.answer_route_error("POST /v1/account/devices/join/cancel", 503, "busy");
+    let cancels = connect.count("POST /v1/account/devices/join/cancel");
+    let kept = if quit {
+        b.connect_quit();
+        drop(b);
+        None
+    } else {
+        b.sync.relay.source = OpenSource::Folder;
+        frame(&ctx, &mut b);
+        assert!(b.ui.connect.sheet.is_none(), "the sheet went with the step");
+        Some(b)
+    };
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while connect.count("POST /v1/account/devices/join/cancel") == cancels {
+        assert!(Instant::now() < deadline, "the cancel was sent");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        pending.exists(),
+        "a cancel that Connect did not take keeps the join"
+    );
+    // The other device confirms meanwhile.
+    until(&a_ctx, &mut a, "the words on A", |app| {
+        matches!(app.ui.connect.sheet, Some(Sheet::Words { .. }))
+    });
+    pass(&a_ctx, &mut a, |app, ctx| {
+        live::choose(app, ctx, SheetChoice::Go)
+    });
+    confirm_with(&mut a, &a_ctx, PASS);
+    until(&a_ctx, &mut a, "the device", |app| {
+        matches!(app.ui.connect.sheet, Some(Sheet::DeviceAdded { .. }))
+    });
+    // The next visit of the step (after a restart: a new app) resumes the join.
+    let mut b = kept.unwrap_or_else(|| device_b(&dir, &connect, b_store));
+    open_connect_path(&mut b);
+    frames_until(&ctx, &mut b, "joined", |text| text.contains(JOINED_TITLE));
+    assert!(!pending.exists(), "the join ended");
+    assert!(
+        crate::connect::AccountState::load(&dir.path().join("data-b/connect/account.json"))
+            .expect("load")
+            .is_some(),
+        "this device is in the account"
+    );
+    assert!(b.connect_session().is_open());
+}
+
+#[test]
+fn a_join_left_on_the_start_screen_ends_in_the_account_after_a_late_confirmation() {
+    a_join_outlives_its_step(false);
+}
+
+#[test]
+fn a_join_cut_by_a_quit_resumes_at_the_next_start() {
+    a_join_outlives_its_step(true);
 }

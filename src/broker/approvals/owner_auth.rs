@@ -55,7 +55,7 @@
 
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::PoisonError;
+use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use zeroize::Zeroizing;
@@ -479,6 +479,11 @@ pub enum OwnerAction {
     DeleteConnectAccount {
         account_id: String,
     },
+    /// Make a new recovery code for the Apassy Connect account (connect-account-v1 section
+    /// 9.1): the recovery key at Connect is replaced, and the old code stops working.
+    NewRecoveryCode {
+        account_id: String,
+    },
     /// Forget an account file of an earlier version of Apassy on this Mac, with the account
     /// key: the device joins its account again after it. Connect is not asked.
     ForgetOldConnectAccount,
@@ -807,6 +812,7 @@ impl OwnerAction {
             Self::ConfirmConnectDevice { .. } => "Add a device to Apassy Connect",
             Self::RevokeConnectDevice { .. } => "Remove a device from Apassy Connect",
             Self::DeleteConnectAccount { .. } => "Delete the Apassy Connect account",
+            Self::NewRecoveryCode { .. } => "Make a new recovery code",
             Self::ForgetOldConnectAccount => "Forget the Apassy Connect account here",
             Self::DeleteVaultStore { .. } => "Delete a relay copy at Apassy Connect",
             Self::TakeDepartedCopy { replace: false, .. } => "Use the copy of a device that left",
@@ -1048,6 +1054,9 @@ impl OwnerAction {
             Self::DeleteConnectAccount { .. } => {
                 "delete your Apassy Connect account, its vault stores, and its plan".to_owned()
             }
+            Self::NewRecoveryCode { .. } => {
+                "make a new recovery code for your Apassy Connect account; the old code stops working".to_owned()
+            }
             Self::ForgetOldConnectAccount => {
                 "forget the Apassy Connect account on this device".to_owned()
             }
@@ -1204,6 +1213,13 @@ impl OwnerAction {
     /// `AddRemoteAgent` mints a bearer token that works from the internet and goes back
     /// to the caller of the command line, whose session proves no owner at the Mac
     /// (owner-cli-v1 §4, review 0.5.16).
+    /// Whether the start screen may confirm this action while no vault is unlocked (the
+    /// owner takes the copy that a removed device left on a vault store, connect-account-v1
+    /// section 7.5). Every other action needs an unlocked vault.
+    pub fn allowed_without_vault(&self) -> bool {
+        matches!(self, Self::TakeDepartedCopy { replace: false, .. })
+    }
+
     pub fn needs_fresh_local_check(&self) -> bool {
         matches!(
             self,
@@ -1215,6 +1231,7 @@ impl OwnerAction {
                 | Self::ConfirmConnectDevice { .. }
                 | Self::RevokeConnectDevice { .. }
                 | Self::DeleteConnectAccount { .. }
+                | Self::NewRecoveryCode { .. }
                 | Self::ForgetOldConnectAccount
                 | Self::DeleteVaultStore { .. }
                 | Self::TakeDepartedCopy { .. }
@@ -1766,13 +1783,38 @@ impl OwnerProof {
     }
 }
 
+/// The epoch of the session of a step that runs while no vault is unlocked (the start
+/// screen's Apassy Connect path), now; `None` while there is none.
+pub type StartEpoch = Arc<dyn Fn() -> Option<[u8; 32]> + Send + Sync>;
+
+/// Why a check without an unlocked vault cannot use the passphrase.
+#[cfg(not(target_os = "linux"))]
+const NO_VAULT_TO_CONFIRM: &str = "No vault is unlocked on this Mac, so its passphrase cannot confirm this. Confirm with Touch ID, or ask on another device of the account instead.";
+/// Why a check without an unlocked vault cannot use the passphrase.
+#[cfg(target_os = "linux")]
+const NO_VAULT_TO_CONFIRM: &str = "No vault is unlocked on this computer, so its passphrase cannot confirm this. Confirm with system authentication, or ask on another device of the account instead.";
+
 /// The owner-authorization gate. It holds the shared vault and, when the app has one,
 /// the native helper for Touch ID.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OwnerGate {
     vault: SharedVault,
     touch_id: Option<NativeHelper>,
     window: super::owner_window::OwnerWindow,
+    /// The session of the start screen's Connect path, for the few actions that it may
+    /// confirm while no vault is unlocked ([`OwnerAction::allowed_without_vault`]).
+    start: Option<StartEpoch>,
+}
+
+impl std::fmt::Debug for OwnerGate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OwnerGate")
+            .field("vault", &self.vault)
+            .field("touch_id", &self.touch_id)
+            .field("window", &self.window)
+            .field("start", &self.start.is_some())
+            .finish()
+    }
 }
 
 impl OwnerGate {
@@ -1783,7 +1825,16 @@ impl OwnerGate {
             vault,
             touch_id,
             window: Default::default(),
+            start: None,
         }
+    }
+
+    /// The gate with `start`, the epoch of the start screen's Connect session: while no
+    /// vault is unlocked, an action of [`OwnerAction::allowed_without_vault`] is confirmed
+    /// with Touch ID or system authentication and bound to that session.
+    pub fn with_start_session(mut self, start: StartEpoch) -> Self {
+        self.start = Some(start);
+        self
     }
 
     pub(crate) fn with_window(mut self, window: super::owner_window::OwnerWindow) -> Self {
@@ -1857,6 +1908,9 @@ impl OwnerGate {
         check: OwnerCheck,
         cancel: Option<&AuthCancel>,
     ) -> Result<OwnerProof, OwnerAuthError> {
+        if self.session().is_err() && action.allowed_without_vault() {
+            return self.authorize_without_vault(action, check, cancel);
+        }
         let generation = self.window.generation();
         let local = matches!(
             check.method(),
@@ -2214,6 +2268,56 @@ impl OwnerGate {
     }
 
     /// The path and the epoch of the unlocked vault. The vault mutex is held only here.
+    /// The check of an action of [`OwnerAction::allowed_without_vault`] while no vault is
+    /// unlocked: Touch ID, or system authentication on Linux; no vault holds a passphrase
+    /// to check, and no other device answers it. The proof is bound to the epoch of the
+    /// start-screen session, which must be the same after the check, still with no vault.
+    /// It seeds no window of later checks.
+    fn authorize_without_vault(
+        &self,
+        action: OwnerAction,
+        check: OwnerCheck,
+        cancel: Option<&AuthCancel>,
+    ) -> Result<OwnerProof, OwnerAuthError> {
+        let cancelled = || cancel.is_some_and(AuthCancel::is_cancelled);
+        let start_epoch = || self.start.as_ref().and_then(|start| start());
+        let Some(epoch) = start_epoch() else {
+            return Err(OwnerAuthError::VaultLocked);
+        };
+        if cancelled() {
+            return Err(OwnerAuthError::Cancelled);
+        }
+        let method = check.method();
+        match check {
+            OwnerCheck::TouchId => {
+                let Some(helper) = &self.touch_id else {
+                    return Err(OwnerAuthError::TouchIdUnavailable {
+                        detail: "this build has no Touch ID helper.".to_owned(),
+                    });
+                };
+                helper
+                    .authenticate_titled(&action.reason(), action.touch_id_title(), cancel)
+                    .map_err(from_native)?;
+            }
+            #[cfg(target_os = "linux")]
+            OwnerCheck::Polkit => {
+                crate::native::linux::authenticate(cancel)
+                    .map_err(|_| OwnerAuthError::Other(NO_VAULT_TO_CONFIRM.to_owned()))?;
+            }
+            OwnerCheck::Passphrase(_) => {
+                return Err(OwnerAuthError::Other(NO_VAULT_TO_CONFIRM.to_owned()));
+            }
+            _ => return Err(OwnerAuthError::RemoteUnsupported),
+        }
+        if cancelled() {
+            return Err(OwnerAuthError::Cancelled);
+        }
+        if self.session().is_ok() || start_epoch() != Some(epoch) {
+            return Err(OwnerAuthError::SessionChanged);
+        }
+        Ok(OwnerProof::issue(action, method, epoch))
+    }
+
     fn session(&self) -> Result<(PathBuf, [u8; 32]), OwnerAuthError> {
         let guard = self.vault.lock().unwrap_or_else(PoisonError::into_inner);
         match guard.as_ref() {
@@ -2499,6 +2603,9 @@ mod evaluation_tests {
                 fingerprint: "1a2b 3c4d 5e6f".into(),
             },
             OwnerAction::DeleteConnectAccount {
+                account_id: "acc_k7m2q4x3ca".into(),
+            },
+            OwnerAction::NewRecoveryCode {
                 account_id: "acc_k7m2q4x3ca".into(),
             },
             OwnerAction::ChangeConnectGroup {

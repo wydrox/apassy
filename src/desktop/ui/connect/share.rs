@@ -1185,7 +1185,7 @@ fn lists_read(app: &mut DesktopApp, now: Instant) {
             .unlisted_head()
             .is_some_and(|head| app.ui.connect.share.checks.quiet(&team, &head, now));
         if !quiet {
-            relay.note_device_list();
+            relay.note_device_list(now);
         }
         app.relay_sync_now(&id);
     }

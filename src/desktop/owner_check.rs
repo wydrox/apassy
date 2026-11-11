@@ -796,6 +796,10 @@ pub enum OwnerRequest {
     DeleteConnectAccount {
         account_id: String,
     },
+    /// "New Recovery Code…" of the Apassy Connect account (section 9.1).
+    NewRecoveryCode {
+        account_id: String,
+    },
     /// Forget an account file of an earlier version of Apassy on this Mac, with its key.
     ForgetOldConnectAccount,
     /// Delete the vault store (relay copy) `team_id` of the vault `vault_name` at Apassy
@@ -814,6 +818,9 @@ pub enum OwnerRequest {
         replace: bool,
         device_name: String,
         vault_name: String,
+        /// The start screen: no vault of this device holds the vault yet; the copy becomes
+        /// the vault on this device.
+        start: bool,
     },
     /// Add the device `device_id` ("`device_name`") of the account `account_id` to the
     /// vault store `team_id` of the vault `vault_name` (section 8).
@@ -1459,6 +1466,9 @@ impl OwnerRequest {
             Self::DeleteConnectAccount { account_id } => OwnerAction::DeleteConnectAccount {
                 account_id: account_id.clone(),
             },
+            Self::NewRecoveryCode { account_id } => OwnerAction::NewRecoveryCode {
+                account_id: account_id.clone(),
+            },
             Self::ForgetOldConnectAccount => OwnerAction::ForgetOldConnectAccount,
             Self::DeleteVaultStore { team_id, .. } => OwnerAction::DeleteVaultStore {
                 team_id: team_id.clone(),
@@ -1970,6 +1980,7 @@ impl OwnerRequest {
                 page_text(fingerprint)
             ),
             Self::DeleteConnectAccount { .. } => "Delete your Apassy Connect account? The subscription ends now, and every vault store, device, and link of the account is deleted at Connect. Your vaults stay on your devices.".to_owned(),
+            Self::NewRecoveryCode { .. } => "Make a new recovery code for your Apassy Connect account? Apassy shows the new code once. The old recovery code stops working.".to_owned(),
             Self::ForgetOldConnectAccount => concat!("Forget the Apassy Connect account on this ", crate::computer!(), "? Its account file is from an earlier version of Apassy. The file and the account key go from this ", crate::computer!(), "; nothing changes at Connect, and your vaults stay. Then join the account again from another device of the account.").to_owned(),
             Self::DeleteVaultStore { vault_name, .. } => format!(
                 "Delete the relay copy of \"{}\" at Apassy Connect? Its snapshots go, and your devices stop syncing this vault through Connect. The vault stays on your devices.",
@@ -1979,15 +1990,24 @@ impl OwnerRequest {
                 replace: false,
                 device_name,
                 vault_name,
+                start,
                 ..
             } => format!(
                 concat!(
-                    "Use the copy of \"{}\" that {} left on the relay? Apassy merges it with the vault on this ",
-                    crate::computer!(),
-                    " once, and uploads the result."
+                    "Use the copy of \"{vault}\" that {device} left on the relay? This copy comes from a device that was removed from the account. Do not use it if that device was lost or stolen. ",
+                    "Ask on another device of the account instead, or replace the copy from a device you trust. {then}"
                 ),
-                page_text(vault_name),
-                page_text(device_name)
+                vault = page_text(vault_name),
+                device = page_text(device_name),
+                then = if *start {
+                    concat!("The vault on this ", crate::computer!(), " starts from this copy.")
+                } else {
+                    concat!(
+                        "Apassy merges it with the vault on this ",
+                        crate::computer!(),
+                        " once, and uploads the result."
+                    )
+                },
             ),
             Self::TakeDepartedCopy {
                 replace: true,
@@ -2586,11 +2606,19 @@ impl DesktopApp {
 
     /// The owner-authorization gate for this app.
     pub(crate) fn owner_gate(&self) -> OwnerGate {
-        OwnerGate::new(
+        let gate = OwnerGate::new(
             self.owner_ui.session.shared_vault(),
             self.owner.helper.clone(),
         )
-        .with_window(self.owner_ui.session.owner_window.clone())
+        .with_window(self.owner_ui.session.owner_window.clone());
+        // The start screen's Apassy Connect path confirms its few steps while no vault is
+        // unlocked (`OwnerAction::allowed_without_vault`), bound to its session.
+        #[cfg(feature = "vault")]
+        let gate = {
+            let session = self.connect_session();
+            gate.with_start_session(std::sync::Arc::new(move || session.start_epoch()))
+        };
+        gate
     }
 
     /// Ask the owner to confirm `request` (goal item A4). Nothing happens before the
@@ -3258,6 +3286,7 @@ impl DesktopApp {
             OwnerRequest::ConfirmConnectDevice { .. }
             | OwnerRequest::RevokeConnectDevice { .. }
             | OwnerRequest::DeleteConnectAccount { .. }
+            | OwnerRequest::NewRecoveryCode { .. }
             | OwnerRequest::ForgetOldConnectAccount
             | OwnerRequest::DeleteVaultStore { .. }
             | OwnerRequest::TakeDepartedCopy { .. }

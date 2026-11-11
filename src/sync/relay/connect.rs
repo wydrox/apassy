@@ -414,13 +414,15 @@ impl RelaySync {
     /// The device of this Mac in `store`, for a new vault on this Mac from the Connect
     /// copy ("Use a vault from another Mac" › "Apassy Connect"): download it with
     /// [`JoinedDevice::download`] and make the vault with [`Self::adopt`] and the
-    /// passphrase of the copy. The store must list this Mac. Its session takes the signer
-    /// policy of the account file from the first request on (no answer of Connect is
-    /// waited for), in a slot that [`Self::adopt`] hands to the relay sync of the new
-    /// vault, so a later refresh of the account reaches it. A store that holds devices of
-    /// another account ([`VaultStoreView::shared`]) needs a share of it in the account
-    /// file (`ConnectAccount::shares_store`), else it is [`StoreError::OtherAccount`],
-    /// before any request.
+    /// passphrase of the copy. The store must list this Mac. Its session has a fixed signer
+    /// policy: the trust store of the account file as it is now (no answer of Connect is
+    /// waited for; the caller read the account just before). A head or a chain entry of a
+    /// key that this policy does not hold is refused at once, with no wait for another
+    /// device list. [`Self::adopt`] rebinds the session to the policy of the relay sync of
+    /// the new vault, so a later refresh of the account reaches it. A store that holds
+    /// devices of another account ([`VaultStoreView::shared`]) needs a share of it in the
+    /// account file (`ConnectAccount::shares_store`), else it is
+    /// [`StoreError::OtherAccount`], before any request.
     pub fn joined_from_store(
         account: &mut ConnectAccount,
         store: &VaultStoreView,
