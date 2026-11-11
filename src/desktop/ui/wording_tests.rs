@@ -16,6 +16,8 @@ use tempfile::TempDir;
 use super::owner_tests::{collect, locked_app, unlocked_app_with_item};
 use super::settings_view::SettingsSection;
 use super::{Sheet, draw};
+#[cfg(target_os = "linux")]
+use crate::desktop::owner_check::OwnerRequest;
 use crate::desktop::{DesktopApp, Place};
 
 /// A tall window, so that each group of a section is on the screen.
@@ -45,16 +47,6 @@ const MAC_ONLY: [&str; 13] = [
 #[cfg(target_os = "linux")]
 const MAC_ALLOWED: [&str; 0] = [];
 
-/// Whole lines of Settings > Tools > Browser extension (`browser_settings.rs`) that
-/// unit L5 owns and changes in parallel; L7 does not edit that file. Remove each line
-/// here when L5 makes it platform-aware: the guard then covers it too.
-#[cfg(target_os = "linux")]
-const PENDING_L5: [&str; 3] = [
-    "Needs Apassy.app",
-    "No Chromium browser is on this Mac.",
-    "This Apassy.app is not /Applications/Apassy.app. The agent profile protects it only when agents start with the apassy-sandbox of this app.",
-];
-
 /// The painted texts and the AccessKit names of one screen after a few frames.
 struct Screen {
     // Only the Linux guard names the screen, in its failure message.
@@ -65,9 +57,18 @@ struct Screen {
 
 /// Draw `app` for a few frames, so that a new layout and its lazy loads settle.
 fn render(name: &str, app: &mut DesktopApp, prepare: impl Fn(&egui::Context)) -> Screen {
+    render_with(name, app, |_, ctx| prepare(ctx))
+}
+
+/// [`render`], with `prepare` given the app and the context before the first frame.
+fn render_with(
+    name: &str,
+    app: &mut DesktopApp,
+    prepare: impl FnOnce(&mut DesktopApp, &egui::Context),
+) -> Screen {
     let ctx = egui::Context::default();
     ctx.enable_accesskit();
-    prepare(&ctx);
+    prepare(app, &ctx);
     let mut names: HashMap<accesskit::NodeId, String> = HashMap::new();
     let mut text = String::new();
     for frame in 0..4 {
@@ -106,9 +107,214 @@ fn show_all_rows(ctx: &egui::Context) {
     });
 }
 
+/// The owner-check dialogs of the guard: one request of each kind that a Linux owner
+/// meets (agents, secrets, the browser, passkeys, devices and the relay), for `item`.
+/// Linux only, like [`sync_screens`]: the macOS sibling keeps its own screen list.
+#[cfg(target_os = "linux")]
+fn owner_requests(item: u64) -> Vec<(&'static str, OwnerRequest)> {
+    use crate::broker::approvals::OwnerFrequency;
+    use crate::desktop::owner_check::{PasskeyAccount, PasskeyRequest};
+    let page = |rp: &str| PasskeyRequest {
+        origin: Some(format!("https://{rp}")),
+        rid: "rid-1".to_owned(),
+        rp_id: rp.to_owned(),
+        client_data_hash: [7; 32],
+    };
+    let account = |name: &str, id: u8| PasskeyAccount {
+        item_id: item,
+        item_name: format!("{name} login"),
+        user_name: format!("{name}@example.test"),
+        user_display_name: name.to_owned(),
+        credential_id: vec![id; 16],
+        added: Some(1_762_783_385),
+    };
+    vec![
+        (
+            "connect an agent",
+            OwnerRequest::RegisterAgent {
+                name: "Claude Code".to_owned(),
+            },
+        ),
+        ("owner command line", OwnerRequest::OpenCliSession),
+        ("export decisions", OwnerRequest::ExportDecisions),
+        (
+            "back up",
+            OwnerRequest::BackupVault {
+                path: std::path::PathBuf::from("/home/owner/apassy-backup.apassy"),
+            },
+        ),
+        (
+            "how often to ask",
+            OwnerRequest::ChangeOwnerFrequency {
+                old: OwnerFrequency::EveryTime,
+                new: OwnerFrequency::FiveMinutes,
+            },
+        ),
+        ("show values", OwnerRequest::Reveal { item_id: item }),
+        (
+            "copy a field",
+            OwnerRequest::CopyField {
+                item_id: item,
+                field: "token".to_owned(),
+                revision: 1,
+            },
+        ),
+        (
+            "fill a login",
+            OwnerRequest::FillLogin {
+                item_id: item,
+                item_name: "Example login".to_owned(),
+                username: "ada@example.test".to_owned(),
+                origin: "https://example.test".to_owned(),
+            },
+        ),
+        (
+            "save a login",
+            OwnerRequest::SaveLogin {
+                title: "example.test".to_owned(),
+                username: "ada@example.test".to_owned(),
+                origin: "https://example.test".to_owned(),
+            },
+        ),
+        (
+            "fill a code",
+            OwnerRequest::FillCode {
+                item_id: item,
+                item_name: "Example login".to_owned(),
+                field: "otp".to_owned(),
+                origin: "https://example.test".to_owned(),
+            },
+        ),
+        (
+            "sign in with a passkey, two accounts",
+            OwnerRequest::SignPasskey {
+                request: page("example.test"),
+                accounts: vec![account("ada", 1), account("bob", 2)],
+                chosen: crate::desktop::owner_check::NO_ACCOUNT,
+                extensions: Default::default(),
+            },
+        ),
+        (
+            "sign in with a passkey without a page",
+            OwnerRequest::SignPasskey {
+                request: PasskeyRequest {
+                    origin: None,
+                    ..page("example.test")
+                },
+                accounts: vec![account("ada", 1), account("bob", 2)],
+                chosen: crate::desktop::owner_check::NO_ACCOUNT,
+                extensions: Default::default(),
+            },
+        ),
+        (
+            "create a passkey",
+            OwnerRequest::CreatePasskey {
+                request: page("example.test"),
+                user_handle: vec![1; 16],
+                user_name: "ada@example.test".to_owned(),
+                user_display_name: "Ada".to_owned(),
+                algorithms: vec![-7],
+                excluded: Vec::new(),
+                target: crate::vault::PasskeyTarget::NewItem {
+                    title: "example.test".to_owned(),
+                },
+                attach_name: None,
+            },
+        ),
+        (
+            "remove a passkey",
+            OwnerRequest::RemovePasskey {
+                item_id: item,
+                revision: 1,
+                name: "Example login".to_owned(),
+                delete_login: false,
+            },
+        ),
+        (
+            "pair an iPhone",
+            OwnerRequest::PairCompanion {
+                device_id: "device-1".to_owned(),
+                device_name: "iPhone (test)".to_owned(),
+                request_key: vec![4; 65],
+                approval_key: vec![4; 65],
+            },
+        ),
+        (
+            "add a device to the relay sync",
+            OwnerRequest::ConfirmSyncDevice {
+                vault: "vault-1".to_owned(),
+                link_id: 1,
+                device_name: "Office computer".to_owned(),
+                public_key: vec![4; 65],
+            },
+        ),
+        (
+            "add a device to the questions",
+            OwnerRequest::ConfirmQuestionsDevice {
+                vault: "vault-1".to_owned(),
+                link_id: 1,
+                device_name: "Office computer".to_owned(),
+                public_key: vec![4; 65],
+            },
+        ),
+        (
+            "send questions through the relay",
+            OwnerRequest::EnableRelayQuestions {
+                relay_url: crate::sync::DEFAULT_RELAY_URL.to_owned(),
+                team_id: None,
+            },
+        ),
+    ]
+}
+
+/// A vault of the vault list, created on the Create screen, for the sheets of its sync:
+/// the relay setup (new copy, join from another computer, your own node), "Add a
+/// device…", "Add an iPhone…", the questions team and the devices.
+#[cfg(target_os = "linux")]
+fn sync_screens(screens: &mut Vec<Screen>) {
+    use super::sync::SyncSheet;
+    use super::sync::relay::SetupMode;
+    let dir = TempDir::new().expect("temp dir");
+    let mut app = DesktopApp::new();
+    app.load_vault_list(dir.path().join("list"), true);
+    app.sync.offered = true;
+    let ctx = egui::Context::default();
+    app.vault_list.name_input = "Personal".to_owned();
+    app.owner_ui.passphrase.push_str(super::owner_tests::PASS);
+    app.owner_ui
+        .passphrase_confirm
+        .push_str(super::owner_tests::PASS);
+    super::start::create_vault(&mut app, &ctx);
+    let id = app.vault_list.current.clone().expect("open vault");
+    super::open_settings(&mut app, SettingsSection::Vault);
+    for (name, mode) in [
+        ("relay setup, new copy", SetupMode::NewCopy),
+        ("relay setup, join from another computer", SetupMode::Join),
+        ("relay setup, your own node", SetupMode::Node),
+    ] {
+        app.sync_open_sheet(SyncSheet::RelaySetup { id: id.clone() }, None);
+        app.sync.relay.mode = mode;
+        screens.push(render(name, &mut app, |_| {}));
+    }
+    for (name, sheet) in [
+        ("add a device", SyncSheet::AddMac { id: id.clone() }),
+        ("add an iPhone", SyncSheet::AddIphone { id: id.clone() }),
+        (
+            "questions team",
+            SyncSheet::QuestionsTeam { id: id.clone() },
+        ),
+        ("relay devices", SyncSheet::Devices { id: id.clone() }),
+        ("turn off sync", SyncSheet::TurnOff { id: id.clone() }),
+    ] {
+        app.sync_open_sheet(sheet, None);
+        screens.push(render(name, &mut app, |_| {}));
+    }
+}
+
 /// Every screen of the guard: the welcome screen, the open screen of a synced vault,
 /// the locked vault, each place of the sidebar with the sidebar full and as a rail, a
-/// credential, the new-credential sheet, and each Settings section with its hidden rows
+/// credential, the new-credential and import sheets, the sheets of the relay sync and
+/// of pairing, the owner-check dialogs, and each Settings section with its hidden rows
 /// shown.
 fn screens() -> Vec<Screen> {
     let dir = TempDir::new().expect("temp dir");
@@ -145,7 +351,23 @@ fn screens() -> Vec<Screen> {
     screens.push(render("a credential", &mut app, |_| {}));
     app.ui.sheet = Some(Sheet::NewCredential);
     screens.push(render("new credential", &mut app, |_| {}));
+    #[cfg(target_os = "linux")]
+    {
+        app.ui.sheet = Some(Sheet::Import);
+        screens.push(render("import", &mut app, |_| {}));
+        app.ui.sheet = Some(Sheet::RegisterAgent);
+        screens.push(render("connect an agent", &mut app, |_| {}));
+    }
     app.ui.sheet = None;
+    #[cfg(target_os = "linux")]
+    for (name, request) in owner_requests(item) {
+        screens.push(render_with(
+            &format!("owner check: {name}"),
+            &mut app,
+            |app, ctx| app.prepare_owner(request, Some(ctx), false),
+        ));
+        app.owner.check = None;
+    }
     app.selected_item_id = None;
     for section in SettingsSection::ALL {
         // Apassy Connect keeps its account key in the Mac's Keychain and has no Linux
@@ -161,6 +383,8 @@ fn screens() -> Vec<Screen> {
             show_all_rows,
         ));
     }
+    #[cfg(target_os = "linux")]
+    sync_screens(&mut screens);
     screens
 }
 
@@ -168,12 +392,6 @@ fn screens() -> Vec<Screen> {
 /// allow-list.
 #[cfg(target_os = "linux")]
 fn mac_words(text: &str) -> Vec<String> {
-    let text = text
-        .lines()
-        .filter(|line| !PENDING_L5.contains(line))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let text = text.as_str();
     let mut found: Vec<String> = MAC_ONLY
         .iter()
         .filter(|word| text.contains(*word))
@@ -203,7 +421,7 @@ fn mac_words(text: &str) -> Vec<String> {
 #[test]
 fn linux_screens_name_nothing_of_the_mac() {
     let screens = screens();
-    assert!(screens.len() > 15, "{} screens", screens.len());
+    assert!(screens.len() > 40, "{} screens", screens.len());
     let mut failures = Vec::new();
     for screen in &screens {
         assert!(
@@ -215,6 +433,13 @@ fn linux_screens_name_nothing_of_the_mac() {
         if !words.is_empty() {
             failures.push(format!("{}: {words:?}", screen.name));
         }
+    }
+    // The browser rows of Settings > Tools need an installed package: their texts, for
+    // each browser in each state, directly.
+    let rows = super::browser_settings::every_row_text().join("\n");
+    let words = mac_words(&rows);
+    if !words.is_empty() {
+        failures.push(format!("Settings > Tools > browser rows: {words:?}"));
     }
     assert!(
         failures.is_empty(),

@@ -89,5 +89,23 @@ F10 (GNOME's menu key) is not bound: the Linux window has no menu.
 
 ## Screenshots
 
-See the files in this folder (`*.png`), taken under Xvfb with openbox at 1600×1000 from a
-debug build of this branch, with a synthetic vault.
+`l9-*.png` in this folder: the release package of PR #135 (`3631a751`, unit L9) under
+Xvfb with openbox at 1600×1000, with a synthetic vault: the empty vault, a credential list,
+Overview, Decisions, Agents, Logs, "Connect an Agent" (with the Linux note that agents run
+without Apassy's sandbox), and each Settings section (Vault, Security, Devices, Bouncer,
+Tools and its browser rows, Updates). Unit L7 took none.
+
+## Unit L9: the leftovers
+
+The files that L7 could not touch now use the macros too: the browser rows of Settings ›
+Tools (`needs_app!`, `computer!`), `apassy setup browser` (`browser_source_build!`), the
+extension version error (`same_app!`), the Copy hover (`confirm_hint!`), the passkey
+chooser and the passkey dialogs without a page (`passkey_sheet!`; Linux: "an app on this
+computer"), the relay questions dialog (`allow_there!`; Linux: "an Allow there needs the
+owner check of that device"), and the connect page of an embedded relay on a Linux node
+("your computer", `HOST_WORD` of the relay crate). The macOS-only lines ("This Apassy.app
+is not /Applications/Apassy.app…") are compiled only on macOS. The guard has no pending
+list any more; it also renders import, "Connect an Agent", the relay sync and pairing
+sheets (new copy, join from another computer, your own node, add a device, add an
+iPhone, questions team, devices, turn off), 18 owner-check dialogs, and the browser rows
+for each browser in each state.

@@ -345,7 +345,7 @@ fn account_list(ui: &mut egui::Ui, choice: &AccountChoice) -> Option<usize> {
         );
         let caller = match &choice.origin {
             Some(origin) => page_text(origin),
-            None => "the macOS passkey sheet".to_owned(),
+            None => crate::passkey_sheet!().to_owned(),
         };
         s.labeled(
             "Asked by",
@@ -685,7 +685,7 @@ mod tests {
             None,
         );
         let (_app, window) = open(&dir, request);
-        assert!(window.has("the macOS passkey sheet"), "{}", window.screen());
+        assert!(window.has(crate::passkey_sheet!()), "{}", window.screen());
         // A display name that is empty adds nothing to the user name.
         assert!(window.has("ada@example.test"), "{}", window.screen());
     }

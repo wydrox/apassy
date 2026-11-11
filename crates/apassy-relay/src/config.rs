@@ -139,10 +139,33 @@ pub const DEFAULT_NODE_PORT: u16 = 8444;
 pub const EMBEDDED_SESSION_TTL_SECS: u64 = 600;
 /// How long a run of an embedded node waits for the owner: the broker's question wait.
 pub const EMBEDDED_APPROVAL_TIMEOUT_SECS: u64 = 300;
-/// The name of the Mac on the connect page: "your Mac". The page is public (anyone with
-/// its address reads it), so it never shows the computer name; only the owner's own
-/// prompts, on the Mac and the iPhone, name the Mac.
-pub const EMBEDDED_MAC_NAME: &str = "your Mac";
+/// The machine that this relay runs on, as the pages of its embedded node name it: "Mac"
+/// on macOS (the node of the Mac app), "computer" on Linux (the Linux node and
+/// `apassy owner serve`). The relay cannot use the app's wording macros
+/// (`src/wording.rs`), so it has its own; a string literal, for `concat!`.
+#[cfg(not(target_os = "linux"))]
+macro_rules! host_word {
+    () => {
+        "Mac"
+    };
+}
+/// On Linux: "computer".
+#[cfg(target_os = "linux")]
+macro_rules! host_word {
+    () => {
+        "computer"
+    };
+}
+pub(crate) use host_word;
+
+/// [`host_word!`] as a value: "Mac" on macOS, "computer" on Linux.
+pub const HOST_WORD: &str = host_word!();
+
+/// The name of the computer on the connect page: "your Mac" on macOS, "your computer"
+/// on Linux ([`HOST_WORD`]). The page is public (anyone with its address reads it), so
+/// it never shows the computer name; only the owner's own prompts, on the computer and
+/// the iPhone, name it.
+pub const EMBEDDED_MAC_NAME: &str = concat!("your ", host_word!());
 /// The requests that the public listener of an embedded node handles at once. It has
 /// no member reserve: only agents use it (`Scope::Public`).
 pub const PUBLIC_MAX_ACTIVE: usize = 32;
@@ -2162,8 +2185,16 @@ mod tests {
         assert!(!config.operator_socket);
         let oauth = config.oauth.as_ref().expect("an embedded node has OAuth");
         assert_eq!(oauth.mac_name, EMBEDDED_MAC_NAME);
-        // The public page never names the computer (security review finding 5).
-        assert_eq!(EMBEDDED_MAC_NAME, "your Mac");
+        // The public page never names the computer (security review finding 5), only
+        // the platform word of the machine the relay runs on.
+        assert_eq!(
+            EMBEDDED_MAC_NAME,
+            if cfg!(target_os = "linux") {
+                "your computer"
+            } else {
+                "your Mac"
+            }
+        );
         assert_eq!(oauth.access_token_secs, 86_400);
         assert_eq!(oauth.refresh_token_secs, 90 * 86_400);
         assert_eq!((oauth.connect_secs, oauth.code_secs), (300, 300));

@@ -102,6 +102,23 @@ session polkit answers "Not authorized" without a prompt. Failure, cancellation
 or missing support must refuse the operation, with passphrase confirmation
 available. No biometric-only path is required to unlock the vault.
 
+### Agents run without Apassy's sandbox
+
+`apassy-sandbox` (the Seatbelt launcher, `docs/operations/isolation.md`) exists only
+on macOS; the Linux package does not contain it. On Linux an agent host (Claude Code,
+Codex) starts as an ordinary program of your user, as `apassy setup claude` and the
+agent setup screen in the window say. What that means:
+
+- The bouncer and your approvals still decide each use of a credential: the agent
+  lists credentials without values, every run with secrets, access request and
+  browser fill goes through the bouncer, and a question waits for you in Decisions
+  (or in the terminal of `apassy owner serve`).
+- The agent process itself is not confined. It can read and change everything your
+  user can: your files, your browser profile, the files and output of the commands
+  that it runs with secrets, and other programs of your user. Apassy cannot stop that
+  on Linux. Run agents in a separate user account, a container or a virtual machine if
+  they must not reach your files.
+
 ### Browser and agents without a desktop: `apassy owner serve`
 
 `apassy owner serve /path/to/vault.db` unlocks the vault in the terminal and then
@@ -216,14 +233,29 @@ gives it the ID `bbnpgnjnfjlbgggmpnhejpmfjhmmhiih`. Browser limits:
   starts it. The switches of `/usr/bin/chromium` and `/etc/chromium.d/*`, display,
   GPU and language switches (such as `--ozone-platform=wayland`,
   `--force-device-scale-factor=1.25`, `--enable-features=WaylandWindowDecorations`,
-  `--lang=pl`) and page addresses are allowed; any other command-line switch, for
-  example `--password-store=basic`, `--user-data-dir=…` or `--proxy-server=…`, and
-  any comma outside the extension list (so `--enable-features=A,B` too) make
-  Apassy refuse the browser. Then the browser shows its own security-key dialog,
-  and the Apassy button in the toolbar gets a red "!"; its tooltip says "Apassy:
-  Apassy cannot verify this browser, so the browser handles this request itself."
-  Start Chromium without the extra switch, or set it in the browser's settings
-  instead. In Google Chrome those switches are fine.
+  `--lang=pl`), the profile, password-store and proxy switches
+  (`--profile-directory=Default` or `"--profile-directory=Profile 1"`, as Chromium's
+  own per-profile desktop shortcuts start it, `--user-data-dir=…`,
+  `--password-store=basic`, `--proxy-server=…`) and page addresses are allowed; any
+  other command-line switch, for example `--incognito` or `--proxy-pac-url=…`, a
+  profile folder name with a space other than `Profile N`, and any comma outside the
+  extension list (so `--enable-features=A,B` too) make Apassy refuse the browser.
+  Then the browser shows its own security-key dialog, and the Apassy button in the
+  toolbar gets a red "!"; its tooltip says "Apassy: Apassy cannot verify this
+  browser, so the browser handles this request itself." Start Chromium without the
+  extra switch, or set it in the browser's settings instead. In Google Chrome those
+  switches are fine.
+- Every browser (Chrome and Chromium) is refused when it was started with a switch
+  that turns off its sandbox or its site isolation, or hands flags to its JavaScript
+  engine: `--no-sandbox`, `--disable-setuid-sandbox`,
+  `--disable-site-isolation-trials`, `--disable-site-isolation-for-policy`,
+  `--js-flags`, or `--disable-features=` with a site-isolation or sandbox feature
+  (such as `IsolateOrigins`, `SiteIsolationForOAuthSites`, `NetworkServiceSandbox`).
+  The tooltip names the switch, for example "Apassy: This browser was started with
+  --no-sandbox, which turns off how it keeps websites apart, so the browser handles
+  this request itself. Start the browser again without --no-sandbox." Remove the
+  switch from the desktop file, the wrapper or `/etc/chromium.d/` and restart the
+  browser. Disabling the Privacy Sandbox ads features is fine.
 - A browser that runs in a sandbox (another mount or user namespace than Apassy:
   a snap, a Flatpak, firejail, bubblewrap, `unshare`, or a browser in another
   container) is not supported, even with the packaged executable. The browser
@@ -236,7 +268,10 @@ gives it the ID `bbnpgnjnfjlbgggmpnhejpmfjhmmhiih`. Browser limits:
 
 Browser authentication verifies kernel peer credentials, process ancestry and
 root-owned executable paths. Unknown browser builds, writable executables,
-mismatched users and stale process identities are refused. Origin, RP ID,
+mismatched users and stale process identities are refused. The app checks the
+browser host again after you answered and before the answer goes out: if the host or
+its browser ended or was replaced while the card was open, the browser gets the
+refusal, not the answer. Origin, RP ID,
 challenge, pending approval and user verification remain part of the shared
 passkey flow. These checks are defense in depth; root and a compromised process
 of the same user remain outside the software vault's protection. Linux does not
