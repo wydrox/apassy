@@ -1043,6 +1043,11 @@ pub struct SyncHeadView {
     /// The version of the first chain entry. Absent when the chain is empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chain_from: Option<u64>,
+    /// The oldest version whose head the relay still keeps (it keeps the newest 10000): 1
+    /// until it drops older heads. A device without an anchor checks the chain from it
+    /// (relay-sync-v1 section 13). Absent with no head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kept_from: Option<u64>,
     pub receipts: Vec<SyncReceipt>,
     /// The devices that signed the current head and the chain entries.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1724,7 +1729,8 @@ pub struct AccountView {
     pub recovery_key: String,
     /// When a device of the account last made a new recovery code (`POST
     /// /v1/account/recovery`); `None` while the key is the one of the creation or of the
-    /// last recovery.
+    /// last recovery. Set exactly when `recovery_rotated_by` is: a key of a directory file
+    /// from before that column has neither.
     pub recovery_rotated_at: Option<u64>,
     /// The device id of the device that made it, while it is set.
     pub recovery_rotated_by: Option<String>,
@@ -2046,6 +2052,7 @@ mod tests {
             pushed_at: None,
             chain: vec![],
             chain_from: None,
+            kept_from: None,
             receipts: vec![],
             signers: vec![],
         };

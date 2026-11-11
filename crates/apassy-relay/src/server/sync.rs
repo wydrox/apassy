@@ -34,7 +34,7 @@ use crate::sync_head::{HEAD_HEADER, MAX_SNAPSHOT_BYTES, SIGNATURE_HEADER, Signed
 
 /// The most chain entries in one answer.
 pub const MAX_CHAIN: u64 = 1000;
-/// The heads that maintenance keeps: the newest ones.
+/// The heads that maintenance keeps: the newest ones (`Limits::kept_heads`).
 pub const KEPT_HEADS: u64 = 10_000;
 /// A temporary file older than this is removed by maintenance.
 const TEMP_MAX_AGE_SECS: u64 = 3600;
@@ -366,6 +366,7 @@ pub fn view(conn: &Connection, since: u64) -> RelayResult<SyncHeadView> {
             pushed_at: None,
             chain: Vec::new(),
             chain_from: None,
+            kept_from: None,
             receipts,
             signers: Vec::new(),
         });
@@ -383,6 +384,11 @@ pub fn view(conn: &Connection, since: u64) -> RelayResult<SyncHeadView> {
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(db)?
     };
+    // The oldest head that maintenance left: the chain of a device without an anchor
+    // starts there.
+    let kept_from: Option<i64> = conn
+        .query_row("SELECT min(version) FROM sync_head", [], |row| row.get(0))
+        .map_err(db)?;
     let device_name: Option<String> = conn
         .query_row(
             "SELECT name FROM device WHERE id = ?1",
@@ -403,6 +409,7 @@ pub fn view(conn: &Connection, since: u64) -> RelayResult<SyncHeadView> {
         device_name,
         pushed_at: Some(head.pushed_at),
         chain_from: chain.first().map(|entry| entry.version),
+        kept_from: kept_from.map(to_u),
         chain,
         receipts,
         signers,
@@ -1029,13 +1036,15 @@ pub fn delete(core: &Core, by: &MemberAuth, if_match: u64, now: u64) -> SyncResu
     Ok(json!({"last_version": latest}))
 }
 
-/// Every 5 seconds, per team: drops the heads older than the newest `KEPT_HEADS`, and the
-/// temporary files older than one hour (a push that never finished).
+/// Every 5 seconds, per team: drops the heads older than the newest `Limits::kept_heads`
+/// (`KEPT_HEADS`), and the temporary files older than one hour (a push that never
+/// finished).
 pub fn maintenance(core: &Core, now: u64) -> RelayResult<()> {
+    let kept = core.config.limits.kept_heads.max(1);
     core.store.with(|conn| {
         conn.execute(
             "DELETE FROM sync_head WHERE version <= (SELECT max(version) FROM sync_head) - ?1",
-            params![to_i(KEPT_HEADS)],
+            params![to_i(kept)],
         )
         .map(drop)
         .map_err(db)
@@ -1118,6 +1127,24 @@ mod tests {
             pages += 1;
         }
         assert_eq!((since, pages), (2500, 3));
+    }
+
+    /// The answer says where the kept history starts: 1 while every head is kept; after
+    /// maintenance dropped the older heads, the oldest kept version, which is where the
+    /// chain of `since = 0` starts. A later page keeps saying it.
+    #[test]
+    fn the_answer_names_the_oldest_kept_head() {
+        let conn = team_with_heads(30);
+        assert_eq!(view(&conn, 0).unwrap().kept_from, Some(1));
+        conn.execute("DELETE FROM sync_head WHERE version <= 20", [])
+            .unwrap();
+        let first = view(&conn, 0).unwrap();
+        assert_eq!((first.chain_from, first.kept_from), (Some(21), Some(21)));
+        assert_eq!(first.chain.len(), 10);
+        let later = view(&conn, 25).unwrap();
+        assert_eq!((later.chain_from, later.kept_from), (Some(26), Some(21)));
+        let empty = team_with_heads(0);
+        assert_eq!(view(&empty, 0).unwrap().kept_from, None);
     }
 
     /// The signers of a page carry the keys, and a removed device the newest version it
