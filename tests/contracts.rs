@@ -4158,12 +4158,14 @@ mod connect_v1 {
         #[derive(Debug, Deserialize)]
         #[serde(deny_unknown_fields)]
         struct AccountCreate {
+            account_id: String,
             name: String,
             device_name: String,
             platform: String,
             public_key: String,
             recovery_key: String,
             signature: String,
+            statement: String,
         }
 
         #[derive(Debug, Deserialize)]
@@ -4215,6 +4217,7 @@ mod connect_v1 {
             op: String,
             key: String,
             link_hash: Option<String>,
+            name: Option<String>,
             by: String,
             signature: Option<String>,
         }
@@ -4404,6 +4407,7 @@ mod connect_v1 {
             recovery_key: String,
             signature: String,
             recovery_signature: String,
+            statement: String,
         }
 
         #[derive(Debug, Deserialize)]
@@ -4500,16 +4504,19 @@ mod connect_v1 {
                 && list.iter().enumerate().all(|(index, entry)| {
                     let shape = match (index, entry.op.as_str()) {
                         (0, "root") => {
-                            entry.signature.is_none()
+                            entry.signature.as_deref().is_some_and(is_signature)
                                 && entry.link_hash.is_none()
+                                && entry.name.as_deref().is_some_and(is_name)
                                 && entry.key == entry.by
                         }
                         (1.., "add") => {
                             entry.link_hash.as_deref().is_some_and(is_link_hash)
+                                && entry.name.as_deref().is_some_and(is_name)
                                 && entry.signature.as_deref().is_some_and(is_signature)
                         }
                         (1.., "remove") => {
                             entry.link_hash.is_none()
+                                && entry.name.is_none()
                                 && entry.signature.as_deref().is_some_and(is_signature)
                         }
                         _ => false,
@@ -4559,9 +4566,11 @@ mod connect_v1 {
             match example.name.as_str() {
                 "account_create" => {
                     let body: AccountCreate = strict(example);
+                    assert!(is_id(&body.account_id, "acc_"));
                     assert!(is_name(&body.name) && is_name(&body.device_name));
                     assert!(is_platform(&body.platform) && is_public_key(&body.public_key));
                     assert!(is_recovery_key(&body.recovery_key) && is_signature(&body.signature));
+                    assert!(is_signature(&body.statement));
                 }
                 "account_created" => {
                     let body: AccountCreated = strict(example);
@@ -4689,6 +4698,7 @@ mod connect_v1 {
                 "recover" => {
                     let body: Recover = strict(example);
                     assert!(is_recovery_key(&body.recovery_key) && is_signature(&body.signature));
+                    assert!(is_signature(&body.statement));
                     assert_eq!(
                         b64u_decode(&body.recovery_signature).map(|s| s.len()),
                         Some(64)
@@ -4776,6 +4786,7 @@ mod connect_v1 {
         #[serde(deny_unknown_fields)]
         struct VectorDevice {
             device_id: String,
+            name: String,
             private_hex: String,
             public_hex: String,
             public_b64u: String,
@@ -4938,6 +4949,18 @@ mod connect_v1 {
         }
 
         #[cfg(feature = "vault")]
+        /// The message bytes of the vector `device_list_root`.
+        fn message_of_root(v: &Vectors) -> Vec<u8> {
+            b64u_decode(
+                &v.messages
+                    .iter()
+                    .find(|m| m.name == "device_list_root")
+                    .expect("the root message")
+                    .message_b64u,
+            )
+            .expect("message")
+        }
+
         fn message_signature<'a>(v: &'a Vectors, name: &str) -> &'a str {
             &v.messages
                 .iter()
@@ -5042,6 +5065,18 @@ mod connect_v1 {
                     "join" | "join_cancel" => {
                         joined(&[m.tag.as_bytes(), origin, account, link_hash.as_bytes(), b64])
                     }
+                    "device_list_root" => joined(&[
+                        m.tag.as_bytes(),
+                        origin,
+                        account,
+                        b"1",
+                        b"-",
+                        b"root",
+                        a64,
+                        b"-",
+                        v.device_a.name.as_bytes(),
+                        a64,
+                    ]),
                     "device_list_add" => joined(&[
                         m.tag.as_bytes(),
                         origin,
@@ -5051,6 +5086,7 @@ mod connect_v1 {
                         b"add",
                         b64,
                         link_hash.as_bytes(),
+                        v.device_b.name.as_bytes(),
                         a64,
                     ]),
                     "device_list_remove" => joined(&[
@@ -5062,7 +5098,32 @@ mod connect_v1 {
                         b"remove",
                         b64,
                         b"-",
+                        b"-",
                         a64,
+                    ]),
+                    "device_list_member_root" => joined(&[
+                        m.tag.as_bytes(),
+                        origin,
+                        b"acc_m3n5p7q2rb",
+                        b"1",
+                        b"-",
+                        b"root",
+                        b64,
+                        b"-",
+                        v.device_b.name.as_bytes(),
+                        b64,
+                    ]),
+                    "device_list_recovery_root" => joined(&[
+                        m.tag.as_bytes(),
+                        origin,
+                        account,
+                        b"1",
+                        b"-",
+                        b"root",
+                        b64,
+                        b"-",
+                        b"MacBook Air",
+                        b64,
                     ]),
                     "recover" => joined(&[m.tag.as_bytes(), origin, account, b64, new64]),
                     "brain_sign_in" => joined(&[
@@ -5102,9 +5163,12 @@ mod connect_v1 {
                     "sign_in",
                     "join",
                     "join_cancel",
+                    "device_list_root",
                     "device_list_add",
                     "device_list_remove",
                     "recover",
+                    "device_list_member_root",
+                    "device_list_recovery_root",
                     "brain_sign_in"
                 ]
             );
@@ -5131,9 +5195,24 @@ mod connect_v1 {
                 b"root",
                 a64,
                 b"-",
+                v.device_a.name.as_bytes(),
                 a64,
             ]);
             assert_eq!(b64u_decode(&list.root_message_b64u).expect("root"), root);
+            assert_eq!(root, message_of_root(&v));
+            assert_eq!(
+                list.entries[0].signature.as_deref(),
+                Some(message_signature(&v, "device_list_root"))
+            );
+            assert_eq!(
+                list.entries[0].name.as_deref(),
+                Some(v.device_a.name.as_str())
+            );
+            assert_eq!(
+                list.entries[1].name.as_deref(),
+                Some(v.device_b.name.as_str())
+            );
+            assert_eq!(list.entries[2].name, None);
             let message_of = |name: &str| {
                 b64u_decode(
                     &v.messages

@@ -140,6 +140,12 @@ pub(crate) const REVOKE_LEAD: &str =
     "It leaves your Connect account and every vault copy at Connect. Its vaults stay on it.";
 pub(crate) const FORGET_TITLE: &str = concat!("Forget This ", crate::computer_cap!(), "?");
 pub(crate) const NOT_VERIFIED: &str = "Not verified";
+/// The device list that Connect sent did not verify on this device: every device shows
+/// "Not verified", and this says why.
+pub(crate) const LIST_NOT_VERIFIED: &str =
+    "Apassy could not verify the device list from Connect. Nothing was changed.";
+/// The device list of the account is nearly full (connect-account-v1 section 13).
+pub(crate) const LIST_NEARLY_FULL: &str = "The device list of this account is nearly full. A few more devices can be added; removing a device always works. When the list is full, a recovery of the account starts a new one.";
 pub(crate) const REMOVED: &str = "Removed from the account";
 pub(crate) const REMOVED_NOTE: &str = concat!(
     "Apassy Connect says this ",
@@ -149,6 +155,14 @@ pub(crate) const REMOVED_NOTE: &str = concat!(
     " until you forget the account here."
 );
 pub(crate) const FORGET_THIS_MAC: &str = concat!("Forget This ", crate::computer_cap!(), "…");
+/// The account file is from an earlier version of Apassy.
+pub(crate) const OLD_FILE: &str = concat!(
+    "This ",
+    crate::computer!(),
+    " must join its Apassy Connect account again: its account file is from an earlier version of Apassy. Forget the account here, then join it from another device of the account."
+);
+pub(crate) const FORGET_OLD_FILE: &str =
+    concat!("Forget the Account on This ", crate::computer_cap!(), "…");
 pub(crate) const FORGET_REMOVED_LEAD: &str = concat!(
     "The Connect key and the account file of this ",
     crate::computer!(),
@@ -246,9 +260,13 @@ pub(crate) const TEXTS: &[&str] = &[
     FORGET_TITLE,
     FORGET_LEAD,
     NOT_VERIFIED,
+    LIST_NOT_VERIFIED,
+    LIST_NEARLY_FULL,
     REMOVED,
     REMOVED_NOTE,
     FORGET_THIS_MAC,
+    OLD_FILE,
+    FORGET_OLD_FILE,
     FORGET_REMOVED_LEAD,
     JOIN_ACCOUNT_TITLE,
     JOIN_ACCOUNT_LEAD,
@@ -439,9 +457,11 @@ pub(crate) struct Device {
     /// This Mac.
     pub(crate) this: bool,
     /// The signed device list that this Mac verified holds the device's key. A device
-    /// that is not verified shows "Not verified" and is no device of the account for any
-    /// step.
+    /// that is not verified shows "Not verified", has no "Revoke…", and is no device of
+    /// the account for any step.
     pub(crate) verified: bool,
+    /// The short fingerprint of the device's key, as the owner check names it.
+    pub(crate) fingerprint: String,
 }
 
 impl Device {
@@ -522,6 +542,11 @@ pub(crate) struct Account {
     pub(crate) plan: Plan,
     pub(crate) devices: Vec<Device>,
     pub(crate) group: Option<Group>,
+    /// The device list that Connect sent verified on this Mac.
+    pub(crate) list_verified: bool,
+    /// The list has [`crate::connect::trust::ADDS_LEFT_WARNING`] or fewer versions left
+    /// for a new device.
+    pub(crate) list_nearly_full: bool,
 }
 
 impl Account {
@@ -563,6 +588,9 @@ pub(crate) enum Shown {
         device_name: String,
         note: String,
     },
+    /// The account file is from an earlier version of Apassy: this Mac must join its
+    /// account again, after "Forget the Account on This Mac…" (an owner check).
+    OldFile,
     Account(Account),
 }
 
@@ -595,7 +623,7 @@ impl ConnectView {
         let Shown::Account(account) = &self.shown else {
             return match &self.shown {
                 Shown::None => NOT_ON_CONNECT.to_owned(),
-                Shown::Removed { .. } => REMOVED.to_owned(),
+                Shown::Removed { .. } | Shown::OldFile => REMOVED.to_owned(),
                 Shown::Unreachable { .. } => UNREACHABLE.to_owned(),
                 _ => SIGNED_OUT.to_owned(),
             };
@@ -714,6 +742,8 @@ pub(crate) enum Action {
     Revoke(usize),
     /// "Forget This Mac…" of a Mac that Connect removed from its account.
     ForgetRemoved,
+    /// "Forget the Account on This Mac…" of an account file of an earlier version.
+    ForgetOld,
     Invite,
     /// Confirm… of the member with this index.
     ConfirmMember(usize),
@@ -798,6 +828,21 @@ pub(crate) fn draw(ui: &mut Ui, view: &ConnectView) -> Option<Action> {
                         .clicked()
                     {
                         action = Some(Action::ForgetRemoved);
+                    }
+                });
+            });
+        }
+        Shown::OldFile => {
+            rows::group(ui, Some(GROUP_LABEL), |g| {
+                g.line_note(REMOVED, None, Some(rows::note(OLD_FILE)), |ui| {
+                    if ui
+                        .add_enabled_ui(!view.locked, |ui| {
+                            kit::small_button(ui, FORGET_OLD_FILE, Style::Bordered)
+                        })
+                        .inner
+                        .clicked()
+                    {
+                        action = Some(Action::ForgetOld);
                     }
                 });
             });
@@ -1026,9 +1071,23 @@ fn entity_row(
 
 fn devices_group(ui: &mut Ui, view: &ConnectView, account: &Account, action: &mut Option<Action>) {
     counted_label(ui, "Devices", &account.devices.len().to_string());
+    if !account.list_verified {
+        rows::footnote(ui, LIST_NOT_VERIFIED);
+    } else if account.list_nearly_full {
+        rows::footnote(ui, LIST_NEARLY_FULL);
+    }
     rows::group_box(ui, |g| {
         for (index, device) in account.devices.iter().enumerate() {
-            let subline = format!("{} · Added {}", device.kind(), day(device.created_at));
+            let subline = if device.fingerprint.is_empty() {
+                format!("{} · Added {}", device.kind(), day(device.created_at))
+            } else {
+                format!(
+                    "{} · Added {} · Key {}",
+                    device.kind(),
+                    day(device.created_at),
+                    device.fingerprint
+                )
+            };
             let cap = if device.this {
                 Some((THIS_DEVICE, Tone::Neutral))
             } else if !device.verified {
@@ -1048,16 +1107,20 @@ fn devices_group(ui: &mut Ui, view: &ConnectView, account: &Account, action: &mu
                     } else {
                         "Revoke…"
                     };
-                    let button = ui
-                        .add_enabled_ui(!view.locked, |ui| {
-                            kit::small_button(ui, label, Style::Bordered)
-                        })
-                        .inner;
-                    let spoken = format!("{label} {}", device.name);
-                    ui.ctx()
-                        .accesskit_node_builder(button.id, |node| node.set_label(spoken));
-                    if button.clicked() {
-                        *action = Some(Action::Revoke(index));
+                    // A device that this Mac did not verify is no device of the account
+                    // for it: it has nothing to revoke.
+                    if device.this || device.verified {
+                        let button = ui
+                            .add_enabled_ui(!view.locked, |ui| {
+                                kit::small_button(ui, label, Style::Bordered)
+                            })
+                            .inner;
+                        let spoken = format!("{label} {}", device.name);
+                        ui.ctx()
+                            .accesskit_node_builder(button.id, |node| node.set_label(spoken));
+                        if button.clicked() {
+                            *action = Some(Action::Revoke(index));
+                        }
                     }
                     let seen = if device.this {
                         Some(view.now)
@@ -1777,6 +1840,7 @@ fn sheet_body(
                 last_seen_at: None,
                 this: false,
                 verified: false,
+                fingerprint: String::new(),
             }
             .kind();
             rows::group_box(ui, |g| g.labeled("Kind", rows::value(kind)));

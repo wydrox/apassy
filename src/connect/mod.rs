@@ -43,7 +43,8 @@ use std::fmt;
 pub use account::{
     AccountState, Clock, ConnectAccount, DeviceLink, Forgotten, JoinPoll, JoinRequest, PendingJoin,
     RevokeOutcome, Sleeper, account_file, drop_account_rows, drop_stale_account_rows,
-    forget_this_device, group_invite_code, signer_policy,
+    forget_old_account_file, forget_this_device, group_invite_code, is_old_account_file,
+    signer_policy,
 };
 pub use client::{
     AccountCreated, AccountDeleted, AccountView, CheckoutAnswer, CheckoutRequest, ConnectClient,
@@ -60,8 +61,8 @@ pub use key_file::{FileKeyStore, KEYRING_WARNING, key_file, platform_store};
 pub use session::{AccountSession, AccountSlot, Follow, OpenTicket, SessionState};
 pub use trust::ListEntry;
 pub use words::{
-    LinkCode, RecoveryCode, RecoveryKey, link_fingerprint, link_hash, safety_words,
-    same_safety_words,
+    LinkCode, RecoveryCode, RecoveryKey, key_fingerprint, link_fingerprint, link_hash,
+    new_account_id, safety_words, same_safety_words,
 };
 
 use crate::broker::approvals::ProofRefusal;
@@ -159,6 +160,10 @@ pub enum ConnectError {
     NotVerified,
     /// This Mac already has a Connect account.
     AccountExists,
+    /// The account file is from an earlier version of Apassy that kept no signed device
+    /// list: this device must join its account again, after the owner forgets the
+    /// account here.
+    OldAccountFile,
     /// This Mac has no Connect account.
     NoAccount,
     /// A value of a bad shape was given.
@@ -248,6 +253,13 @@ impl fmt::Display for ConnectError {
                 "This ",
                 crate::computer_cap!(),
                 " already has an Apassy Connect account."
+            ),
+            Self::OldAccountFile => concat!(
+                "This ",
+                crate::computer!(),
+                " must join its Apassy Connect account again: its account file is from an earlier version of Apassy. Forget the account on this ",
+                crate::computer!(),
+                ", then join it again from another device of the account."
             ),
             Self::NoAccount => concat!(
                 "This ",

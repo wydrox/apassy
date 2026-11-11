@@ -131,9 +131,20 @@ fn join(
     b: &Device,
     owner: &Owner,
 ) -> ConnectAccount {
+    join_named(connect, account, b, owner, "iPhone")
+}
+
+/// [`join`] with the device name `name`.
+fn join_named(
+    connect: &FakeConnect,
+    account: &mut ConnectAccount,
+    b: &Device,
+    owner: &Owner,
+    name: &str,
+) -> ConnectAccount {
     let link = account.start_link().expect("link");
-    let mut request = JoinRequest::start(client(connect), &b.store, &b.path, link.code(), "iPhone")
-        .expect("join");
+    let mut request =
+        JoinRequest::start(client(connect), &b.store, &b.path, link.code(), name).expect("join");
     assert!(matches!(request.poll().expect("poll"), JoinPoll::Waiting));
     let pending = account.pending_joins(&link).expect("pending");
     assert_eq!(pending.len(), 1);
@@ -252,6 +263,8 @@ fn the_vectors_reproduce_the_words_hashes_keys_and_messages() {
         v["device_a"]["public_key_sha256"].as_str().unwrap()
     );
     let hash = code.link_hash();
+    let name_a = v["device_a"]["name"].as_str().unwrap();
+    let name_b = v["device_b"]["name"].as_str().unwrap();
     let hashes: Vec<String> = v["device_list"]["hashes"]
         .as_array()
         .unwrap()
@@ -267,13 +280,47 @@ fn the_vectors_reproduce_the_words_hashes_keys_and_messages() {
             "sign_in" => (sign_in_message(origin, account, a64, nonce), &a_public),
             "join" => (join_message(origin, account, &hash, b64), &b_public),
             "join_cancel" => (join_cancel_message(origin, account, &hash, b64), &b_public),
+            "device_list_root" => (
+                list_message(origin, account, 1, "-", "root", a64, "-", name_a, a64),
+                &a_public,
+            ),
             "device_list_add" => (
-                list_message(origin, account, 2, &hashes[0], "add", b64, &hash, a64),
+                list_message(
+                    origin, account, 2, &hashes[0], "add", b64, &hash, name_b, a64,
+                ),
                 &a_public,
             ),
             "device_list_remove" => (
-                list_message(origin, account, 3, &hashes[1], "remove", b64, "-", a64),
+                list_message(origin, account, 3, &hashes[1], "remove", b64, "-", "-", a64),
                 &a_public,
+            ),
+            "device_list_member_root" => (
+                list_message(
+                    origin,
+                    "acc_m3n5p7q2rb",
+                    1,
+                    "-",
+                    "root",
+                    b64,
+                    "-",
+                    name_b,
+                    b64,
+                ),
+                &b_public,
+            ),
+            "device_list_recovery_root" => (
+                list_message(
+                    origin,
+                    account,
+                    1,
+                    "-",
+                    "root",
+                    b64,
+                    "-",
+                    "MacBook Air",
+                    b64,
+                ),
+                &b_public,
             ),
             "recover" => (recover_message(origin, account, b64, &new_key), &b_public),
             "brain_sign_in" => (brain_sign_in_message(brain, account, a64, nonce), &a_public),
@@ -304,9 +351,12 @@ fn the_vectors_reproduce_the_words_hashes_keys_and_messages() {
             "sign_in",
             "join",
             "join_cancel",
+            "device_list_root",
             "device_list_add",
             "device_list_remove",
             "recover",
+            "device_list_member_root",
+            "device_list_recovery_root",
             "brain_sign_in"
         ]
     );
@@ -321,12 +371,18 @@ fn the_vectors_reproduce_the_words_hashes_keys_and_messages() {
     // The device list starts at device A, the root: A adds B, then A removes B. Each hash
     // is the one of the vectors, and the list verifies only from A.
     let list: Vec<ListEntry> = serde_json::from_value(v["device_list"]["entries"].clone()).unwrap();
-    assert_eq!(root_hash(origin, account, &a_public), hashes[0]);
+    assert_eq!(root_hash(origin, account, &a_public, name_a), hashes[0]);
     let verified = verify_list(origin, account, &a_public, &list).unwrap();
     assert_eq!(verified.hashes, hashes);
     assert_eq!(verified.live, std::slice::from_ref(&a_public));
     let at_two = verify_list(origin, account, &a_public, &list[..2]).unwrap();
     assert_eq!(at_two.live, [a_public.clone(), b_public.clone()]);
+    // Each name is the one that its entry signed.
+    assert_eq!(at_two.name_of(&a_public), Some(name_a));
+    assert_eq!(at_two.name_of(&b_public), Some(name_b));
+    let mut renamed = list.clone();
+    renamed[1].name = Some("Other".to_owned());
+    assert!(verify_list(origin, account, &a_public, &renamed).is_none());
     assert!(verify_list(origin, account, &b_public, &list).is_none());
     // A device that pinned version 3 refuses the list of version 2.
     let pin = Pin {
@@ -352,11 +408,26 @@ fn the_vectors_reproduce_the_words_hashes_keys_and_messages() {
             &a_public,
         ),
         (
-            list_message(origin, account, 2, &hashes[0], "add", b64, &hash, a64),
+            list_message(
+                origin, account, 2, &hashes[0], "add", b64, &hash, name_b, a64,
+            ),
             signer_a
-                .sign_list_entry(origin, account, (2, &hashes[0]), "add", b64, Some(&hash))
+                .sign_list_entry(
+                    origin,
+                    account,
+                    (2, &hashes[0]),
+                    "add",
+                    b64,
+                    Some(&hash),
+                    Some(name_b),
+                )
                 .unwrap()
                 .0,
+            &a_public,
+        ),
+        (
+            list_message(origin, account, 1, "-", "root", a64, "-", name_a, a64),
+            signer_a.sign_root(origin, account, name_a).unwrap().0,
             &a_public,
         ),
         (
@@ -541,7 +612,8 @@ fn creating_an_account_keeps_the_key_in_the_store_and_no_secret_in_the_file() {
         root_hash(
             &connect.url,
             &state.account_id,
-            &decode_b64u(&state.public_key).unwrap()
+            &decode_b64u(&state.public_key).unwrap(),
+            "MacBook Pro"
         )
     );
     // A view signs in once, and the token stays in memory.
@@ -888,7 +960,9 @@ fn a_join_refuses_any_confirmer_that_the_code_does_not_name() {
     // Another root: a key that Connect could make, with a list that adds A's key.
     let other_root = AccountSigner::open_or_create(&MemoryKeyStore::new()).unwrap();
     let other_root_key = other_root.public_key_b64u();
-    let other_head = root_hash(&connect.url, &account_id, other_root.public_key());
+    let (other_root_statement, other_head) = other_root
+        .sign_root(&connect.url, &account_id, "Other Mac")
+        .unwrap();
     let fake_hash = encode_b64u(&[3u8; 32]);
     let (statement, _) = other_root
         .sign_list_entry(
@@ -898,16 +972,25 @@ fn a_join_refuses_any_confirmer_that_the_code_does_not_name() {
             "add",
             &own_key,
             Some(&fake_hash),
+            Some("MacBook Pro"),
         )
         .unwrap();
     let other_list = vec![
         json!({"version": 1, "op": "root", "key": other_root_key, "link_hash": null,
-               "by": other_root_key, "signature": null}),
+               "name": "Other Mac", "by": other_root_key,
+               "signature": encode_b64u(&other_root_statement)}),
         json!({"version": 2, "op": "add", "key": own_key, "link_hash": fake_hash,
-               "by": other_root_key, "signature": encode_b64u(&statement)}),
+               "name": "MacBook Pro", "by": other_root_key,
+               "signature": encode_b64u(&statement)}),
     ];
     // The right root, without the confirmer: the root removed itself.
-    let own_head = root_hash(&connect.url, &account_id, &decode_b64u(&own_key).unwrap());
+    let own_root = connect.device_list(&account_id)[0].clone();
+    let own_head = root_hash(
+        &connect.url,
+        &account_id,
+        &decode_b64u(&own_key).unwrap(),
+        "MacBook Pro",
+    );
     let (gone, _) = account
         .signer()
         .unwrap()
@@ -918,13 +1001,13 @@ fn a_join_refuses_any_confirmer_that_the_code_does_not_name() {
             "remove",
             &own_key,
             None,
+            None,
         )
         .unwrap();
     let only_root = vec![
-        json!({"version": 1, "op": "root", "key": own_key, "link_hash": null,
-               "by": own_key, "signature": null}),
+        own_root,
         json!({"version": 2, "op": "remove", "key": own_key, "link_hash": null,
-               "by": own_key, "signature": encode_b64u(&gone)}),
+               "name": null, "by": own_key, "signature": encode_b64u(&gone)}),
     ];
     let real_list = connect.device_list(&account_id);
     let mut off = vec![4u8];
@@ -1117,14 +1200,13 @@ fn only_verified_devices_count_for_stores_and_heads() {
     assert_eq!(verified(&mut phone, &tablet_id), Some(false));
     assert_eq!(verified(&mut phone, &account.state().device_id), Some(true));
     assert_eq!(phone.state().list_version, account.state().list_version);
-    // The phone never knew the tablet as a device (it joined and left after the phone's
-    // last view): it is not among the phone's keys that left, so it signs nothing there.
-    assert!(!phone.state().left.contains(&tablet.state().public_key));
-    assert!(!apassy::connect::signer_policy(phone.state()).allows(
-        &decode_b64u(&tablet.state().public_key).unwrap(),
-        1,
-        9
-    ));
+    // The tablet joined and left after the phone's last view: the list that the phone
+    // verified removed it, so it is among the phone's keys that left. As a current head it
+    // signs only up to the phone's anchor, never a later version.
+    assert!(phone.state().left.contains(&tablet.state().public_key));
+    let phone_policy = apassy::connect::signer_policy(phone.state());
+    assert!(!phone_policy.accepts(&tablet_key));
+    assert!(!phone_policy.allows(&tablet_key, 4, 3));
 }
 
 /// The signed list decides, not Connect's word: a list that is older than the one this
@@ -1166,13 +1248,14 @@ fn a_rolled_back_or_forked_device_list_verifies_no_device() {
             "add",
             &other.public_key_b64u(),
             Some(&encode_b64u(&[5u8; 32])),
+            Some("Other Mac"),
         )
         .unwrap();
     let mut forked = real[..2].to_vec();
     forked.push(
         json!({"version": 3, "op": "add", "key": other.public_key_b64u(),
-        "link_hash": encode_b64u(&[5u8; 32]), "by": account.state().public_key,
-        "signature": encode_b64u(&statement)}),
+        "link_hash": encode_b64u(&[5u8; 32]), "name": "Other Mac",
+        "by": account.state().public_key, "signature": encode_b64u(&statement)}),
     );
     connect.set_device_list(&account_id, forked);
     let view = phone.view().expect("view");
@@ -1213,6 +1296,186 @@ fn a_rolled_back_or_forked_device_list_verifies_no_device() {
     assert_eq!(restored.state().list_version, 4);
 }
 
+/// The short fingerprint of a key that the owner check shows: the first 6 bytes of the
+/// SHA-256 of its 65 bytes, in hex groups of four.
+fn key_fingerprint(key: &[u8]) -> String {
+    let digest = ring::digest::digest(&ring::digest::SHA256, key);
+    let hex: String = digest.as_ref()[..6]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("{} {} {}", &hex[..4], &hex[4..8], &hex[8..12])
+}
+
+/// The row of `device_id` in a fresh view of `account`.
+fn row(account: &mut ConnectAccount, device_id: &str) -> apassy::connect::DeviceView {
+    account
+        .view()
+        .expect("view")
+        .devices
+        .into_iter()
+        .find(|device| device.device_id == device_id)
+        .expect("row")
+}
+
+/// A join pins only a list that holds this device's own `add`, made by the confirmer that
+/// the code named: an older list that verifies (a prefix from before a removal) is not
+/// pinned, so the device that left before signs nothing here. And a list that does not
+/// hold this device's own key as a device never counts on it.
+#[test]
+fn a_join_answered_with_an_older_valid_prefix_pins_nothing() {
+    let connect = FakeConnect::start();
+    let owner = owner();
+    let (a, x, j, b) = (device(), device(), device(), device());
+    let (mut account, _) = create(&connect, &a);
+    let account_id = account.state().account_id.clone();
+    let tablet = join_named(&connect, &mut account, &x, &owner, "iPad");
+    let tablet_key = decode_b64u(&tablet.state().public_key).unwrap();
+    let tablet_row = row(&mut account, &tablet.state().device_id);
+    let (proof, epoch) = owner.proof(account.revoke_action(&tablet_row));
+    account.revoke(&tablet_row, proof, &epoch).expect("revoke");
+    let real = connect.device_list(&account_id);
+    assert_eq!(real.len(), 3);
+    let prefix = real[..2].to_vec();
+
+    // Connect answers the join, and the account after the confirmation, with the list of
+    // version 2, in which the tablet is still a device.
+    connect.set_device_list(&account_id, prefix.clone());
+    let link = account.start_link().expect("link");
+    let mut request = JoinRequest::start(
+        client(&connect),
+        &j.store,
+        &j.path,
+        link.code(),
+        "MacBook Air",
+    )
+    .expect("join");
+    connect.set_device_list(&account_id, real);
+    let pending = account.pending_joins(&link).expect("pending");
+    let (proof, epoch) = owner.proof(pending[0].owner_action(&account_id));
+    account
+        .confirm_join(&link, &pending[0], proof, &epoch)
+        .expect("confirm");
+    let full = connect.device_list(&account_id);
+    connect.set_device_list(&account_id, prefix);
+    let polled = request.poll();
+    let takes_tablet = matches!(
+        &polled,
+        Ok(JoinPoll::Confirmed(joined))
+            if apassy::connect::signer_policy(joined.state()).accepted.contains(&tablet_key)
+    );
+    assert!(
+        !takes_tablet,
+        "the tablet that left signs nothing on the new Mac"
+    );
+    assert!(
+        !matches!(polled, Ok(JoinPoll::Confirmed(_))),
+        "a list without this Mac's own add is not pinned"
+    );
+
+    assert!(!j.path.exists(), "no account file");
+    // A live device that Connect shows a list in which it is not a device any more (a
+    // removal that Connect does not enforce) pins nothing of it.
+    connect.set_device_list(&account_id, full);
+    let mut phone = join(&connect, &mut account, &b, &owner);
+    let phone_id = phone.state().device_id.clone();
+    let phone_row = row(&mut account, &phone_id);
+    let (proof, epoch) = owner.proof(account.revoke_action(&phone_row));
+    account.revoke(&phone_row, proof, &epoch).expect("revoke");
+    connect.unrevoke(&phone_id);
+    let pinned = phone.state().clone();
+    let view = phone.view().expect("view");
+    assert!(
+        !view.list_verified,
+        "a list without this device counts for nothing"
+    );
+    assert_eq!(phone.state(), &pinned);
+}
+
+/// A revoke removes the key that this Mac's verified list holds for the row, shows its
+/// signed name and short fingerprint in the owner check, and refuses a row whose key is
+/// this Mac's own while its id is not (and the reverse). Nothing is sent for a refusal.
+#[test]
+fn a_revoke_names_the_key_of_the_verified_list_and_refuses_a_swapped_row() {
+    let connect = FakeConnect::start();
+    let owner = owner();
+    let (a, b, c) = (device(), device(), device());
+    let (mut account, _) = create(&connect, &a);
+    let phone = join_named(&connect, &mut account, &b, &owner, "Synthetic iPhone");
+    let tablet = join_named(&connect, &mut account, &c, &owner, "Synthetic iPad");
+    let own_id = account.state().device_id.clone();
+    let own_key = decode_b64u(&account.state().public_key).unwrap();
+    let phone_id = phone.state().device_id.clone();
+    let phone_key = decode_b64u(&phone.state().public_key).unwrap();
+    let tablet_key = decode_b64u(&tablet.state().public_key).unwrap();
+    let deletes = || connect.count("DELETE /v1/account/devices");
+
+    // The phone's row with this Mac's key.
+    connect.swap_key(&phone_id, &own_key);
+    let swapped = row(&mut account, &phone_id);
+    let before = deletes();
+    let (proof, epoch) = owner.proof(account.revoke_action(&swapped));
+    assert!(account.revoke(&swapped, proof, &epoch).is_err());
+    assert_eq!(deletes(), before, "nothing was sent");
+    connect.swap_key(&phone_id, &phone_key);
+    // This Mac's own row with the phone's key.
+    connect.swap_key(&own_id, &phone_key);
+    let swapped = row(&mut account, &own_id);
+    let (proof, epoch) = owner.proof(account.revoke_action(&swapped));
+    assert!(account.revoke(&swapped, proof, &epoch).is_err());
+    assert_eq!(deletes(), before, "nothing was sent");
+    connect.swap_key(&own_id, &own_key);
+
+    // The phone's row with the tablet's key: the owner check names the tablet, by the
+    // name that its `add` signed and by its fingerprint.
+    connect.swap_key(&phone_id, &tablet_key);
+    let swapped = row(&mut account, &phone_id);
+    let action = format!("{:?}", account.revoke_action(&swapped));
+    assert!(
+        action.contains(&key_fingerprint(&tablet_key)),
+        "the fingerprint of the key that goes: {action}"
+    );
+    assert!(action.contains("Synthetic iPad"), "{action}");
+    assert!(!action.contains("Synthetic iPhone"), "{action}");
+}
+
+/// An account file of an earlier version (no signed device list): creating, joining, and
+/// recovering say that this device must join its account again, and the owner forgets the
+/// file here with an owner check; then a creation works.
+#[test]
+fn an_account_file_of_an_earlier_version_is_forgotten_with_an_owner_check() {
+    let connect = FakeConnect::start();
+    let owner = owner();
+    let a = device();
+    let (account, _) = create(&connect, &a);
+    drop(account);
+    let mut value: Value = serde_json::from_slice(&std::fs::read(&a.path).unwrap()).unwrap();
+    let object = value.as_object_mut().unwrap();
+    object.insert("v".to_owned(), json!(2));
+    for field in ["list_version", "list_head", "left"] {
+        object.remove(field);
+    }
+    std::fs::write(&a.path, serde_json::to_vec(&value).unwrap()).unwrap();
+    assert!(apassy::connect::is_old_account_file(&a.path));
+    let refused =
+        ConnectAccount::create(client(&connect), &a.store, &a.path, "Rafal", "MacBook Pro")
+            .err()
+            .expect("refused");
+    assert_eq!(refused, ConnectError::OldAccountFile);
+    // Another owner action does not forget it.
+    let (wrong, epoch) = owner.proof(OwnerAction::DeleteConnectAccount {
+        account_id: "acc_k7m2q4x3ca".to_owned(),
+    });
+    assert!(apassy::connect::forget_old_account_file(&a.store, &a.path, wrong, &epoch).is_err());
+    assert!(a.path.exists());
+    let (proof, epoch) = owner.proof(OwnerAction::ForgetOldConnectAccount);
+    apassy::connect::forget_old_account_file(&a.store, &a.path, proof, &epoch).expect("forget");
+    assert!(!a.path.exists());
+    assert!(!a.store.has_key());
+    ConnectAccount::create(client(&connect), &a.store, &a.path, "Rafal", "MacBook Pro")
+        .expect("a new account works");
+}
+
 /// The list hash of the last entry of `list` of `account`, computed as a device does.
 fn head_of(connect: &FakeConnect, account: &str, list: &[Value]) -> String {
     let mut previous = "-".to_owned();
@@ -1225,6 +1488,7 @@ fn head_of(connect: &FakeConnect, account: &str, list: &[Value]) -> String {
             entry["op"].as_str().unwrap(),
             entry["key"].as_str().unwrap(),
             entry["link_hash"].as_str().unwrap_or("-"),
+            entry["name"].as_str().unwrap_or("-"),
             entry["by"].as_str().unwrap(),
         ));
     }

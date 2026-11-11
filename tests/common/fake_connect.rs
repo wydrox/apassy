@@ -143,6 +143,7 @@ fn list_message(
     op: &str,
     key: &str,
     link_hash: &str,
+    name: &str,
     by: &str,
 ) -> Vec<u8> {
     joined(&[
@@ -154,8 +155,33 @@ fn list_message(
         op,
         key,
         link_hash,
+        name,
         by,
     ])
+}
+
+/// Whether `statement` is the signature of `root` over the root entry of a new list of
+/// `account` that names the device `name`.
+fn root_statement_verifies(
+    origin: &str,
+    account: &str,
+    root: &[u8],
+    name: &str,
+    statement: &[u8],
+) -> bool {
+    let key = encode_b64u(root);
+    let message = list_message(origin, account, 1, "-", "root", &key, "-", name, &key);
+    verify(root, &message, statement)
+}
+
+/// An account id of section 2: `acc_` and 10 characters of `a-z2-7`.
+fn account_id_form(text: &str) -> bool {
+    text.strip_prefix("acc_").is_some_and(|rest| {
+        rest.len() == 10
+            && rest
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || (b'2'..=b'7').contains(&byte))
+    })
 }
 
 /// The list hash of a message: b64u of its SHA-256.
@@ -164,15 +190,23 @@ fn list_hash(message: &[u8]) -> String {
 }
 
 impl Account {
-    /// A new list with `root` as version 1.
-    fn start_list(&mut self, origin: &str, account: &str, root: &[u8]) {
+    /// A new list with `root` (named `name`, with its own signature `statement`) as
+    /// version 1.
+    fn start_list(
+        &mut self,
+        origin: &str,
+        account: &str,
+        root: &[u8],
+        name: &str,
+        statement: &[u8],
+    ) {
         let key = encode_b64u(root);
         self.list = vec![
-            json!({"version": 1, "op": "root", "key": key, "link_hash": null,
-                                "by": key, "signature": null}),
+            json!({"version": 1, "op": "root", "key": key, "link_hash": null, "name": name,
+                                "by": key, "signature": encode_b64u(statement)}),
         ];
         self.hashes = vec![list_hash(&list_message(
-            origin, account, 1, "-", "root", &key, "-", &key,
+            origin, account, 1, "-", "root", &key, "-", name, &key,
         ))];
     }
 
@@ -186,12 +220,16 @@ impl Account {
         version: u64,
         op: &str,
         key: &[u8],
-        link_hash: Option<&str>,
+        (link_hash, name): (Option<&str>, Option<&str>),
         by: &[u8],
         statement: &[u8],
     ) -> Result<(), Outgoing> {
         if version != self.list.len() as u64 + 1 {
             return Err(fail(409, "conflict"));
+        }
+        // The relay keeps room to remove every live device (connect-account-v1 section 13).
+        if version > 256 || (op == "add" && version > 246) {
+            return Err(fail(403, "account_limit"));
         }
         let message = list_message(
             origin,
@@ -201,6 +239,7 @@ impl Account {
             op,
             &encode_b64u(key),
             link_hash.unwrap_or("-"),
+            name.unwrap_or("-"),
             &encode_b64u(by),
         );
         if !verify(by, &message, statement) {
@@ -208,7 +247,8 @@ impl Account {
         }
         self.list.push(
             json!({"version": version, "op": op, "key": encode_b64u(key),
-            "link_hash": link_hash, "by": encode_b64u(by), "signature": encode_b64u(statement)}),
+            "link_hash": link_hash, "name": name, "by": encode_b64u(by),
+            "signature": encode_b64u(statement)}),
         );
         self.hashes.push(list_hash(&message));
         Ok(())
@@ -1258,12 +1298,14 @@ fn route(shared: &Arc<Mutex<State>>, request: &Incoming) -> Outgoing {
     match (request.method.as_str(), segments.as_slice()) {
         ("POST", ["v1", "account"]) => {
             let keys = [
+                "account_id",
                 "name",
                 "device_name",
                 "platform",
                 "public_key",
                 "recovery_key",
                 "signature",
+                "statement",
             ];
             if !strict(&body, &keys) {
                 return fail(400, "invalid_request");
@@ -1286,6 +1328,20 @@ fn route(shared: &Arc<Mutex<State>>, request: &Incoming) -> Outgoing {
             if !verify(&public_key, &message, &signature) {
                 return fail(400, "invalid_request");
             }
+            // The device made the id; its root entry names it.
+            let account_id = text(&body, "account_id").to_owned();
+            let statement = decode_b64u(text(&body, "statement")).unwrap_or_default();
+            if !account_id_form(&account_id)
+                || !root_statement_verifies(
+                    &origin,
+                    &account_id,
+                    &public_key,
+                    text(&body, "device_name"),
+                    &statement,
+                )
+            {
+                return fail(400, "invalid_request");
+            }
             if let Some((earlier, answer)) = state.created.get(&public_key) {
                 return if *earlier == body {
                     ok(answer.clone())
@@ -1300,8 +1356,10 @@ fn route(shared: &Arc<Mutex<State>>, request: &Incoming) -> Outgoing {
             {
                 return fail(409, "conflict");
             }
+            if state.accounts.contains_key(&account_id) {
+                return fail(409, "conflict");
+            }
             state.next += 1;
-            let account_id = id("acc_", state.next);
             state.accounts.insert(
                 account_id.clone(),
                 Account {
@@ -1317,7 +1375,13 @@ fn route(shared: &Arc<Mutex<State>>, request: &Incoming) -> Outgoing {
                 },
             );
             if let Some(entry) = state.accounts.get_mut(&account_id) {
-                entry.start_list(&origin, &account_id, &public_key);
+                entry.start_list(
+                    &origin,
+                    &account_id,
+                    &public_key,
+                    text(&body, "device_name"),
+                    &statement,
+                );
             }
             let device = new_device(
                 &mut state,
@@ -1565,6 +1629,7 @@ fn route(shared: &Arc<Mutex<State>>, request: &Incoming) -> Outgoing {
                 "recovery_key",
                 "signature",
                 "recovery_signature",
+                "statement",
             ];
             if !strict(&body, &keys) {
                 return fail(400, "invalid_request");
@@ -1586,7 +1651,16 @@ fn route(shared: &Arc<Mutex<State>>, request: &Incoming) -> Outgoing {
                 text(&body, "recovery_key"),
             ]);
             let signature = decode_b64u(text(&body, "signature")).unwrap_or_default();
-            if !verify(&public_key, &message, &signature) {
+            let statement = decode_b64u(text(&body, "statement")).unwrap_or_default();
+            if !verify(&public_key, &message, &signature)
+                || !root_statement_verifies(
+                    &origin,
+                    &account,
+                    &public_key,
+                    text(&body, "device_name"),
+                    &statement,
+                )
+            {
                 return fail(400, "invalid_request");
             }
             // The same body again, while the device it made is live: the same answer.
@@ -1623,7 +1697,13 @@ fn route(shared: &Arc<Mutex<State>>, request: &Incoming) -> Outgoing {
                 .count();
             state.stores.retain(|store| store.account != account);
             if let Some(entry) = state.accounts.get_mut(&account) {
-                entry.start_list(&origin, &account, &public_key);
+                entry.start_list(
+                    &origin,
+                    &account,
+                    &public_key,
+                    text(&body, "device_name"),
+                    &statement,
+                );
             }
             let device = new_device(
                 &mut state,
@@ -1813,6 +1893,7 @@ fn authenticated(
                 .map(|entry| entry.public_key.clone())
                 .unwrap_or_default();
             let joining = state.joins[index].public_key.clone();
+            let joining_name = state.joins[index].name.clone();
             let version = body["version"].as_u64().unwrap_or(0);
             let appended = state.accounts.get_mut(account).expect("account").append(
                 origin,
@@ -1820,7 +1901,7 @@ fn authenticated(
                 version,
                 "add",
                 &joining,
-                Some(&link_hash),
+                (Some(&link_hash), Some(&joining_name)),
                 &caller_key,
                 &statement,
             );
@@ -1871,7 +1952,7 @@ fn authenticated(
                 version,
                 "remove",
                 &target_key,
-                None,
+                (None, None),
                 &caller_key,
                 &statement,
             );

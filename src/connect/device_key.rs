@@ -142,7 +142,8 @@ pub fn join_cancel_message(
 /// The `apassy-connect device-list v1` message of version `version` of a device list:
 /// `previous` is the list hash of the entry before ([`list_hash`]), or [`LIST_NONE`] for
 /// version 1; `op` is `root`, `add`, or `remove`; `link_hash` is the link of an `add`, else
-/// [`LIST_NONE`]; `by_b64u` is the key that signs the entry (for the `root`, the root key).
+/// [`LIST_NONE`]; `name` is the device name of a `root` or an `add`, else [`LIST_NONE`];
+/// `by_b64u` is the key that signs the entry (for the `root`, the root key itself).
 #[allow(clippy::too_many_arguments)]
 pub fn list_message(
     origin: &str,
@@ -152,6 +153,7 @@ pub fn list_message(
     op: &str,
     key_b64u: &str,
     link_hash: &str,
+    name: &str,
     by_b64u: &str,
 ) -> Vec<u8> {
     joined(&[
@@ -163,6 +165,7 @@ pub fn list_message(
         op,
         key_b64u,
         link_hash,
+        name,
         by_b64u,
     ])
 }
@@ -509,8 +512,10 @@ impl AccountSigner {
     }
 
     /// An entry of the device list signed by this device: version `version` after the
-    /// entry with the list hash `previous`, `op` (`add` with its `link_hash`, or `remove`)
-    /// for `key_b64u`. Returns the signature and the list hash of the entry.
+    /// entry with the list hash `previous`, `op` (`add` with its `link_hash` and the name of
+    /// the new device, or `remove`) for `key_b64u`. Returns the signature and the list hash
+    /// of the entry.
+    #[allow(clippy::too_many_arguments)]
     pub fn sign_list_entry(
         &self,
         origin: &str,
@@ -519,6 +524,7 @@ impl AccountSigner {
         op: &str,
         key_b64u: &str,
         link_hash: Option<&str>,
+        name: Option<&str>,
     ) -> Result<(Vec<u8>, String), ConnectError> {
         let message = list_message(
             origin,
@@ -528,9 +534,31 @@ impl AccountSigner {
             op,
             key_b64u,
             link_hash.unwrap_or(LIST_NONE),
+            name.unwrap_or(LIST_NONE),
             &self.public_key_b64u(),
         );
         Ok((self.sign(&message)?, list_hash(&message)))
+    }
+
+    /// The root entry of a new device list (version 1) with this device as its root and
+    /// only device, named `name`: what `POST /v1/account` and `POST /v1/account/recover`
+    /// carry as `statement`. Returns the signature and the list hash of the entry.
+    pub fn sign_root(
+        &self,
+        origin: &str,
+        account_id: &str,
+        name: &str,
+    ) -> Result<(Vec<u8>, String), ConnectError> {
+        let key = self.public_key_b64u();
+        self.sign_list_entry(
+            origin,
+            account_id,
+            (1, LIST_NONE),
+            "root",
+            &key,
+            None,
+            Some(name),
+        )
     }
 
     /// The signature of `POST /v1/account/recover` by the new device, with the public key
@@ -649,9 +677,11 @@ mod tests {
                     "add",
                     &signer.public_key_b64u(),
                     Some("K6tgKp"),
+                    Some("Synthetic"),
                 )
                 .unwrap()
                 .0,
+            signer.sign_root(origin, account, "Synthetic").unwrap().0,
             signer.sign_recover(origin, account, recovery).unwrap(),
             signer
                 .sign_brain_sign_in("https://brain.example.test", account, nonce)

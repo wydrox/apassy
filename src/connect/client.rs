@@ -112,6 +112,8 @@ pub struct TunnelNodeView {
 
 #[derive(Serialize)]
 pub(super) struct CreateAccount<'a> {
+    /// The id of the new account, made by this device: the root entry names it.
+    pub account_id: &'a str,
     pub name: &'a str,
     pub device_name: &'a str,
     pub platform: &'a str,
@@ -119,6 +121,9 @@ pub(super) struct CreateAccount<'a> {
     /// b64u of the Ed25519 public key of the recovery code.
     pub recovery_key: &'a str,
     pub signature: &'a str,
+    /// The root entry of the device list (version 1), signed by the new device key over
+    /// its name.
+    pub statement: &'a str,
 }
 
 #[derive(Serialize)]
@@ -200,6 +205,9 @@ pub(super) struct RecoverBody<'a> {
     pub signature: &'a str,
     /// The old recovery key's Ed25519 signature over the same message.
     pub recovery_signature: &'a str,
+    /// The root entry of the new device list (version 1), signed by the new device key
+    /// over its name.
+    pub statement: &'a str,
 }
 
 /// `POST /v1/account/checkout` (connect-billing-v1 section 4): `people` only for Family,
@@ -322,6 +330,22 @@ pub struct DeviceView {
     /// not an account device for any decision.
     #[serde(skip)]
     pub verified: bool,
+    /// Set by this device for a verified device: the name that the signed device list
+    /// holds for its key (the name that its `root` or `add` signed). Show it, not
+    /// [`Self::name`], wherever the owner decides about the device.
+    #[serde(skip)]
+    pub signed_name: Option<String>,
+    /// Set by this device: the short fingerprint of [`Self::public_key`]
+    /// (`super::key_fingerprint`), empty for a key that is not a point.
+    #[serde(skip)]
+    pub fingerprint: String,
+}
+
+impl DeviceView {
+    /// The name to show: the signed name of a verified device, else the name of Connect.
+    pub fn shown_name(&self) -> &str {
+        self.signed_name.as_deref().unwrap_or(&self.name)
+    }
 }
 
 /// The group of the account (connect-billing-v1).

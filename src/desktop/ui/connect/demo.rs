@@ -128,6 +128,7 @@ fn devices() -> Vec<Device> {
             last_seen_at: seen,
             this,
             verified: true,
+            fingerprint: crate::connect::key_fingerprint(id.as_bytes()),
         };
     vec![
         device(
@@ -207,6 +208,8 @@ fn account(plan: Plan, group: Option<Group>) -> Account {
         plan,
         devices: devices(),
         group,
+        list_verified: true,
+        list_nearly_full: false,
     }
 }
 

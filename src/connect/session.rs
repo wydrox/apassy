@@ -260,6 +260,13 @@ impl AccountSession {
             .and_then(|path| AccountState::load(&path).ok().flatten())
     }
 
+    /// The account file is of an earlier version of Apassy: this device must join its
+    /// account again (`crate::connect::forget_old_account_file`).
+    pub fn has_old_account_file(&self) -> bool {
+        self.path()
+            .is_some_and(|path| super::account::is_old_account_file(&path))
+    }
+
     /// This device has a Connect account (the account file), without asking Connect.
     pub fn has_account(&self) -> bool {
         self.account_state().is_some()

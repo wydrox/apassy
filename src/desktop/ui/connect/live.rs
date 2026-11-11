@@ -60,6 +60,9 @@ fn slot<T>() -> Slot<T> {
 pub(crate) const REFRESH_EVERY: Duration = Duration::from_secs(30 * 60);
 /// A refresh that could not reach Connect is tried again after this long.
 pub(crate) const RETRY_UNREACHABLE: Duration = Duration::from_secs(60);
+/// A sync of a vault store that was refused asks for the account again after at least
+/// this long since the last answer ([`Live::refresh_soon`]).
+pub(crate) const REFRESH_SOON_AFTER: Duration = Duration::from_secs(60);
 
 /// A step that waits for the proof of its owner check.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +74,8 @@ pub(crate) enum Guarded {
         device_id: String,
     },
     Delete,
+    /// "Forget the Account on This Mac…" of an account file of an earlier version.
+    ForgetOld,
     Group {
         group_id: String,
         change: ConnectGroupChange,
@@ -159,12 +164,12 @@ pub(crate) struct SyncAccount {
     pub(crate) account: Slot<ConnectAccount>,
     /// The Connect origin of the account.
     pub(crate) origin: String,
-    /// The plan state of the last refresh.
-    pub(crate) plan: StorePlan,
+    /// The plan state of the last refresh; `None` before Connect answered once.
+    pub(crate) plan: Option<StorePlan>,
     /// The account key of the session.
     pub(crate) signer: Option<Arc<AccountSigner>>,
-    /// Which keys may sign the heads of a vault store, from the last refresh
-    /// (connect-account-v1 section 7.5, `crate::connect::signer_policy`).
+    /// Which keys may sign the heads of a vault store (connect-account-v1 section 7.5,
+    /// `crate::connect::signer_policy`): of the last refresh, else of the account file.
     pub(crate) signers: crate::sync::SignerPolicy,
 }
 
@@ -261,20 +266,43 @@ impl Live {
     }
 
     /// The account of this device for the sync through Apassy Connect (plan s7 unit M3):
-    /// `Some` while the session is open and Connect answered once.
+    /// `Some` while the session is open. The sync of a vault store does not wait for an
+    /// answer of Connect: before the first refresh the signers come from the trust store
+    /// of the account file, and the plan is not known yet.
     pub(crate) fn sync_account(&self) -> Option<SyncAccount> {
         if !self.session.is_open() {
             return None;
         }
-        let snapshot = self.snapshot.as_ref()?;
         let file = self.file()?;
+        let snapshot = self.snapshot.as_ref();
         Some(SyncAccount {
             account: self.session.slot(),
             origin: file.origin.clone(),
-            plan: StorePlan::from_view(&snapshot.view.plan),
+            plan: snapshot.map(|snapshot| StorePlan::from_view(&snapshot.view.plan)),
             signer: self.session.signer(),
-            signers: snapshot.signers.clone(),
+            signers: snapshot.map_or_else(
+                || crate::connect::signer_policy(file),
+                |snapshot| snapshot.signers.clone(),
+            ),
         })
+    }
+
+    /// The Connect origin of the account file of this device, also while the session is
+    /// not open: a link for that origin needs the account ([`Self::sync_account`]).
+    pub(crate) fn account_origin(&self) -> Option<String> {
+        self.file().map(|file| file.origin.clone())
+    }
+
+    /// Ask Connect for the account at the next frame, at most once a minute: a sync of a
+    /// vault store was refused or waits for a device, so a removal or a new device reaches
+    /// the policy of the running sessions sooner than [`REFRESH_EVERY`].
+    pub(crate) fn refresh_soon(&mut self) {
+        if self
+            .refreshed_at
+            .is_some_and(|at| at.elapsed() >= REFRESH_SOON_AFTER)
+        {
+            self.refreshed_at = None;
+        }
     }
 
     /// The poll intervals.
@@ -445,12 +473,14 @@ fn account_of(snapshot: &Snapshot, this_device: &str) -> Account {
         .iter()
         .map(|device| Device {
             id: device.device_id.clone(),
-            name: device.name.clone(),
+            // The name that the signed device list holds for the key, when it verified.
+            name: device.shown_name().to_owned(),
             platform: device.platform.clone(),
             created_at: device.created_at,
             last_seen_at: device.last_seen_at,
             this: device.device_id == this_device,
             verified: device.verified,
+            fingerprint: device.fingerprint.clone(),
         })
         .collect();
     devices.sort_by_key(|device| !device.this);
@@ -495,6 +525,8 @@ fn account_of(snapshot: &Snapshot, this_device: &str) -> Account {
             members,
         }
     });
+    let adds_left =
+        crate::connect::trust::MAX_ADD_VERSION.saturating_sub(view.device_list.len() as u64);
     Account {
         account_id: view.account_id.clone(),
         name: view.name.clone(),
@@ -502,6 +534,9 @@ fn account_of(snapshot: &Snapshot, this_device: &str) -> Account {
         plan: plan_of(&view.plan),
         devices,
         group,
+        list_verified: view.list_verified,
+        list_nearly_full: view.list_verified
+            && adds_left <= crate::connect::trust::ADDS_LEFT_WARNING,
     }
 }
 
@@ -512,6 +547,7 @@ pub(crate) fn view(app: &DesktopApp) -> ConnectView {
     let file = live.file();
     let state = live.session.state();
     let shown = match (file, &state) {
+        (None, _) if live.session.has_old_account_file() => Shown::OldFile,
         (None, _) => Shown::None,
         (Some(file), SessionState::Removed(error)) => Shown::Removed {
             name: file.name.clone(),
@@ -1028,6 +1064,21 @@ fn run_guarded(
                 }))
             });
         }
+        Guarded::ForgetOld => {
+            let session = live.session();
+            live.spawn(ctx, move || {
+                drop(session.take_any());
+                let (Some(store), Some(path)) = (store, path) else {
+                    return Outcome::Forgot(Err(ConnectError::KeychainUnavailable));
+                };
+                Outcome::Forgot(crate::connect::forget_old_account_file(
+                    store.as_ref(),
+                    &path,
+                    proof,
+                    &epoch,
+                ))
+            });
+        }
         Guarded::Delete => {
             let session = live.session();
             live.spawn(ctx, move || {
@@ -1281,6 +1332,11 @@ pub(crate) fn act(app: &mut DesktopApp, ctx: &egui::Context, action: Action) {
             });
         }
         Action::Delete => app.ui.connect.sheet = Some(Sheet::Delete),
+        Action::ForgetOld => {
+            app.ui.connect.live.error = None;
+            app.ui.connect.live.guarded = Some(Guarded::ForgetOld);
+            app.ask_owner(OwnerRequest::ForgetOldConnectAccount, Some(ctx));
+        }
         Action::ForgetRemoved => {
             app.ui.connect.live.error = None;
             app.ui.connect.sheet = Some(Sheet::ForgetRemoved);
@@ -1516,6 +1572,7 @@ pub(crate) fn choose(app: &mut DesktopApp, ctx: &egui::Context, choice: SheetCho
                     account_id: account.account_id,
                     device_id: device.id,
                     device_name: name,
+                    fingerprint: device.fingerprint,
                     this_device: this,
                 },
                 Some(ctx),

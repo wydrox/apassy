@@ -465,17 +465,23 @@ pub enum OwnerAction {
         words: String,
     },
     /// Revoke a device of the Apassy Connect account (section 7.4), also this Mac
-    /// itself ("Forget this device"). The proof names the account and the device.
+    /// itself ("Forget this device"). The proof names the account, the device, the name
+    /// that the signed device list holds for its key, and the short fingerprint of that
+    /// key (`crate::connect::key_fingerprint`): the key that the signed removal names.
     RevokeConnectDevice {
         account_id: String,
         device_id: String,
         device_name: String,
+        fingerprint: String,
     },
     /// Delete the Apassy Connect account (section 6): its vault stores, devices, and
     /// subscription end.
     DeleteConnectAccount {
         account_id: String,
     },
+    /// Forget an account file of an earlier version of Apassy on this Mac, with the account
+    /// key: the device joins its account again after it. Connect is not asked.
+    ForgetOldConnectAccount,
     /// Delete a vault store of the Apassy Connect account (connect-account-v1 section 8):
     /// the relay copy of one vault and its snapshots go at Connect. The proof names the
     /// store by its relay team.
@@ -724,6 +730,7 @@ impl OwnerAction {
             Self::ConfirmConnectDevice { .. } => "Add a device to Apassy Connect",
             Self::RevokeConnectDevice { .. } => "Remove a device from Apassy Connect",
             Self::DeleteConnectAccount { .. } => "Delete the Apassy Connect account",
+            Self::ForgetOldConnectAccount => "Forget the Apassy Connect account here",
             Self::DeleteVaultStore { .. } => "Delete a relay copy at Apassy Connect",
             Self::AddStoreDevice { .. } => "Add a device to a relay copy",
             Self::ChangeConnectGroup { .. } => "Change your family or team",
@@ -938,12 +945,24 @@ impl OwnerAction {
                     .take(80)
                     .collect::<String>()
             ),
-            Self::RevokeConnectDevice { device_name, .. } => format!(
-                "remove the device \"{}\" from your Apassy Connect account",
-                short_device_name(device_name)
+            Self::RevokeConnectDevice {
+                device_name,
+                fingerprint,
+                ..
+            } => format!(
+                "remove the device \"{}\" (key {}) from your Apassy Connect account",
+                short_device_name(device_name),
+                fingerprint
+                    .chars()
+                    .filter(|c| c.is_ascii_hexdigit() || *c == ' ')
+                    .take(14)
+                    .collect::<String>()
             ),
             Self::DeleteConnectAccount { .. } => {
                 "delete your Apassy Connect account, its vault stores, and its plan".to_owned()
+            }
+            Self::ForgetOldConnectAccount => {
+                "forget the Apassy Connect account on this device".to_owned()
             }
             Self::DeleteVaultStore { .. } => {
                 "delete the relay copy of this vault and its snapshots at Apassy Connect".to_owned()
@@ -1039,6 +1058,7 @@ impl OwnerAction {
                 | Self::ConfirmConnectDevice { .. }
                 | Self::RevokeConnectDevice { .. }
                 | Self::DeleteConnectAccount { .. }
+                | Self::ForgetOldConnectAccount
                 | Self::DeleteVaultStore { .. }
                 | Self::AddStoreDevice { .. }
                 | Self::ChangeConnectGroup { .. }
@@ -2303,6 +2323,7 @@ mod evaluation_tests {
                 account_id: "acc_k7m2q4x3ca".into(),
                 device_id: "dev_p4n6r2t7bc".into(),
                 device_name: long.clone(),
+                fingerprint: "1a2b 3c4d 5e6f".into(),
             },
             OwnerAction::DeleteConnectAccount {
                 account_id: "acc_k7m2q4x3ca".into(),
