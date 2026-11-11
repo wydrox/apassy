@@ -67,6 +67,24 @@ use crate::server::sessions::SessionTable;
 use crate::server::store::Store;
 use crate::session::SessionSource;
 
+/// How long a device stream of the Connect tunnel waits on the tailnet listener for the
+/// first byte of its next request (docs/SPEC.md section 35.6). Below the TLS front's idle
+/// limit (120 s, `FrontLimits::idle`) and Connect's (15 minutes for a stream without a
+/// byte); above the iPhone's 30 s for a kept dial (`apassy::sync::KEPT_DIAL_IDLE`), so
+/// that the client closes first and never sends into a connection that the relay closes.
+pub const TUNNEL_KEEP_IDLE: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// Sequential requests on the tailnet listener, only on device streams of the Connect
+/// tunnel: the TLS front of this process writes each one down
+/// (`apassy::net::front_peers::is_tunnel`), never a header. Every other connection
+/// serves one request.
+fn tunnel_keep_alive() -> tiny_http::KeepAlive {
+    tiny_http::KeepAlive {
+        idle: TUNNEL_KEEP_IDLE,
+        allow: Arc::new(apassy::net::front_peers::is_tunnel),
+    }
+}
+
 /// The state of one team that every request handler of that team shares. A handler
 /// gets exactly one `Core`, chosen by the hub from the team id of the request.
 pub struct Core {
@@ -723,12 +741,13 @@ impl Relay {
             Some(Arc::new(Proxy::new(&hub.config.upstream, source)?))
         };
         let proxy_built = proxy.is_some();
-        let bind = |listen: SocketAddr| {
-            let server = tiny_http::Server::http_with_deadlines(
+        let bind_keeping = |listen: SocketAddr, keep: Option<tiny_http::KeepAlive>| {
+            let server = tiny_http::Server::http_with_deadlines_and_keep_alive(
                 listen,
                 std::time::Duration::from_secs(10),
                 hub.config.request_read_timeout,
                 hub.config.request_handle_timeout,
+                keep,
             )
             .map_err(|_| RelayError::internal(format!("Cannot listen on {listen}.")))?;
             let addr = server
@@ -737,9 +756,15 @@ impl Relay {
                 .ok_or_else(|| RelayError::internal("The listener has no IP address."))?;
             Ok::<_, RelayError>((server, addr))
         };
+        let bind = |listen: SocketAddr| bind_keeping(listen, None);
         let (server, addr) = bind(hub.config.listen)?;
         let public = hub.config.public_listen.map(bind).transpose()?;
-        let tailnet = hub.config.tailnet_listen.map(bind).transpose()?;
+        // The device streams of the tunnel reach this listener only (docs/SPEC.md 35.3).
+        let tailnet = hub
+            .config
+            .tailnet_listen
+            .map(|listen| bind_keeping(listen, Some(tunnel_keep_alive())))
+            .transpose()?;
         let tailnet_local = hub
             .config
             .tailnet_listen

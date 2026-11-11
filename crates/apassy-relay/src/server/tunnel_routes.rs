@@ -942,6 +942,15 @@ pub fn limits_of(settings: &TunnelSettings) -> Limits {
         idle_timeout: settings.idle_timeout,
         stream_idle: settings.stream_idle,
         stream_buffer: settings.stream_buffer,
+        streams_per_grantee: settings.streams_per_grantee,
+        grantee_streams: settings.grantee_streams,
+        grantee_bytes_percent: settings.grantee_bytes_percent,
+        ingress_streams: settings.ingress_streams,
+        ingress_per_minute: settings.ingress_per_minute,
+        ingress_first_byte: settings.ingress_first_byte,
+        ingress_bytes_per_month: settings.ingress_bytes_per_month,
+        max_streams: settings.max_streams,
+        ingress_share_percent: settings.ingress_share_percent,
         ..Limits::default()
     }
 }

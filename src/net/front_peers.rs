@@ -16,21 +16,39 @@
 //! A stream of the Connect tunnel has no peer address (Connect tells the node nothing
 //! about the caller): the front writes it down as a tunnel stream ([`register_tunnel`]),
 //! so the relay knows, without a header, that the request came through Connect
-//! ([`is_tunnel`]).
+//! ([`is_tunnel`]). Each tunnel stream has a serial number of its own in this process
+//! ([`tunnel_stream`]): one stream is one connection to the target, and the serial stays
+//! unique when a later connection reuses the same loopback port.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
 type Key = (SocketAddr, SocketAddr);
 
 /// Whose bytes a pumped connection carries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Origin {
     /// A tailnet peer.
     Peer(IpAddr),
     /// A stream of the Connect tunnel.
-    Tunnel,
+    Tunnel(TunnelStream),
+}
+
+/// What the front knows of one stream of the Connect tunnel that it pumps.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TunnelStream {
+    /// Unique in this process for its lifetime, from 1.
+    pub serial: u64,
+    /// The server name that the stream's TLS handshake asked for and that the front's
+    /// certificate answered, when the front gave one ([`register_tunnel_named`]).
+    pub server_name: Option<String>,
+}
+
+fn next_serial() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 fn table() -> MutexGuard<'static, HashMap<Key, Origin>> {
@@ -72,8 +90,21 @@ pub fn register(source: SocketAddr, target: SocketAddr, peer: IpAddr) -> PeerEnt
 /// Write down that the connection from `source` to `target` carries a stream of the
 /// Connect tunnel. The entry lives until the returned value drops.
 pub fn register_tunnel(source: SocketAddr, target: SocketAddr) -> PeerEntry {
+    register_tunnel_named(source, target, None)
+}
+
+/// As [`register_tunnel`], with the server name of the stream's TLS handshake.
+pub fn register_tunnel_named(
+    source: SocketAddr,
+    target: SocketAddr,
+    server_name: Option<&str>,
+) -> PeerEntry {
     let key = key(source, target);
-    table().insert(key, Origin::Tunnel);
+    let stream = TunnelStream {
+        serial: next_serial(),
+        server_name: server_name.map(str::to_owned),
+    };
+    table().insert(key, Origin::Tunnel(stream));
     PeerEntry { key }
 }
 
@@ -90,7 +121,16 @@ pub fn peer_of(source: SocketAddr, target: SocketAddr) -> Option<IpAddr> {
 /// True while the connection from `source` to the listener at `target` carries a stream
 /// of the Connect tunnel that the front of this process pumps.
 pub fn is_tunnel(source: SocketAddr, target: SocketAddr) -> bool {
-    table().get(&key(source, target)) == Some(&Origin::Tunnel)
+    tunnel_stream(source, target).is_some()
+}
+
+/// The tunnel stream that the connection from `source` to the listener at `target`
+/// carries, while the front of this process pumps it.
+pub fn tunnel_stream(source: SocketAddr, target: SocketAddr) -> Option<TunnelStream> {
+    match table().get(&key(source, target)) {
+        Some(Origin::Tunnel(stream)) => Some(stream.clone()),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -124,6 +164,23 @@ mod tests {
         assert!(!is_tunnel(source, target));
         let _peer = register(source, target, "100.64.0.9".parse().unwrap());
         assert!(!is_tunnel(source, target));
+    }
+
+    #[test]
+    fn each_tunnel_stream_has_its_own_serial_and_its_name() {
+        let source: SocketAddr = "127.0.0.1:50031".parse().unwrap();
+        let target: SocketAddr = "127.0.0.1:50032".parse().unwrap();
+        let first = register_tunnel(source, target);
+        let one = tunnel_stream(source, target).unwrap();
+        assert_eq!(one.server_name, None);
+        drop(first);
+        assert_eq!(tunnel_stream(source, target), None);
+        // The same loopback ports again: another stream, another serial.
+        let _second = register_tunnel_named(source, target, Some("k7m2q4x3ca.node.example"));
+        let two = tunnel_stream(source, target).unwrap();
+        assert_ne!(one.serial, two.serial);
+        assert_eq!(two.server_name.as_deref(), Some("k7m2q4x3ca.node.example"));
+        assert_eq!(peer_of(source, target), None);
     }
 
     #[test]

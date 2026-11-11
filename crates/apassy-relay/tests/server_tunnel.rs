@@ -1503,3 +1503,72 @@ fn a_substring_of_upgrade_is_not_an_upgrade_and_a_body_keeps_its_length() {
     assert!(read);
     assert_eq!(body, b"hello", "the body is framed by its Content-Length");
 }
+
+#[test]
+fn the_ingress_of_many_nodes_never_takes_the_streams_kept_for_dials() {
+    assert_eq!(Limits::default().ingress_cap(), 2048);
+    let limits = Limits {
+        max_streams: 8,
+        ingress_share_percent: 50,
+        ..test_limits()
+    };
+    assert_eq!(limits.ingress_cap(), 4);
+    let h = Harness::with(limits, Duration::from_secs(30));
+    let mut node_a = h.node("tok-a1").unwrap();
+    let mut node_b = h.node("tok-b").unwrap();
+    let sni = sni_listener(&h, IngressConfig::default());
+    let hello = |label: &str| client_hello(&format!("{label}.node.example.test"));
+    // Two nodes of two accounts, each far below its own ingress slots (16), fill the
+    // broker's ingress share together.
+    let mut agents = Vec::new();
+    for round in 0..2 {
+        for (label, node) in [("aaaaaaaaaa", &mut node_a), ("bbbbbbbbbb", &mut node_b)] {
+            let mut client = agent(sni.addr);
+            client.write_all(&hello(label)).unwrap();
+            let open = node.next_frame();
+            assert_eq!(
+                (open.kind, open.flags),
+                (Kind::Public, OPEN),
+                "{label} {round}"
+            );
+            agents.push(client);
+        }
+    }
+    assert_eq!(h.broker.ingress_usage("acc_a").open_streams, 2);
+    assert_eq!(h.broker.ingress_usage("acc_b").open_streams, 2);
+    // A fifth ingress stream, to either node, is over the share although the broker has
+    // room: closed without an answer.
+    for label in ["aaaaaaaaaa", "bbbbbbbbbb"] {
+        let mut client = agent(sni.addr);
+        client.write_all(&hello(label)).unwrap();
+        let mut answer = Vec::new();
+        let _ = client.read_to_end(&mut answer);
+        assert!(answer.is_empty(), "{label}: over the ingress share");
+    }
+    // The rest of the broker's streams stays for the dials.
+    let dials: Vec<Peer> = (0..4)
+        .map(|_| h.dial("tok-a2", NODE_A).expect("a stream kept for dials"))
+        .collect();
+    // Now the broker is full: one more dial is 429.
+    assert_eq!(
+        h.dial("tok-b", NODE_B).err(),
+        Some((429, "tunnel_limit".into()))
+    );
+    // An ingress stream that ends gives its place back to the ingress.
+    drop(agents.pop());
+    loop {
+        let frame = node_b.next_frame();
+        if frame.flags & CLOSE != 0 {
+            node_b.send_frame(frame.stream, Kind::Public, CLOSE, b"");
+            break;
+        }
+    }
+    wait_until("one ingress place free", || {
+        h.broker.ingress_usage("acc_b").open_streams == 1
+    });
+    let mut client = agent(sni.addr);
+    client.write_all(&hello("bbbbbbbbbb")).unwrap();
+    let open = node_b.next_frame();
+    assert_eq!((open.kind, open.flags), (Kind::Public, OPEN));
+    drop(dials);
+}

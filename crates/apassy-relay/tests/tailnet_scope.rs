@@ -14,7 +14,9 @@ use std::net::{IpAddr, SocketAddr, TcpStream};
 
 use apassy::net::front_peers;
 use apassy::node::backend::{NewCloudAgent, RunningNode, TokenIssue};
-use apassy_relay::server::http::{AUTH_FAILURES_MAX, listener_alive};
+use apassy_relay::server::http::{
+    AUTH_FAILURES_MAX, TUNNEL_DEVICE_FAILURES_MAX, TUNNEL_STREAM_FAILURES_MAX, listener_alive,
+};
 use node::{Node, NodeOptions, code};
 use serde_json::json;
 
@@ -330,14 +332,16 @@ fn serve_without_peer_addresses_shares_a_higher_limit() {
 }
 
 /// One request on a new connection to `listener`, written down as the front writes down
-/// a stream of the Connect tunnel (`front_peers::register_tunnel`) when `tunnel`, else as
-/// a connection without the front. Returns the status.
+/// a stream of the Connect tunnel with the node's public name
+/// (`front_peers::register_tunnel_named`) when `tunnel`, else as a connection without the
+/// front. Returns the status.
 fn request_via(listener: SocketAddr, tunnel: bool, head: &str, body: &str) -> u16 {
     let mut stream = TcpStream::connect(listener).expect("connect");
     let _entry = tunnel.then(|| {
-        front_peers::register_tunnel(
+        front_peers::register_tunnel_named(
             stream.local_addr().expect("local"),
             stream.peer_addr().expect("peer"),
+            Some(node::CONNECT_NAME),
         )
     });
     write!(
@@ -439,4 +443,145 @@ fn a_device_stream_of_the_tunnel_reaches_no_team_code_invite_or_join_route() {
             "{method} {path} through the tunnel"
         );
     }
+}
+
+/// `GET /v1/me` with `token` on a new connection to `listener`, written down as a `device`
+/// stream of the Connect tunnel. Returns the status.
+fn me_via_tunnel(listener: SocketAddr, token: &str) -> u16 {
+    let head = format!(
+        "GET /v1/me HTTP/1.1\r\nHost: 100.64.0.7:8444\r\nAuthorization: Bearer {token}\r\n"
+    );
+    request_via(listener, true, &head, "")
+}
+
+#[test]
+fn the_device_streams_of_the_tunnel_have_a_count_of_the_node_apart_from_the_peers() {
+    let node = Node::start(NodeOptions::default());
+    let (_team, mac) = node.device_team("Approvals");
+    let tailnet = node.node().tailnet_addr().expect("a tailnet listener");
+    // Each request here is a stream of its own, far below the count of one stream
+    // (TUNNEL_STREAM_FAILURES_MAX): only the count of the node holds them.
+    for n in 0..TUNNEL_DEVICE_FAILURES_MAX {
+        assert_eq!(me_via_tunnel(tailnet, "apr_bad"), 401, "{n}");
+    }
+    // At it every device stream of the tunnel is held, a good token too, until the
+    // window ends.
+    assert_eq!(me_via_tunnel(tailnet, "apr_bad"), 429);
+    assert_eq!(me_via_tunnel(tailnet, &mac.token), 429);
+    // The tailnet peers and the Mac's local route keep their own counts: the tunnel's
+    // failures are in none of them.
+    let peer: IpAddr = "100.64.0.21".parse().unwrap();
+    assert_eq!(bad_token_from(tailnet, Some(peer)), 401);
+    let base = node.local_route();
+    let me = node.ok(&base, "GET", "/v1/me", Some(&mac.token), None);
+    assert_eq!(me["device_id"].as_u64(), Some(mac.id));
+    // The audit row names the count of the node, and no address.
+    let limited: Vec<_> = node
+        .relay_audit()
+        .into_iter()
+        .filter(|(action, _)| action == "rate_limited")
+        .collect();
+    assert!(
+        limited
+            .iter()
+            .any(|(_, detail)| detail.contains("\"bucket\":\"tunnel_node\"")),
+        "{limited:?}"
+    );
+    assert!(
+        limited
+            .iter()
+            .all(|(_, detail)| !detail.contains("\"peer\"")),
+        "{limited:?}"
+    );
+}
+
+/// `GET /v1/me` with each of `tokens` in turn on ONE connection to `listener`, written
+/// down as a `device` stream of the Connect tunnel, which the tailnet listener keeps open
+/// between requests (docs/SPEC.md section 35.6). Returns the statuses.
+fn me_on_one_stream(listener: SocketAddr, tokens: &[&str]) -> Vec<u16> {
+    let mut stream = TcpStream::connect(listener).expect("connect");
+    let _entry = front_peers::register_tunnel(
+        stream.local_addr().expect("local"),
+        stream.peer_addr().expect("peer"),
+    );
+    let mut statuses = Vec::new();
+    for token in tokens {
+        write!(
+            stream,
+            "GET /v1/me HTTP/1.1\r\nHost: 100.64.0.7:8444\r\nAuthorization: Bearer {token}\r\n\r\n"
+        )
+        .expect("write");
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            assert_eq!(stream.read(&mut byte).expect("read"), 1, "the stream ended");
+            head.push(byte[0]);
+        }
+        let head = String::from_utf8(head).expect("ascii").to_ascii_lowercase();
+        assert!(!head.contains("connection: close"), "{head}");
+        let length: usize = head
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length:"))
+            .map_or(0, |value| value.trim().parse().expect("length"));
+        let mut body = vec![0u8; length];
+        stream.read_exact(&mut body).expect("body");
+        statuses.push(
+            head.split(' ')
+                .nth(1)
+                .and_then(|code| code.parse().ok())
+                .expect("status"),
+        );
+    }
+    statuses
+}
+
+#[test]
+fn a_device_stream_of_the_tunnel_has_its_own_count_and_a_new_dial_another() {
+    let node = Node::start(NodeOptions::default());
+    let (_team, mac) = node.device_team("Approvals");
+    let tailnet = node.node().tailnet_addr().expect("a tailnet listener");
+    let limit = TUNNEL_STREAM_FAILURES_MAX as usize;
+    // One stream with bad tokens: 401 up to its count, then 429 for every request on it,
+    // a good token too.
+    let mut tokens = vec!["apr_bad"; limit + 2];
+    tokens.push(mac.token.as_str());
+    let statuses = me_on_one_stream(tailnet, &tokens);
+    assert!(
+        statuses[..limit].iter().all(|status| *status == 401),
+        "{statuses:?}"
+    );
+    assert!(
+        statuses[limit..].iter().all(|status| *status == 429),
+        "{statuses:?}"
+    );
+    // Another stream (a new dial) has its own count: its good token works, and its bad
+    // tokens are answered.
+    assert_eq!(
+        me_on_one_stream(
+            tailnet,
+            &[mac.token.as_str(), "apr_bad", mac.token.as_str()]
+        ),
+        [200, 401, 200]
+    );
+    // The tailnet peers keep their own count.
+    let peer: IpAddr = "100.64.0.22".parse().unwrap();
+    assert_eq!(bad_token_from(tailnet, Some(peer)), 401);
+    // The audit row names the stream's bucket, and no address.
+    let limited: Vec<_> = node
+        .relay_audit()
+        .into_iter()
+        .filter(|(action, _)| action == "rate_limited")
+        .collect();
+    assert!(
+        limited
+            .iter()
+            .any(|(_, detail)| detail.contains("\"bucket\":\"tunnel_stream\"")),
+        "{limited:?}"
+    );
+    assert!(
+        limited
+            .iter()
+            .all(|(_, detail)| !detail.contains("\"peer\"")),
+        "{limited:?}"
+    );
 }

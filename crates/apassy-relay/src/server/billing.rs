@@ -473,6 +473,11 @@ pub struct BillingConfig {
     /// `APASSY_CONNECT_FAMILY_EXTRA_YEAR_CENTS`: tier 2 of `connect_family_year`.
     pub family_extra_year_cents: u64,
     pub durations: Durations,
+    /// `APASSY_CONNECT_AUTO_RAISE_SEATS` (default off): the maintenance pass raises the
+    /// quantity of an entitled group to its active members at Stripe, with a proration.
+    /// Off, the members beyond the paid quantity stay `read_only` until the owner raises
+    /// the seats (`POST /v1/account/group/seats`).
+    pub auto_raise_seats: bool,
 }
 
 impl Default for BillingConfig {
@@ -482,6 +487,7 @@ impl Default for BillingConfig {
             family_extra_cents: 100,
             family_extra_year_cents: 1000,
             durations: Durations::default(),
+            auto_raise_seats: false,
         }
     }
 }
@@ -491,7 +497,8 @@ impl BillingConfig {
     /// `APASSY_CONNECT_SITE_URL`, `APASSY_CONNECT_FAMILY_EXTRA_CENTS` (default 100),
     /// `APASSY_CONNECT_FAMILY_EXTRA_YEAR_CENTS` (default 1000),
     /// `APASSY_CONNECT_GRACE_DAYS` (14, 1 to 60), `APASSY_CONNECT_READ_ONLY_DAYS` (30, 1 to
-    /// 365), `APASSY_CONNECT_DELETE_DAYS` (90, above the read-only days, at most 730).
+    /// 365), `APASSY_CONNECT_DELETE_DAYS` (90, above the read-only days, at most 730),
+    /// `APASSY_CONNECT_AUTO_RAISE_SEATS` (`0` or `1`, default `0`).
     pub fn from_lookup(lookup: &dyn Fn(&str) -> Option<String>) -> RelayResult<Self> {
         let defaults = Self::default();
         let site_url = lookup("APASSY_CONNECT_SITE_URL")
@@ -526,6 +533,18 @@ impl BillingConfig {
         let grace_days = number("APASSY_CONNECT_GRACE_DAYS", 14, 1, 60)?;
         let read_only_days = number("APASSY_CONNECT_READ_ONLY_DAYS", 30, 1, 365)?;
         let delete_days = number("APASSY_CONNECT_DELETE_DAYS", 90, read_only_days + 1, 730)?;
+        let auto_raise_seats = match lookup("APASSY_CONNECT_AUTO_RAISE_SEATS")
+            .as_deref()
+            .map(str::trim)
+        {
+            None | Some("0") => false,
+            Some("1") => true,
+            Some(_) => {
+                return Err(RelayError::invalid(
+                    "APASSY_CONNECT_AUTO_RAISE_SEATS is 0 or 1.",
+                ));
+            }
+        };
         Ok(Self {
             site_url,
             family_extra_cents,
@@ -535,6 +554,7 @@ impl BillingConfig {
                 read_only_days,
                 delete_days,
             },
+            auto_raise_seats,
         })
     }
 
@@ -2298,10 +2318,13 @@ impl<S: BillingStore> Billing<S> {
     /// - a live subscription whose period ended more than `STALE_PERIOD_SECS` ago (a
     ///   renewal or an end whose event did not arrive) is read from Stripe, at most once
     ///   in `RECHECK_SECS`, and Stripe's state is applied;
-    /// - a group whose active members exceed the quantity of its entitled subscription
-    ///   gets that quantity raised to its members (up to the plan's maximum), under the
-    ///   group's lock: the members joined while they were paid for, or the owner bought
-    ///   again for fewer, and the members beyond the quantity are not entitled until then.
+    /// - only with `BillingConfig::auto_raise_seats`: a group whose active members exceed
+    ///   the quantity of its entitled subscription gets that quantity raised to its
+    ///   members (up to the plan's maximum), under the group's lock: the members joined
+    ///   while they were paid for, or the owner bought again for fewer, and the members
+    ///   beyond the quantity are not entitled until then. Without the setting (the
+    ///   default) the pass changes no quantity: those members stay `read_only` until the
+    ///   owner raises the seats, and no charge happens without an action of the owner.
     ///
     /// A failed call is counted and logged; the next pass tries again.
     pub fn reconcile(&self, now: u64) -> RelayResult<ReconcileReport> {
@@ -2340,6 +2363,9 @@ impl<S: BillingStore> Billing<S> {
                     ));
                 }
             }
+        }
+        if !self.config.auto_raise_seats {
+            return Ok(report);
         }
         let groups: BTreeSet<String> = self.store.transaction(|tx| {
             Ok(tx
@@ -3338,6 +3364,25 @@ mod tests {
         assert_eq!(config.durations.grace_days, 7);
         assert_eq!(config.family_extra_cents, 150);
         assert_eq!(config.site_url, "https://staging.example");
+        assert!(!config.auto_raise_seats);
+        for (text, expected) in [
+            ("0", Some(false)),
+            ("1", Some(true)),
+            (" 1 ", Some(true)),
+            ("yes", None),
+            ("2", None),
+            ("", None),
+        ] {
+            let raise =
+                |name: &str| (name == "APASSY_CONNECT_AUTO_RAISE_SEATS").then(|| text.to_owned());
+            assert_eq!(
+                BillingConfig::from_lookup(&raise)
+                    .ok()
+                    .map(|config| config.auto_raise_seats),
+                expected,
+                "{text:?}"
+            );
+        }
     }
 
     #[test]
