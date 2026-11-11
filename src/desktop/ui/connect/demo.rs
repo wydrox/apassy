@@ -128,7 +128,18 @@ fn devices() -> Vec<Device> {
             last_seen_at: seen,
             this,
             verified: true,
-            fingerprint: crate::connect::key_fingerprint(id.as_bytes()),
+            // A synthetic fingerprint of the demo id: the demo has no keys (and no
+            // `connect` module in a build without the vault).
+            fingerprint: id
+                .bytes()
+                .skip(4)
+                .take(6)
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<Vec<_>>()
+                .chunks(2)
+                .map(|pair| pair.concat())
+                .collect::<Vec<_>>()
+                .join(" "),
         };
     vec![
         device(
