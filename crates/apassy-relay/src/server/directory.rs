@@ -81,8 +81,10 @@ ALTER TABLE team_code ADD COLUMN kind TEXT NOT NULL DEFAULT 'operator' CHECK (ki
 ///   and `account_id`, `vault_id`. SQLite cannot widen a CHECK in place, so the table is
 ///   rebuilt with the same rows; the index `team_legacy` is made again.
 /// - `account` (with the public recovery key and the last recovery, for its retry),
-///   `account_device` (with the device statement that added it: `added_by`, `link_hash`,
-///   `statement`; none for a root), `account_key` (the SHA-256 of every key that was ever
+///   `account_device` (with the device that added it, `added_by`; none for a root),
+///   `account_list` (the signed device list of each account: one row for each entry,
+///   from the root at version 1; a recovery starts it again), `account_key` (the SHA-256
+///   of every key that was ever
 ///   a device of an account, and that account: one key makes at most one account, also
 ///   after a deletion), `account_link`, `account_join`, `account_store_device` (which
 ///   account device is which device of which store), `account_store_removal` (removals
@@ -120,8 +122,13 @@ CREATE TABLE account_device (
   id TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES account(id) ON DELETE CASCADE,
   name TEXT NOT NULL, platform TEXT NOT NULL CHECK (platform IN ('mac','iphone','linux')),
   public_key BLOB NOT NULL UNIQUE, created_at INTEGER NOT NULL, last_seen_at INTEGER,
-  revoked_at INTEGER, added_by TEXT, link_hash TEXT, statement BLOB);
+  revoked_at INTEGER, added_by TEXT);
 CREATE INDEX account_device_account ON account_device(account_id);
+CREATE TABLE account_list (
+  account_id TEXT NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+  version INTEGER NOT NULL, op TEXT NOT NULL CHECK (op IN ('root','add','remove')),
+  key BLOB NOT NULL, link_hash TEXT, by_key BLOB NOT NULL, signature BLOB,
+  hash TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (account_id, version));
 CREATE TABLE account_key (
   key_hash BLOB PRIMARY KEY, created_at INTEGER NOT NULL, account_id TEXT);
 CREATE TABLE account_store_removal (
@@ -345,13 +352,14 @@ fn migrate_accounts(conn: &Connection) -> RelayResult<()> {
 }
 
 /// The tables of the accounts step from an earlier, unreleased build of it (no
-/// `account_device.added_by`): this build does not read them, and does not change them.
+/// `account_list`, the signed device lists): this build does not read them, and does not
+/// change them.
 fn refuse_earlier_accounts_step(conn: &Connection) -> RelayResult<()> {
-    if crate::server::store::has_column(conn, "account_device", "added_by")? {
+    if crate::server::store::has_column(conn, "account_list", "hash")? {
         return Ok(());
     }
     Err(RelayError::internal(
-        "relay.db holds the accounts tables of an earlier, unreleased build of directory 1006 (account_device has no added_by). This build cannot open it: restore relay.db from the backup taken before that build, or start that build's image again.",
+        "relay.db holds the accounts tables of an earlier, unreleased build of directory 1006 (no account_list). This build cannot open it: restore relay.db from the backup taken before that build, or start that build's image again.",
     ))
 }
 
@@ -2254,6 +2262,7 @@ PRAGMA user_version = 1002;
         for table in [
             "account",
             "account_device",
+            "account_list",
             "account_key",
             "account_link",
             "account_join",

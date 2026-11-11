@@ -317,9 +317,25 @@ pub fn token(core: &Core, request: &TokenRequest, now: u64) -> RelayResult<Value
             let hash = token_hash(access.expose());
             state.access.insert(hash, (id, expires_at));
             state.access_order.push_back(hash);
-            Ok(response)
+            Ok((response, id, hash))
         })
-    })();
+    })()
+    .and_then(|(response, id, hash)| {
+        // A removal from a vault store that committed between the check above and the
+        // token: the removal drops the tokens after its commit, and this check after the
+        // token, so no token outlives it.
+        if let Err(error) = account_device_live(core, id) {
+            let mut state = core
+                .device_auth
+                .0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            state.access.remove(&hash);
+            state.compact();
+            return Err(error);
+        }
+        Ok(response)
+    });
     if result
         .as_ref()
         .is_err_and(|e| e.code == codes::UNAUTHENTICATED)

@@ -37,8 +37,12 @@ pub const ACCOUNT_DOMAIN: &str = "apassy-connect account v1";
 pub const ACCOUNT_SIGN_IN_DOMAIN: &str = "apassy-connect sign-in v1";
 pub const ACCOUNT_JOIN_DOMAIN: &str = "apassy-connect join v1";
 pub const ACCOUNT_JOIN_CANCEL_DOMAIN: &str = "apassy-connect join-cancel v1";
-/// The device statement: a device of the account vouches for the key it adds.
-pub const ACCOUNT_DEVICE_DOMAIN: &str = "apassy-connect device v1";
+/// The signed device list of an account: each change (an added or a removed device) is
+/// an entry signed by a device of the list, naming the entry before it.
+pub const ACCOUNT_LIST_DOMAIN: &str = "apassy-connect device-list v1";
+/// The `previous` of the first entry of a device list, and the `link_hash` of an entry
+/// without a link.
+pub const LIST_NONE: &str = "-";
 pub const ACCOUNT_RECOVER_DOMAIN: &str = "apassy-connect recover v1";
 /// The bouncer brain's sign-in (plan 0035 A). Connect never accepts it.
 pub const BRAIN_SIGN_IN_DOMAIN: &str = "apassy-bouncer sign-in v1";
@@ -131,23 +135,40 @@ pub fn account_join_cancel_message(
     ])
 }
 
-/// `"apassy-connect device v1" 0x00 origin 0x00 account 0x00 link_hash 0x00
-/// joining_key_b64`: the device statement that the confirming device signs
-/// (`POST /v1/account/devices/pending/{join_id}/confirm`). The statements of an account
-/// lead each of its devices back to its root key.
-pub fn account_device_message(
+/// One entry of the signed device list of an account (connect-account-v1 section 7.5):
+/// `"apassy-connect device-list v1" 0x00 origin 0x00 account 0x00 version 0x00 previous
+/// 0x00 op 0x00 key_b64 0x00 link_hash 0x00 by_b64`. `version` is decimal; `previous` is
+/// the list hash of the entry before ([`account_list_hash`]), or `-` for version 1; `op`
+/// is `root`, `add`, or `remove`; `link_hash` is the link of an `add`, else `-`; `by` is
+/// the key of the device that signs the entry (for the `root`, the root key itself).
+#[allow(clippy::too_many_arguments)]
+pub fn account_list_message(
     origin: &str,
     account: &str,
+    version: u64,
+    previous: &str,
+    op: &str,
+    key_b64: &str,
     link_hash: &str,
-    joining_key_b64: &str,
+    by_b64: &str,
 ) -> Vec<u8> {
     joined(&[
-        ACCOUNT_DEVICE_DOMAIN,
+        ACCOUNT_LIST_DOMAIN,
         origin.trim_end_matches('/'),
         account,
+        &version.to_string(),
+        previous,
+        op,
+        key_b64,
         link_hash,
-        joining_key_b64,
+        by_b64,
     ])
+}
+
+/// The list hash of an entry: b64u of SHA-256 of its message, 43 characters. The next
+/// entry names it as `previous`.
+pub fn account_list_hash(message: &[u8]) -> String {
+    encode_b64(&Sha256::digest(message))
 }
 
 /// `"apassy-connect recover v1" 0x00 origin 0x00 account 0x00 public_key_b64 0x00
@@ -639,9 +660,11 @@ mod tests {
             b"apassy-connect join-cancel v1\0https://c.test\0acc_a\0LH\0PK".to_vec()
         );
         assert_eq!(
-            account_device_message("https://c.test/", "acc_a", "LH", "PK"),
-            b"apassy-connect device v1\0https://c.test\0acc_a\0LH\0PK".to_vec()
+            account_list_message("https://c.test/", "acc_a", 2, "PH", "add", "PK", "LH", "BY"),
+            b"apassy-connect device-list v1\0https://c.test\0acc_a\02\0PH\0add\0PK\0LH\0BY"
+                .to_vec()
         );
+        assert_eq!(account_list_hash(b"").len(), 43);
         assert_eq!(
             account_recover_message("https://c.test", "acc_a", "PK", "RK"),
             b"apassy-connect recover v1\0https://c.test\0acc_a\0PK\0RK".to_vec()

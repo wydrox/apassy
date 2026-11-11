@@ -1346,7 +1346,8 @@ pub struct AccountTokenRef<'a> {
     pub device_id: &'a str,
 }
 
-/// A live device of an account.
+/// A live device of an account. Whether it is a device of the account is the signed
+/// device list's to say ([`ListEntry`]), not this row's.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountDevice {
     pub device_id: String,
@@ -1356,19 +1357,56 @@ pub struct AccountDevice {
     pub created_at: u64,
     /// Rounded down to the hour, or `None`.
     pub last_seen_at: Option<u64>,
-    /// The device statements from this device's key to the account's root key; empty for
-    /// a root.
-    pub chain: Vec<ChainEntry>,
 }
 
-/// One device statement of a chain: `confirmer_key` signed, over `apassy-connect device v1`
-/// with `link_hash`, the key of the entry before (the first entry: the device's own key).
+/// What one entry of the signed device list does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ListOp {
+    /// Version 1: the account's root key (the first device, or the device of the last
+    /// recovery).
+    Root,
+    /// A device is added, through a link, by a device of the list.
+    Add,
+    /// A device of the list is removed by a device of the list (also itself).
+    Remove,
+}
+
+impl ListOp {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Root => "root",
+            Self::Add => "add",
+            Self::Remove => "remove",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "root" => Some(Self::Root),
+            "add" => Some(Self::Add),
+            "remove" => Some(Self::Remove),
+            _ => None,
+        }
+    }
+}
+
+/// One entry of the signed device list of an account (connect-account-v1 section 7.5):
+/// `by` signed the `apassy-connect device-list v1` message of `version`, the hash of the
+/// entry before, `op`, `key`, and `link_hash`. The root entry (version 1) has no
+/// signature: its key is the root that each device pinned itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ChainEntry {
-    pub link_hash: String,
-    pub confirmer_key: String,
-    /// b64u of the DER signature.
-    pub statement: String,
+pub struct ListEntry {
+    pub version: u64,
+    pub op: ListOp,
+    /// b64u of the key that the entry adds or removes (the root key for `root`).
+    pub key: String,
+    /// The link of an `add`, else `None`.
+    pub link_hash: Option<String>,
+    /// b64u of the key that signed the entry (the root key for `root`).
+    pub by: String,
+    /// b64u of the DER signature, `None` for `root`.
+    pub signature: Option<String>,
 }
 
 /// The plan of an account (connect-billing-v1 section 8). Billing (C2) fills it; without
@@ -1437,6 +1475,8 @@ pub struct AccountView {
     pub plan: PlanView,
     pub devices: Vec<AccountDevice>,
     pub group: Option<AccountGroup>,
+    /// The signed device list, from version 1.
+    pub device_list: Vec<ListEntry>,
 }
 
 /// An empty JSON object: `DELETE /v1/account`, a refusal of a join.
@@ -1483,8 +1523,23 @@ pub struct AccountPendingJoin {
 #[serde(deny_unknown_fields)]
 pub struct AccountConfirm {
     pub public_key: String,
-    /// The device statement: b64u of the caller's DER signature over the
-    /// `apassy-connect device v1` message of the join's link and this key.
+    /// The version of the new entry of the device list: the head's version and 1.
+    pub version: u64,
+    /// The `add` entry: b64u of the caller's DER signature over the
+    /// `apassy-connect device-list v1` message of `version`, the head's hash, this key,
+    /// and the join's link.
+    pub statement: String,
+}
+
+/// `DELETE /v1/account/devices/{device_id}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountRevoke {
+    /// The version of the new entry of the device list: the head's version and 1.
+    pub version: u64,
+    /// The `remove` entry: b64u of the caller's DER signature over the
+    /// `apassy-connect device-list v1` message of `version`, the head's hash, and the
+    /// removed device's key.
     pub statement: String,
 }
 
@@ -1506,8 +1561,6 @@ pub struct AccountConfirmer {
     pub device_id: String,
     pub name: String,
     pub public_key: String,
-    /// The confirming device's chain to the account's root key.
-    pub chain: Vec<ChainEntry>,
 }
 
 /// `POST /v1/account/devices/join` answer.
@@ -1517,6 +1570,9 @@ pub struct AccountJoined {
     pub account_id: String,
     pub confirmer: AccountConfirmer,
     pub expires_at: u64,
+    /// The signed device list of the account, from version 1: the new device checks that
+    /// the confirmer is a device of it.
+    pub device_list: Vec<ListEntry>,
 }
 
 /// `POST /v1/account/devices/join/cancel`.

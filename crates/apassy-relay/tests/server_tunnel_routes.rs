@@ -380,6 +380,52 @@ fn sign_in(c: &Connect, dev: &Dev) -> String {
     granted["token"].as_str().unwrap().to_string()
 }
 
+/// The version and the list hash of the head of the signed device list `list` of
+/// `account`.
+fn list_head(c: &Connect, account: &str, list: &Value) -> (u64, String) {
+    let mut previous = device::LIST_NONE.to_string();
+    let entries = list.as_array().unwrap();
+    for entry in entries {
+        previous = device::account_list_hash(&device::account_list_message(
+            c.origin(),
+            account,
+            entry["version"].as_u64().unwrap(),
+            &previous,
+            entry["op"].as_str().unwrap(),
+            entry["key"].as_str().unwrap(),
+            entry["link_hash"].as_str().unwrap_or(device::LIST_NONE),
+            entry["by"].as_str().unwrap(),
+        ));
+    }
+    (entries.len() as u64, previous)
+}
+
+/// `by` (signed in with `token`) revokes `target` with the signed `remove` entry of the
+/// next version of the device list.
+fn revoke(c: &Connect, by: &Dev, token: &str, target: &Dev) {
+    let view = c.ok("GET", "/v1/account", Some(token), None);
+    let (head, previous) = list_head(c, &by.account, &view["device_list"]);
+    let statement = by
+        .key
+        .sign(&device::account_list_message(
+            c.origin(),
+            &by.account,
+            head + 1,
+            &previous,
+            "remove",
+            &target.key.public_key_b64(),
+            device::LIST_NONE,
+            &by.key.public_key_b64(),
+        ))
+        .unwrap();
+    c.ok(
+        "DELETE",
+        &format!("/v1/account/devices/{}", target.id),
+        Some(token),
+        Some(&json!({"version": head + 1, "statement": encode_b64(&statement)})),
+    );
+}
+
 /// `a` adds a new device to its account: the link, the join, the confirmation.
 fn add_device(c: &Connect, a: &Dev, token: &str, name: &str) -> Dev {
     let mut bytes = [0u8; 32];
@@ -417,20 +463,28 @@ fn add_device(c: &Connect, a: &Dev, token: &str, name: &str) -> Dev {
         ),
     );
     let join_id = joined["join_id"].as_u64().unwrap();
+    // The `add` entry of the next version of the signed device list, after its head.
+    let (head, previous) = list_head(c, &a.account, &joined["device_list"]);
+    let version = head + 1;
     let statement = a
         .key
-        .sign(&device::account_device_message(
+        .sign(&device::account_list_message(
             c.origin(),
             &a.account,
-            &hash,
+            version,
+            &previous,
+            "add",
             &public_key,
+            &hash,
+            &a.key.public_key_b64(),
         ))
         .unwrap();
     let added = c.ok(
         "POST",
         &format!("/v1/account/devices/pending/{join_id}/confirm"),
         Some(token),
-        Some(&json!({"public_key": public_key, "statement": encode_b64(&statement)})),
+        Some(&json!({"public_key": public_key, "version": version,
+                     "statement": encode_b64(&statement)})),
     );
     Dev {
         key,
@@ -830,12 +884,7 @@ fn the_dial_checks_run_in_the_contract_order() {
     first.send(b"still fine");
     assert_eq!(first.read_bytes(10), b"still fine");
     // A revoked device's token is 401 at once.
-    c.ok(
-        "DELETE",
-        &format!("/v1/account/devices/{}", b.phone.id),
-        Some(&b.mac_token),
-        None,
-    );
+    revoke(&c, &b.mac, &b.mac_token, &b.phone);
     assert_eq!(
         refused(Some(&b.phone_token), &path),
         Some((401, "unauthenticated".to_string()))
@@ -1011,12 +1060,7 @@ fn revoking_the_device_closes_its_node_and_deletes_it() {
     node.open();
     // The iPhone revokes the Mac: the node's WebSocket closes (4003), the dial ends as for
     // an offline node (4001), and the node row is gone.
-    c.ok(
-        "DELETE",
-        &format!("/v1/account/devices/{}", a.mac.id),
-        Some(&a.phone_token),
-        None,
-    );
+    revoke(&c, &a.phone, &a.phone_token, &a.mac);
     assert_eq!(node.closed(), Some(close::REVOKED));
     dial.expect_close(close::NODE_OFFLINE);
     assert!(!c.online(&node_id));
@@ -1048,12 +1092,7 @@ fn a_revoked_dialer_and_a_removed_node_close_their_tunnels() {
     let third_token = sign_in(&c, &third);
     let mut dial = c.dial(&third_token, &node_id).expect("101");
     node.open();
-    c.ok(
-        "DELETE",
-        &format!("/v1/account/devices/{}", third.id),
-        Some(&a.mac_token),
-        None,
-    );
+    revoke(&c, &a.mac, &a.mac_token, &third);
     dial.expect_close(close::REVOKED);
     assert!(c.online(&node_id), "the node of another device stays");
     // `DELETE /v1/tunnel/nodes/{id}`: only a device of the node's account; the tunnel closes.
