@@ -367,6 +367,33 @@ fn open_directory_file(config: &RelayConfig) -> RelayResult<Store> {
 
 /// Removes the vault stores from `team` inside a downgrade's transaction and returns
 /// their ids; the caller deletes their files after the commit.
+/// The downgrades below directory 1006 delete the vault stores of the accounts (paid
+/// stores of Apassy Connect, with their snapshots). They do it only when the operator
+/// says so (`--delete-vault-stores`); otherwise a directory with vault stores is refused
+/// and nothing changes.
+fn refuse_vault_stores(store: &Store, delete_vault_stores: bool) -> RelayResult<()> {
+    if delete_vault_stores {
+        return Ok(());
+    }
+    let stores: i64 = store.with(|conn| {
+        conn.query_row(
+            "SELECT count(*) FROM team WHERE kind = 'account'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(db)
+    })?;
+    if stores > 0 {
+        return Err(RelayError::new(
+            codes::CONFLICT,
+            format!(
+                "relay.db holds {stores} vault stores of Apassy Connect accounts, and this downgrade deletes them with their snapshots. Run it again with --delete-vault-stores to delete them. Nothing was changed."
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn drop_vault_store_rows(conn: &Connection) -> RelayResult<Vec<TeamId>> {
     let mut statement = conn
         .prepare("SELECT id FROM team WHERE kind = 'account' ORDER BY id")
@@ -955,11 +982,19 @@ impl Directory {
     /// team file until it ends (at most `oauth::ACCESS_TOKEN_SECS`), and no client can
     /// refresh it. A file of version 1003 is left as it is. Returns the version before and
     /// after.
-    pub fn downgrade_to_1003(config: &RelayConfig) -> RelayResult<(i64, i64)> {
+    /// A directory of `DIRECTORY_VERSION` with vault stores is refused, with no change, unless
+    /// `delete_vault_stores` (`--delete-vault-stores`): the step deletes them.
+    pub fn downgrade_to_1003(
+        config: &RelayConfig,
+        delete_vault_stores: bool,
+    ) -> RelayResult<(i64, i64)> {
         config.refuse_connect_mode("`apassy-relay downgrade-directory-1003`")?;
         let _lock = crate::server::hub::lock_data_dir(config)?;
         let store = open_directory_file(config)?;
         let from = store.user_version()?;
+        if from == DIRECTORY_VERSION {
+            refuse_vault_stores(&store, delete_vault_stores)?;
+        }
         let stores = match from {
             DIRECTORY_VERSION => store.tx(|tx| {
                 let stores = drop_vault_store_rows(tx)?;
@@ -993,11 +1028,19 @@ impl Directory {
     /// image of 1004 would take one for an operator code); used ones stay as history, and
     /// the `kind` column stays: that image never reads it, and the next open of 1005 keeps
     /// it. A file of version 1004 is left as it is. Returns the version before and after.
-    pub fn downgrade_to_1004(config: &RelayConfig) -> RelayResult<(i64, i64)> {
+    /// A directory of `DIRECTORY_VERSION` with vault stores is refused, with no change, unless
+    /// `delete_vault_stores` (`--delete-vault-stores`): the step deletes them.
+    pub fn downgrade_to_1004(
+        config: &RelayConfig,
+        delete_vault_stores: bool,
+    ) -> RelayResult<(i64, i64)> {
         config.refuse_connect_mode("`apassy-relay downgrade-directory-1004`")?;
         let _lock = crate::server::hub::lock_data_dir(config)?;
         let store = open_directory_file(config)?;
         let from = store.user_version()?;
+        if from == DIRECTORY_VERSION {
+            refuse_vault_stores(&store, delete_vault_stores)?;
+        }
         let stores = match from {
             DIRECTORY_VERSION => store.tx(|tx| {
                 let stores = drop_vault_store_rows(tx)?;
@@ -1027,11 +1070,19 @@ impl Directory {
     /// table of the step stay, unread by that image, and the next open of this version keeps
     /// them. A file of version 1005 is left as it is. Returns the version before and after,
     /// and the vault stores removed. The only complete way back is the backup of the deploy.
-    pub fn downgrade_to_1005(config: &RelayConfig) -> RelayResult<(i64, i64, usize)> {
+    /// A directory of `DIRECTORY_VERSION` with vault stores is refused, with no change, unless
+    /// `delete_vault_stores` (`--delete-vault-stores`): the step deletes them.
+    pub fn downgrade_to_1005(
+        config: &RelayConfig,
+        delete_vault_stores: bool,
+    ) -> RelayResult<(i64, i64, usize)> {
         config.refuse_connect_mode("`apassy-relay downgrade-directory-1005`")?;
         let _lock = crate::server::hub::lock_data_dir(config)?;
         let store = open_directory_file(config)?;
         let from = store.user_version()?;
+        if from == DIRECTORY_VERSION {
+            refuse_vault_stores(&store, delete_vault_stores)?;
+        }
         let stores = match from {
             DIRECTORY_VERSION => store.tx(|tx| drop_vault_store_rows(tx))?,
             1005 => Vec::new(),
@@ -2088,10 +2139,13 @@ PRAGMA user_version = 1002;
             .unwrap();
         // Down: the OAuth tables go, the team stays, and a second run changes nothing.
         assert_eq!(
-            Directory::downgrade_to_1003(&config).unwrap(),
+            Directory::downgrade_to_1003(&config, false).unwrap(),
             (DIRECTORY_VERSION, 1003)
         );
-        assert_eq!(Directory::downgrade_to_1003(&config).unwrap(), (1003, 1003));
+        assert_eq!(
+            Directory::downgrade_to_1003(&config, false).unwrap(),
+            (1003, 1003)
+        );
         let down = schema_of(&config);
         assert!(
             down.iter().all(
@@ -2110,7 +2164,7 @@ PRAGMA user_version = 1002;
             .unwrap()
             .with(|conn| conn.pragma_update(None, "user_version", 1002).map_err(db))
             .unwrap();
-        assert!(Directory::downgrade_to_1003(&config).is_err());
+        assert!(Directory::downgrade_to_1003(&config, false).is_err());
     }
 
     #[test]
@@ -2209,10 +2263,13 @@ PRAGMA user_version = 1002;
         drop(directory);
         // Down: the unused node code goes; the operator code and the used node code stay.
         assert_eq!(
-            Directory::downgrade_to_1004(&config).unwrap(),
+            Directory::downgrade_to_1004(&config, false).unwrap(),
             (DIRECTORY_VERSION, 1004)
         );
-        assert_eq!(Directory::downgrade_to_1004(&config).unwrap(), (1004, 1004));
+        assert_eq!(
+            Directory::downgrade_to_1004(&config, false).unwrap(),
+            (1004, 1004)
+        );
         let kinds: Vec<(String, bool)> =
             Store::open_at(&config.directory_path(), &config.master_key)
                 .unwrap()
@@ -2240,7 +2297,7 @@ PRAGMA user_version = 1002;
             .unwrap()
             .with(|conn| conn.pragma_update(None, "user_version", 1003).map_err(db))
             .unwrap();
-        assert!(Directory::downgrade_to_1004(&config).is_err());
+        assert!(Directory::downgrade_to_1004(&config, false).is_err());
     }
 
     #[test]
@@ -2345,13 +2402,20 @@ PRAGMA user_version = 1002;
         );
         drop(directory);
         assert_eq!(schema_of(&config), fresh);
+        // Without `--delete-vault-stores` the vault store stays and nothing changes.
+        let refused = Directory::downgrade_to_1005(&config, false).unwrap_err();
+        assert!(
+            refused.message.contains("--delete-vault-stores"),
+            "{refused:?}"
+        );
+        assert_eq!(schema_of(&config), fresh);
         // Down: the vault store goes, the other teams stay; a second run changes nothing.
         assert_eq!(
-            Directory::downgrade_to_1005(&config).unwrap(),
+            Directory::downgrade_to_1005(&config, true).unwrap(),
             (DIRECTORY_VERSION, 1005, 1)
         );
         assert_eq!(
-            Directory::downgrade_to_1005(&config).unwrap(),
+            Directory::downgrade_to_1005(&config, false).unwrap(),
             (1005, 1005, 0)
         );
         let left: Vec<String> = Store::open_at(&config.directory_path(), &config.master_key)
@@ -2375,7 +2439,7 @@ PRAGMA user_version = 1002;
             .unwrap()
             .with(|conn| conn.pragma_update(None, "user_version", 1004).map_err(db))
             .unwrap();
-        assert!(Directory::downgrade_to_1005(&config).is_err());
+        assert!(Directory::downgrade_to_1005(&config, false).is_err());
     }
 
     #[test]

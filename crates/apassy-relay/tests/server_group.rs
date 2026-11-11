@@ -924,3 +924,36 @@ fn a_late_event_of_an_old_plan_never_deletes_the_stores_of_a_paid_group() {
     assert!(c.rows("SELECT id FROM team").contains(&team));
     assert_eq!(c.plan(&member)["entitled"], true);
 }
+
+#[test]
+fn joining_a_group_ends_the_checkout_the_account_had_open() {
+    let c = start();
+    let owner = family(&c, 4);
+    let who = c.account("Ola");
+    c.stripe.set_session_expires_at(connect::now() + 86_400);
+    let session = c.ok(
+        "POST",
+        "/v1/account/checkout",
+        Some(&who.token),
+        Some(&json!({"plan": "personal", "interval": "month"})),
+    )["session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(c.stripe.session_status(&session).as_deref(), Some("open"));
+    let code = invite_code(&invite(&c, &owner, "member"));
+    let (status, answer) = join(&c, &who, &code);
+    assert_eq!(status, 200, "{answer}");
+    // Stripe ended it, and Connect forgot it.
+    assert_eq!(
+        c.stripe.session_status(&session).as_deref(),
+        Some("expired")
+    );
+    assert_eq!(
+        c.rows(&format!(
+            "SELECT coalesce(checkout_session, '-') FROM stripe_customer WHERE account_id = '{}'",
+            who.account
+        )),
+        ["-"]
+    );
+}

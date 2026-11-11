@@ -560,6 +560,11 @@ fn join(
                 &json!({"group_id": group, "invite_id": id, "state": "pending"}),
             )
         })?;
+        // A checkout the account opened before it joined ends at Stripe: a plan bought
+        // now could not bind to a group of its own.
+        if let Ok(billing) = crate::server::account::billing(hub) {
+            billing.end_open_checkout(&caller.account, now);
+        }
     }
     hub.directory.store.with(|conn| {
         let (kind, owner_name): (String, String) = conn

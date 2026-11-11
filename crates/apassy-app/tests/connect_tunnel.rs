@@ -1379,6 +1379,22 @@ fn the_tunnel_carries_dials_public_agents_and_acme_and_ends_with_the_node() {
     wait_until("the tunnel is on again", || {
         tunnel_state(&node) == Some(TunnelState::On) && connect.broker.online(NODE_ID)
     });
+    // This Mac's own clients reach the node through the local route of the paired origin
+    // (node-pairing-v1 section 3, plan s7 unit M5): no TLS, no dial, no stream of the
+    // tunnel, and the origin is still the signed value.
+    let streams_local = connect.broker.usage(ACCOUNT).streams;
+    let own = QuestionsClient::from_membership(&membership).expect("this Mac's client");
+    own.list(0, Duration::ZERO)
+        .expect("this Mac reaches its node through the local route");
+    own.close();
+    assert_eq!(
+        connect.broker.usage(ACCOUNT).streams,
+        streams_local,
+        "this Mac's own client takes no stream of the tunnel"
+    );
+    // The clients below stand for devices on other computers. The local route lives in
+    // this process only, so the test takes it away, as phase A did.
+    apassy::sync::clear_local_route(&origin);
     let bridge = DialBridge::start(connect.addr);
     let through_connect = |team: &str, device_id: u64, key| {
         let url = RelayUrl::parse_with_trust(&origin, TlsTrust::Pinned(node_pin))

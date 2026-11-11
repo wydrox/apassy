@@ -1513,7 +1513,7 @@ fn the_directory_goes_back_to_1003_and_up_to_1004_again() {
     };
     assert_eq!(version(&node.config.directory_path()), DIRECTORY_VERSION);
     assert_eq!(
-        Directory::downgrade_to_1003(&node.config).unwrap(),
+        Directory::downgrade_to_1003(&node.config, false).unwrap(),
         (DIRECTORY_VERSION, 1003)
     );
     assert_eq!(version(&node.config.directory_path()), 1003);

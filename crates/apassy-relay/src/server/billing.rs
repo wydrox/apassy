@@ -1104,6 +1104,11 @@ pub trait BillingTx {
     fn create_group(&mut self, kind: GroupKind, owner: &str, now: u64) -> RelayResult<String>;
     /// The active members of a group, the owner included.
     fn active_members(&mut self, group_id: &str) -> RelayResult<u32>;
+    /// Every member of a group, pending or active, the owner included.
+    fn group_size(&mut self, group_id: &str) -> RelayResult<u32>;
+    /// Gives a group another kind (the owner alone in it bought the other plan) and drops
+    /// its open invites.
+    fn set_group_kind(&mut self, group_id: &str, kind: GroupKind) -> RelayResult<()>;
     /// The place of an active member among the active members of its group, from 0: the
     /// owner first, then the earliest confirmed. `None` for an account that is not active.
     fn member_rank(&mut self, group_id: &str, account: &str) -> RelayResult<Option<u32>>;
@@ -1187,6 +1192,15 @@ impl MemoryBillingStore {
 
     pub fn add_account(&self, account: &str) {
         self.lock().accounts.insert(account.to_owned());
+    }
+
+    /// Deletes an account as `DELETE /v1/account` does: its row and its group membership
+    /// go; its subscription rows and its customer stay.
+    pub fn remove_account(&self, account: &str) {
+        let mut guard = self.lock();
+        guard.accounts.remove(account);
+        guard.members.remove(account);
+        guard.joined.remove(account);
     }
 
     /// Adds an account to a group (C3 does this through invites and confirmations).
@@ -1388,6 +1402,27 @@ impl BillingTx for MemoryState {
             .filter(|m| m.group_id == group_id && m.state == MemberState::Active)
             .count();
         Ok(u32::try_from(count).unwrap_or(u32::MAX))
+    }
+
+    fn group_size(&mut self, group_id: &str) -> RelayResult<u32> {
+        let count = self
+            .members
+            .values()
+            .filter(|m| m.group_id == group_id)
+            .count();
+        Ok(u32::try_from(count).unwrap_or(u32::MAX))
+    }
+
+    fn set_group_kind(&mut self, group_id: &str, kind: GroupKind) -> RelayResult<()> {
+        if let Some(group) = self.groups.get_mut(group_id) {
+            group.kind = kind;
+        }
+        for member in self.members.values_mut() {
+            if member.group_id == group_id {
+                member.kind = kind;
+            }
+        }
+        Ok(())
     }
 
     fn member_rank(&mut self, group_id: &str, account: &str) -> RelayResult<Option<u32>> {
@@ -1695,6 +1730,8 @@ pub struct Billing<S: BillingStore> {
     /// One lock for each account: a webhook that changes its subscriptions and the
     /// deletion of its stores never overlap.
     account_locks: LockMap,
+    /// One lock for each account's checkout: two requests at once make one session.
+    checkout_locks: LockMap,
 }
 
 impl<S: BillingStore> Billing<S> {
@@ -1713,6 +1750,7 @@ impl<S: BillingStore> Billing<S> {
             log: stripe::stderr_log(),
             group_locks: LockMap::default(),
             account_locks: LockMap::default(),
+            checkout_locks: LockMap::default(),
         })
     }
 
@@ -1762,9 +1800,20 @@ impl<S: BillingStore> Billing<S> {
     }
 
     /// `POST /v1/account/checkout` for an authenticated account. Calls Stripe; changes
-    /// nothing here (the webhook binds the subscription).
+    /// nothing here (the webhook binds the subscription). The checkouts of one account run
+    /// one at a time, so two requests at once leave one open session.
     pub fn checkout(&self, account: &str, body: &[u8], now: u64) -> RelayResult<CheckoutAnswer> {
         let request: CheckoutRequest = parse_request(body)?;
+        self.checkout_locks
+            .run(account, || self.checkout_locked(account, &request, now))
+    }
+
+    fn checkout_locked(
+        &self,
+        account: &str,
+        request: &CheckoutRequest,
+        now: u64,
+    ) -> RelayResult<CheckoutAnswer> {
         let count = match (request.plan, request.people, request.seats) {
             (Plan::Personal, None, None) => 1,
             (Plan::Family, Some(people), None) => people,
@@ -1792,8 +1841,12 @@ impl<S: BillingStore> Billing<S> {
                 return Err(RelayError::not_found("account"));
             }
             // A member (pending or active) does not buy; its owner's plan covers it. An
-            // owner whose plan lapsed may buy again: the new subscription keeps the group,
-            // so it must pay for the members already in it.
+            // owner whose plan lapsed may buy again: a plan of the group's kind keeps the
+            // group, so it must pay for the members already in it. A plan of the other kind
+            // takes the group only while the owner is alone in it (nobody active or
+            // pending): the group then changes its kind when the subscription arrives.
+            // Connect Personal leaves the group without a plan, so only an owner without
+            // other active members buys it.
             if let Some(member) = tx.membership(account)? {
                 if member.role != GroupRole::Owner {
                     return Err(RelayError::new(
@@ -1802,23 +1855,26 @@ impl<S: BillingStore> Billing<S> {
                     ));
                 }
                 let active = tx.active_members(&member.group_id)?;
-                if active > 1 {
-                    if request.plan.group_kind() != Some(member.kind) {
-                        return Err(RelayError::new(
-                            codes::CONFLICT,
-                            match member.kind {
-                                GroupKind::Family => {
-                                    "This account has a family with members. Buy Connect Family for them, or remove them first."
-                                }
-                                GroupKind::Team => {
-                                    "This account has a team with members. Buy Connect Team for them, or remove them first."
-                                }
-                            },
-                        ));
-                    }
-                    if count < active {
-                        return Err(below_members(request.plan, active));
-                    }
+                let has_members = match request.plan.group_kind() {
+                    Some(kind) if kind == member.kind => false,
+                    Some(_) => tx.group_size(&member.group_id)? > 1,
+                    None => active > 1,
+                };
+                if has_members {
+                    return Err(RelayError::new(
+                        codes::CONFLICT,
+                        match member.kind {
+                            GroupKind::Family => {
+                                "This account has a family with members. Buy Connect Family for them, or remove them first."
+                            }
+                            GroupKind::Team => {
+                                "This account has a team with members. Buy Connect Team for them, or remove them first."
+                            }
+                        },
+                    ));
+                }
+                if request.plan.group_kind() == Some(member.kind) && count < active {
+                    return Err(below_members(request.plan, active));
                 }
             }
             if account_plan(tx, account, now, &durations)?.entitled {
@@ -1832,6 +1888,33 @@ impl<S: BillingStore> Billing<S> {
                 tx.open_checkout(account)?,
             ))
         })?;
+        // A subscription that is not over (one beyond its grace, `unpaid`, `paused`, or
+        // still `incomplete`) can still charge: the account pays it or ends it in the
+        // portal before it buys again, so it never pays for two plans. Stripe's list is
+        // the truth, also for a subscription whose events have not arrived.
+        if let Some(customer) = customer.as_deref() {
+            let at_stripe = self.stripe.customer_subscriptions(customer)?;
+            self.note_stripe_time(at_stripe.date)?;
+            if !at_stripe.complete {
+                return Err(RelayError::new(
+                    codes::CONFLICT,
+                    "This account has subscriptions at Stripe. Manage them in the billing portal.",
+                ));
+            }
+            if let Some((id, status)) = at_stripe
+                .list
+                .iter()
+                .find(|(_, status)| !StripeStatus::parse(status).is_final())
+            {
+                self.log(&format!(
+                    "checkout refused for {account}: subscription {id} is {status} at Stripe"
+                ));
+                return Err(RelayError::new(
+                    codes::CONFLICT,
+                    "This account has a subscription that is not over. Pay or end it in the billing portal.",
+                ));
+            }
+        }
         let prices = self.prices(now)?;
         let Some(price) = prices.get(request.plan, request.interval) else {
             self.log(&format!(
@@ -1912,11 +1995,11 @@ impl<S: BillingStore> Billing<S> {
             Some(&customer),
             &self.config.site_url,
         );
-        // The key names the request (its price included) and the session it follows: two
-        // clicks at once get one session; a new attempt after a finished or expired one,
-        // or with another price, is a new session.
-        let previous = open.as_ref().map_or("-", |open| open.session_id.as_str());
-        let key = idempotency_key("checkout", &[account, &customer, &request_hash, previous]);
+        // A fresh key for each new session: a retry of this call reuses it, and two
+        // clicks at once are one after the other under the account's checkout lock (the
+        // second gets the session the first stored). A key made of the request alone
+        // would make Stripe answer a completed session again.
+        let key = random_idempotency_key("checkout")?;
         let session = self.stripe.create_checkout_session(&form, &key)?;
         self.store.transaction(|tx| {
             tx.set_open_checkout(
@@ -2100,7 +2183,22 @@ impl<S: BillingStore> Billing<S> {
             .ok_or_else(|| RelayError::new(codes::BUSY, "The subscription is not ready yet."))?;
         // A fresh key for each change: 6, then 5, then 6 again are three changes.
         let key = random_idempotency_key("seats")?;
-        self.stripe.update_item_quantity(item, quantity, &key)?;
+        if let Err(error) = self.stripe.update_item_quantity(item, quantity, &key) {
+            // A timeout or a 5xx does not tell whether Stripe took the change: Stripe's
+            // item answers. Only a refusal, or an item still at another quantity, fails.
+            if error.code != codes::BUSY
+                || !self
+                    .stripe
+                    .item_quantity(item)
+                    .is_ok_and(|at_stripe| at_stripe == quantity)
+            {
+                return Err(error);
+            }
+            self.log(&format!(
+                "quantity {quantity} of {}: the answer was lost; Stripe's item has it",
+                row.id
+            ));
+        }
         self.store.transaction(|tx| {
             if let Some(mut stored) = tx.subscription(&row.id)? {
                 stored.requested_quantity = Some(quantity);
@@ -2122,33 +2220,45 @@ impl<S: BillingStore> Billing<S> {
     /// For `DELETE /v1/account` (contract section 9): cancels every subscription of the
     /// account that has not ended, at once, and deletes the email copy. The Stripe
     /// customer row stays for support. Answers whether a subscription was canceled.
+    ///
+    /// Every subscription that is not final goes (`unpaid` and `paused` too: Stripe could
+    /// still charge them): the stored ones and those Stripe lists for the account's
+    /// customer, whose events may not have arrived. A Stripe error refuses the deletion.
     pub fn cancel_for_account_deletion(&self, account: &str) -> RelayResult<bool> {
-        let (rows, open) = self.store.transaction(|tx| {
+        let (rows, customer) = self.store.transaction(|tx| {
             Ok((
                 tx.subscriptions_of_account(account)?,
-                tx.open_checkout(account)?,
+                tx.customer_of_account(account)?.map(|row| row.customer),
             ))
         })?;
+        let mut open: BTreeSet<String> = rows
+            .iter()
+            .filter(|row| !row.status.is_final())
+            .map(|row| row.id.clone())
+            .collect();
+        if let Some(customer) = customer.as_deref() {
+            let at_stripe = self.stripe.customer_subscriptions(customer)?;
+            if !at_stripe.complete {
+                return Err(RelayError::new(
+                    codes::CONFLICT,
+                    "This account has more subscriptions at Stripe than Connect reads at once. End them in the billing portal first.",
+                ));
+            }
+            for (id, status) in at_stripe.list {
+                if StripeStatus::parse(&status).is_final() {
+                    open.remove(&id);
+                } else {
+                    open.insert(id);
+                }
+            }
+        }
         let mut canceled = false;
-        for row in rows.iter().filter(|row| !row.status.has_ended()) {
-            self.stripe.cancel_subscription(&row.id)?;
+        for id in &open {
+            self.stripe.cancel_subscription(id)?;
             canceled = true;
         }
         // An open checkout session ends too, so it cannot make a subscription later.
-        if let Some(open) = open.filter(|open| open.expires_at > crate::now_unix())
-            && self
-                .stripe
-                .expire_checkout_session(
-                    &open.session_id,
-                    &idempotency_key("expire", &[&open.session_id]),
-                )
-                .is_err()
-        {
-            self.log(&format!(
-                "checkout session {} of {account} could not be expired",
-                open.session_id
-            ));
-        }
+        self.end_open_checkout(account, crate::now_unix());
         self.store.transaction(|tx| {
             if let Some(mut customer) = tx.customer_of_account(account)? {
                 customer.email = None;
@@ -2158,6 +2268,56 @@ impl<S: BillingStore> Billing<S> {
             Ok(())
         })?;
         Ok(canceled)
+    }
+
+    /// Ends the account's open checkout session at Stripe (it joined a group, or it is
+    /// deleted), so it cannot make a subscription later, and forgets it once Stripe shows
+    /// it is not open. A session Stripe still shows open stays stored, with a log line: a
+    /// subscription it makes later is recorded for the operator when it cannot bind.
+    pub fn end_open_checkout(&self, account: &str, now: u64) {
+        let open = match self.store.transaction(|tx| tx.open_checkout(account)) {
+            Ok(Some(open)) => open,
+            Ok(None) => return,
+            Err(_) => {
+                self.log(&format!(
+                    "the checkout session of {account} could not be read"
+                ));
+                return;
+            }
+        };
+        if open.expires_at > now {
+            let _ = self.stripe.expire_checkout_session(
+                &open.session_id,
+                &idempotency_key("expire", &[&open.session_id]),
+            );
+        }
+        let ended = open.expires_at <= now
+            || self
+                .stripe
+                .checkout_session(&open.session_id)
+                .is_ok_and(|session| session.status.as_deref() != Some("open"));
+        if !ended {
+            self.log(&format!(
+                "checkout session {} of {account} could not be expired",
+                open.session_id
+            ));
+            return;
+        }
+        let cleared = self.store.transaction(|tx| {
+            if tx
+                .open_checkout(account)?
+                .is_some_and(|stored| stored.session_id == open.session_id)
+            {
+                tx.set_open_checkout(account, None)?;
+            }
+            Ok(())
+        });
+        if cleared.is_err() {
+            self.log(&format!(
+                "checkout session {} of {account} could not be forgotten",
+                open.session_id
+            ));
+        }
     }
 
     /// The maintenance pass: prunes event ids older than 30 days and lists the ended
@@ -2170,6 +2330,14 @@ impl<S: BillingStore> Billing<S> {
             let events_pruned = tx.prune_events(now.saturating_sub(EVENT_RETENTION))?;
             let mut due = Vec::new();
             for row in tx.lapsed_subscriptions()? {
+                // A due plan whose deletion did not finish (Stripe showed it ended, then
+                // something kept its stores) is read from Stripe again a day later.
+                if row
+                    .checked_at
+                    .is_some_and(|at| now < at.saturating_add(RECHECK_SECS))
+                {
+                    continue;
+                }
                 if let Some(delete_at) = due_time(&row, now, &durations) {
                     due.push(DueDeletion {
                         subscription: row.id.clone(),
@@ -2220,11 +2388,15 @@ impl<S: BillingStore> Billing<S> {
     /// webhook would). `Ended` only when Stripe shows an ended status and the relay's
     /// clock is within `MAX_CLOCK_AHEAD` of the latest time it saw from Stripe. A Stripe
     /// that cannot be reached is an error: the pass tries again next time.
+    ///
+    /// A successful read is stamped (`checked_at`): the pass reads a due plan at most once
+    /// in `RECHECK_SECS`.
     pub fn verify_ended(&self, subscription: &str, now: u64) -> RelayResult<StripeCheck> {
         let read = self.stripe.subscription(subscription)?;
         self.note_stripe_time(read.date)?;
         let status = text(&read.object, "/status").map_or(StripeStatus::Other, StripeStatus::parse);
-        self.apply_read(&read.object, read.date.unwrap_or(now), now)?;
+        self.apply_read(&read.object, read.date, now)?;
+        self.mark_checked(subscription, now)?;
         if !status.has_ended() {
             self.log(&format!(
                 "subscription {subscription}: Stripe shows {}; its stores stay",
@@ -2240,6 +2412,76 @@ impl<S: BillingStore> Billing<S> {
             return Ok(StripeCheck::ClockAhead);
         }
         Ok(StripeCheck::Ended)
+    }
+
+    /// Whether the data of `account` must stay although a plan of it is due for deletion,
+    /// and why (`None`: it may go). Asked before anything is deleted, for the buying
+    /// account and for each member:
+    ///
+    /// - an open billing problem of the account or its customer: the operator looks first;
+    /// - a stored checkout session that Stripe shows `open` or `complete` (a purchase whose
+    ///   events have not arrived); an expired one is forgotten;
+    /// - a subscription of its customer at Stripe that is not over: anything but
+    ///   `canceled` and `incomplete_expired`, except an `unpaid` or `paused` one that
+    ///   Connect stores (its own state decides); also a list longer than one page.
+    ///
+    /// A Stripe error is an error: nothing is deleted, the next pass asks again.
+    pub fn deletion_blocked(&self, account: &str) -> RelayResult<Option<&'static str>> {
+        let (customer, open, problem, known) = self.store.transaction(|tx| {
+            let customer = tx.customer_of_account(account)?.map(|row| row.customer);
+            let problem = tx.open_problems()?.iter().any(|row| {
+                row.account_id.as_deref() == Some(account)
+                    || (customer.is_some() && row.customer_id == customer)
+            });
+            let known: BTreeSet<String> = tx
+                .subscriptions_of_account(account)?
+                .into_iter()
+                .map(|row| row.id)
+                .collect();
+            Ok((customer, tx.open_checkout(account)?, problem, known))
+        })?;
+        if problem {
+            return Ok(Some("an open billing problem"));
+        }
+        if let Some(open) = open {
+            let session = self.stripe.checkout_session(&open.session_id)?;
+            match session.status.as_deref() {
+                Some("open" | "complete") => return Ok(Some("a checkout session")),
+                _ => self.store.transaction(|tx| {
+                    if tx
+                        .open_checkout(account)?
+                        .is_some_and(|stored| stored.session_id == open.session_id)
+                    {
+                        tx.set_open_checkout(account, None)?;
+                    }
+                    Ok(())
+                })?,
+            }
+        }
+        let Some(customer) = customer else {
+            return Ok(None);
+        };
+        let at_stripe = self.stripe.customer_subscriptions(&customer)?;
+        self.note_stripe_time(at_stripe.date)?;
+        if !at_stripe.complete {
+            return Ok(Some("more subscriptions at Stripe than one page"));
+        }
+        let live = at_stripe.list.iter().any(|(id, status)| {
+            let status = StripeStatus::parse(status);
+            !(status.is_final() || (status.has_ended() && known.contains(id)))
+        });
+        Ok(live.then_some("a subscription at Stripe that is not over"))
+    }
+
+    /// Stamps the time of a successful read of a subscription from Stripe.
+    fn mark_checked(&self, subscription: &str, now: u64) -> RelayResult<()> {
+        self.store.transaction(|tx| {
+            if let Some(mut stored) = tx.subscription(subscription)? {
+                stored.checked_at = Some(now);
+                tx.put_subscription(&stored)?;
+            }
+            Ok(())
+        })
     }
 
     /// Whether this pass may delete stores (B10): every pass records its time; a gap
@@ -2317,14 +2559,22 @@ impl<S: BillingStore> Billing<S> {
     ///
     /// - a live subscription whose period ended more than `STALE_PERIOD_SECS` ago (a
     ///   renewal or an end whose event did not arrive) is read from Stripe, at most once
-    ///   in `RECHECK_SECS`, and Stripe's state is applied;
+    ///   in `RECHECK_SECS`, and Stripe's state is applied. The read runs outside the
+    ///   account's lock; Stripe's answer is applied under it by the rules of an event;
+    /// - a live Family or Team subscription without a group is bound again (its buyer may
+    ///   have left the other group since); one that still cannot bind is recorded for the
+    ///   operator (`no_group`) when no open problem names it;
+    /// - a live Connect Personal subscription with a quantity above 1 (a portal switch
+    ///   from Family that kept the people) gets quantity 1 at Stripe;
     /// - only with `BillingConfig::auto_raise_seats`: a group whose active members exceed
     ///   the quantity of its entitled subscription gets that quantity raised to its
     ///   members (up to the plan's maximum), under the group's lock: the members joined
     ///   while they were paid for, or the owner bought again for fewer, and the members
-    ///   beyond the quantity are not entitled until then. Without the setting (the
-    ///   default) the pass changes no quantity: those members stay `read_only` until the
-    ///   owner raises the seats, and no charge happens without an action of the owner.
+    ///   beyond the quantity are not entitled until then. Stripe's refusal of a raise is
+    ///   recorded for the operator (`raise_refused`), and that subscription is not raised
+    ///   again while the problem is open. Without the setting (the default) the pass
+    ///   raises no quantity: those members stay `read_only` until the owner raises the
+    ///   seats, and no charge happens without an action of the owner.
     ///
     /// A failed call is counted and logged; the next pass tries again.
     pub fn reconcile(&self, now: u64) -> RelayResult<ReconcileReport> {
@@ -2341,24 +2591,56 @@ impl<S: BillingStore> Billing<S> {
             if !stale || recent {
                 continue;
             }
-            let result = self.with_account_lock(&row.account, || {
-                let read = self.stripe.subscription(&row.id)?;
+            let result = self.stripe.subscription(&row.id).and_then(|read| {
                 self.note_stripe_time(read.date)?;
-                self.apply_read(&read.object, read.date.unwrap_or(now), now)
+                self.with_account_lock(&row.account, || {
+                    self.apply_read(&read.object, read.date, now)
+                })
             });
-            self.store.transaction(|tx| {
-                if let Some(mut stored) = tx.subscription(&row.id)? {
-                    stored.checked_at = Some(now);
-                    tx.put_subscription(&stored)?;
-                }
-                Ok(())
-            })?;
+            self.mark_checked(&row.id, now)?;
             match result {
                 Ok(()) => report.read.push((row.id.clone(), row.account.clone())),
                 Err(_) => {
                     report.failed += 1;
                     self.log(&format!(
                         "subscription {}: it could not be read from Stripe; the next pass tries again",
+                        row.id
+                    ));
+                }
+            }
+        }
+        self.bind_groupless(now, &durations)?;
+        let live = self.store.transaction(|tx| tx.live_subscriptions())?;
+        for row in live
+            .iter()
+            .filter(|row| row.plan == Some(Plan::Personal) && row.effective_quantity() > 1)
+        {
+            let Some(item) = row.item.as_deref() else {
+                continue;
+            };
+            let key = idempotency_key(
+                "personal-quantity",
+                &[&row.id, &row.last_event_created.to_string()],
+            );
+            match self.stripe.update_item_quantity(item, 1, &key) {
+                Ok(()) => {
+                    self.store.transaction(|tx| {
+                        if let Some(mut stored) = tx.subscription(&row.id)? {
+                            stored.requested_quantity = Some(1);
+                            stored.requested_at = Some(now);
+                            tx.put_subscription(&stored)?;
+                        }
+                        Ok(())
+                    })?;
+                    self.log(&format!(
+                        "subscription {} is Connect Personal: quantity 1 asked from Stripe",
+                        row.id
+                    ));
+                }
+                Err(_) => {
+                    report.failed += 1;
+                    self.log(&format!(
+                        "subscription {}: quantity 1 could not be set; the next pass tries again",
                         row.id
                     ));
                 }
@@ -2375,38 +2657,118 @@ impl<S: BillingStore> Billing<S> {
                 .collect())
         })?;
         for group_id in groups {
-            let raised = self.with_group_lock(&group_id, |locked| -> RelayResult<Option<u32>> {
-                let wanted = self.store.transaction(|tx| {
-                    let Some(group) = tx.group(&group_id)? else {
+            let raised = self.with_group_lock(
+                &group_id,
+                |locked| -> Result<Option<u32>, (Option<Box<SubscriptionRow>>, RelayError)> {
+                    let wanted = self
+                        .store
+                        .transaction(|tx| {
+                            let Some(group) = tx.group(&group_id)? else {
+                                return Ok(None);
+                            };
+                            let Some((row, state)) =
+                                group_subscription(tx, &group, now, &durations)?
+                            else {
+                                return Ok(None);
+                            };
+                            let refused = tx.open_problems()?.iter().any(|problem| {
+                                problem.object == row.id && problem.reason == "raise_refused"
+                            });
+                            let active = tx.active_members(&group_id)?;
+                            let max = row.plan.map_or(1, |plan| plan.spec().max);
+                            let wanted = active.min(max);
+                            Ok(
+                                (state.entitled && !refused && wanted > row.effective_quantity())
+                                    .then_some((row, wanted)),
+                            )
+                        })
+                        .map_err(|error| (None, error))?;
+                    let Some((row, wanted)) = wanted else {
                         return Ok(None);
                     };
-                    let Some((row, state)) = group_subscription(tx, &group, now, &durations)?
-                    else {
-                        return Ok(None);
-                    };
-                    let active = tx.active_members(&group_id)?;
-                    let max = row.plan.map_or(1, |plan| plan.spec().max);
-                    let wanted = active.min(max);
-                    Ok((state.entitled && wanted > row.effective_quantity()).then_some(wanted))
-                })?;
-                let Some(wanted) = wanted else {
-                    return Ok(None);
-                };
-                self.request_quantity_locked(locked, wanted, now)?;
-                Ok(Some(wanted))
-            });
+                    self.request_quantity_locked(locked, wanted, now)
+                        .map_err(|error| (Some(Box::new(row)), error))?;
+                    Ok(Some(wanted))
+                },
+            );
             match raised {
                 Ok(Some(quantity)) => report.raised.push((group_id, quantity)),
                 Ok(None) => {}
-                Err(_) => {
+                Err((row, error)) => {
                     report.failed += 1;
-                    self.log(&format!(
-                        "group {group_id}: its quantity could not be raised to its members; the next pass tries again"
-                    ));
+                    if let Some(row) = row.filter(|_| error.code == codes::UPSTREAM_FAILED) {
+                        let mut lines = Vec::new();
+                        self.store.transaction(|tx| {
+                            lines.clear();
+                            record_problem(
+                                tx,
+                                &mut lines,
+                                &format!("group {group_id}"),
+                                Problem {
+                                    object: row.id.clone(),
+                                    account: Some(row.account.clone()),
+                                    customer: Some(row.customer.clone()),
+                                    event: None,
+                                    reason: "raise_refused",
+                                    at: now,
+                                },
+                            )
+                        })?;
+                        for line in &lines {
+                            self.log(line);
+                        }
+                    } else {
+                        self.log(&format!(
+                            "group {group_id}: its quantity could not be raised to its members; the next pass tries again"
+                        ));
+                    }
                 }
             }
         }
         Ok(report)
+    }
+
+    /// The part of `reconcile` for live Family or Team subscriptions without a group.
+    fn bind_groupless(&self, now: u64, durations: &Durations) -> RelayResult<()> {
+        let groupless: Vec<SubscriptionRow> = self.store.transaction(|tx| {
+            Ok(tx
+                .live_subscriptions()?
+                .into_iter()
+                .filter(|row| {
+                    row.group_id.is_none() && row.plan.and_then(Plan::group_kind).is_some()
+                })
+                .collect())
+        })?;
+        for row in groupless {
+            let mut lines = Vec::new();
+            let tag = format!("pass {now}");
+            self.with_account_lock(&row.account, || {
+                self.store.transaction(|tx| {
+                    lines.clear();
+                    let Some(mut stored) = tx.subscription(&row.id)? else {
+                        return Ok(());
+                    };
+                    if ensure_group(tx, &mut stored, now, durations, &mut lines, &tag)? {
+                        if stored.group_id.is_some() {
+                            tx.put_subscription(&stored)?;
+                        }
+                        return Ok(());
+                    }
+                    if !tx
+                        .open_problems()?
+                        .iter()
+                        .any(|problem| problem.object == stored.id)
+                    {
+                        record_problem(tx, &mut lines, &tag, no_group_problem(&stored, None, now))?;
+                    }
+                    Ok(())
+                })
+            })?;
+            for line in &lines {
+                self.log(line);
+            }
+        }
+        Ok(())
     }
 
     /// Keeps the latest time seen from Stripe (B10).
@@ -2425,16 +2787,19 @@ impl<S: BillingStore> Billing<S> {
     }
 
     /// Applies Stripe's answer to a read of a subscription that Connect stores, by the
-    /// rules of a subscription event created at `created`.
-    fn apply_read(&self, object: &Value, created: u64, now: u64) -> RelayResult<()> {
+    /// rules of a subscription event created at Stripe's time of the answer (`Date`).
+    /// Without that time the read applies at the time of the last applied event, so the
+    /// relay's own clock never becomes the event time of a subscription.
+    fn apply_read(&self, object: &Value, date: Option<u64>, now: u64) -> RelayResult<()> {
         let durations = self.config.durations;
         let mut lines = Vec::new();
         self.store.transaction(|tx| {
             lines.clear();
             let id = text(object, "/id").unwrap_or("-");
-            if tx.subscription(id)?.is_none() {
+            let Some(stored) = tx.subscription(id)? else {
                 return Ok(());
-            }
+            };
+            let created = date.unwrap_or(stored.last_event_created);
             apply_subscription(
                 tx,
                 object,
@@ -2660,6 +3025,11 @@ pub fn checkout_form(
     if let Some(customer) = customer {
         form.push("customer", customer)
             .push("customer_update[address]", "auto");
+        // Stripe saves the business name of a collected tax id on the customer: with an
+        // existing customer it needs `customer_update[name]=auto` for that.
+        if plan == Plan::Team {
+            form.push("customer_update[name]", "auto");
+        }
     }
     form
 }
@@ -2932,7 +3302,14 @@ fn apply_event(
             let mut row = tx
                 .subscription(subscription)?
                 .unwrap_or_else(|| SubscriptionRow::bound(subscription, customer, account));
-            ensure_group(tx, &mut row, now, lines, &tag)?;
+            if !ensure_group(tx, &mut row, now, durations, lines, &tag)? && row.status.charges() {
+                record_problem(
+                    tx,
+                    lines,
+                    &tag,
+                    no_group_problem(&row, Some(&event.id), now),
+                )?;
+            }
             tx.put_subscription(&row)?;
             lines.push(format!("{tag}: {subscription} bound to {account}"));
             Ok(WebhookEffect::Applied {
@@ -3104,6 +3481,23 @@ fn apply_subscription(
                     &format!("{id} does not match its stored customer or account"),
                 );
             }
+            // The account was deleted (its subscriptions were canceled then): a status that
+            // charges again is applied and recorded for the operator.
+            if status.charges() && !tx.account_exists(&row.account)? {
+                record_problem(
+                    tx,
+                    lines,
+                    tag,
+                    Problem {
+                        object: id.to_owned(),
+                        account: Some(row.account.clone()),
+                        customer: Some(customer.to_owned()),
+                        event: source.event.clone(),
+                        reason: "deleted_account",
+                        at: now,
+                    },
+                )?;
+            }
             row.account.clone()
         }
         None => {
@@ -3272,7 +3666,32 @@ fn apply_subscription(
         _ => {}
     }
     row.last_event_created = source.created;
-    ensure_group(tx, &mut row, now, lines, tag)?;
+    if !ensure_group(tx, &mut row, now, durations, lines, tag)? && status.charges() {
+        record_problem(
+            tx,
+            lines,
+            tag,
+            no_group_problem(&row, source.event.as_deref(), now),
+        )?;
+    }
+    // Connect Personal is one account: a quantity above 1 (a portal switch from Family that
+    // kept the people) is recorded for the operator, and the maintenance pass sets it to 1
+    // at Stripe.
+    if row.plan == Some(Plan::Personal) && row.quantity > 1 && status.charges() {
+        record_problem(
+            tx,
+            lines,
+            tag,
+            Problem {
+                object: row.id.clone(),
+                account: Some(account.clone()),
+                customer: Some(customer.to_owned()),
+                event: source.event.clone(),
+                reason: "personal_quantity",
+                at: now,
+            },
+        )?;
+    }
     tx.put_subscription(&row)?;
     let state = row.state(now, durations);
     lines.push(format!(
@@ -3286,36 +3705,67 @@ fn apply_subscription(
 }
 
 /// Makes the group of a Family or Team subscription, with the buyer as its owner, when it
-/// has none yet. An account that is already in another group keeps that group; the
-/// subscription stays without one and the line says so.
+/// has none yet; binds it to the group the buyer owns when that group is of its kind; and
+/// gives the buyer's group the subscription's kind when the buyer is alone in it (nobody
+/// active or pending) and no subscription of the group's kind is entitled. False when the
+/// subscription stays without a group (the buyer is a member of another group, or owns
+/// one of the other kind with members): the caller records it for the operator while it
+/// charges.
 fn ensure_group(
     tx: &mut dyn BillingTx,
     row: &mut SubscriptionRow,
     now: u64,
+    durations: &Durations,
     lines: &mut Vec<String>,
     tag: &str,
-) -> RelayResult<()> {
+) -> RelayResult<bool> {
     let Some(kind) = row.plan.and_then(Plan::group_kind) else {
-        return Ok(());
+        return Ok(true);
     };
     if row.group_id.is_some() {
-        return Ok(());
+        return Ok(true);
     }
-    if let Some(member) = tx.membership(&row.account)? {
-        if member.role == GroupRole::Owner && member.kind == kind {
-            row.group_id = Some(member.group_id);
-        } else {
-            lines.push(format!(
-                "{tag}: {} is in another group; no group made",
-                row.account
-            ));
-        }
-        return Ok(());
+    let Some(member) = tx.membership(&row.account)? else {
+        let group_id = tx.create_group(kind, &row.account, now)?;
+        lines.push(format!("{tag}: group {group_id} made for {}", row.account));
+        row.group_id = Some(group_id);
+        return Ok(true);
+    };
+    if member.role == GroupRole::Owner && member.kind == kind {
+        row.group_id = Some(member.group_id);
+        return Ok(true);
     }
-    let group_id = tx.create_group(kind, &row.account, now)?;
-    lines.push(format!("{tag}: group {group_id} made for {}", row.account));
-    row.group_id = Some(group_id);
-    Ok(())
+    if member.role == GroupRole::Owner
+        && tx.group_size(&member.group_id)? == 1
+        && let Some(group) = tx.group(&member.group_id)?
+        && !group_subscription(tx, &group, now, durations)?.is_some_and(|(_, state)| state.entitled)
+    {
+        tx.set_group_kind(&group.group_id, kind)?;
+        lines.push(format!(
+            "{tag}: group {} of {} takes the kind of {}",
+            group.group_id, row.account, row.id
+        ));
+        row.group_id = Some(group.group_id);
+        return Ok(true);
+    }
+    lines.push(format!(
+        "{tag}: {} is in another group; {} stays without a group",
+        row.account, row.id
+    ));
+    Ok(false)
+}
+
+/// A Family or Team subscription that charges without a group: recorded for the operator
+/// (`no_group`), who ends or refunds it in the Stripe dashboard.
+fn no_group_problem(row: &SubscriptionRow, event: Option<&str>, now: u64) -> Problem {
+    Problem {
+        object: row.id.clone(),
+        account: Some(row.account.clone()),
+        customer: Some(row.customer.clone()),
+        event: event.map(str::to_owned),
+        reason: "no_group",
+        at: now,
+    }
 }
 
 #[cfg(test)]

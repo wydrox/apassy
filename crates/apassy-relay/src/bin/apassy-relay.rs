@@ -28,9 +28,9 @@ const USAGE: &str = "Usage:
   apassy-relay rollback-check
   apassy-relay downgrade-schema-6
   apassy-relay downgrade-schema-7
-  apassy-relay downgrade-directory-1003
-  apassy-relay downgrade-directory-1004
-  apassy-relay downgrade-directory-1005
+  apassy-relay downgrade-directory-1003 [--delete-vault-stores]
+  apassy-relay downgrade-directory-1004 [--delete-vault-stores]
+  apassy-relay downgrade-directory-1005 [--delete-vault-stores]
   apassy-relay snapshot-check
   apassy-relay backup
   apassy-relay connect-cutover [--dry-run | --confirm-delete-teams <plan>] [--backup <folder>]
@@ -80,6 +80,8 @@ node pairing codes are dropped (docs/OPERATIONS.md 24.3).
 `downgrade-directory-1005` runs with the relay stopped: relay.db goes from 1006 (Apassy
 Connect accounts) back to 1005 in place, and the vault stores of the accounts are deleted
 with their snapshots; the accounts stay, unread by that image (docs/OPERATIONS.md 26.3).
+The three directory downgrades delete the vault stores of the accounts only with
+--delete-vault-stores; without it a relay.db that holds vault stores is refused unchanged.
 The downgrades and `rollback-check` refuse APASSY_RELAY_MODE=connect: its files are plain.
 `backup` runs with the relay stopped: a byte-for-byte copy of the data directory in a new
 folder of APASSY_RELAY_BACKUP_DIR, with MANIFEST.json (\"stopped\": true); `admin backup`
@@ -108,9 +110,15 @@ enum Command {
     RollbackCheck,
     DowngradeSchema6,
     DowngradeSchema7,
-    DowngradeDirectory1003,
-    DowngradeDirectory1004,
-    DowngradeDirectory1005,
+    DowngradeDirectory1003 {
+        delete_vault_stores: bool,
+    },
+    DowngradeDirectory1004 {
+        delete_vault_stores: bool,
+    },
+    DowngradeDirectory1005 {
+        delete_vault_stores: bool,
+    },
     SnapshotCheck,
     Backup,
     ConnectCutover {
@@ -331,9 +339,30 @@ fn parse(args: &[String]) -> Result<Command, String> {
         "rollback-check" if args.len() == 1 => Ok(Command::RollbackCheck),
         "downgrade-schema-6" if args.len() == 1 => Ok(Command::DowngradeSchema6),
         "downgrade-schema-7" if args.len() == 1 => Ok(Command::DowngradeSchema7),
-        "downgrade-directory-1003" if args.len() == 1 => Ok(Command::DowngradeDirectory1003),
-        "downgrade-directory-1004" if args.len() == 1 => Ok(Command::DowngradeDirectory1004),
-        "downgrade-directory-1005" if args.len() == 1 => Ok(Command::DowngradeDirectory1005),
+        "downgrade-directory-1003" if args.len() == 1 => Ok(Command::DowngradeDirectory1003 {
+            delete_vault_stores: false,
+        }),
+        "downgrade-directory-1003" if args.len() == 2 && args[1] == "--delete-vault-stores" => {
+            Ok(Command::DowngradeDirectory1003 {
+                delete_vault_stores: true,
+            })
+        }
+        "downgrade-directory-1004" if args.len() == 1 => Ok(Command::DowngradeDirectory1004 {
+            delete_vault_stores: false,
+        }),
+        "downgrade-directory-1004" if args.len() == 2 && args[1] == "--delete-vault-stores" => {
+            Ok(Command::DowngradeDirectory1004 {
+                delete_vault_stores: true,
+            })
+        }
+        "downgrade-directory-1005" if args.len() == 1 => Ok(Command::DowngradeDirectory1005 {
+            delete_vault_stores: false,
+        }),
+        "downgrade-directory-1005" if args.len() == 2 && args[1] == "--delete-vault-stores" => {
+            Ok(Command::DowngradeDirectory1005 {
+                delete_vault_stores: true,
+            })
+        }
         "snapshot-check" if args.len() == 1 => Ok(Command::SnapshotCheck),
         "backup" if args.len() == 1 => Ok(Command::Backup),
         "connect-cutover" => parse_cutover(&args[1..]),
@@ -516,8 +545,13 @@ fn main() -> ExitCode {
             }
             Err(error) => fail(&error.message),
         },
-        Command::DowngradeDirectory1003 => {
-            match apassy_relay::server::directory::Directory::downgrade_to_1003(&config) {
+        Command::DowngradeDirectory1003 {
+            delete_vault_stores,
+        } => {
+            match apassy_relay::server::directory::Directory::downgrade_to_1003(
+                &config,
+                delete_vault_stores,
+            ) {
                 Ok((from, to)) => {
                     println!("{}", serde_json::json!({"from": from, "to": to}));
                     eprintln!(
@@ -528,8 +562,13 @@ fn main() -> ExitCode {
                 Err(error) => fail(&error.message),
             }
         }
-        Command::DowngradeDirectory1004 => {
-            match apassy_relay::server::directory::Directory::downgrade_to_1004(&config) {
+        Command::DowngradeDirectory1004 {
+            delete_vault_stores,
+        } => {
+            match apassy_relay::server::directory::Directory::downgrade_to_1004(
+                &config,
+                delete_vault_stores,
+            ) {
                 Ok((from, to)) => {
                     println!("{}", serde_json::json!({"from": from, "to": to}));
                     eprintln!(
@@ -540,8 +579,13 @@ fn main() -> ExitCode {
                 Err(error) => fail(&error.message),
             }
         }
-        Command::DowngradeDirectory1005 => {
-            match apassy_relay::server::directory::Directory::downgrade_to_1005(&config) {
+        Command::DowngradeDirectory1005 {
+            delete_vault_stores,
+        } => {
+            match apassy_relay::server::directory::Directory::downgrade_to_1005(
+                &config,
+                delete_vault_stores,
+            ) {
                 Ok((from, to, stores)) => {
                     println!(
                         "{}",
@@ -847,7 +891,19 @@ mod tests {
         assert!(parse(&args(&["downgrade-schema-6", "--now"])).is_err());
         assert!(matches!(
             parse(&args(&["downgrade-directory-1003"])).unwrap(),
-            Command::DowngradeDirectory1003
+            Command::DowngradeDirectory1003 {
+                delete_vault_stores: false
+            }
+        ));
+        assert!(matches!(
+            parse(&args(&[
+                "downgrade-directory-1003",
+                "--delete-vault-stores"
+            ]))
+            .unwrap(),
+            Command::DowngradeDirectory1003 {
+                delete_vault_stores: true
+            }
         ));
         assert!(parse(&args(&["downgrade-directory-1003", "--now"])).is_err());
         assert!(matches!(
@@ -857,12 +913,36 @@ mod tests {
         assert!(parse(&args(&["downgrade-schema-7", "--now"])).is_err());
         assert!(matches!(
             parse(&args(&["downgrade-directory-1004"])).unwrap(),
-            Command::DowngradeDirectory1004
+            Command::DowngradeDirectory1004 {
+                delete_vault_stores: false
+            }
+        ));
+        assert!(matches!(
+            parse(&args(&[
+                "downgrade-directory-1004",
+                "--delete-vault-stores"
+            ]))
+            .unwrap(),
+            Command::DowngradeDirectory1004 {
+                delete_vault_stores: true
+            }
         ));
         assert!(parse(&args(&["downgrade-directory-1004", "--now"])).is_err());
         assert!(matches!(
             parse(&args(&["downgrade-directory-1005"])).unwrap(),
-            Command::DowngradeDirectory1005
+            Command::DowngradeDirectory1005 {
+                delete_vault_stores: false
+            }
+        ));
+        assert!(matches!(
+            parse(&args(&[
+                "downgrade-directory-1005",
+                "--delete-vault-stores"
+            ]))
+            .unwrap(),
+            Command::DowngradeDirectory1005 {
+                delete_vault_stores: true
+            }
         ));
         assert!(parse(&args(&["downgrade-directory-1005", "--now"])).is_err());
         assert_eq!(

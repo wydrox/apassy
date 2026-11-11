@@ -9,6 +9,13 @@
 //! the one add button, and the Wi-Fi Pairing group while a Wi-Fi iPhone is paired
 //! (`companion.rs`, ADR 0028 stage 3).
 //!
+//! Apassy Connect (plan s7 unit M5; mockup frames 9a to 9e): "Move Approvals to
+//! Connect…" beside the move to this Mac while the node runs on Connect, the row of a
+//! move that waits for its first approval through Connect ("Undo"), the route word "via
+//! Apassy Connect" for a device that reaches a node with only the Connect route, and the
+//! state of approvals that the hosted relay ended (`410`) with the same two choices as
+//! the notice.
+//!
 //! The drawing is pure: [`draw`] takes a [`DevicesView`] and returns the [`Action`] that
 //! the owner chose. The vault build makes the view from the vault and from
 //! [`NodeCache`], the copy of `Node::status` that a worker thread reads (a frame never
@@ -51,6 +58,17 @@ pub(crate) const ROUTE_LOCKED: &str = "Stopped while the vault is locked.";
 pub(crate) const ADD_DEVICE: &str = concat!("Add an iPhone or a ", crate::computer!(), "…");
 /// The button of the move row (frame 4).
 pub(crate) const MOVE_APPROVALS: &str = concat!("Move Approvals to This ", crate::computer!(), "…");
+/// The button of the move to Apassy Connect (frame 9a; plan s7 unit M5).
+pub(crate) const MOVE_TO_CONNECT: &str = "Move Approvals to Connect…";
+/// The row of a move to Apassy Connect that waits for its first approval (frame 9c).
+pub(crate) const CONNECT_PENDING: &str = "Moving approvals to Apassy Connect";
+pub(crate) const CONNECT_PENDING_NOTE: &str =
+    "The old path stays until the first approval went through Apassy Connect.";
+/// Its button: the hosted team carries the approvals again.
+pub(crate) const CONNECT_UNDO: &str = "Undo";
+/// The subline of the relay switch while the hosted relay ended the approvals (frame 9d).
+pub(crate) const RELAY_QUESTIONS_ENDED: &str =
+    concat!("Stopped. Questions wait on this ", crate::computer!(), ".");
 /// The hint row of a list with only this Mac (frame 7).
 pub(crate) const ONLY_THIS_MAC: &str = "Add an iPhone to approve runs with Face ID.";
 /// The group of the Wi-Fi iPhones (ADR 0028 stage 3).
@@ -97,7 +115,7 @@ const WORDS_HELP: [&str; 4] = [
     ),
 ];
 /// The help of the Devices list.
-const DEVICES_HELP: [&str; 4] = [
+const DEVICES_HELP: [&str; 5] = [
     concat!(
         "via your ",
         crate::computer!(),
@@ -106,6 +124,11 @@ const DEVICES_HELP: [&str; 4] = [
         " over your tailnet."
     ),
     "via Apassy relay: through apassy-relay.wyderka.cc, end-to-end encrypted.",
+    concat!(
+        "via Apassy Connect: to this ",
+        crate::computer!(),
+        " through Apassy Connect, pinned to its certificate."
+    ),
     "Tailnet: your own Linux node.",
     "Wi-Fi: the old pairing. It ends soon.",
 ];
@@ -221,6 +244,9 @@ pub(crate) enum Route {
     Tailnet,
     /// The old Wi-Fi pairing (ADR 0020), until W2.
     Wifi,
+    /// To this Mac's node through the Apassy Connect dial (plan s7 unit M5): the node runs
+    /// with only the Connect route, so a device reaches it no other way.
+    Connect,
 }
 
 impl Route {
@@ -230,18 +256,58 @@ impl Route {
             Self::Relay => "via Apassy relay",
             Self::Tailnet => "Tailnet",
             Self::Wifi => "Wi-Fi",
+            Self::Connect => "via Apassy Connect",
         }
     }
 
-    /// Green, grey, blue, orange.
+    /// Green, grey, blue, orange; Connect green, as the node of this Mac.
     fn tone(self) -> Tone {
         match self {
-            Self::Mac => Tone::Good,
+            Self::Mac | Self::Connect => Tone::Good,
             Self::Relay => Tone::Neutral,
             Self::Tailnet => Tone::Accent,
             Self::Wifi => Tone::Warning,
         }
     }
+}
+
+/// Why the hosted relay refuses the approvals of the vault for good (`410`, plan s7 unit
+/// M5; `crate::relay::membership::PathEnded`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Ended {
+    /// `410 free_connect_ended`: the free approvals ended with the release of the notice.
+    Free,
+    /// `410 hosted_retired`: the hosted relay serves Apassy Connect only.
+    Retired,
+}
+
+/// The line of approvals that the hosted relay ended (frame 9d).
+pub(crate) fn ended_line(ended: Ended, version: &str) -> String {
+    match ended {
+        Ended::Free => {
+            format!("Free approvals through apassy-relay.wyderka.cc ended with Apassy {version}.")
+        }
+        Ended::Retired => "apassy-relay.wyderka.cc no longer carries these approvals.".to_owned(),
+    }
+}
+
+/// Its help: what still works and the two choices of the notice (plans section 5).
+fn ended_help() -> [&'static str; 3] {
+    [
+        concat!(
+            "Questions wait on this ",
+            crate::computer!(),
+            ". Nothing on this ",
+            crate::computer!(),
+            " is lost."
+        ),
+        concat!(
+            "Keep them free over Tailscale with this ",
+            crate::computer!(),
+            " as the node."
+        ),
+        "Or use Apassy Connect (paid).",
+    ]
 }
 
 /// The kind of a device row.
@@ -421,6 +487,8 @@ pub(crate) enum Questions {
     RemovedSync,
     /// The vault is locked or not open.
     Locked,
+    /// The hosted relay ended the questions of the team (`410`): they wait on this Mac.
+    Ended,
 }
 
 impl Questions {
@@ -434,6 +502,7 @@ impl Questions {
             Self::Removed => (RELAY_QUESTIONS_REMOVED, true),
             Self::RemovedSync => (RELAY_QUESTIONS_REMOVED_SYNC, false),
             Self::Locked => (RELAY_QUESTIONS_LOCKED, false),
+            Self::Ended => (RELAY_QUESTIONS_ENDED, true),
         }
     }
 }
@@ -459,6 +528,13 @@ pub(crate) struct RelayView {
     /// The version with which the free approvals through the hosted relay end, while the
     /// questions of the vault go through it.
     pub(crate) free_end: Option<String>,
+    /// The hosted relay ended the approvals of the vault (`410`), with the version of the
+    /// end: the line with the choices replaces the notice (frame 9d).
+    pub(crate) ended: Option<(Ended, String)>,
+    /// The choices of that line: the move to this Mac (the tailnet route runs) and the
+    /// move to Apassy Connect (the node runs on Connect).
+    pub(crate) can_move: bool,
+    pub(crate) can_move_connect: bool,
 }
 
 /// Everything that Settings > Devices shows.
@@ -470,6 +546,11 @@ pub(crate) struct DevicesView {
     pub(crate) locked: bool,
     /// The approvals go through Apassy relay and the route runs: frame 4.
     pub(crate) can_move: bool,
+    /// The approvals go through Apassy relay and the node runs on Apassy Connect: frame 9a
+    /// ("Move Approvals to Connect…").
+    pub(crate) can_move_connect: bool,
+    /// A move to Apassy Connect waits for its first approval through Connect: frame 9c.
+    pub(crate) connect_pending: bool,
     pub(crate) devices: Vec<DeviceEntry>,
     /// Problems of the approvals or of the feed, one line each.
     pub(crate) notes: Vec<(String, Tone)>,
@@ -515,6 +596,10 @@ pub(crate) enum Action {
     PairAgain,
     Copy(String),
     Move,
+    /// "Move Approvals to Connect…" (plan s7 unit M5).
+    MoveConnect,
+    /// "Undo" of a move to Apassy Connect that waits for its first approval.
+    UndoConnectMove,
     Add,
     /// Revoke… or Try Again of the row with this index.
     Revoke(usize),
@@ -756,8 +841,12 @@ fn this_mac_group(
             }
             NodeState::On { address } => on_rows(g, view, address.as_ref(), action),
         }
-        if view.can_move && matches!(view.node, NodeState::On { address: Some(_) }) {
-            move_row(g, action);
+        let to_mac = view.can_move && matches!(view.node, NodeState::On { address: Some(_) });
+        if to_mac || view.can_move_connect {
+            move_row(g, to_mac, view.can_move_connect, action);
+        }
+        if view.connect_pending {
+            connect_pending_row(g, action);
         }
         if view.old_relay_entry {
             problem_line(
@@ -851,8 +940,50 @@ fn on_rows(
     }
 }
 
-/// Frame 4: the approvals still go through Apassy relay.
-fn move_row(g: &mut rows::Group<'_>, action: &mut Option<Action>) {
+/// Frame 9c: a move to Apassy Connect waits for its first approval through Connect.
+fn connect_pending_row(g: &mut rows::Group<'_>, action: &mut Option<Action>) {
+    g.row(|ui| {
+        egui::Sides::new()
+            .shrink_left()
+            .wrap_mode(egui::TextWrapMode::Wrap)
+            .height(rows::LINE)
+            .show(
+                ui,
+                |ui| {
+                    ui.horizontal_top(|ui| {
+                        kit::icon_tile_sized(ui, Icon::Globe, kit::palette().accent, 22.0);
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 1.0;
+                            ui.label(
+                                kit::medium(CONNECT_PENDING, Font::Body)
+                                    .color(kit::palette().label),
+                            );
+                            ui.add(Label::new(rows::note(CONNECT_PENDING_NOTE)).wrap());
+                        });
+                    });
+                },
+                |ui| {
+                    if kit::small_button(ui, CONNECT_UNDO, Style::Bordered).clicked() {
+                        *action = Some(Action::UndoConnectMove);
+                    }
+                },
+            );
+    });
+}
+
+/// Frame 4: the approvals still go through Apassy relay. `to_mac`: the tailnet route
+/// runs ("Move Approvals to This Mac…"); `to_connect`: the node runs on Apassy Connect
+/// ("Move Approvals to Connect…", frame 9a). The first one is the blue button.
+fn move_row(g: &mut rows::Group<'_>, to_mac: bool, to_connect: bool, action: &mut Option<Action>) {
+    let note = match (to_mac, to_connect) {
+        (true, true) => "Move them here: over your tailnet, or through Apassy Connect.",
+        (false, true) => concat!(
+            "Move them to Apassy Connect: your iPhone reaches this ",
+            crate::computer!(),
+            " without Tailscale."
+        ),
+        _ => "Move them here to keep them on your tailnet.",
+    };
     g.row(|ui| {
         egui::Sides::new()
             .shrink_left()
@@ -869,17 +1000,24 @@ fn move_row(g: &mut rows::Group<'_>, action: &mut Option<Action>) {
                                 kit::medium("Approvals go through Apassy relay", Font::Body)
                                     .color(kit::palette().label),
                             );
-                            ui.add(
-                                Label::new(rows::note(
-                                    "Move them here to keep them on your tailnet.",
-                                ))
-                                .wrap(),
-                            );
+                            ui.add(Label::new(rows::note(note)).wrap());
                         });
                     });
                 },
                 |ui| {
-                    if kit::small_button(ui, MOVE_APPROVALS, Style::Prominent).clicked() {
+                    // Right to left: the second button first.
+                    if to_mac && to_connect {
+                        if kit::small_button(ui, MOVE_TO_CONNECT, Style::Bordered).clicked() {
+                            *action = Some(Action::MoveConnect);
+                        }
+                        if kit::small_button(ui, MOVE_APPROVALS, Style::Prominent).clicked() {
+                            *action = Some(Action::Move);
+                        }
+                    } else if to_connect {
+                        if kit::small_button(ui, MOVE_TO_CONNECT, Style::Prominent).clicked() {
+                            *action = Some(Action::MoveConnect);
+                        }
+                    } else if kit::small_button(ui, MOVE_APPROVALS, Style::Prominent).clicked() {
                         *action = Some(Action::Move);
                     }
                 },
@@ -936,7 +1074,7 @@ fn devices_group(ui: &mut Ui, view: &DevicesView, action: &mut Option<Action>) {
     });
     ui.add_space(12.0);
     // One blue button for each view: the move row has it in frame 4.
-    let style = if view.can_move {
+    let style = if view.can_move || view.can_move_connect {
         Style::Bordered
     } else {
         Style::Prominent
@@ -1055,7 +1193,7 @@ fn device_row(g: &mut rows::Group<'_>, device: &DeviceEntry, now: u64) -> Option
 /// free approvals through Apassy relay.
 fn relay_group(ui: &mut Ui, relay: &RelayView, action: &mut Option<Action>) {
     rows::group(ui, Some(RELAY_GROUP), |g| {
-        let was = relay.questions == Questions::On;
+        let was = matches!(relay.questions, Questions::On | Questions::Ended);
         let (subline, enabled) = relay.questions.subline();
         let mut on = was;
         switch_row(
@@ -1072,7 +1210,7 @@ fn relay_group(ui: &mut Ui, relay: &RelayView, action: &mut Option<Action>) {
         if relay.questions == Questions::RemovedSync {
             g.note_row(RELAY_QUESTIONS_REMOVED_SYNC_FIX);
         }
-        if was {
+        if relay.questions == Questions::On {
             let mut shown = relay.feed_shown;
             switch_row(
                 g,
@@ -1099,12 +1237,75 @@ fn relay_group(ui: &mut Ui, relay: &RelayView, action: &mut Option<Action>) {
                 kit::help_button(ui, OTHER_MACS, &OTHER_MACS_HELP);
             });
         }
-        if let Some(version) = &relay.free_end {
+        if let Some((ended, version)) = &relay.ended {
+            ended_row(g, relay, *ended, version, action);
+        } else if let Some(version) = &relay.free_end {
             let line = free_end_line(version);
             let help = free_end_help(version);
             let help: Vec<&str> = help.iter().map(String::as_str).collect();
             problem_line(g, &line, Tone::Warning, None, Some((RELAY_GROUP, &help)));
         }
+    });
+}
+
+/// Frame 9d: the hosted relay ended the approvals of the vault (`410`). One line, its
+/// help, and the choices of the notice that this Mac can take now; without either, the
+/// help says where to turn them on.
+fn ended_row(
+    g: &mut rows::Group<'_>,
+    relay: &RelayView,
+    ended: Ended,
+    version: &str,
+    action: &mut Option<Action>,
+) {
+    let line = ended_line(ended, version);
+    let help = ended_help();
+    g.row(|ui| {
+        egui::Sides::new()
+            .shrink_left()
+            .wrap_mode(egui::TextWrapMode::Wrap)
+            .height(rows::LINE)
+            .show(
+                ui,
+                |ui| {
+                    ui.horizontal_top(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        kit::paint_icon_in(ui, Icon::Warning, 13.0, Tone::Warning.text());
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 1.0;
+                            ui.add(
+                                Label::new(
+                                    kit::text(&line, Font::Callout).color(Tone::Warning.text()),
+                                )
+                                .wrap(),
+                            );
+                            if !relay.can_move && !relay.can_move_connect {
+                                ui.add(
+                                    Label::new(rows::note(concat!(
+                                        "Turn on “Reachable on Your Tailnet” above, or Apassy Connect for this ",
+                                        crate::computer!(),
+                                        " in Bouncer › Agents."
+                                    )))
+                                    .wrap(),
+                                );
+                            }
+                        });
+                    });
+                },
+                |ui| {
+                    kit::help_button(ui, RELAY_GROUP, &help);
+                    if relay.can_move_connect
+                        && kit::small_button(ui, MOVE_TO_CONNECT, Style::Bordered).clicked()
+                    {
+                        *action = Some(Action::MoveConnect);
+                    }
+                    if relay.can_move
+                        && kit::small_button(ui, MOVE_APPROVALS, Style::Bordered).clicked()
+                    {
+                        *action = Some(Action::Move);
+                    }
+                },
+            );
     });
 }
 
@@ -2330,6 +2531,19 @@ mod live {
             && problem.is_none()
             && tailnet.is_some_and(|tailnet| tailnet.questions_elsewhere.is_some())
             && app.questions_can_move();
+        // The node runs on Apassy Connect (plan s7 unit M5): from the cached status, so a
+        // frame reads no file.
+        let on_connect = cache.status.as_ref().is_some_and(|status| {
+            status.connect.available
+                && status.connect.on
+                && status.connect.running
+                && status.connect.public_name.is_some()
+        });
+        let can_move_connect = !locked
+            && on_connect
+            && tailnet.is_some_and(|tailnet| tailnet.questions_elsewhere.is_some())
+            && app.questions_can_move();
+        let connect_pending = !locked && app.questions_connect_pending().is_some();
         let mut devices = if locked { Vec::new() } else { device_rows(app) };
         if devices.is_empty() {
             devices.push(this_mac_row(false));
@@ -2343,10 +2557,12 @@ mod live {
             problem,
             locked,
             can_move,
+            can_move_connect,
+            connect_pending,
             devices,
             notes,
             wifi: None,
-            relay: relay_view(app),
+            relay: relay_view(app, can_move, can_move_connect),
             old_relay_entry: !locked && app.questions_old_hosted_entry(),
             now: crate::desktop::companion::now(),
         }
@@ -2355,7 +2571,11 @@ mod live {
     /// The Relay group of the open vault: the state of its questions ("Unlock the vault
     /// to change it." while locked), the feed switch, the other Macs while it syncs, and
     /// the D14 notice while its questions go through the hosted relay.
-    fn relay_view(app: &DesktopApp) -> Option<super::RelayView> {
+    fn relay_view(
+        app: &DesktopApp,
+        can_move: bool,
+        can_move_connect: bool,
+    ) -> Option<super::RelayView> {
         let questions = app
             .owner_ui
             .session
@@ -2388,11 +2608,26 @@ mod live {
         let free_end = app
             .questions_free_notice()
             .map(|_| FREE_RELAY_PATHS_END_VERSION.to_owned());
+        // The hosted relay ended the approvals (`410`): one state with the choices.
+        let ended = app.questions_ended().map(|why| {
+            let ended = match why {
+                crate::relay::membership::PathEnded::FreeEnded => super::Ended::Free,
+                crate::relay::membership::PathEnded::Retired => super::Ended::Retired,
+            };
+            (ended, FREE_RELAY_PATHS_END_VERSION.to_owned())
+        });
+        let questions = match questions {
+            Questions::On if ended.is_some() => Questions::Ended,
+            other => other,
+        };
         Some(super::RelayView {
             questions,
             feed_shown: !app.ui.feed_off,
             other_macs,
             free_end,
+            ended,
+            can_move,
+            can_move_connect,
         })
     }
 
@@ -2496,6 +2731,11 @@ mod live {
             membership.pin.is_some()
                 && tailnet.is_some_and(|tailnet| tailnet.questions_team.is_some())
         });
+        // A node with only the Connect route: its devices reach it through Connect.
+        let node_route = match app.ui.devices.cache.status.as_ref() {
+            Some(status) if !status.tailnet.running && status.connect.running => Route::Connect,
+            _ => Route::Mac,
+        };
         let mut rows = vec![this_mac_row(on_node)];
         let me_uuid = me.map(|me| me.uuid);
         for device in trusted {
@@ -2521,7 +2761,7 @@ mod live {
             };
             let route = membership.as_ref().map(|membership| {
                 if membership.pin.is_some() {
-                    Route::Mac
+                    node_route
                 } else {
                     Route::Relay
                 }
@@ -2576,7 +2816,7 @@ mod live {
                     name: device.name.clone(),
                     kind,
                     roles: Vec::new(),
-                    route: Some(Route::Mac),
+                    route: Some(node_route),
                     last_contact: device.last_seen_at,
                     target: Target::Node {
                         team_id: tailnet.questions_team.clone().unwrap_or_default(),
@@ -2677,6 +2917,8 @@ mod live {
                 }
             }
             Action::PairAgain | Action::Move => app.questions_move_to_node(Some(ctx)),
+            Action::MoveConnect => app.questions_move_to_connect(Some(ctx)),
+            Action::UndoConnectMove => app.questions_undo_connect_move(),
             Action::Copy(origin) => {
                 ctx.copy_text(origin);
                 app.set_ok(concat!(
