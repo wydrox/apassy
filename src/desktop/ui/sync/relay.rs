@@ -3938,10 +3938,11 @@ impl DesktopApp {
                 Ok(stores
                     .into_iter()
                     .filter(|store| {
-                        // A store of another account (shared) is not offered: sharing a
-                        // vault between accounts is not available yet.
+                        // A store that holds devices of another account is offered only
+                        // with a share of it that this device verified (connect-account-v1
+                        // section 16).
                         !known.contains(&store.vault_id)
-                            && !store.shared
+                            && (!store.shared || account.shares_store(&store.team_id))
                             && store
                                 .devices
                                 .iter()

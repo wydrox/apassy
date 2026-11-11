@@ -287,6 +287,11 @@ impl Live {
         })
     }
 
+    /// The account id of the account file of this device.
+    pub(crate) fn account_id(&self) -> Option<String> {
+        self.file().map(|file| file.account_id.clone())
+    }
+
     /// The Connect origin of the account file of this device, also while the session is
     /// not open: a link for that origin needs the account ([`Self::sync_account`]).
     pub(crate) fn account_origin(&self) -> Option<String> {
@@ -415,6 +420,7 @@ impl DesktopApp {
         live.reset();
         live.epoch = None;
         self.ui.connect.sheet = None;
+        self.ui.connect.share.reset();
     }
 }
 
@@ -599,6 +605,9 @@ pub(crate) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let view = view(app);
     if let Some(action) = super::draw(ui, &view) {
         act(app, &ctx, action);
+    }
+    if matches!(view.shown, Shown::Account(_)) && !view.locked {
+        super::share::section(app, ui);
     }
     let live = &app.ui.connect.live;
     let busy = live.busy();

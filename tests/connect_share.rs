@@ -666,3 +666,166 @@ fn an_account_file_of_version_3_moves_in_place() {
     assert_eq!(state.account_id, account.state().account_id);
     assert!(state.peers.is_empty() && state.stores.is_empty());
 }
+
+const SHARE_VECTORS: &str = include_str!("fixtures/connect-account-v1/share-vectors.json");
+
+fn hex(text: &str) -> Vec<u8> {
+    (0..text.len() / 2)
+        .map(|index| u8::from_str_radix(&text[index * 2..index * 2 + 2], 16).expect("hex"))
+        .collect()
+}
+
+/// The vectors of section 16: the share-list messages and the peer-join message are those
+/// of this build, each signature verifies over its message and fails over a changed byte,
+/// the share code, its fingerprint, its hash, and the six words come from their inputs,
+/// and both lists verify from their roots with the peers, the share, and the join.
+#[test]
+fn the_share_vectors_reproduce_the_messages_and_words() {
+    use apassy::connect::device_key::{list_hash, peer_join_message};
+    use apassy::connect::trust::{ListEntry, verify_list};
+    use apassy::connect::{ShareCode, share_fingerprint, share_link_hash, share_safety_words};
+    use apassy::sync::{decode_b64u, verify_signature};
+
+    let v: Value = serde_json::from_str(SHARE_VECTORS).expect("vectors");
+    let origin = v["origin"].as_str().unwrap();
+    let (a, x, store) = (
+        v["account_a"].as_str().unwrap(),
+        v["account_x"].as_str().unwrap(),
+        v["store"].as_str().unwrap(),
+    );
+    let pub_a = hex(v["device_a"]["public_hex"].as_str().unwrap());
+    let pub_b = hex(v["device_b"]["public_hex"].as_str().unwrap());
+    let (a64, b64) = (encode_b64u(&pub_a), encode_b64u(&pub_b));
+    let code = v["code"]["code"].as_str().unwrap();
+    let parsed = ShareCode::parse(code).expect("a share code");
+    assert_eq!(parsed.account_id(), a);
+    assert_eq!(
+        parsed.fingerprint(),
+        v["code"]["fingerprint"].as_str().unwrap()
+    );
+    assert_eq!(share_fingerprint(&pub_a, &pub_a), parsed.fingerprint());
+    assert_eq!(
+        share_link_hash(code),
+        v["code"]["link_hash"].as_str().unwrap()
+    );
+    assert_eq!(
+        share_safety_words(code, (a, &pub_a, &pub_a), (x, &pub_b, &pub_b)),
+        v["words"]["words"].as_str().unwrap()
+    );
+    let made: Vec<(&str, Vec<u8>)> = vec![
+        (
+            "share_list_peer",
+            share_list_message(
+                origin,
+                a,
+                2,
+                v["lists"]["a"]["hashes"][0].as_str().unwrap(),
+                "peer",
+                x,
+                &b64,
+                "-",
+                &a64,
+            ),
+        ),
+        (
+            "share_list_share",
+            share_list_message(
+                origin,
+                a,
+                3,
+                v["lists"]["a"]["hashes"][1].as_str().unwrap(),
+                "share",
+                x,
+                "-",
+                store,
+                &a64,
+            ),
+        ),
+        (
+            "share_list_member_peer",
+            share_list_message(
+                origin,
+                x,
+                2,
+                v["lists"]["x"]["hashes"][0].as_str().unwrap(),
+                "peer",
+                a,
+                &a64,
+                "-",
+                &b64,
+            ),
+        ),
+        (
+            "share_list_join",
+            share_list_message(
+                origin,
+                x,
+                3,
+                v["lists"]["x"]["hashes"][1].as_str().unwrap(),
+                "join",
+                a,
+                "-",
+                store,
+                &b64,
+            ),
+        ),
+        (
+            "peer_join",
+            peer_join_message(origin, a, &share_link_hash(code), x, &b64, &b64),
+        ),
+    ];
+    for (name, message) in made {
+        let vector = v["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|vector| vector["name"] == name)
+            .unwrap_or_else(|| panic!("{name}"));
+        assert_eq!(
+            encode_b64u(&message),
+            vector["message_b64u"].as_str().unwrap(),
+            "{name}"
+        );
+        assert!(message.starts_with(vector["tag"].as_str().unwrap().as_bytes()));
+        let key = if vector["signer"] == "device_a" {
+            &pub_a
+        } else {
+            &pub_b
+        };
+        let signature = decode_b64u(vector["signature_b64u"].as_str().unwrap()).unwrap();
+        assert!(verify_signature(key, &message, &signature), "{name}");
+        let mut changed = message.clone();
+        *changed.last_mut().unwrap() ^= 1;
+        assert!(!verify_signature(key, &changed, &signature), "{name}");
+        if name.starts_with("share_list") {
+            assert!(
+                v["lists"].to_string().contains(&list_hash(&message)),
+                "{name}"
+            );
+        }
+    }
+    for (account, root, list, pinned) in
+        [(a, &pub_a, "a", (x, &pub_b)), (x, &pub_b, "x", (a, &pub_a))]
+    {
+        let entries: Vec<ListEntry> =
+            serde_json::from_value(v["lists"][list]["entries"].clone()).expect("entries");
+        let verified = verify_list(origin, account, root, &entries).expect("the list verifies");
+        assert_eq!(verified.shares.root_of(pinned.0), Some(pinned.1.as_slice()));
+        assert_eq!(
+            verified.hashes,
+            v["lists"][list]["hashes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|hash| hash.as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        );
+        if list == "a" {
+            assert_eq!(verified.shares.members_of(store), [x.to_owned()]);
+        } else {
+            assert_eq!(verified.shares.owner_of(store), Some(a));
+        }
+        // From another root, nothing verifies.
+        assert!(verify_list(origin, account, pinned.1, &entries).is_none());
+    }
+}

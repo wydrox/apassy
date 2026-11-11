@@ -702,6 +702,32 @@ pub enum OwnerRequest {
         group_id: String,
         change: crate::broker::approvals::ConnectGroupChange,
     },
+    /// Share the vault store `team_id` with another account (connect-account-v1 section
+    /// 16): the words that both devices showed, empty for an account pinned already.
+    ShareConnectVault {
+        account_id: String,
+        peer_account: String,
+        peer_name: String,
+        team_id: String,
+        words: String,
+        fingerprint: String,
+    },
+    /// "The Words Match" of a share code of another account.
+    AcceptConnectShare {
+        account_id: String,
+        peer_account: String,
+        peer_name: String,
+        words: String,
+        fingerprint: String,
+    },
+    /// "Stop Sharing with <name>…" or "Leave This Shared Vault…".
+    EndConnectShare {
+        account_id: String,
+        peer_account: String,
+        peer_name: String,
+        team_id: String,
+        leave: bool,
+    },
     /// Turn the tailnet route of this Mac's node on or off (Settings > Devices, plan
     /// S2–S3, unit N7). The node checks nothing itself: the caller asks first.
     SetTailnetRoute {
@@ -1197,6 +1223,47 @@ impl OwnerRequest {
                 group_id: group_id.clone(),
                 change: change.clone(),
             },
+            Self::ShareConnectVault {
+                account_id,
+                peer_account,
+                peer_name,
+                team_id,
+                words,
+                fingerprint,
+            } => OwnerAction::ShareConnectVault {
+                account_id: account_id.clone(),
+                peer_account: peer_account.clone(),
+                peer_name: peer_name.clone(),
+                team_id: team_id.clone(),
+                words: words.clone(),
+                fingerprint: fingerprint.clone(),
+            },
+            Self::AcceptConnectShare {
+                account_id,
+                peer_account,
+                peer_name,
+                words,
+                fingerprint,
+            } => OwnerAction::AcceptConnectShare {
+                account_id: account_id.clone(),
+                peer_account: peer_account.clone(),
+                peer_name: peer_name.clone(),
+                words: words.clone(),
+                fingerprint: fingerprint.clone(),
+            },
+            Self::EndConnectShare {
+                account_id,
+                peer_account,
+                peer_name,
+                team_id,
+                leave,
+            } => OwnerAction::EndConnectShare {
+                account_id: account_id.clone(),
+                peer_account: peer_account.clone(),
+                peer_name: peer_name.clone(),
+                team_id: team_id.clone(),
+                leave: *leave,
+            },
             Self::SetTailnetRoute { on } => OwnerAction::SetTailnetRoute { on: *on },
             Self::RevokeNodeDevice(request) => request.action(),
             Self::AllowConnect {
@@ -1681,6 +1748,50 @@ impl OwnerRequest {
                 "Let \"{}\" sync the relay copy of \"{}\" at Apassy Connect? It can then read and change the encrypted copy; it still needs the passphrase to open the vault.",
                 page_text(device_name),
                 page_text(vault_name)
+            ),
+            Self::ShareConnectVault {
+                peer_name, words, ..
+            } if words.is_empty() => format!(
+                "Share this vault with \"{}\" through Apassy Connect? Their devices can then read and change the encrypted copy; they still need the passphrase to open the vault.",
+                page_text(peer_name)
+            ),
+            Self::ShareConnectVault {
+                peer_name,
+                words,
+                fingerprint,
+                ..
+            } => format!(
+                "Share vaults with \"{}\" (account key {}) through Apassy Connect? Both devices show: {}. Their devices can then read and change the encrypted copy of this vault; they still need its passphrase.",
+                page_text(peer_name),
+                page_text(fingerprint),
+                page_text(words)
+            ),
+            Self::AcceptConnectShare {
+                peer_name,
+                words,
+                fingerprint,
+                ..
+            } => format!(
+                "Share vaults with \"{}\" (account key {}) through Apassy Connect? Both devices show: {}. You can then join the vaults that they share with you.",
+                page_text(peer_name),
+                page_text(fingerprint),
+                page_text(words)
+            ),
+            Self::EndConnectShare {
+                peer_name,
+                leave: false,
+                ..
+            } => format!(
+                "Stop sharing this vault with \"{}\"? Their devices leave the shared copy now.",
+                page_text(peer_name)
+            ),
+            Self::EndConnectShare {
+                peer_name,
+                leave: true,
+                ..
+            } => format!(
+                "Leave the vault that \"{}\" shares? This device stops syncing the shared copy; the vault stays here.",
+                page_text(peer_name)
             ),
             Self::ChangeConnectGroup { change, .. } => match change {
                 crate::broker::approvals::ConnectGroupChange::ConfirmMember { name, .. } => format!(
@@ -2827,7 +2938,10 @@ impl DesktopApp {
             | OwnerRequest::ForgetOldConnectAccount
             | OwnerRequest::DeleteVaultStore { .. }
             | OwnerRequest::AddStoreDevice { .. }
-            | OwnerRequest::ChangeConnectGroup { .. } => {
+            | OwnerRequest::ChangeConnectGroup { .. }
+            | OwnerRequest::ShareConnectVault { .. }
+            | OwnerRequest::AcceptConnectShare { .. }
+            | OwnerRequest::EndConnectShare { .. } => {
                 self.owner.connect_proof = Some(proof);
             }
             OwnerRequest::SetTailnetRoute { on } => self.devices_set_route(on, proof),

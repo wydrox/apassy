@@ -260,6 +260,26 @@ fn an_unshare_removes_the_member_from_the_store_in_its_transaction() {
     assert_eq!(rows(&owner.account).len(), 1);
     assert_ne!(store_challenge(c, &f.team, member), 200);
     assert_eq!(store_challenge(c, &f.team, owner), 200);
+    // A store row left behind (a removal that did not run to its end) signs in no more:
+    // the store sign-in needs the owner's active share too.
+    c.edit_directory(&format!(
+        "INSERT INTO account_store_device (team_id, device_id, account_id, store_device, added_at) \
+         VALUES ('{}', '{}', '{}', 2, 1);",
+        f.team, member.id, member.account
+    ));
+    let team_id = apassy_relay::ids::TeamId::parse(&f.team).unwrap();
+    let live = c
+        .relay
+        .hub()
+        .directory
+        .store
+        .with(|conn| apassy_relay::server::account::store_device_live(conn, &team_id, 2))
+        .unwrap();
+    assert!(!live, "a row without the share is no live store device");
+    c.edit_directory(&format!(
+        "DELETE FROM account_store_device WHERE team_id = '{}' AND device_id = '{}';",
+        f.team, member.id
+    ));
     // No new device of the member comes in without a new share.
     assert_eq!(
         code(&add_to_store(c, owner, &f.team, member)),
@@ -648,4 +668,138 @@ fn a_directory_without_the_share_columns_is_refused_at_open() {
         refused.message
     );
     drop(dir);
+}
+
+/// The vectors of contract section 16 are the messages, the hashes, and the words of this
+/// relay, and every list entry of them parses with strict types and keeps its JSON.
+#[test]
+fn the_share_vectors_are_the_messages_of_this_relay() {
+    use apassy_relay::hostkeys::decode_b64;
+    let v: Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/connect-account-v1/share-vectors.json"
+    ))
+    .unwrap();
+    let hex = |text: &str| -> Vec<u8> {
+        (0..text.len() / 2)
+            .map(|index| u8::from_str_radix(&text[index * 2..index * 2 + 2], 16).unwrap())
+            .collect()
+    };
+    let origin = v["origin"].as_str().unwrap();
+    let (a, x, store) = (
+        v["account_a"].as_str().unwrap(),
+        v["account_x"].as_str().unwrap(),
+        v["store"].as_str().unwrap(),
+    );
+    let pub_a = hex(v["device_a"]["public_hex"].as_str().unwrap());
+    let pub_b = hex(v["device_b"]["public_hex"].as_str().unwrap());
+    let (a64, b64) = (encode_b64(&pub_a), encode_b64(&pub_b));
+    let code = v["code"]["code"].as_str().unwrap();
+    assert_eq!(
+        device::share_fingerprint(&pub_a, &pub_a),
+        v["code"]["fingerprint"].as_str().unwrap()
+    );
+    assert_eq!(
+        device::share_link_hash(code),
+        v["code"]["link_hash"].as_str().unwrap()
+    );
+    assert_eq!(
+        device::share_safety_words(code, (a, &pub_a, &pub_a), (x, &pub_b, &pub_b)),
+        v["words"]["words"].as_str().unwrap()
+    );
+    let link_hash = device::share_link_hash(code);
+    let messages = [
+        (
+            "share_list_peer",
+            device::share_list_message(
+                origin,
+                a,
+                2,
+                v["lists"]["a"]["hashes"][0].as_str().unwrap(),
+                "peer",
+                x,
+                &b64,
+                "-",
+                &a64,
+            ),
+            &pub_a,
+        ),
+        (
+            "share_list_share",
+            device::share_list_message(
+                origin,
+                a,
+                3,
+                v["lists"]["a"]["hashes"][1].as_str().unwrap(),
+                "share",
+                x,
+                "-",
+                store,
+                &a64,
+            ),
+            &pub_a,
+        ),
+        (
+            "share_list_member_peer",
+            device::share_list_message(
+                origin,
+                x,
+                2,
+                v["lists"]["x"]["hashes"][0].as_str().unwrap(),
+                "peer",
+                a,
+                &a64,
+                "-",
+                &b64,
+            ),
+            &pub_b,
+        ),
+        (
+            "share_list_join",
+            device::share_list_message(
+                origin,
+                x,
+                3,
+                v["lists"]["x"]["hashes"][1].as_str().unwrap(),
+                "join",
+                a,
+                "-",
+                store,
+                &b64,
+            ),
+            &pub_b,
+        ),
+        (
+            "peer_join",
+            device::peer_join_message(origin, a, &link_hash, x, &b64, &b64),
+            &pub_b,
+        ),
+    ];
+    for (name, message, key) in messages {
+        let vector = v["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|vector| vector["name"] == name)
+            .unwrap();
+        assert_eq!(
+            encode_b64(&message),
+            vector["message_b64u"].as_str().unwrap(),
+            "{name}"
+        );
+        let signature = decode_b64(vector["signature_b64u"].as_str().unwrap(), 72).unwrap();
+        assert!(device::verify(key, &message, &signature), "{name}");
+    }
+    for list in ["a", "x"] {
+        for (entry, hash) in v["lists"][list]["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(v["lists"][list]["hashes"].as_array().unwrap())
+        {
+            let typed: apassy_relay::api::ListEntry =
+                serde_json::from_value(entry.clone()).unwrap();
+            assert_eq!(serde_json::to_value(&typed).unwrap(), *entry);
+            assert_eq!(hash.as_str().unwrap().len(), 43);
+        }
+    }
 }
