@@ -1580,6 +1580,12 @@ fn route(shared: &Arc<(Mutex<Relay>, Condvar)>, request: &Incoming) -> Outgoing 
                         None => fail(404, "not_found"),
                     }
                 }
+                // A vault store of an account serves relay sync only, as the relay does
+                // (connect-account-v1 section 8): its devices come from the account, never
+                // from a device link.
+                (_, ["devices", "links", ..]) if relay.store_teams.contains(&team_id) => {
+                    fail(403, "forbidden")
+                }
                 ("POST", ["devices", "links"]) => {
                     relay.next_secret += 1;
                     let code = format!("apassy_lnk_{team_id}_{}", secret_hex(relay.next_secret));

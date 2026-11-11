@@ -312,6 +312,10 @@ pub enum SyncError {
     StaleCopy,
     /// The relay serves a copy whose chain does not include this Mac's last change.
     ForkedCopy,
+    /// The head of a vault store of Apassy Connect was pushed by a device that left the
+    /// account after this Mac's last sync: this Mac waits for a device of the account to
+    /// sync, which signs a head of its own over it. Nothing was changed.
+    WaitsForAccountDevice,
     /// Another sync of this vault runs now. The next sync tries again.
     Running,
     /// The copy is larger than the relay takes (64 MiB).
@@ -440,6 +444,9 @@ impl fmt::Display for SyncError {
             ),
             Self::ForkedCopy => f.write_str(
                 concat!("the relay served a copy that does not include this ", crate::computer!(), "'s last change. To go on, select “Use the relay copy…” in Settings > Vault > Sync"),
+            ),
+            Self::WaitsForAccountDevice => f.write_str(
+                "waiting for another device of this account to sync. The last copy was saved by a device that left the account; nothing was changed",
             ),
             Self::Running => f.write_str("another sync of this vault runs now. Apassy tries again"),
             Self::TooLarge => f.write_str("the vault is too large for the relay (64 MiB)"),

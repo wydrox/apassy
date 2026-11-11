@@ -11,14 +11,16 @@
 //! - [`RelaySync::enable_on_connect`]: `POST /v1/account/vaults` (the same vault again
 //!   answers the existing store), the sign-in with the account key, the first sync (the
 //!   push of version 1, or the merge of a copy that another Mac of the account pushed),
-//!   then the registration of the other live devices of the account in the store. A
-//!   second Mac of the same account turns on the same way: it needs no link code, and it
-//!   merges.
-//! - A member of a Family or Team joins a shared vault with the device link of
-//!   relay-sync-v1 section 7 on the store ([`super::PendingJoin::request_with_account`]):
-//!   the link, the safety words on both Macs, the confirmation on the Mac in the store,
-//!   and the passphrase of the copy. Connect adds only a device of the same account or of
-//!   a member of the same group (`403 not_in_group`).
+//!   then the registration of the other verified devices of the account in the store. A
+//!   second Mac of the same account with a copy of the vault turns on the same way: it
+//!   needs no link code, and it merges.
+//! - A device of the account without a copy of the vault gets it from the store that
+//!   lists it ([`RelaySync::joined_from_store`], then [`super::JoinedDevice::download`]
+//!   and [`RelaySync::adopt`] with the passphrase of the copy). A device in the store adds
+//!   it first (`register_account_devices`, also the sync worker every 5 minutes). A vault
+//!   store has no device link (the relay refuses one): its devices come from the account.
+//! - Sharing a vault between accounts (a Family or Team vault) is not available yet: a
+//!   store of another account is refused before any request ([`StoreError::OtherAccount`]).
 //! - [`RelaySync::move_to_connect`]: "Move the relay copy to Connect". It pushes to
 //!   Connect first and deletes the old copy second; the move record ([`MoveRecord`],
 //!   `<state>.move.json`, no secret) keeps the step, so a failure in between leaves both
@@ -103,6 +105,9 @@ pub enum StoreError {
     OtherConnect,
     /// The vault has no relay sync to move.
     NothingToMove,
+    /// The store belongs to another account, or holds a device of one: sharing a vault
+    /// between accounts is not available yet. Nothing was asked or made.
+    OtherAccount,
 }
 
 impl From<SyncError> for StoreError {
@@ -146,6 +151,9 @@ impl fmt::Display for StoreError {
                 "This vault syncs through another Apassy Connect than the account of this Mac.",
             ),
             Self::NothingToMove => f.write_str("This vault has no relay copy to move."),
+            Self::OtherAccount => {
+                f.write_str("Sharing a vault between accounts is not available yet.")
+            }
         }
     }
 }
@@ -236,10 +244,12 @@ impl RelaySync {
         *lock(&self.account) = signer;
     }
 
-    /// Which keys may sign the heads of a vault store (`ConnectAccount::signer_policy`),
-    /// set with the account key after each refresh of the account, or `None` at a
-    /// sign-out. A session that runs reads it at each check of a head, so a device that
-    /// left the account signs no later version from the next check on.
+    /// Which keys may sign the heads of a vault store (`crate::connect::signer_policy` of
+    /// the account file), set by the window with the account key whenever it hands the
+    /// account session over (the account file is enough: no answer of Connect is waited
+    /// for) and after each refresh of the account, or `None` at a sign-out. A session that
+    /// runs reads it at each check of a head, so a device that left the account signs no
+    /// later version from the next check on.
     pub fn set_account_signers(&self, policy: Option<super::SignerPolicy>) {
         *lock(&self.account_keys) = policy;
     }
@@ -392,11 +402,18 @@ impl RelaySync {
     /// The device of this Mac in `store`, for a new vault on this Mac from the Connect
     /// copy ("Use a vault from another Mac" › "Apassy Connect"): download it with
     /// [`JoinedDevice::download`] and make the vault with [`Self::adopt`] and the
-    /// passphrase of the copy. The store must list this Mac.
+    /// passphrase of the copy. The store must list this Mac. Its session takes the signer
+    /// policy of the account file from the first request on (no answer of Connect is
+    /// waited for), in a slot that [`Self::adopt`] hands to the relay sync of the new
+    /// vault, so a later refresh of the account reaches it. A store of another account
+    /// ([`VaultStoreView::shared`]) is [`StoreError::OtherAccount`], before any request.
     pub fn joined_from_store(
         account: &mut ConnectAccount,
         store: &VaultStoreView,
     ) -> Result<JoinedDevice, StoreError> {
+        if store.shared {
+            return Err(StoreError::OtherAccount);
+        }
         let url = crate::sync::RelayUrl::parse(account.client().origin())?;
         let me = account.state().device_id.clone();
         let store_device = store
@@ -407,7 +424,7 @@ impl RelaySync {
             .filter(|id| *id > 0)
             .ok_or(StoreError::NotInStore)?;
         let signer = account.signer()?;
-        let policy = account.signer_policy()?;
+        let policy = crate::connect::signer_policy(account.state());
         Ok(JoinedDevice {
             session: Arc::new(
                 Session::new(
@@ -416,7 +433,7 @@ impl RelaySync {
                     SessionKey::Account(signer),
                     Some(store_device),
                 )
-                .with_signer_policy(policy),
+                .with_shared_signers(Arc::new(Mutex::new(Some(policy)))),
             ),
             team: store.name.clone(),
         })

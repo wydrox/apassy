@@ -61,8 +61,8 @@ use crate::questions::{QuestionsClient, TeamDevice};
 use crate::sync::{
     DEFAULT_RELAY_URL, DeviceKey, DeviceView, JoinedDevice, KeySource, LinkCode, LinkKind,
     PIN_CHANGED_TEXT, PairedLink, PendingJoin, PendingLink, Receipt, RelayAdoptReport, RelayConfig,
-    RelayDownload, RelayEnableReport, RelayRefusal, RelaySync, RelayUrl, SyncError, SyncOutcome,
-    TlsTrust, VaultSync, device_name, valid_team_code,
+    RelayDownload, RelayEnableReport, RelayRefusal, RelaySync, RelayUrl, StorePlan, SyncError,
+    SyncOutcome, TlsTrust, VaultSync, device_name, link_code_team, valid_team_code,
 };
 use crate::vault::{TrustedDeviceKind, Vault, VaultErrorKind};
 use crate::vaults::{self, Registry, SyncLink, VaultEntry};
@@ -103,6 +103,14 @@ pub(crate) const CONNECT_TICK_EVERY: Duration = Duration::from_secs(30);
 
 /// "Use a vault from another Mac" › "Apassy Connect" without an account session.
 pub(crate) const CONNECT_SIGN_IN: &str = "Sign in to Apassy Connect in Settings › Connect first. Then the vaults of your account show here.";
+
+/// A link for the origin of this Mac's Apassy Connect account while the account is not
+/// signed in: nothing is sent.
+pub(crate) const CONNECT_SIGN_IN_FOR_LINK: &str = concat!(
+    "This link is for Apassy Connect, where this ",
+    crate::computer!(),
+    " has an account. Choose Sign In… in Settings › Connect first, then paste the link again."
+);
 
 /// The end of the state name of a relay sync that turns on, until the relay answered.
 const STAGED: &str = ".relay-new";
@@ -439,9 +447,20 @@ struct Join {
     phase: Phase,
 }
 
+/// What a link for the origin of this Mac's Connect account turned out to be.
+enum Resolved {
+    /// A vault store of the account that lists this Mac: no link is used.
+    Store(JoinedDevice),
+    /// A relay team at that origin: the link was sent with a key of its own.
+    Link(PendingJoin),
+}
+
 enum Phase {
     /// `POST /v1/devices/link`.
     Requesting(Task<Result<PendingJoin, SyncError>>),
+    /// A link for the origin of the Connect account: the stores of the account first,
+    /// then the store or the link ([`Resolved`]).
+    Resolving(Task<Result<Resolved, String>>),
     /// The device of this Mac in a vault store of its Connect account
     /// (`RelaySync::joined_from_store`): no link and no confirmation.
     FromStore(Task<Result<JoinedDevice, String>>),
@@ -604,7 +623,7 @@ impl RelayUi {
             .as_ref()
             .filter(|join| join.target.as_deref() == target)?;
         Some(match &join.phase {
-            Phase::Requesting(_) => JoinView::Sending,
+            Phase::Requesting(_) | Phase::Resolving(_) => JoinView::Sending,
             Phase::FromStore(_) => JoinView::Downloading {
                 team: join.team.clone(),
             },
@@ -659,6 +678,7 @@ fn problem(text: &str) -> Option<SyncError> {
         SyncError::RemovedFromRelay,
         SyncError::StaleCopy,
         SyncError::ForkedCopy,
+        SyncError::WaitsForAccountDevice,
         SyncError::Relay(RelayRefusal::RateLimited),
         SyncError::Relay(RelayRefusal::Busy),
         SyncError::Relay(RelayRefusal::TeamLimit),
@@ -686,6 +706,7 @@ pub(crate) fn tag(status: &UiStatus) -> (&'static str, Tone) {
             Some(SyncError::StaleCopy | SyncError::ForkedCopy) => {
                 ("Relay copy refused", Tone::Warning)
             }
+            Some(SyncError::WaitsForAccountDevice) => ("Waiting for another device", Tone::Accent),
             Some(_) => ("Relay not reachable", Tone::Warning),
             None => ("Problem", Tone::Warning),
         },
@@ -1166,6 +1187,19 @@ impl DesktopApp {
             return;
         }
         self.sync.relay.connect_tick = Some(Instant::now());
+        // A sync of a vault store that was refused, or waits for another device of the
+        // account, asks Connect for the account soon: a removal or a newer device reaches
+        // the policy of the running sessions within a minute, not at the next refresh.
+        let refused = self.sync.statuses.values().any(|status| {
+            matches!(status, UiStatus::Damaged)
+                || matches!(status, UiStatus::Problem(text) if matches!(
+                    problem(text),
+                    Some(SyncError::WaitsForAccountDevice | SyncError::RemovedFromRelay)
+                ))
+        });
+        if refused {
+            self.ui.connect.live.refresh_soon();
+        }
         let account = self.ui.connect.live.sync_account();
         if let Some(account) = &account {
             for relay in lock(&self.sync.relay.cache).values() {
@@ -1173,7 +1207,9 @@ impl DesktopApp {
                     relay.set_account_signers(Some(account.signers.clone()));
                     relay.set_account_signer(Some(Arc::clone(signer)));
                 }
-                relay.set_store_plan(Some(account.plan));
+                if let Some(plan) = account.plan {
+                    relay.set_store_plan(Some(plan));
+                }
             }
         }
         self.sync
@@ -2028,7 +2064,7 @@ impl DesktopApp {
             .connect
             .live
             .sync_account()
-            .filter(|account| account.plan.entitled())
+            .filter(|account| account.plan.is_some_and(StorePlan::entitled))
             .ok_or_else(|| CONNECT_NEEDS_PLAN.to_owned())?;
         let url = RelayUrl::parse(&account.origin).map_err(|error| sentence(&error.to_string()))?;
         if self.relay_changing(id) {
@@ -2080,7 +2116,7 @@ impl DesktopApp {
             .connect
             .live
             .sync_account()
-            .is_some_and(|account| account.plan.entitled())
+            .is_some_and(|account| account.plan.is_some_and(StorePlan::entitled))
     }
 
     /// Whether "Move the relay copy to Connect" fits the vault `id`: it syncs through the
@@ -2138,7 +2174,7 @@ impl DesktopApp {
             .connect
             .live
             .sync_account()
-            .filter(|account| account.plan.entitled())
+            .filter(|account| account.plan.is_some_and(StorePlan::entitled))
             .ok_or_else(|| CONNECT_NEEDS_PLAN.to_owned())?;
         let url = RelayUrl::parse(&account.origin).map_err(|error| sentence(&error.to_string()))?;
         if self.relay_changing(id) {
@@ -2304,7 +2340,9 @@ impl DesktopApp {
                 relay.set_account_signers(Some(account.signers.clone()));
                 relay.set_account_signer(Some(Arc::clone(signer)));
             }
-            relay.set_store_plan(Some(account.plan));
+            if let Some(plan) = account.plan {
+                relay.set_store_plan(Some(plan));
+            }
         }
         // The open vault store takes the newer devices of the account (connect-account-v1
         // section 8); no owner check, as at its start (`register_own_store_device`).
@@ -3418,31 +3456,27 @@ impl DesktopApp {
             "" => device_name(),
             typed => typed.to_owned(),
         };
-        // A link of a vault store of Apassy Connect (a shared Family or Team vault, or a
-        // vault of the account): this Mac joins with its account key (plan s7 unit M3).
-        let account = self
-            .ui
-            .connect
-            .live
-            .sync_account()
-            .filter(|account| RelayUrl::parse(&account.origin).is_ok_and(|own| own.as_str() == url))
-            .and_then(|account| account.signer);
+        // A link for the origin of this Mac's Connect account, decided from the account
+        // file: a vault store of the account has no device link (its devices come from the
+        // account), so the store of the link's team is taken from the account, and only a
+        // relay team at that origin gets the link. That needs the open account session; a
+        // key of its own is never sent for a store of the account.
+        let for_account =
+            self.ui.connect.live.account_origin().is_some_and(|origin| {
+                RelayUrl::parse(&origin).is_ok_and(|own| own.as_str() == url)
+            });
+        let account = if for_account {
+            match self.ui.connect.live.sync_account() {
+                Some(account) => Some(account),
+                None => {
+                    self.sync.relay.join_error = Some(CONNECT_SIGN_IN_FOR_LINK.to_owned());
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         let relay = &mut self.sync.relay;
-        if let Some(signer) = account {
-            relay.join_key = None;
-            self.relay_join_cancel();
-            let task = Task::spawn(ctx.cloned(), move || {
-                PendingJoin::request_with_account(&text, &url_field, &device, signer)
-            });
-            self.sync.relay.join = Some(Join {
-                target,
-                url,
-                team: String::new(),
-                safety: String::new(),
-                phase: Phase::Requesting(task),
-            });
-            return;
-        }
         // One key for each pasted code: a retry after a lost answer is the same request.
         let key = match relay
             .join_key
@@ -3459,8 +3493,46 @@ impl DesktopApp {
                 return;
             }
         };
+        let team = link_code_team(&code).unwrap_or_default().to_owned();
         relay.join_key = key.pkcs8().map(|pkcs8| (code, pkcs8.clone()));
         self.relay_join_cancel();
+        if let Some(account) = account {
+            self.sync.relay.store_join = false;
+            let task = Task::spawn(ctx.cloned(), move || {
+                let store = {
+                    let mut guard = lock(&account.account);
+                    let account = guard
+                        .as_mut()
+                        .ok_or_else(|| crate::connect::ConnectError::SignedOut.to_string())?;
+                    let store = account
+                        .vault_stores()
+                        .map_err(|error| error.to_string())?
+                        .into_iter()
+                        .find(|store| store.team_id == team);
+                    match store {
+                        Some(store) => Some(
+                            RelaySync::joined_from_store(account, &store)
+                                .map_err(|error| error.to_string())?,
+                        ),
+                        None => None,
+                    }
+                };
+                match store {
+                    Some(joined) => Ok(Resolved::Store(joined)),
+                    None => PendingJoin::request_with_key(&text, &url_field, &device, key)
+                        .map(Resolved::Link)
+                        .map_err(join_error),
+                }
+            });
+            self.sync.relay.join = Some(Join {
+                target,
+                url,
+                team: String::new(),
+                safety: String::new(),
+                phase: Phase::Resolving(task),
+            });
+            return;
+        }
         let task = Task::spawn(ctx.cloned(), move || {
             PendingJoin::request_with_key(&text, &url_field, &device, key)
         });
@@ -3526,6 +3598,27 @@ impl DesktopApp {
         });
     }
 
+    /// Cancel a link for the origin of the Connect account that is still resolving: wait
+    /// for its answer, then cancel the link when one was sent. A store of the account
+    /// needs nothing.
+    fn relay_end_resolving(&mut self, task: Task<Result<Resolved, String>>) {
+        self.relay_end(move || {
+            let deadline = Instant::now() + CANCEL_WAIT;
+            loop {
+                match task.poll() {
+                    TaskPoll::Waiting if Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                    TaskPoll::Waiting => return Some(NOT_CANCELLED.to_owned()),
+                    TaskPoll::Done(Ok(Resolved::Link(pending))) => {
+                        return pending.cancel().err().map(|_| NOT_CANCELLED.to_owned());
+                    }
+                    TaskPoll::Done(_) | TaskPoll::Lost => return None,
+                }
+            }
+        });
+    }
+
     /// Stop a Mac that joins: its link is cancelled, or its device leaves the relay,
     /// best effort. A vault that the passphrase opens already is not stopped: it opens
     /// in a moment.
@@ -3536,6 +3629,9 @@ impl DesktopApp {
         };
         match join.phase {
             Phase::Requesting(task) => self.relay_end_request(task),
+            // A link of a relay team is cancelled when it was sent; the account device
+            // stays in a store.
+            Phase::Resolving(task) => self.relay_end_resolving(task),
             // The account device stays in the store; nothing to cancel.
             Phase::FromStore(_) => self.sync.relay.store_join = false,
             Phase::Waiting { pending, .. } => self.relay_end_pending(pending),
@@ -3602,6 +3698,50 @@ impl DesktopApp {
         let mut failure = None;
         let now = Instant::now();
         let next = match phase {
+            Phase::Resolving(task) => match task.poll() {
+                TaskPoll::Waiting => Some(Phase::Resolving(task)),
+                TaskPoll::Done(Ok(Resolved::Store(joined))) => {
+                    // A store of the account: the copy downloads; no link was used.
+                    self.sync.relay.link_input.zeroize();
+                    self.sync.relay.join_key = None;
+                    self.sync.relay.store_join = true;
+                    let joined = Arc::new(joined);
+                    joined.team().clone_into(&mut team);
+                    match &target {
+                        None => {
+                            let work = self.vault_list.data_dir.join("sync");
+                            let device = Arc::clone(&joined);
+                            let task = Task::spawn(ctx.cloned(), move || device.download(&work));
+                            Some(Phase::Downloading { joined, task })
+                        }
+                        Some(id) => {
+                            if let Err(text) = self.relay_enable_joined(id, joined, &url, None) {
+                                failure = Some(text);
+                            }
+                            None
+                        }
+                    }
+                }
+                TaskPoll::Done(Ok(Resolved::Link(pending))) => {
+                    self.sync.relay.link_input.zeroize();
+                    self.sync.relay.join_key = None;
+                    team.clone_from(&pending.team);
+                    safety.clone_from(&pending.safety);
+                    Some(Phase::Waiting {
+                        pending: Arc::new(pending),
+                        poll: None,
+                        next_poll: now + POLL_EVERY,
+                    })
+                }
+                TaskPoll::Done(Err(text)) => {
+                    failure = Some(text);
+                    None
+                }
+                TaskPoll::Lost => {
+                    failure = Some(lost());
+                    None
+                }
+            },
             Phase::FromStore(task) => match task.poll() {
                 TaskPoll::Waiting => Some(Phase::FromStore(task)),
                 TaskPoll::Done(Ok(joined)) => {
@@ -3798,7 +3938,10 @@ impl DesktopApp {
                 Ok(stores
                     .into_iter()
                     .filter(|store| {
+                        // A store of another account (shared) is not offered: sharing a
+                        // vault between accounts is not available yet.
                         !known.contains(&store.vault_id)
+                            && !store.shared
                             && store
                                 .devices
                                 .iter()
@@ -4016,6 +4159,7 @@ impl DesktopApp {
             let joining = match self.sync.relay.join.as_ref().map(|join| &join.phase) {
                 Some(
                     Phase::Requesting(_)
+                    | Phase::Resolving(_)
                     | Phase::FromStore(_)
                     | Phase::Downloading { .. }
                     | Phase::Adopting(_),

@@ -39,6 +39,37 @@ pub(super) mod fake_connect;
 
 use fake_connect::FakeConnect;
 
+/// The fake relay of the desktop keeps the vault stores of the fake Connect, as in the
+/// integration tests (`tests/common/mod.rs`).
+impl fake_connect::StoreRelay for crate::desktop::fake_relay::FakeRelay {
+    fn url(&self) -> String {
+        self.url.clone()
+    }
+    fn set_origin(&self, origin: &str) {
+        crate::desktop::fake_relay::FakeRelay::set_origin(self, origin);
+    }
+    fn add_store_team(&self, name: &str, device_name: &str, public_key: &[u8]) -> (String, u64) {
+        crate::desktop::fake_relay::FakeRelay::add_store_team(self, name, device_name, public_key)
+    }
+    fn add_store_device(&self, team_id: &str, device_name: &str, public_key: &[u8]) -> u64 {
+        crate::desktop::fake_relay::FakeRelay::add_store_device(
+            self,
+            team_id,
+            device_name,
+            public_key,
+        )
+    }
+    fn remove_team(&self, team_id: &str) {
+        crate::desktop::fake_relay::FakeRelay::remove_team(self, team_id);
+    }
+    fn set_team_sync_bytes(&self, team_id: &str, bytes: u64) {
+        crate::desktop::fake_relay::FakeRelay::set_team_sync_bytes(self, team_id, bytes);
+    }
+    fn set_store_guard(&self, guard: fake_connect::StoreGuard) {
+        crate::desktop::fake_relay::FakeRelay::set_store_guard(self, guard);
+    }
+}
+
 const FIXTURES: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/connect-billing-v1"
@@ -977,6 +1008,8 @@ fn the_plan_row_shows_its_whole_status_at_the_settings_width() {
                 plan,
                 devices: Vec::new(),
                 group: None,
+                list_verified: true,
+                list_nearly_full: false,
             }),
             plans: Some(fixture_plans()),
             locked: false,
@@ -1044,6 +1077,8 @@ fn every_state_of_the_plan_row() {
                 plan: plan.clone(),
                 devices: Vec::new(),
                 group: None,
+                list_verified: true,
+                list_nearly_full: false,
             }),
             plans: Some(fixture_plans()),
             locked: false,
@@ -1379,6 +1414,215 @@ fn an_unverified_device_is_refused_by_the_sync_of_the_session() {
             .accepted
             .iter()
             .any(|key| key == stranger.public_key())
+    );
+}
+
+/// A link for the origin of this Mac's Connect account is decided from the account file:
+/// while the account session is not open, the join asks for the sign-in and sends nothing
+/// (never a key of its own for a store of the account).
+#[test]
+fn a_link_for_the_account_origin_with_the_session_closed_asks_for_the_sign_in() {
+    let dir = TempDir::new().expect("temp dir");
+    let connect = FakeConnect::start();
+    let mut app = connect_app(&dir, &connect);
+    let ctx = egui::Context::default();
+    create_account(&ctx, &mut app, "Rafal");
+    app.ui.connect.live.session().close();
+    assert!(app.ui.connect.live.sync_account().is_none());
+    let before = connect.log().len();
+    app.sync.relay.link_input = format!(
+        "{}/link#apassy_lnk_t_7k2m5q4x3c_{}",
+        connect.url,
+        "ab".repeat(32)
+    );
+    app.sync.relay.device_input = "Synthetic Mac mini".to_owned();
+    app.relay_join_request(None, None);
+    app.relay_join_settle_for_test();
+    assert!(app.sync.relay.join_view(None).is_none(), "no join runs");
+    let error = app.sync.relay.join_error.clone().unwrap_or_default();
+    assert!(error.contains("Sign In"), "asks for the sign-in: {error}");
+    assert!(
+        !connect.log()[before..]
+            .iter()
+            .any(|line| line.starts_with("POST /v1/devices/link")),
+        "nothing was sent: {:?}",
+        connect.log()
+    );
+}
+
+/// A removal reaches the running sync of a vault store through the window: the app turns
+/// on the sync through Apassy Connect, the owner revokes another device of the account in
+/// Settings › Connect, and the refresh after it hands the new policy to the relay sync of
+/// the vault (`relay_share_connect`). A later head of the revoked device, a copy that
+/// merges, is not merged by the session that runs: the vault waits for a device of the
+/// account instead.
+#[test]
+fn a_removal_reaches_the_running_store_session_through_the_window() {
+    use crate::sync::{HeadFields, sha256_hex};
+    let dir = TempDir::new().expect("temp dir");
+    let relay = Arc::new(crate::desktop::fake_relay::FakeRelay::start());
+    let connect = FakeConnect::with_relay(Arc::clone(&relay) as _);
+    // A vault of the vault list, unlocked, and the Connect section of this test.
+    let mut app = DesktopApp::new();
+    app.load_vault_list(dir.path().join("mac"), true);
+    let ctx = egui::Context::default();
+    app.vault_list.name_input = "Personal".to_owned();
+    app.owner_ui.passphrase.push_str(PASS);
+    app.owner_ui.passphrase_confirm.push_str(PASS);
+    super::start::create_vault(&mut app, &ctx);
+    assert!(!app.owner_ui.session.is_locked(), "{}", app.status_text);
+    let data = dir.path().join("data");
+    std::fs::create_dir_all(&data).expect("data dir");
+    app.connect_configure(Some(Arc::new(MemoryKeyStore::new())), Some(data));
+    let live = &mut app.ui.connect.live;
+    live.origin = Some(connect.url.clone());
+    live.poll_every = Some(Duration::from_millis(40));
+    live.join_poll_every = Some(Duration::from_millis(40));
+    super::open_settings(&mut app, super::SettingsSection::Connect);
+    let account_id = create_account(&ctx, &mut app, "Rafal");
+    connect.entitle(&account_id);
+
+    // The iMac joins with the words and the owner check.
+    act(&ctx, &mut app, Action::AddDevice);
+    until(&ctx, &mut app, "the link", |app| {
+        matches!(app.ui.connect.sheet, Some(Sheet::AddDevice { .. }))
+    });
+    let Some(Sheet::AddDevice { code, .. }) = &app.ui.connect.sheet else {
+        unreachable!();
+    };
+    let code = code.as_str().to_owned();
+    let imac_store = MemoryKeyStore::new();
+    let imac_path = dir.path().join("imac/connect/account.json");
+    let mut request = JoinRequest::start(
+        ConnectClient::new(&connect.url).expect("client"),
+        &imac_store,
+        &imac_path,
+        &code,
+        "Synthetic iMac",
+    )
+    .expect("join");
+    until(&ctx, &mut app, "the words", |app| {
+        matches!(app.ui.connect.sheet, Some(Sheet::Words { .. }))
+    });
+    choose(&ctx, &mut app, SheetChoice::Go);
+    confirm_with(&mut app, &ctx, PASS);
+    until(&ctx, &mut app, "the device", |app| {
+        matches!(app.ui.connect.sheet, Some(Sheet::DeviceAdded { .. }))
+    });
+    let imac = match request.poll() {
+        Ok(JoinPoll::Confirmed(imac)) => *imac,
+        other => panic!("not confirmed: {other:?}"),
+    };
+    choose(&ctx, &mut app, SheetChoice::Done);
+    act(&ctx, &mut app, Action::SignIn);
+    until(&ctx, &mut app, "two verified devices and the plan", |app| {
+        shown(app).is_some_and(|account| {
+            account.devices.len() == 2 && account.devices.iter().all(|device| device.verified)
+        }) && app
+            .ui
+            .connect
+            .live
+            .sync_account()
+            .is_some_and(|account| account.plan.is_some_and(crate::sync::StorePlan::entitled))
+    });
+
+    // The sync through Apassy Connect: the store with both devices.
+    let entry = app.current_vault().expect("the open vault").clone();
+    app.relay_enable_connect(&entry.id).expect("turn on");
+    app.relay_settle_for_test();
+    let sync = app.relay_of(&entry.id).expect("the relay sync");
+    let team = sync
+        .state()
+        .expect("state")
+        .and_then(|state| state.team_id)
+        .expect("a store");
+    let imac_key = imac.signer().expect("key").public_key().to_vec();
+    let number = relay
+        .team_devices(&team)
+        .into_iter()
+        .find(|(_, key)| *key == imac_key)
+        .map(|(number, _)| number)
+        .expect("the iMac is in the store");
+    app.sync_now();
+    app.relay_settle_for_test();
+    assert!(sync.has_session(), "a session runs");
+
+    // The owner revokes the iMac; the refresh after it reaches the relay sync.
+    let index = shown(&app)
+        .expect("account")
+        .devices
+        .iter()
+        .position(|device| device.name == "Synthetic iMac")
+        .expect("the iMac");
+    act(&ctx, &mut app, Action::Revoke(index));
+    choose(&ctx, &mut app, SheetChoice::Go);
+    confirm_with(&mut app, &ctx, PASS);
+    until(&ctx, &mut app, "one device", |app| {
+        shown(app).is_some_and(|account| account.devices.len() == 1)
+    });
+    assert!(sync.has_session(), "the same session still runs");
+
+    // A later head of the iMac with a copy of the vault that merges.
+    let copy_path = dir.path().join("imac-copy.db");
+    std::fs::copy(&entry.path, &copy_path).expect("copy");
+    let mut copy = crate::vault::Vault::open(&copy_path).expect("open");
+    copy.unlock(PASS).expect("unlock");
+    copy.add(crate::vault::ItemDraft {
+        title: "From the revoked iMac".to_owned(),
+        kind: crate::contracts::CredentialKind::ApiKey,
+        notes: String::new(),
+        tags: Vec::new(),
+        fields: Vec::new(),
+    })
+    .expect("add");
+    let synced = dir.path().join("imac-copy.sync");
+    copy.write_sync_copy(&synced, "Synthetic iMac")
+        .expect("sync copy");
+    let bytes = std::fs::read(&synced).expect("bytes");
+    let last = relay.heads_of(&team).last().cloned().expect("a head");
+    let fields = HeadFields {
+        version: last.version + 1,
+        previous: last.hash(),
+        snapshot_sha256: sha256_hex(&bytes),
+        size: bytes.len() as u64,
+        device_id: number,
+        ..HeadFields::parse(&last.text).expect("head")
+    };
+    let signed = imac.signer().expect("key").sign_head(fields).expect("sign");
+    relay.replace_store_from(
+        &team,
+        vec![(
+            crate::desktop::fake_relay::StoredHead {
+                version: last.version + 1,
+                text: signed.text,
+                signature: signed.signature,
+                device_id: number,
+            },
+            bytes,
+        )],
+    );
+    app.sync_now();
+    app.relay_settle_for_test();
+    let titles: Vec<String> = app
+        .owner_ui
+        .session
+        .search("")
+        .expect("search")
+        .into_iter()
+        .map(|summary| summary.name)
+        .collect();
+    assert!(
+        !titles.iter().any(|title| title == "From the revoked iMac"),
+        "not merged: {titles:?}"
+    );
+    assert!(
+        matches!(
+            app.sync.statuses.get(&entry.id),
+            Some(super::sync::UiStatus::Problem(text))
+                if text == &crate::sync::SyncError::WaitsForAccountDevice.to_string()
+        ),
+        "{:?}",
+        app.sync.statuses.get(&entry.id)
     );
 }
 
