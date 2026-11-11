@@ -3855,7 +3855,10 @@ mod connect_sync {
         );
         let mut vault_a = slot.into_inner().unwrap().expect("the vault");
         let state = a.mac.sync.state().expect("state").expect("on");
-        assert_eq!((state.last_remote_version, state.last_head_sha256), (0, None));
+        assert_eq!(
+            (state.last_remote_version, state.last_head_sha256),
+            (0, None)
+        );
         assert_eq!(
             state.approved_head,
             Some(apassy::sync::ApprovedHead {

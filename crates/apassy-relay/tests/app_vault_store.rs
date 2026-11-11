@@ -363,7 +363,11 @@ fn a_new_device_gets_a_store_whose_older_heads_the_relay_dropped() {
             kept.push((view.version, view.chain_from, view.kept_from));
         }
     }
-    assert_eq!(kept, vec![(5, Some(4), Some(4))], "the relay dropped versions 1 to 3");
+    assert_eq!(
+        kept,
+        vec![(5, Some(4), Some(4))],
+        "the relay dropped versions 1 to 3"
+    );
     let store = account_b
         .vault_stores()
         .expect("stores")

@@ -174,9 +174,7 @@ impl SyncState {
             && self.last_head_sha256.as_deref().is_none_or(hex)
             && (self.last_remote_version == 0) == self.last_head_sha256.is_none()
             && self.approved_head.as_ref().is_none_or(|approved| {
-                approved.version >= 1
-                    && hex(&approved.head_sha256)
-                    && self.last_remote_version == 0
+                approved.version >= 1 && hex(&approved.head_sha256) && self.last_remote_version == 0
             });
         common && (folder || relay)
     }

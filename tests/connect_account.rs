@@ -1702,7 +1702,10 @@ fn an_account_file_that_cannot_be_read_now_is_never_forgotten() {
     assert_eq!(forgot.unwrap_err(), ConnectError::AccountFileUnreadable);
     assert!(a.path.exists());
     assert!(a.store.has_key(), "the account key stays");
-    assert!(AccountState::load(&a.path).unwrap().is_some(), "it reads again");
+    assert!(
+        AccountState::load(&a.path).unwrap().is_some(),
+        "it reads again"
+    );
     // A file that does not parse is one that this version cannot take.
     std::fs::write(&a.path, b"{ not an account file").unwrap();
     assert!(apassy::connect::is_old_account_file(&a.path));
@@ -3088,7 +3091,10 @@ fn a_file_without_a_pin_shows_a_code_that_another_device_made() {
     let mut file: Value = serde_json::from_slice(&std::fs::read(&a.path).unwrap()).unwrap();
     file.as_object_mut().unwrap().remove("recovery_key");
     std::fs::write(&a.path, serde_json::to_vec(&file).unwrap()).unwrap();
-    assert_eq!(AccountState::load(&a.path).unwrap().unwrap().recovery_key, None);
+    assert_eq!(
+        AccountState::load(&a.path).unwrap().unwrap().recovery_key,
+        None
+    );
     let mut account = ConnectAccount::open(&a.store, &a.path)
         .unwrap()
         .expect("account");

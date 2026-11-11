@@ -1123,8 +1123,7 @@ impl ConnectAccount {
         let mut key_note = None;
         let (answer, public_key) = loop {
             let public_key = signer.public_key_b64u();
-            let message =
-                recover_message(client.origin(), account_id, &public_key, &recovery_key);
+            let message = recover_message(client.origin(), account_id, &public_key, &recovery_key);
             let signature = encode_b64u(&signer.sign(&message)?);
             let recovery_signature = encode_b64u(&old.key()?.sign_recover(&message)?);
             // This device is the root of the new device list: its entry, signed over its

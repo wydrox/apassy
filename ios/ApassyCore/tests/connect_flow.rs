@@ -1053,7 +1053,10 @@ fn ok_of_a_new_recovery_code_works_while_another_call_holds_the_account() {
     std::thread::scope(|scope| {
         let slow = scope.spawn(|| call(&phone.core, json!({"op": "connect_status"})));
         std::thread::sleep(std::time::Duration::from_millis(400));
-        assert!(!slow.is_finished(), "the status call still holds the account");
+        assert!(
+            !slow.is_finished(),
+            "the status call still holds the account"
+        );
         call(
             &phone.core,
             json!({"op": "connect_recovery_change_seen", "recovery_key": key}),
