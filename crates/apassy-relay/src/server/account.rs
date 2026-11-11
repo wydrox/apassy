@@ -103,8 +103,8 @@ pub const STORE_DEVICES_PER_ACCOUNT: u64 = 10;
 pub const RECOVERY_TRIES_PER_HOUR: u32 = 5;
 /// Failed recovery signatures of one client prefix in one hour at most (`429`).
 pub const RECOVERY_PREFIX_TRIES_PER_HOUR: u32 = 20;
-/// Accounts and prefixes with counted recovery failures at once, each; a new one beyond
-/// it is 503 `busy` until the hour of the oldest ends.
+/// Accounts, unknown account ids, and prefixes with counted recovery failures at once,
+/// each; a new one beyond it is 503 `busy` until the hour of the oldest ends.
 pub const MAX_RECOVERY_ENTRIES: usize = 10_000;
 /// A repeat of `POST /v1/account` with the same body within this time answers the same
 /// result (a retry after a lost answer).
@@ -617,65 +617,70 @@ impl AuthState {
     }
 }
 
-/// The failed recovery signatures of the last hour, in memory only, apart from the
-/// sign-in state: of each account, and of each proven client prefix (by its HMAC under a
-/// salt of this process, never as text).
+/// The failed recoveries of the last hour, in memory only, apart from the sign-in state:
+/// of each existing account, of each unknown account id (a table of its own, so unknown
+/// ids never fill the table of accounts), and of each proven client prefix (by its HMAC
+/// under a salt of this process, never as text).
 #[derive(Default)]
 struct RecoveryState {
     accounts: HashMap<String, (u64, u32)>,
+    unknown: HashMap<String, (u64, u32)>,
     prefixes: HashMap<[u8; 32], (u64, u32)>,
+}
+
+/// The account id of a failed recovery: an existing account, or an id that names none.
+#[derive(Debug, Clone, Copy)]
+enum Tried<'a> {
+    Known(&'a str),
+    Unknown(&'a str),
 }
 
 impl RecoveryState {
     fn purge(&mut self, now: u64) {
         self.accounts
             .retain(|_, (start, _)| now < start.saturating_add(3600));
+        self.unknown
+            .retain(|_, (start, _)| now < start.saturating_add(3600));
         self.prefixes
             .retain(|_, (start, _)| now < start.saturating_add(3600));
     }
 
-    /// Counts one failed recovery: a wrong recovery signature of an existing account
-    /// (`Some(account)`), or a recovery of an unknown account (`None`: it counts for the
-    /// client prefix only, so unknown ids never fill the table of accounts). Only a failure
-    /// is ever counted or limited: a valid recovery signature never comes here. 429
-    /// `rate_limited` when the account or the source already failed too often this hour
-    /// (nothing more is counted); a new entry in a full table is 503 `busy`, and nothing is
-    /// counted. Else the failure counts, and the answer stays the caller's 403. Both kinds
-    /// get the same checks of the prefix and the same answers.
+    /// Counts one failed recovery of the id `tried`: a wrong recovery signature of an
+    /// existing account (`Tried::Known`, in the table of accounts) or a recovery of an id
+    /// that names no account (`Tried::Unknown`, in the table of unknown ids), and of the
+    /// client prefix. Both kinds have the same rule and the same answers: only a failure is
+    /// ever counted or limited (a valid recovery signature never comes here); 429
+    /// `rate_limited` when the id or the source already failed too often this hour (nothing
+    /// more is counted); a new entry in a full table is 503 `busy`, and nothing is counted.
+    /// Else the failure counts, and the answer stays the caller's 403.
     fn fail(
         &mut self,
-        account: Option<&str>,
+        tried: Tried<'_>,
         prefix: &[u8; 32],
         now: u64,
         cap: usize,
     ) -> RelayResult<()> {
         self.purge(now);
-        let account_tries = account
-            .and_then(|account| self.accounts.get(account))
-            .map_or(0, |(_, count)| *count);
+        let (table, id) = match tried {
+            Tried::Known(id) => (&mut self.accounts, id),
+            Tried::Unknown(id) => (&mut self.unknown, id),
+        };
+        let id_tries = table.get(id).map_or(0, |(_, count)| *count);
         let prefix_tries = self.prefixes.get(prefix).map_or(0, |(_, count)| *count);
-        if account_tries >= RECOVERY_TRIES_PER_HOUR
-            || prefix_tries >= RECOVERY_PREFIX_TRIES_PER_HOUR
-        {
+        if id_tries >= RECOVERY_TRIES_PER_HOUR || prefix_tries >= RECOVERY_PREFIX_TRIES_PER_HOUR {
             return Err(RelayError::new(
                 codes::RATE_LIMITED,
                 "Too many recovery tries for this account. Try again in an hour.",
             ));
         }
-        if account.is_some_and(|account| {
-            !self.accounts.contains_key(account) && self.accounts.len() >= cap
-        }) || (!self.prefixes.contains_key(prefix) && self.prefixes.len() >= cap)
+        if (!table.contains_key(id) && table.len() >= cap)
+            || (!self.prefixes.contains_key(prefix) && self.prefixes.len() >= cap)
         {
             return Err(busy(
                 "Connect holds too many recovery tries. Try again later.",
             ));
         }
-        if let Some(account) = account {
-            self.accounts
-                .entry(account.to_string())
-                .or_insert((now, 0))
-                .1 += 1;
-        }
+        table.entry(id.to_string()).or_insert((now, 0)).1 += 1;
         self.prefixes.entry(*prefix).or_insert((now, 0)).1 += 1;
         Ok(())
     }
@@ -691,6 +696,9 @@ pub struct Accounts {
     nonce_key: hmac::Key,
     /// The salt of the client prefixes of the recovery tries.
     prefix_salt: hmac::Key,
+    /// A recovery key of a random code of this process: a recovery of an unknown account
+    /// verifies its signature with it, so it costs the work of a known one, and fails.
+    stand_in_recovery_key: [u8; device::RECOVERY_KEY_BYTES],
     /// The new accounts of each client prefix today.
     prefixes: PrefixLimiter,
     plans: RwLock<Arc<dyn Plans>>,
@@ -714,6 +722,13 @@ impl Accounts {
             recovery: Mutex::new(RecoveryState::default()),
             nonce_key: random_key()?,
             prefix_salt: random_key()?,
+            stand_in_recovery_key: {
+                let mut code = zeroize::Zeroizing::new([0u8; 16]);
+                getrandom::fill(code.as_mut_slice()).map_err(|_| random_source())?;
+                device::RecoveryKey::from_code(code.as_slice())
+                    .map_err(|_| random_source())?
+                    .public_key()
+            },
             prefixes: PrefixLimiter::default(),
             plans: RwLock::new(Arc::new(NoPlans)),
             groups: RwLock::new(Arc::new(NoGroups)),
@@ -2543,11 +2558,11 @@ fn earlier_recovery(
 /// device name (`statement`; 400 otherwise for either, not counted). A wrong recovery signature, an
 /// unknown account, and an account with a live device are the same 403. The recovery
 /// signature is checked first, and a valid one is never limited: only failures count and
-/// are limited, a wrong recovery signature of an existing account for that account
-/// (`RECOVERY_TRIES_PER_HOUR`) and for the client prefix
-/// (`RECOVERY_PREFIX_TRIES_PER_HOUR`), a recovery of an unknown account for the prefix only,
-/// with the same checks and answers (429), in tables of `MAX_RECOVERY_ENTRIES` (503 when
-/// full). The new device is the account's new
+/// are limited, a wrong recovery signature of an existing account and a recovery of an
+/// unknown account id alike: `RECOVERY_TRIES_PER_HOUR` for the id (unknown ids in a table
+/// of their own) and `RECOVERY_PREFIX_TRIES_PER_HOUR` for the client prefix (429), in
+/// tables of `MAX_RECOVERY_ENTRIES` each (503 when full); an unknown id verifies its
+/// signature with a stand-in key, so both do the same work. The new device is the account's new
 /// root and starts a new device list, every vault store of the account is deleted (a new
 /// device list cannot verify the old heads), the recovery key is replaced, the
 /// subscription stays. The same body again within `RECOVER_RETRY_SECS` answers the same
@@ -2602,23 +2617,34 @@ fn recover(hub: &Hub, request: &AccountRecover, prefix: &str, now: u64) -> Relay
         key.map(|key| Ok((key, live_devices(conn, &request.account_id)?)))
             .transpose()
     })?;
-    // An unknown account: the checks and the answer of a wrong recovery signature, counted
-    // for the client prefix only.
-    let Some((recovery_key, live)) = stored else {
-        hub.accounts
-            .recovery()
-            .fail(None, &tag, now, MAX_RECOVERY_ENTRIES)?;
-        return Err(wrong());
-    };
     let recovery_signature = decode_b64(
         &request.recovery_signature,
         device::RECOVERY_SIGNATURE_BYTES,
     )
     .unwrap_or_default();
+    // An unknown account: the work, the checks, and the answers of a wrong recovery
+    // signature, counted in the table of unknown ids and for the client prefix.
+    let Some((recovery_key, live)) = stored else {
+        let _ = device::verify_recovery(
+            &hub.accounts.stand_in_recovery_key,
+            &message,
+            &recovery_signature,
+        );
+        hub.accounts.recovery().fail(
+            Tried::Unknown(&request.account_id),
+            &tag,
+            now,
+            MAX_RECOVERY_ENTRIES,
+        )?;
+        return Err(wrong());
+    };
     if !device::verify_recovery(&recovery_key, &message, &recovery_signature) {
-        hub.accounts
-            .recovery()
-            .fail(Some(&request.account_id), &tag, now, MAX_RECOVERY_ENTRIES)?;
+        hub.accounts.recovery().fail(
+            Tried::Known(&request.account_id),
+            &tag,
+            now,
+            MAX_RECOVERY_ENTRIES,
+        )?;
         return Err(wrong());
     }
     if live != 0 {
@@ -3270,11 +3296,13 @@ mod tests {
         let mut state = RecoveryState::default();
         let prefix = [1u8; 32];
         for _ in 0..RECOVERY_TRIES_PER_HOUR {
-            state.fail(Some("acc_a"), &prefix, NOW, 100).unwrap();
+            state
+                .fail(Tried::Known("acc_a"), &prefix, NOW, 100)
+                .unwrap();
         }
         assert_eq!(
             state
-                .fail(Some("acc_a"), &prefix, NOW, 100)
+                .fail(Tried::Known("acc_a"), &prefix, NOW, 100)
                 .unwrap_err()
                 .code,
             codes::RATE_LIMITED
@@ -3282,7 +3310,7 @@ mod tests {
         // Another account from the same prefix goes on until the prefix's limit.
         let mut account = 0;
         while state
-            .fail(Some(&format!("acc_{account}")), &prefix, NOW, 100)
+            .fail(Tried::Known(&format!("acc_{account}")), &prefix, NOW, 100)
             .is_ok()
         {
             account += 1;
@@ -3292,46 +3320,97 @@ mod tests {
             RECOVERY_PREFIX_TRIES_PER_HOUR
         );
         // Another prefix is free for another account; the hour ends both.
-        state.fail(Some("acc_new"), &[2u8; 32], NOW, 100).unwrap();
-        state.fail(Some("acc_a"), &prefix, NOW + 3600, 100).unwrap();
+        state
+            .fail(Tried::Known("acc_new"), &[2u8; 32], NOW, 100)
+            .unwrap();
+        state
+            .fail(Tried::Known("acc_a"), &prefix, NOW + 3600, 100)
+            .unwrap();
         // A full table: a new account is 503 and is not counted.
         let mut state = RecoveryState::default();
-        state.fail(Some("acc_a"), &prefix, NOW, 1).unwrap();
+        state.fail(Tried::Known("acc_a"), &prefix, NOW, 1).unwrap();
         assert_eq!(
-            state.fail(Some("acc_b"), &prefix, NOW, 1).unwrap_err().code,
+            state
+                .fail(Tried::Known("acc_b"), &prefix, NOW, 1)
+                .unwrap_err()
+                .code,
             codes::BUSY
         );
         assert!(!state.accounts.contains_key("acc_b"));
         assert_eq!(
             state
-                .fail(Some("acc_a"), &[3u8; 32], NOW, 1)
+                .fail(Tried::Known("acc_a"), &[3u8; 32], NOW, 1)
                 .unwrap_err()
                 .code,
             codes::BUSY
         );
-        state.fail(Some("acc_a"), &prefix, NOW, 1).unwrap();
+        state.fail(Tried::Known("acc_a"), &prefix, NOW, 1).unwrap();
     }
 
     #[test]
-    fn a_recovery_of_an_unknown_account_counts_for_the_prefix_only() {
+    fn an_unknown_account_id_has_the_rule_of_an_existing_one_in_a_table_of_its_own() {
+        // The same answers over 6 tries from fresh prefixes: 5 failures, then 429.
+        let answers = |tried: Tried<'_>| {
+            let mut state = RecoveryState::default();
+            (0u8..6)
+                .map(|index| {
+                    state
+                        .fail(tried, &[index; 32], NOW, 100)
+                        .map_err(|error| error.code)
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            answers(Tried::Unknown("acc_b")),
+            answers(Tried::Known("acc_a"))
+        );
+        assert_eq!(
+            answers(Tried::Unknown("acc_b"))[5],
+            Err(codes::RATE_LIMITED)
+        );
+        // Unknown ids never enter the table of accounts, and the prefix limit is the same.
         let mut state = RecoveryState::default();
         let prefix = [1u8; 32];
-        for _ in 0..RECOVERY_PREFIX_TRIES_PER_HOUR {
-            state.fail(None, &prefix, NOW, 100).unwrap();
+        let mut tries = 0;
+        while state
+            .fail(Tried::Unknown(&format!("acc_{tries}")), &prefix, NOW, 100)
+            .is_ok()
+        {
+            tries += 1;
         }
+        assert_eq!(tries, RECOVERY_PREFIX_TRIES_PER_HOUR);
         assert!(state.accounts.is_empty());
-        // The prefix is used up for an unknown and an existing account alike.
         assert_eq!(
-            state.fail(None, &prefix, NOW, 100).unwrap_err(),
-            state.fail(Some("acc_a"), &prefix, NOW, 100).unwrap_err()
+            state
+                .fail(Tried::Known("acc_a"), &prefix, NOW, 100)
+                .unwrap_err(),
+            state
+                .fail(Tried::Unknown("acc_z"), &prefix, NOW, 100)
+                .unwrap_err()
         );
-        assert!(state.accounts.is_empty());
-        // A full table of prefixes: a new one is 503 for both kinds.
+        // A full table: a new id is 503 for both kinds, each in its own table.
         let mut state = RecoveryState::default();
-        state.fail(None, &prefix, NOW, 1).unwrap();
+        state
+            .fail(Tried::Unknown("acc_b"), &prefix, NOW, 1)
+            .unwrap();
         assert_eq!(
-            state.fail(None, &[2u8; 32], NOW, 1).unwrap_err(),
-            state.fail(Some("acc_a"), &[2u8; 32], NOW, 1).unwrap_err()
+            state
+                .fail(Tried::Unknown("acc_c"), &prefix, NOW, 1)
+                .unwrap_err()
+                .code,
+            codes::BUSY
         );
+        state.fail(Tried::Known("acc_a"), &prefix, NOW, 1).unwrap();
+        assert_eq!(
+            state
+                .fail(Tried::Known("acc_d"), &prefix, NOW, 1)
+                .unwrap_err()
+                .code,
+            codes::BUSY
+        );
+        // The hour ends them.
+        state
+            .fail(Tried::Unknown("acc_c"), &prefix, NOW + 3600, 1)
+            .unwrap();
     }
 }

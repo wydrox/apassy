@@ -3369,14 +3369,13 @@ fn the_end_of_a_device_list_keeps_room_to_remove_every_device_and_recover() {
     assert_eq!(stored_head(&c, &r.account).0, 1);
 }
 
-/// A failed recovery is the same answer for an unknown and an existing account id, before
-/// and after the client prefix used up its failures: a failure for an unknown id counts
-/// for the prefix (not in the table of accounts).
+/// A failed recovery has the same answers for an unknown and an existing account id: over
+/// 6 wrong tries of one id, 5 times 403 and then 429 for both (unknown ids are counted in a
+/// table of their own), and the limit of the client prefix stays 20 for both.
 #[test]
 fn a_recovery_answers_an_unknown_and_an_existing_account_the_same() {
     let c = start();
-    let recover_from = |body: &Value| {
-        let prefix = "203.0.113.0/24";
+    let recover_from = |prefix: &str, body: &Value| {
         let mac = apassy_relay::server::connect::prefix_mac(EDGE_SECRET, prefix);
         let (status, text) = relay::call_raw(
             &c.relay.url,
@@ -3398,18 +3397,31 @@ fn a_recovery_answers_an_unknown_and_an_existing_account_the_same() {
     revoke(&c, &existing, &token, &existing);
     let key = DeviceKey::generate().unwrap();
     let wrong = |account: &str| recover_body(&c, account, &[0u8; 16], &key, &[1u8; 16]);
-    let unknown = |_: usize| new_account_id();
-    // Before: the same 403 and the same message for both.
-    let known = recover_from(&wrong(&existing.account));
-    let stranger = recover_from(&wrong(&unknown(0)));
-    assert_eq!(known.0, 403, "{}", known.1);
+    // Six wrong tries of one id, each from its own prefix: the same sequence for both.
+    let sequence = |account: &str, net: u8| -> Vec<(u16, Value)> {
+        (0..6)
+            .map(|index| recover_from(&format!("198.51.{net}.{index}/32"), &wrong(account)))
+            .collect()
+    };
+    let known = sequence(&existing.account, 1);
+    let stranger = sequence(&new_account_id(), 2);
+    assert_eq!(
+        known.iter().map(|(status, _)| *status).collect::<Vec<_>>(),
+        [403, 403, 403, 403, 403, 429]
+    );
     assert_eq!(known, stranger);
-    // Unknown ids use up the prefix (20 failures in all): then both get the same 429.
-    for index in 1..19 {
-        assert_eq!(recover_from(&wrong(&unknown(index))).0, 403);
+    // The limit of one prefix is the same for both: 20 failures of fresh ids, then 429.
+    for _ in 0..20 {
+        assert_eq!(
+            recover_from("203.0.113.0/24", &wrong(&new_account_id())).0,
+            403
+        );
     }
-    let known = recover_from(&wrong(&existing.account));
-    let stranger = recover_from(&wrong(&unknown(19)));
+    let other = create(&c);
+    let other_token = sign_in(&c, &other);
+    revoke(&c, &other, &other_token, &other);
+    let known = recover_from("203.0.113.0/24", &wrong(&other.account));
+    let stranger = recover_from("203.0.113.0/24", &wrong(&new_account_id()));
     assert_eq!(known.0, 429, "{}", known.1);
     assert_eq!(known, stranger);
     // The right recovery key is never limited.
