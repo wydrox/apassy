@@ -76,3 +76,37 @@ the read buffer, because the head and the upgraded stream share one
 - `request.rs`: the raw upgrade reader is chosen by it, and only for a request without
   `Content-Length` or `Transfer-Encoding`; upstream chose it on a substring of the first
   `Connection` header and then ignored the body framing.
+
+## Sequential requests where the relay allows them (2026-11-11, unit RM item 5)
+
+The iPhone reaches its Mac through a Connect dial, and a dial for each request is slow and
+counts against Connect's dial rate. A device stream of the tunnel may now carry sequential
+requests; every other connection still serves one request.
+
+- `lib.rs`: new `KeepAlive { idle, allow }` and `Server::http_with_deadlines_and_keep_alive`
+  (`http_with_deadlines` is that with `None`). `allow` gets the client's address and the
+  listener's address; the relay passes `apassy::net::front_peers::is_tunnel` for its
+  tailnet listener only (no header is read). A connection that may be kept is handed the
+  next request only after the answer of the one before it was written (the notification
+  that the TLS path of upstream uses).
+- `request.rs`: `respond_impl` keeps the connection only when `allow` says so for this
+  connection, the request is HTTP/1.1 and asks neither to close nor to upgrade, its body
+  was read to its end (new `UntilEnd` reader: no body is drained after a kept answer), the
+  answer has no `Connection` header, and no byte waits on the socket (a non-blocking peek,
+  `Connection::input_waiting`). Then the answer has no `Connection: close`; else it has
+  it, as before. `into_writer`, `upgrade`, and `upgrade_split` never keep.
+- `client.rs`: `await_next` waits for the reader of the request before (the answer is
+  written), goes on only when that answer kept the connection and nothing came before it
+  (bytes in the read buffer close the connection: pipelining), and waits at most `idle` for
+  the first byte of the next head. An idle or pipelined connection closes without a byte
+  from the server (no `408`). From the first byte on the request has fresh header, body,
+  and handle deadlines.
+- `deadline.rs`: the handle deadline moved into `Deadline` (`handle_until`), so the reaper
+  closes a kept connection by the deadline of its current request, or 5 s after its idle
+  wait; `idle_wait`, `next_request`, `answered_for_next`/`take_again`, `allows`.
+- `util/sequential.rs`: `SequentialReader::inner` (the reader once its turn came).
+- `keep_alive_tests.rs`: two and more sequential requests on an allowed connection, a
+  pipelined request closes and is never served, a connection that is not allowed (and a
+  server without keep-alive) serves one request with `Connection: close`, an unread body
+  and HTTP/1.0 close, the idle close writes nothing, and a stalled next head ends at its
+  own header deadline.

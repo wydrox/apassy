@@ -124,6 +124,21 @@ impl<R: Read + Send> Read for SequentialReader<R> {
     }
 }
 
+impl<R: Read + Send> SequentialReader<R> {
+    /// Apassy (connect keep-alive): the reader itself, once its turn came, that is once
+    /// the reader of the request before it was dropped.
+    pub fn inner(&mut self) -> &mut R {
+        if let SequentialReaderInner::Waiting(recv) = &mut self.inner {
+            let reader = recv.recv().unwrap();
+            self.inner = SequentialReaderInner::MyTurn(reader);
+        }
+        match self.inner {
+            SequentialReaderInner::MyTurn(ref mut reader) => reader,
+            _ => unreachable!(),
+        }
+    }
+}
+
 impl<W: Write + Send> Write for SequentialWriter<W> {
     fn write(&mut self, buf: &[u8]) -> IoResult<usize> {
         if let Some(v) = self.trigger.as_mut() {

@@ -14,7 +14,9 @@ use std::net::{IpAddr, SocketAddr, TcpStream};
 
 use apassy::net::front_peers;
 use apassy::node::backend::{NewCloudAgent, RunningNode, TokenIssue};
-use apassy_relay::server::http::{AUTH_FAILURES_MAX, TUNNEL_DEVICE_FAILURES_MAX, listener_alive};
+use apassy_relay::server::http::{
+    AUTH_FAILURES_MAX, TUNNEL_DEVICE_FAILURES_MAX, TUNNEL_STREAM_FAILURES_MAX, listener_alive,
+};
 use node::{Node, NodeOptions, code};
 use serde_json::json;
 
@@ -489,6 +491,92 @@ fn the_device_streams_of_the_tunnel_have_a_count_of_the_node_apart_from_the_peer
         limited
             .iter()
             .all(|(_, detail)| !detail.contains("\"peer\"")),
+        "{limited:?}"
+    );
+}
+
+/// `GET /v1/me` with each of `tokens` in turn on ONE connection to `listener`, written
+/// down as a `device` stream of the Connect tunnel, which the tailnet listener keeps open
+/// between requests (docs/SPEC.md section 35.6). Returns the statuses.
+fn me_on_one_stream(listener: SocketAddr, tokens: &[&str]) -> Vec<u16> {
+    let mut stream = TcpStream::connect(listener).expect("connect");
+    let _entry = front_peers::register_tunnel(
+        stream.local_addr().expect("local"),
+        stream.peer_addr().expect("peer"),
+    );
+    let mut statuses = Vec::new();
+    for token in tokens {
+        write!(
+            stream,
+            "GET /v1/me HTTP/1.1\r\nHost: 100.64.0.7:8444\r\nAuthorization: Bearer {token}\r\n\r\n"
+        )
+        .expect("write");
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            assert_eq!(stream.read(&mut byte).expect("read"), 1, "the stream ended");
+            head.push(byte[0]);
+        }
+        let head = String::from_utf8(head).expect("ascii").to_ascii_lowercase();
+        assert!(!head.contains("connection: close"), "{head}");
+        let length: usize = head
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length:"))
+            .map_or(0, |value| value.trim().parse().expect("length"));
+        let mut body = vec![0u8; length];
+        stream.read_exact(&mut body).expect("body");
+        statuses.push(
+            head.split(' ')
+                .nth(1)
+                .and_then(|code| code.parse().ok())
+                .expect("status"),
+        );
+    }
+    statuses
+}
+
+#[test]
+fn a_device_stream_of_the_tunnel_has_its_own_count_and_a_new_dial_another() {
+    let node = Node::start(NodeOptions::default());
+    let (_team, mac) = node.device_team("Approvals");
+    let tailnet = node.node().tailnet_addr().expect("a tailnet listener");
+    let limit = TUNNEL_STREAM_FAILURES_MAX as usize;
+    // One stream with bad tokens: 401 up to its count, then 429 for every request on it,
+    // a good token too.
+    let mut tokens = vec!["apr_bad"; limit + 2];
+    tokens.push(mac.token.as_str());
+    let statuses = me_on_one_stream(tailnet, &tokens);
+    assert!(
+        statuses[..limit].iter().all(|status| *status == 401),
+        "{statuses:?}"
+    );
+    assert!(
+        statuses[limit..].iter().all(|status| *status == 429),
+        "{statuses:?}"
+    );
+    // Another stream (a new dial) has its own count: its good token works, and its bad
+    // tokens are answered.
+    assert_eq!(
+        me_on_one_stream(tailnet, &[mac.token.as_str(), "apr_bad", mac.token.as_str()]),
+        [200, 401, 200]
+    );
+    // The tailnet peers keep their own count.
+    let peer: IpAddr = "100.64.0.22".parse().unwrap();
+    assert_eq!(bad_token_from(tailnet, Some(peer)), 401);
+    // The audit row names the stream's bucket, and no address.
+    let limited: Vec<_> = node
+        .relay_audit()
+        .into_iter()
+        .filter(|(action, _)| action == "rate_limited")
+        .collect();
+    assert!(
+        limited
+            .iter()
+            .any(|(_, detail)| detail.contains("\"bucket\":\"tunnel_stream\"")),
+        "{limited:?}"
+    );
+    assert!(
+        limited.iter().all(|(_, detail)| !detail.contains("\"peer\"")),
         "{limited:?}"
     );
 }
