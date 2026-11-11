@@ -3232,6 +3232,10 @@ impl DesktopApp {
     /// that was asked after the refusal decides it.
     pub(crate) fn relay_check_list_again(&mut self, id: &str) {
         self.ui.connect.live.refresh_now();
+        // A store shared between accounts: Shared Vaults reads the other accounts' lists.
+        if self.share_reads_lists(id) {
+            self.ui.connect.share.check_again();
+        }
         self.relay_sync_now(id);
     }
 

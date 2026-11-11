@@ -90,7 +90,16 @@ pub type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
 /// of the file, with a counter of the writes: the session of the app hands them to the
 /// sync of the vault stores, whether or not a call to Connect worked
 /// (`super::AccountSession::signers_after`).
-pub type SignerFeed = Arc<std::sync::Mutex<(u64, Option<crate::sync::SignerPolicy>)>>;
+pub type SignerFeed = Arc<std::sync::Mutex<(u64, Option<ListedSigners>)>>;
+
+/// The signers of the account file with when the newest device list that verified in them
+/// was asked of Connect (`None` before one in this session): one value, so a hand-over to
+/// the sync never pairs the time of a newer list with older signers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedSigners {
+    pub policy: crate::sync::SignerPolicy,
+    pub verified_at: Option<std::time::Instant>,
+}
 
 /// The waits between sign-in rounds. Tests make them instant.
 pub type Sleeper = Arc<dyn Fn(Duration) + Send + Sync>;
@@ -738,6 +747,8 @@ pub struct ConnectAccount {
     sleeper: Sleeper,
     /// Where each write of the account file publishes its signers ([`SignerFeed`]).
     feed: Option<SignerFeed>,
+    /// When the newest view whose device list verified here was asked of Connect.
+    verified_at: Option<std::time::Instant>,
     /// What the shared vaults keep in memory between two refreshes (section 16).
     shares: share::ShareMemory,
 }
@@ -779,6 +790,7 @@ impl ConnectAccount {
             clock: system_clock(),
             sleeper: system_sleeper(),
             feed: None,
+            verified_at: None,
             shares: share::ShareMemory::default(),
         }
     }
@@ -797,7 +809,10 @@ impl ConnectAccount {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             held.0 = held.0.wrapping_add(1);
-            held.1 = Some(signer_policy(&self.state));
+            held.1 = Some(ListedSigners {
+                policy: signer_policy(&self.state),
+                verified_at: self.verified_at,
+            });
         }
     }
 
@@ -1353,11 +1368,17 @@ impl ConnectAccount {
     /// the trust store learns the list. The name of the person goes into the account file when this Mac did
     /// not know it; the email never does.
     pub fn view(&mut self) -> Result<AccountView, ConnectError> {
+        let asked = std::time::Instant::now();
         let mut view = self.with_token(|client, token| client.account(token))?;
         if view.account_id != self.state.account_id {
             return Err(ConnectError::BadAnswer);
         }
         self.verify(&mut view)?;
+        // The signers now hold that list: they go out with the time it was asked.
+        if view.list_verified && self.verified_at.is_none_or(|held| asked > held) {
+            self.verified_at = Some(asked);
+            self.publish();
+        }
         if self.state.name.is_none()
             && let Ok(name) = clean_name(&view.name)
         {

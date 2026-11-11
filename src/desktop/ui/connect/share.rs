@@ -1124,6 +1124,12 @@ impl ShareUi {
         self.refreshed_at = None;
     }
 
+    /// Read the lists of the other accounts again at the next frame ("Try Again" of a
+    /// shared store that checks who shares it).
+    pub(crate) fn check_again(&mut self) {
+        self.check_due = true;
+    }
+
     /// Whether a step of the section runs.
     #[cfg(test)]
     pub(crate) fn is_busy(&self) -> bool {
@@ -1318,9 +1324,13 @@ fn take_status(app: &mut DesktopApp, status: ShareStatus) {
 
 /// The lists of the other accounts were read again: each vault of a shared store whose head
 /// has a signer not verified yet syncs again, and one past the quiet time of its head notes
-/// the read (`RelaySync::note_device_list`), so a signer that the lists still do not hold
-/// is refused from then on. (Settings › Connect notes the account's own list for the other
-/// stores.)
+/// when the lists of every account of that store, and the own list, were asked of Connect
+/// in that refresh (`RelaySync::note_device_list`, `ShareStatus::asked_for`): a head that
+/// was refused before that time, by a signer that the lists still do not hold, is refused
+/// from then on. A read that failed or did not verify, for any account of the store, notes
+/// nothing: the store keeps checking (and after 10 minutes says that Connect cannot be
+/// reached, with "Try Again"), and a read asked before the refusal never ends the check.
+/// (Settings › Connect notes the account's own list for the other stores.)
 fn lists_read(app: &mut DesktopApp, now: Instant) {
     let ids: Vec<String> = app
         .vault_list
@@ -1347,8 +1357,15 @@ fn lists_read(app: &mut DesktopApp, now: Instant) {
         let quiet = relay
             .unlisted_head()
             .is_some_and(|head| app.ui.connect.share.checks.quiet(&team, &head, now));
-        if !quiet {
-            relay.note_device_list(now);
+        let asked = app
+            .ui
+            .connect
+            .share
+            .status
+            .as_ref()
+            .and_then(|status| status.asked_for(&team));
+        if !quiet && let Some(asked) = asked {
+            relay.note_device_list(asked);
         }
         app.relay_sync_now(&id);
     }

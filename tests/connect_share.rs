@@ -2033,3 +2033,93 @@ fn an_offline_co_member_reads_the_keys_of_a_member_that_left_the_group() {
     y_mac.sync.sync(&mut vault_y).expect("Y follows the chain");
     assert_eq!(titles(&vault_y), vec!["Alpha", "Beta", "Gamma"]);
 }
+
+/// F11: a head of a shared store that was refused for a signer not verified yet is decided
+/// only by device lists asked after the refusal that verified. A refresh whose reads of the
+/// other accounts' lists fail gives the store no time (it keeps checking, never a damaged
+/// copy), a time from before the refusal ends nothing, and a refresh that reads the lists
+/// takes the new device.
+#[test]
+fn a_shared_store_is_decided_only_by_lists_asked_after_its_refusal() {
+    let mut f = family();
+    f.share();
+    let team = f.team.clone();
+    hand_over(&f.a, &f.account_a);
+    // A second device of X that A has not read yet writes to the store.
+    let x2 = mac(&f.cloud, "x2");
+    let mut account_x2 = join_account(&f.cloud, &mut f.account_x, &x2, "Synthetic MacBook Air");
+    account_x2.refresh_shares(&[]).expect("X2");
+    let device = account_x2.state().device_id.clone();
+    f.cloud.connect.list_in_store(&team, &device);
+    let mut vault_x2 = member_copy(&x2, &mut account_x2, &team);
+    vault_x2.add(item("Beta")).expect("add");
+    assert!(x2.sync.sync(&mut vault_x2).expect("X2").pushed);
+    let before = std::time::Instant::now();
+    let checking = f.a.sync.sync(&mut f.vault_a);
+    assert_eq!(
+        checking.err(),
+        Some(apassy::sync::SyncError::ChecksDeviceList)
+    );
+    // Every read of another account's list fails: no time for the store.
+    f.cloud
+        .connect
+        .answer_route_error("POST /v1/account/peers/lists", 500, "relay_error");
+    let status = f.account_a.refresh_shares(&[]).expect("A, reads failed");
+    assert!(status.read.is_empty(), "{:?}", status.read);
+    assert_eq!(status.asked_for(&team), None);
+    // A time from before the refusal (a read in flight then) ends nothing either.
+    f.a.sync.note_device_list(before);
+    let again = f.a.sync.sync(&mut f.vault_a);
+    assert_eq!(again.err(), Some(apassy::sync::SyncError::ChecksDeviceList));
+    // The reads work again: the lists were asked after the refusal, and X2 signs.
+    f.cloud
+        .connect
+        .clear_route_errors("POST /v1/account/peers/lists");
+    let status = f.account_a.refresh_shares(&[]).expect("A");
+    let asked = status.asked_for(&team).expect("every list read");
+    assert!(asked > before);
+    hand_over(&f.a, &f.account_a);
+    f.a.sync.note_device_list(asked);
+    f.a.sync.sync(&mut f.vault_a).expect("A takes X2's head");
+    assert_eq!(titles(&f.vault_a), vec!["Alpha", "Beta"]);
+}
+
+/// F12: the signers of the account file and the time of the newest list that verified in
+/// them are published as one value: a later verified list moves the time only together
+/// with signers that hold it, and a write without a verified list keeps the time.
+#[test]
+fn the_signers_and_the_time_of_their_list_are_one_value() {
+    let mut f = family();
+    let feed: apassy::connect::account::SignerFeed = Arc::new(Mutex::new((0, None)));
+    f.account_a.set_signer_feed(Arc::clone(&feed));
+    let held = || feed.lock().unwrap().1.clone().expect("published");
+    let before = std::time::Instant::now();
+    f.account_a.view().expect("A");
+    let first = held();
+    let first_at = first.verified_at.expect("a verified list");
+    assert!(first_at >= before);
+    // A second device joins: A's next verified list holds it, with a later time.
+    let a2 = mac(&f.cloud, "a2");
+    let account_a2 = join_account(&f.cloud, &mut f.account_a, &a2, "Synthetic Mac mini");
+    let joined = held();
+    assert!(joined.policy.accepts(&key_of(&account_a2)));
+    f.account_a.view().expect("A again");
+    let second = held();
+    let second_at = second.verified_at.expect("a verified list");
+    assert!(second_at > first_at);
+    assert!(
+        second.policy.accepts(&key_of(&account_a2)),
+        "the time comes with its list"
+    );
+    // A share step writes the account file: the time of the list stays with it.
+    f.share();
+    let shared = held();
+    assert!(shared.verified_at.is_some_and(|at| at >= second_at));
+    assert!(
+        shared
+            .policy
+            .stores
+            .iter()
+            .any(|store| store.team_id == f.team)
+    );
+}

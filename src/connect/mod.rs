@@ -46,10 +46,10 @@ pub mod words;
 use std::fmt;
 
 pub use account::{
-    AccountState, Clock, ConnectAccount, DeviceLink, Forgotten, JoinPoll, JoinRequest, PendingJoin,
-    RevokeOutcome, Sleeper, account_file, drop_account_rows, drop_stale_account_rows,
-    forget_old_account_file, forget_this_device, group_invite_code, has_pending_join,
-    is_old_account_file, signer_policy,
+    AccountState, Clock, ConnectAccount, DeviceLink, Forgotten, JoinPoll, JoinRequest,
+    ListedSigners, PendingJoin, RevokeOutcome, Sleeper, account_file, drop_account_rows,
+    drop_stale_account_rows, forget_old_account_file, forget_this_device, group_invite_code,
+    has_pending_join, is_old_account_file, signer_policy,
 };
 pub use client::{
     AccountCreated, AccountDeleted, AccountView, CheckoutAnswer, CheckoutRequest, ConnectClient,
