@@ -1350,7 +1350,19 @@ impl ConnectAccount {
             Some(held) if held == root => {}
             Some(_) => {
                 // Another root: the people compared new words for a reset account. The
-                // old pin ends first; its shares and joins must have ended.
+                // shares and joins of the old root end first (its keys sign nothing new
+                // already), then its pin; a store of the old shares is shared again on
+                // its own.
+                let (shares, joins) = self
+                    .verified_list()
+                    .map(|own| (own.shares.shares.clone(), own.shares.joins.clone()))
+                    .unwrap_or_default();
+                for (team, _) in shares.iter().filter(|(_, held)| held == account) {
+                    self.share_entry(UNSHARE, account, None, Some(team))?;
+                }
+                for (team, _) in joins.iter().filter(|(_, held)| held == account) {
+                    self.share_entry(LEAVE, account, None, Some(team))?;
+                }
                 self.share_entry(UNPEER, account, None, None)?;
                 self.share_entry(PEER, account, Some(root), None)?;
             }

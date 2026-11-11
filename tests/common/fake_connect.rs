@@ -227,8 +227,9 @@ impl Account {
         if version != self.list.len() as u64 + 1 {
             return Err(fail(409, "conflict"));
         }
-        // The relay keeps room to remove every live device (connect-account-v1 section 13).
-        if version > 256 || (op == "add" && version > 246) {
+        // The relay keeps room to end every live device, peer, share, and join
+        // (connect-account-v1 sections 13 and 16).
+        if version > 1024 || (op == "add" && version > 822) {
             return Err(fail(403, "account_limit"));
         }
         let message = list_message(

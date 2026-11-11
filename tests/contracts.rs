@@ -4500,7 +4500,7 @@ mod connect_v1 {
         /// then `add` (with a link) and `remove` (without one), each signed; at most 256.
         fn list_is_valid(list: &[ListEntry]) -> bool {
             !list.is_empty()
-                && list.len() <= 256
+                && list.len() <= 1024
                 && list.iter().enumerate().all(|(index, entry)| {
                     let shape = match (index, entry.op.as_str()) {
                         (0, "root") => {
@@ -4562,7 +4562,188 @@ mod connect_v1 {
                         .all(|d| d.account_id == view.devices[0].account_id))
         }
 
+        /// `POST /v1/account/list` (section 16.3).
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ListAppend {
+            version: u64,
+            op: String,
+            account_id: String,
+            root: Option<String>,
+            team_id: Option<String>,
+            statement: String,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ListAppended {
+            version: u64,
+            op: String,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PeerLink {
+            link_hash: String,
+            account_id: String,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PeerJoin {
+            account_id: String,
+            link_hash: String,
+            signature: String,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PeerInviter {
+            account_id: String,
+            device_id: String,
+            name: String,
+            public_key: String,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PeerJoined {
+            join_id: u64,
+            inviter: PeerInviter,
+            expires_at: u64,
+            device_list: Vec<ListEntry>,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PeerPending {
+            join_id: u64,
+            link_id: u64,
+            account_id: String,
+            name: String,
+            public_key: String,
+            signature: String,
+            created_at: u64,
+            expires_at: u64,
+            device_list: Vec<ListEntry>,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PeerJoinState {
+            join_id: u64,
+            state: String,
+            expires_at: u64,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PeerDevice {
+            device_id: String,
+            name: String,
+            platform: String,
+            public_key: String,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PeerView {
+            account_id: String,
+            name: String,
+            devices: Vec<PeerDevice>,
+            device_list: Vec<ListEntry>,
+        }
+
+        /// The examples of section 16.
+        fn check_share(example: &Example) -> bool {
+            match example.name.as_str() {
+                "list_append" => {
+                    let body: ListAppend = strict(example);
+                    assert!(
+                        ["peer", "unpeer", "share", "unshare", "join", "leave"]
+                            .contains(&body.op.as_str())
+                    );
+                    assert!(is_id(&body.account_id, "acc_") && is_signature(&body.statement));
+                    assert_eq!(body.op == "peer", body.root.is_some());
+                    assert_eq!(
+                        ["share", "unshare", "join", "leave"].contains(&body.op.as_str()),
+                        body.team_id.is_some()
+                    );
+                    assert!(body.version >= 2);
+                }
+                "list_appended" => {
+                    let body: ListAppended = strict(example);
+                    assert!(body.version >= 2 && !body.op.is_empty());
+                }
+                "peer_link" => {
+                    let body: PeerLink = strict(example);
+                    assert!(is_link_hash(&body.link_hash) && is_id(&body.account_id, "acc_"));
+                }
+                "peer_link_created" => {
+                    let body: LinkAnswer = strict(example);
+                    assert!(body.link_id > 0 && body.expires_at > 0);
+                }
+                "peer_join" => {
+                    let body: PeerJoin = strict(example);
+                    assert!(is_id(&body.account_id, "acc_") && is_link_hash(&body.link_hash));
+                    assert!(is_signature(&body.signature));
+                }
+                "peer_joined" => {
+                    let body: PeerJoined = strict(example);
+                    assert!(
+                        is_id(&body.inviter.account_id, "acc_")
+                            && is_id(&body.inviter.device_id, "dev_")
+                    );
+                    assert!(is_public_key(&body.inviter.public_key) && is_name(&body.inviter.name));
+                    assert!(
+                        list_is_valid(&body.device_list) && body.join_id > 0 && body.expires_at > 0
+                    );
+                }
+                "peer_pending" => {
+                    let body: Vec<PeerPending> = strict(example);
+                    for answer in &body {
+                        assert!(is_id(&answer.account_id, "acc_") && is_name(&answer.name));
+                        assert!(
+                            is_public_key(&answer.public_key) && is_signature(&answer.signature)
+                        );
+                        assert!(list_is_valid(&answer.device_list));
+                        assert!(
+                            answer.join_id > 0
+                                && answer.link_id > 0
+                                && answer.expires_at > answer.created_at
+                        );
+                    }
+                }
+                "peer_join_state" => {
+                    let body: PeerJoinState = strict(example);
+                    assert!(
+                        ["pending", "confirmed", "refused", "cancelled", "expired"]
+                            .contains(&body.state.as_str())
+                    );
+                    assert!(body.join_id > 0 && body.expires_at > 0);
+                }
+                "peer_view" => {
+                    let body: PeerView = strict(example);
+                    assert!(is_id(&body.account_id, "acc_") && is_name(&body.name));
+                    assert!(
+                        body.devices
+                            .iter()
+                            .all(|device| is_id(&device.device_id, "dev_")
+                                && is_name(&device.name)
+                                && is_platform(&device.platform)
+                                && is_public_key(&device.public_key))
+                    );
+                    assert!(list_is_valid(&body.device_list));
+                }
+                _ => return false,
+            }
+            true
+        }
+
         fn check_one(example: &Example) -> bool {
+            if check_share(example) {
+                return true;
+            }
             match example.name.as_str() {
                 "account_create" => {
                     let body: AccountCreate = strict(example);

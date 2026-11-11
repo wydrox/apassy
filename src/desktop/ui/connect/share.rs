@@ -758,7 +758,7 @@ pub(crate) enum Guard {
 
 /// The result of one worker step.
 pub(crate) enum Outcome {
-    Refreshed(Result<(ShareStatus, Vec<VaultStoreView>, Vec<GroupMember>), ConnectError>),
+    Refreshed(Result<Refreshed, ConnectError>),
     /// A code was made (in the slot: `None`), or the member is pinned already (the short
     /// fingerprint of its pinned root, for the owner check of a share without words).
     Started(Result<Option<String>, ConnectError>),
@@ -770,6 +770,20 @@ pub(crate) enum Outcome {
     Ended(Result<(), ConnectError>),
     Differed,
 }
+
+/// What a refresh of the section read.
+pub(crate) struct Refreshed {
+    status: ShareStatus,
+    stores: Vec<VaultStoreView>,
+    members: Vec<GroupMember>,
+    /// The signers of every vault store after the refresh, from the account file
+    /// (`crate::connect::signer_policy`): the running syncs take them at once.
+    signers: crate::sync::SignerPolicy,
+}
+
+/// Without Settings › Connect on the screen the lists are read again this often (and at
+/// once when a head of a key not verified yet comes).
+pub(crate) const REFRESH_HIDDEN: Duration = Duration::from_secs(30 * 60);
 
 /// The section state.
 #[derive(Default)]
@@ -793,6 +807,8 @@ pub(crate) struct ShareUi {
     checking: Vec<(String, Instant, Instant)>,
     /// When [`watch_heads`] looked last.
     watched_at: Option<Instant>,
+    /// When the section was on the screen last.
+    shown_at: Option<Instant>,
 }
 
 impl ShareUi {
@@ -911,13 +927,13 @@ pub(crate) fn step(app: &mut DesktopApp, ctx: &egui::Context) {
         });
         return;
     }
-    let due = app
-        .ui
-        .connect
-        .share
-        .refreshed_at
-        .is_none_or(|at| at.elapsed() >= REFRESH_EVERY);
-    if due && app.ui.connect.share.sheet.is_none() {
+    let share = &app.ui.connect.share;
+    let shown = share
+        .shown_at
+        .is_some_and(|at| at.elapsed() < Duration::from_secs(2));
+    let every = if shown { REFRESH_EVERY } else { REFRESH_HIDDEN };
+    let due = share.refreshed_at.is_none_or(|at| at.elapsed() >= every);
+    if due && share.sheet.is_none() {
         refresh(app, ctx);
     }
 }
@@ -931,7 +947,12 @@ fn refresh(app: &mut DesktopApp, ctx: &egui::Context) {
                 .group()?
                 .map(|group| group.members)
                 .unwrap_or_default();
-            Ok((status, stores, members))
+            Ok(Refreshed {
+                status,
+                stores,
+                members,
+                signers: crate::connect::signer_policy(account.state()),
+            })
         });
         Outcome::Refreshed(result)
     });
@@ -940,11 +961,12 @@ fn refresh(app: &mut DesktopApp, ctx: &egui::Context) {
 fn apply(app: &mut DesktopApp, ctx: &egui::Context, outcome: Outcome) {
     let share = &mut app.ui.connect.share;
     match outcome {
-        Outcome::Refreshed(Ok((status, stores, members))) => {
-            share.status = Some(status);
-            share.stores = stores;
-            share.members = members;
-            // The sessions that run take the new signers of the shared stores.
+        Outcome::Refreshed(Ok(refreshed)) => {
+            share.status = Some(refreshed.status);
+            share.stores = refreshed.stores;
+            share.members = refreshed.members;
+            // The sessions that run take the new signers of the shared stores at once.
+            app.ui.connect.live.take_signers(refreshed.signers);
             app.relay_share_connect();
         }
         Outcome::Refreshed(Err(error)) | Outcome::Ended(Err(error)) => {
@@ -1473,6 +1495,7 @@ pub(crate) fn choose(app: &mut DesktopApp, ctx: &egui::Context, choice: ShareCho
 /// The section in Settings › Connect, under the account.
 pub(crate) fn section(app: &mut DesktopApp, ui: &mut Ui) {
     let ctx = ui.ctx().clone();
+    app.ui.connect.share.shown_at = Some(Instant::now());
     step(app, &ctx);
     let share = &app.ui.connect.share;
     let Some(status) = share.status.as_ref() else {

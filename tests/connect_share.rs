@@ -79,7 +79,15 @@ fn client(cloud: &Cloud) -> ConnectClient {
 }
 
 fn new_account(cloud: &Cloud, mac: &Mac, name: &str) -> ConnectAccount {
-    let (account, _) = ConnectAccount::create(
+    new_account_with_code(cloud, mac, name).0
+}
+
+fn new_account_with_code(
+    cloud: &Cloud,
+    mac: &Mac,
+    name: &str,
+) -> (ConnectAccount, apassy::connect::RecoveryCode) {
+    let (account, code) = ConnectAccount::create(
         client(cloud),
         &mac.keys,
         &mac.account_path,
@@ -88,7 +96,7 @@ fn new_account(cloud: &Cloud, mac: &Mac, name: &str) -> ConnectAccount {
     )
     .expect("create account");
     cloud.connect.entitle(&account.state().account_id);
-    account
+    (account, code)
 }
 
 struct Owner {
@@ -191,13 +199,15 @@ struct Family {
     owner_x: Owner,
     vault_a: Vault,
     team: String,
+    /// The recovery code of X's account.
+    recovery_x: apassy::connect::RecoveryCode,
 }
 
 fn family() -> Family {
     let cloud = cloud();
     let (a, x) = (mac(&cloud, "a"), mac(&cloud, "x"));
     let mut account_a = new_account(&cloud, &a, "Rafal");
-    let account_x = new_account(&cloud, &x, "Ola");
+    let (account_x, recovery_x) = new_account_with_code(&cloud, &x, "Ola");
     let a_id = account_a.state().account_id.clone();
     cloud.connect.make_group(&a_id, "family");
     cloud
@@ -221,6 +231,7 @@ fn family() -> Family {
         owner_x: owner(),
         vault_a,
         team,
+        recovery_x,
     }
 }
 
@@ -526,7 +537,6 @@ fn a_substituted_inviter_or_answering_key_is_caught() {
     let mut f = family();
     let x_id = f.x_id();
     let a_id = f.a_id();
-    let head = f.list_of(&a_id).len();
     // Another inviter key: the fingerprint of the code fails.
     let link = f.account_a.start_share(&x_id, &f.team).expect("code");
     let stranger = apassy::sync::DeviceKey::generate().expect("key");
@@ -541,12 +551,40 @@ fn a_substituted_inviter_or_answering_key_is_caught() {
         "The code does not match the account that answered. Nothing was signed. Ask for a new code."
     );
     f.cloud.connect.answer_inviter(None);
+    // Another live device of A as the inviter: a device of A's list, but not the device
+    // that the code names. Only the fingerprint of the code catches it before the words.
+    let a2 = mac(&f.cloud, "a2");
+    let account_a2 = join_account(&f.cloud, &mut f.account_a, &a2, "Synthetic Mac mini");
+    let link = f.account_a.start_share(&x_id, &f.team).expect("code");
+    f.cloud
+        .connect
+        .answer_inviter(Some(json!({"account_id": a_id,
+        "device_id": account_a2.state().device_id, "name": "Rafal",
+        "public_key": account_a2.state().public_key})));
+    assert_eq!(
+        f.account_x.accept_code(link.code()).unwrap_err(),
+        ConnectError::ShareMismatch
+    );
+    f.cloud.connect.answer_inviter(None);
+    let head = f.list_of(&a_id).len();
     // Another answering key: the signature over the answer fails, so A sees no request.
     let link = f.account_a.start_share(&x_id, &f.team).expect("code");
     let _answer = f.account_x.accept_code(link.code()).expect("answer");
     f.cloud
         .connect
         .answer_pending_key(Some(stranger.public_key().to_vec()));
+    assert!(
+        f.account_a
+            .share_requests(&link)
+            .expect("requests")
+            .is_empty()
+    );
+    // Another live device of X as the answering key: in X's list, but it signed nothing.
+    let x2 = mac(&f.cloud, "x2");
+    let account_x2 = join_account(&f.cloud, &mut f.account_x, &x2, "Synthetic MacBook Air");
+    f.cloud
+        .connect
+        .answer_pending_key(Some(key_of(&account_x2)));
     assert!(
         f.account_a
             .share_requests(&link)
@@ -828,4 +866,79 @@ fn the_share_vectors_reproduce_the_messages_and_words() {
         // From another root, nothing verifies.
         assert!(verify_list(origin, account, pinned.1, &entries).is_none());
     }
+}
+
+/// A recovery of the member starts a new root: the owner's devices mark the member
+/// reset and its old keys sign nothing new; sharing again with the same pin is refused,
+/// and a new code with new words pins the new root (the old share and pin end first) and
+/// shares the store again, for the new keys only.
+#[test]
+fn a_reset_account_is_shared_again_only_with_new_words() {
+    let mut f = family();
+    f.share();
+    let (team, x_id) = (f.team.clone(), f.x_id());
+    let old_key = key_of(&f.account_x);
+    // X's only device leaves the account, and X recovers it on a new Mac.
+    let device_id = f.account_x.state().device_id.clone();
+    let row = f
+        .account_x
+        .view()
+        .expect("view")
+        .devices
+        .into_iter()
+        .find(|device| device.device_id == device_id)
+        .expect("this device");
+    let (proof, epoch) = f.owner_x.proof(f.account_x.revoke_action(&row));
+    f.account_x
+        .revoke(&row, proof, &epoch)
+        .expect("X removes itself");
+    let fresh = mac(&f.cloud, "x-fresh");
+    let code = f.recovery_x.text();
+    let (mut new_x, _, _) = ConnectAccount::recover(
+        client(&f.cloud),
+        &fresh.keys,
+        &fresh.account_path,
+        &x_id,
+        &code,
+        "Synthetic iMac",
+    )
+    .expect("recover X");
+    let status = f.account_a.refresh_shares().expect("A");
+    assert_eq!(status.suspended, vec![x_id.clone()]);
+    let policy = signer_policy(f.account_a.state()).for_team(&team);
+    assert!(!policy.accepts(&old_key) && policy.left_key(&old_key));
+    assert!(!policy.accepts(&key_of(&new_x)));
+    // The same pin is not enough: new words are needed.
+    let (proof, epoch) = f
+        .owner_a
+        .proof(f.account_a.share_again_action(&team, &x_id, "Ola"));
+    assert_eq!(
+        f.account_a
+            .share_again(&team, &x_id, "Ola", proof, &epoch)
+            .unwrap_err(),
+        ConnectError::NotVerified
+    );
+    // A new code, new words, and the new root.
+    let link = f.account_a.start_share(&x_id, &team).expect("code");
+    let answer = new_x.accept_code(link.code()).expect("answer");
+    let requests = f.account_a.share_requests(&link).expect("requests");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].words, answer.words);
+    let (proof, epoch) = f
+        .owner_a
+        .proof(f.account_a.share_action(&link, &requests[0]));
+    f.account_a
+        .confirm_share(&link, &requests[0], proof, &epoch)
+        .expect("A shares again");
+    f.account_a.refresh_shares().expect("A");
+    let policy = signer_policy(f.account_a.state()).for_team(&team);
+    assert!(policy.accepts(&key_of(&new_x)));
+    assert!(!policy.accepts(&old_key));
+    assert!(
+        f.account_a
+            .state()
+            .peers
+            .iter()
+            .any(|pin| pin.account_id == x_id && !pin.suspended)
+    );
 }

@@ -292,6 +292,16 @@ impl Live {
         self.file().map(|file| file.account_id.clone())
     }
 
+    /// The signers of the vault stores after a refresh of Shared Vaults
+    /// (`super::share`): the sync takes them from the next hand-over on, and the account
+    /// file is read again.
+    pub(crate) fn take_signers(&mut self, signers: crate::sync::SignerPolicy) {
+        if let Some(snapshot) = self.snapshot.as_mut() {
+            snapshot.signers = signers;
+        }
+        self.file = OnceCell::new();
+    }
+
     /// The Connect origin of the account file of this device, also while the session is
     /// not open: a link for that origin needs the account ([`Self::sync_account`]).
     pub(crate) fn account_origin(&self) -> Option<String> {
@@ -652,6 +662,11 @@ pub(crate) fn step(app: &mut DesktopApp, ctx: &egui::Context) {
     guarded(app, ctx);
     polls(app, ctx);
     keep_fresh(app, ctx);
+    // Shared Vaults: its worker, its owner checks, and the lists of the shared stores,
+    // also while Settings is closed (a head of a key not verified yet reads them again).
+    if app.ui.connect.live.session.is_open() {
+        super::share::step(app, ctx);
+    }
 }
 
 /// The session follows the vault session: it closes at a lock and at another vault
