@@ -6,6 +6,7 @@
       "route": "POST /v1/account",
       "part": "request",
       "body": {
+        "account_id": "acc_k7m2q4x3ca",
         "name": "Rafal",
         "device_name": "MacBook Pro",
         "platform": "mac",
