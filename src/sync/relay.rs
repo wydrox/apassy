@@ -173,6 +173,8 @@ pub(crate) fn sync_error(error: ApiError) -> SyncError {
             (400, _) => SyncError::Relay(RelayRefusal::InvalidRequest),
             (404, _) => SyncError::Relay(RelayRefusal::NotFound),
             (409, _) => SyncError::Relay(RelayRefusal::Conflict),
+            (410, "free_connect_ended") => SyncError::Relay(RelayRefusal::FreeEnded),
+            (410, "hosted_retired") => SyncError::Relay(RelayRefusal::HostedRetired),
             (429, _) => SyncError::Relay(RelayRefusal::RateLimited),
             (503, _) => SyncError::Relay(RelayRefusal::Busy),
             _ => SyncError::Relay(RelayRefusal::Error),

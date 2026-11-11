@@ -5,8 +5,14 @@
 //! relay sent. Like Stripe, a POST with an `Idempotency-Key` seen before gets the first
 //! answer again.
 //!
+//! It also lists a customer's subscriptions (`GET /v1/subscriptions?customer=…`) and reads
+//! an item (`GET /v1/subscription_items/{id}`). Like Stripe, it refuses a Checkout Session
+//! that collects tax ids for an existing customer without `customer_update[name]=auto`.
+//!
 //! Hooks: `fail_next(status, n)` answers the next `n` calls with that status;
-//! `fail_path(prefix, status, n)` does it for one path only; `delay_next(prefix, ms)`
+//! `fail_path(prefix, status, n)` does it for one path only; `fail_after(prefix, status,
+//! n)` applies the next `n` calls of a path and then answers that status (a lost answer);
+//! `delay_next(prefix, ms)`
 //! holds the next call of a path; `set_prices` replaces the price list;
 //! `put_subscription` stores the object `GET /v1/subscriptions/{id}` answers;
 //! `set_session_status` changes a session; `set_checkout_origin` makes sessions on another
@@ -60,6 +66,7 @@ struct State {
     prices: Vec<Value>,
     failures: Vec<u16>,
     path_failures: Vec<(String, u16)>,
+    after_failures: Vec<(String, u16)>,
     delays: Vec<(String, u64)>,
     replays: HashMap<String, (u16, String)>,
     /// Checkout Sessions by id: (status, url, expires_at).
@@ -67,6 +74,10 @@ struct State {
     subscriptions: HashMap<String, Value>,
     checkout_origin: Option<String>,
     date: Option<u64>,
+    /// A `Date` header Connect cannot read (an answer without Stripe's time).
+    bad_date: bool,
+    /// `expires_at` of new sessions; `SESSION_EXPIRES_AT` without one.
+    session_expires_at: Option<u64>,
 }
 
 pub struct FakeStripe {
@@ -208,6 +219,16 @@ impl FakeStripe {
             .extend(std::iter::repeat_n((prefix.to_owned(), status), n));
     }
 
+    /// The next `n` calls whose path starts with `prefix` take effect, and then answer
+    /// `status` (Stripe did it; the answer was lost).
+    pub fn fail_after(&self, prefix: &str, status: u16, n: usize) {
+        self.state
+            .lock()
+            .unwrap()
+            .after_failures
+            .extend(std::iter::repeat_n((prefix.to_owned(), status), n));
+    }
+
     /// The next call whose path starts with `prefix` waits `ms` before its answer.
     pub fn delay_next(&self, prefix: &str, ms: u64) {
         self.state
@@ -247,6 +268,17 @@ impl FakeStripe {
     /// New Checkout Sessions get URLs on this origin (with the trailing `/`).
     pub fn set_checkout_origin(&self, origin: &str) {
         self.state.lock().unwrap().checkout_origin = Some(origin.to_owned());
+    }
+
+    /// Every answer carries a `Date` header that is not an HTTP date (`true`), as if
+    /// Stripe's time were missing.
+    pub fn set_bad_date(&self, bad: bool) {
+        self.state.lock().unwrap().bad_date = bad;
+    }
+
+    /// New Checkout Sessions expire at this time (a test on the real clock).
+    pub fn set_session_expires_at(&self, time: u64) {
+        self.state.lock().unwrap().session_expires_at = Some(time);
     }
 
     /// Every answer carries `Date` of this time (Stripe's clock); `None` is the real clock.
@@ -334,12 +366,17 @@ fn handle(mut request: tiny_http::Request, state: &Mutex<State>, counter: &Atomi
         std::thread::sleep(Duration::from_millis(ms));
     }
     let (status, answer) = answer(&call, state, counter);
-    let date = state.lock().unwrap().date;
+    let (date, bad_date) = {
+        let guard = state.lock().unwrap();
+        (guard.date, guard.bad_date)
+    };
     state.lock().unwrap().calls.push(call);
     let mut response = tiny_http::Response::from_string(answer)
         .with_status_code(status)
         .with_header(tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap());
-    if let Some(time) = date {
+    if bad_date {
+        response = response.with_header(tiny_http::Header::from_bytes("Date", "unknown").unwrap());
+    } else if let Some(time) = date {
         response =
             response.with_header(tiny_http::Header::from_bytes("Date", http_date(time)).unwrap());
     }
@@ -367,11 +404,31 @@ fn answer(call: &Call, state: &Mutex<State>, counter: &AtomicU32) -> (u16, Strin
         .header("Idempotency-Key")
         .filter(|_| call.method == "POST")
         .map(|key| format!("{} {key}", call.path));
-    if let Some(key) = &replay_key
-        && let Some(previous) = guard.replays.get(key)
+    let replayed = replay_key
+        .as_ref()
+        .and_then(|key| guard.replays.get(key))
+        .cloned();
+    let result = match replayed {
+        Some(previous) => previous,
+        None => fresh_answer(call, &mut guard, counter, replay_key),
+    };
+    if let Some(index) = guard
+        .after_failures
+        .iter()
+        .position(|(prefix, _)| call.path.starts_with(prefix.as_str()))
     {
-        return previous.clone();
+        let status = guard.after_failures.remove(index).1;
+        return (status, error_body("api_error", "fake_failure"));
     }
+    result
+}
+
+fn fresh_answer(
+    call: &Call,
+    guard: &mut State,
+    counter: &AtomicU32,
+    replay_key: Option<String>,
+) -> (u16, String) {
     let n = counter.fetch_add(1, Ordering::Relaxed) + 1;
     let result = match (call.method.as_str(), call.path.as_str()) {
         ("GET", "/v1/prices") => {
@@ -406,6 +463,16 @@ fn answer(call: &Call, state: &Mutex<State>, counter: &AtomicU32) -> (u16, Strin
                 .to_string(),
             )
         }
+        ("POST", "/v1/checkout/sessions")
+            if call.field("tax_id_collection[enabled]") == Some("true")
+                && call.field("customer").is_some()
+                && call.field("customer_update[name]") != Some("auto") =>
+        {
+            (
+                400,
+                error_body("invalid_request_error", "parameter_missing"),
+            )
+        }
         ("POST", "/v1/checkout/sessions") => {
             let id = format!("cs_test_SynthSession{n:04}");
             let origin = guard
@@ -413,15 +480,15 @@ fn answer(call: &Call, state: &Mutex<State>, counter: &AtomicU32) -> (u16, Strin
                 .clone()
                 .unwrap_or_else(|| "https://checkout.stripe.com/".to_owned());
             let url = format!("{origin}c/pay/{id}");
-            guard.sessions.insert(
-                id.clone(),
-                ("open".to_owned(), url.clone(), SESSION_EXPIRES_AT),
-            );
+            let expires_at = guard.session_expires_at.unwrap_or(SESSION_EXPIRES_AT);
+            guard
+                .sessions
+                .insert(id.clone(), ("open".to_owned(), url.clone(), expires_at));
             (
                 200,
                 json!({
                     "id": id, "object": "checkout.session", "status": "open",
-                    "url": url, "expires_at": SESSION_EXPIRES_AT
+                    "url": url, "expires_at": expires_at
                 })
                 .to_string(),
             )
@@ -456,6 +523,40 @@ fn answer(call: &Call, state: &Mutex<State>, counter: &AtomicU32) -> (u16, Strin
                            "url": if status == "open" { json!(url) } else { Value::Null },
                            "expires_at": expires_at})
                     .to_string(),
+                ),
+                None => (404, error_body("invalid_request_error", "resource_missing")),
+            }
+        }
+        ("GET", "/v1/subscriptions") => {
+            let customer = call
+                .query
+                .iter()
+                .find(|(k, _)| k == "customer")
+                .map(|(_, v)| v.clone());
+            let mut data: Vec<Value> = guard
+                .subscriptions
+                .values()
+                .filter(|object| object["customer"].as_str() == customer.as_deref())
+                .cloned()
+                .collect();
+            data.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+            (
+                200,
+                json!({"object": "list", "data": data, "has_more": false}).to_string(),
+            )
+        }
+        ("GET", path) if path.starts_with("/v1/subscription_items/") => {
+            let item = &path["/v1/subscription_items/".len()..];
+            let quantity = guard.subscriptions.values().find_map(|object| {
+                (object.pointer("/items/data/0/id").and_then(Value::as_str) == Some(item))
+                    .then(|| object.pointer("/items/data/0/quantity").cloned())
+                    .flatten()
+            });
+            match quantity {
+                Some(quantity) => (
+                    200,
+                    json!({"id": item, "object": "subscription_item", "quantity": quantity})
+                        .to_string(),
                 ),
                 None => (404, error_body("invalid_request_error", "resource_missing")),
             }

@@ -1754,8 +1754,12 @@ version.
 
 ```sh
 docker compose stop relay
-docker compose run --rm --no-deps -T relay downgrade-directory-1005
+docker compose run --rm --no-deps -T relay downgrade-directory-1005 --delete-vault-stores
 ```
+
+Without `--delete-vault-stores` a `relay.db` that holds vault stores is refused (exit 1,
+nothing changed): those stores may be paid ones of Apassy Connect, so the operator says so
+explicitly. `downgrade-directory-1004` and `-1003` take the same flag.
 
 It takes `relay.lock`. In one transaction it deletes the vault store rows (kind
 `account`) and their device map and sets the version to 1005; then it deletes the files
@@ -1831,7 +1835,10 @@ Settings › Billing › Customer portal, in the sandbox and the live account:
   intervals); **quantity changes off** (people and seats change through Connect, SPEC 34.4).
   A switch from Family to Personal ends the family's plan for its members (read-only, then
   suspended; their stores are never deleted for it); the owner pays Personal from the
-  switch. A switch back to Family restores the family.
+  switch. A switch back to Family restores the family. Stripe's documentation does not
+  say whether a switch keeps the quantity: if Personal arrives with the family's people,
+  the relay records the problem `personal_quantity` (27.8) and its next pass sets the
+  quantity to 1 at Stripe (27.7). Check the switch in the sandbox and the invoice it makes.
 - Settings › Billing › Subscriptions and emails › Manage failed payments: after the last
   retry, **cancel the subscription** or **mark it as unpaid**. A subscription that Stripe
   leaves `past_due` keeps its stores: the relay deletes stores only when Stripe also shows
@@ -1900,39 +1907,56 @@ than `https://api.stripe.com`.
 - **At start:** it reads the six prices from Stripe on a thread of its own (a failure is
   logged as `the Stripe prices could not be read at start` and the next `GET /v1/plans`
   asks again); the start never waits for Stripe.
-- **Each hour** (the maintenance pass): event ids older than 30 days go. A live
-  subscription whose period ended more than two days ago without an event is read from
-  Stripe (once a day at most) and Stripe's state applies. Only with
+- **Each hour** (the billing pass, on its own thread `relay-billing`, so a slow Stripe
+  never holds the teams' pass): event ids older than 30 days go. A live subscription whose
+  period ended more than two days ago without an event is read from Stripe (once a day at
+  most) and Stripe's state applies. A live Family or Team subscription without a group is
+  bound again, or recorded as `no_group` (27.8). A live Connect Personal subscription with
+  a quantity above 1 gets quantity 1 at Stripe. Only with
   `APASSY_CONNECT_AUTO_RAISE_SEATS=1`: a group with more active members than its quantity at
-  Stripe gets the quantity raised to them, with prorations. By default (`0`) the pass changes
-  no quantity: members beyond the paid people or seats stay read-only until the owner raises
-  the seats in the app (`POST /v1/account/group/seats`), so no charge happens without an
-  action of the owner. Each ended plan at its
+  Stripe gets the quantity raised to them, with prorations; a raise Stripe refuses is
+  recorded as `raise_refused` and not asked again until the operator resolves it. By
+  default (`0`) the pass raises no quantity: members beyond the paid people or seats stay
+  read-only until the owner raises the seats in the app (`POST /v1/account/group/seats`),
+  so no higher charge happens without an action of the owner. Each ended plan at its
   deletion day (end + `APASSY_CONNECT_DELETE_DAYS`) is read from Stripe first: only when
   Stripe shows it ended, and the relay's clock is within a day of Stripe's, it loses its
   vault stores and tunnel nodes, with those of its group's active members whose plan is
   over too (never for a plan that is not the group's own, and never while another
-  subscription of the group gives a plan), one audit row `plan_stores_deleted` (actor
-  `billing`, counts only, `failed` for accounts that could not be deleted) and an I-4
-  `forget` for each account. Stripe out of reach, or one failed account, is logged and
-  tried again at the next pass; the pass goes on with the other plans. The accounts and
-  their devices stay. The rows are in the relay audit of `relay.db` (`audit` table); a
-  failed pass logs `the billing maintenance pass failed`.
+  subscription of the group gives a plan). Before anything goes, the relay asks Stripe for
+  each such account: an open problem (27.8), a checkout session that Stripe shows open or
+  complete, or another subscription of its customer that is not over keeps its data, and
+  while the buying account is kept nothing of the plan goes; a Stripe error keeps it too.
+  One audit row `plan_stores_deleted` (actor `billing`, counts only, `failed` for accounts
+  that could not be deleted, `waiting` for accounts kept) and an I-4 `forget` for each
+  account whose data went are written when something went, an account failed, or the plan
+  is done. A plan that waits or failed is read from Stripe again a day later; the pass goes
+  on with the other plans. The accounts and their devices stay. The rows are in the relay
+  audit of `relay.db` (`audit` table); a failed pass logs `the billing maintenance pass
+  failed`.
 - **After a gap:** when a pass runs more than two days after the last one (the relay was
   down, or the clock jumped), no store is deleted until the operator checks the clock
   (`timedatectl`) and runs `apassy-relay admin billing --resume-deletions` (audit row
   `billing_deletions_resumed`). `apassy-relay admin readiness` shows
   `billing.deletions_held_since` meanwhile.
-- **On `DELETE /v1/account`:** the subscription is canceled at Stripe first; if Stripe
-  fails, nothing is deleted and the app can ask again.
+- **On `DELETE /v1/account`:** every subscription of the account that is not final
+  (`unpaid` and `paused` included, and those Stripe lists for its customer) is canceled at
+  Stripe first, and an open checkout session ends; if Stripe fails, nothing is deleted and
+  the app can ask again.
+- **On a join:** an account that joins a family or team has its open checkout session
+  ended at Stripe.
 
 ### 27.8 Problems for the operator
 
 When Stripe reports a subscription that charges, or a completed checkout, that the relay
 cannot apply for a known account or customer (an account bound to another customer, an
-account that was deleted, a price that is not Connect's), the relay answers Stripe 200 and
-records it: one row in `billing_problem`, the audit row `billing_problem_recorded` (ids
-only), and the count `billing.open_problems` in `apassy-relay admin readiness`.
+account that was deleted, a price that is not Connect's), or a Family or Team subscription
+that has no group (`no_group`: its buyer is in another group), a Connect Personal
+subscription with a quantity above 1 (`personal_quantity`), or a raise of seats that
+Stripe refused (`raise_refused`), the relay answers Stripe 200 and records it: one row in
+`billing_problem`, the audit row `billing_problem_recorded` (ids only), and the count
+`billing.open_problems` in `apassy-relay admin readiness`. While a problem names an
+account, the relay deletes no data of that account for an ended plan.
 
 ```sh
 apassy-relay admin billing                    # the open problems and the deletion clock

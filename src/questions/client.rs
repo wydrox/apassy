@@ -72,6 +72,17 @@ impl QuestionsError {
         }
     }
 
+    /// The hosted relay ended this path for good (`410 free_connect_ended` or `410
+    /// hosted_retired`, plan s7 unit M5): the caller stops calling it.
+    pub fn path_ended(&self) -> Option<crate::relay::membership::PathEnded> {
+        match self {
+            Self::Relay { status, code } => {
+                crate::relay::membership::PathEnded::of_answer(*status, code)
+            }
+            _ => None,
+        }
+    }
+
     fn from_call(error: RelayCallError) -> Self {
         match error {
             RelayCallError::Unreachable => Self::Unreachable,

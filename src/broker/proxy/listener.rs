@@ -194,9 +194,15 @@ mod tests {
     /// True when the proxy closes `stream` without an answer; false on an answer
     /// or when nothing happens for 15 s.
     fn closed_without_answer(stream: &mut TcpStream) -> bool {
-        stream
-            .set_read_timeout(Some(Duration::from_secs(15)))
-            .expect("timeout");
+        // macOS refuses a socket option (`EINVAL`) on a connection that the proxy has
+        // already closed: the read below then returns at once.
+        if let Err(err) = stream.set_read_timeout(Some(Duration::from_secs(15))) {
+            assert_eq!(
+                err.kind(),
+                std::io::ErrorKind::InvalidInput,
+                "timeout: {err}"
+            );
+        }
         let mut buf = [0u8; 64];
         match stream.read(&mut buf) {
             Ok(read) => read == 0,

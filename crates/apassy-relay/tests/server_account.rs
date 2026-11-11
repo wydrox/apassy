@@ -1946,9 +1946,9 @@ fn open_plain_refuses_a_master_key_and_connect_mode_refuses_the_key() {
         let Connect { relay, .. } = c;
         relay.stop_keep()
     };
-    assert!(Directory::downgrade_to_1005(&config).is_err());
-    assert!(Directory::downgrade_to_1004(&config).is_err());
-    assert!(Directory::downgrade_to_1003(&config).is_err());
+    assert!(Directory::downgrade_to_1005(&config, true).is_err());
+    assert!(Directory::downgrade_to_1004(&config, true).is_err());
+    assert!(Directory::downgrade_to_1003(&config, true).is_err());
     assert!(config.team_path(&team).exists());
     let conn = rusqlite::Connection::open(config.directory_path()).unwrap();
     let version: i64 = conn
@@ -1977,13 +1977,28 @@ fn the_directory_moves_to_the_accounts_step_and_back_with_the_rollback_note() {
         let Connect { relay, .. } = c;
         relay.stop_keep()
     };
+    // Without the operator's word the vault stores stay, and nothing changes.
+    for refused in [
+        Directory::downgrade_to_1005(&config, false).map(drop),
+        Directory::downgrade_to_1004(&config, false).map(drop),
+        Directory::downgrade_to_1003(&config, false).map(drop),
+    ] {
+        let error = refused.unwrap_err();
+        assert_eq!(error.code, apassy_relay::error::codes::CONFLICT);
+        assert!(
+            error.message.contains("--delete-vault-stores"),
+            "{}",
+            error.message
+        );
+    }
+    assert!(config.team_path(&team).exists());
     assert_eq!(
-        Directory::downgrade_to_1005(&config).unwrap(),
+        Directory::downgrade_to_1005(&config, true).unwrap(),
         (1006, 1005, 1)
     );
     assert!(!config.team_path(&team).exists());
     assert_eq!(
-        Directory::downgrade_to_1005(&config).unwrap(),
+        Directory::downgrade_to_1005(&config, false).unwrap(),
         (1005, 1005, 0)
     );
     let directory = Directory::open(&config).unwrap();
