@@ -15,7 +15,8 @@ mod fake_stripe;
 #[path = "common/relay.rs"]
 mod relay;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -27,8 +28,9 @@ use apassy_relay::hostkeys::encode_b64;
 use apassy_relay::ids::TeamId;
 use apassy_relay::secret::SecretString;
 use apassy_relay::server::cutover::{self, Interrupt, Options, Report};
-use apassy_relay::server::directory::Directory;
+use apassy_relay::server::directory::{self, Directory};
 use apassy_relay::server::operator::Command;
+use apassy_relay::server::store::Store;
 use apassy_relay::server::{Relay, rollback, sync};
 use connect::{Connect, Dev, Pusher, send};
 use fake_stripe::FakeStripe;
@@ -167,6 +169,36 @@ fn names(dir: &Path) -> Vec<String> {
     fingerprint(dir).into_keys().collect()
 }
 
+/// Every file under `dir` but `relay.lock`, by relative name, with its SHA-256 only: the
+/// bytes, whatever a read-write open did to the times.
+fn contents(dir: &Path) -> BTreeMap<String, String> {
+    fingerprint(dir)
+        .into_iter()
+        .filter(|(name, _)| name != "relay.lock")
+        .map(|(name, (sha, _))| (name, sha))
+        .collect()
+}
+
+/// True when `needle` occurs in `haystack`.
+fn holds(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
+/// The data directory holds no team key in plain bytes, in any file.
+fn assert_no_plain_key(dir: &Path, keys: &[String], at: &str) {
+    for name in names(dir) {
+        let bytes = std::fs::read(dir.join(&name)).unwrap();
+        for key in keys {
+            assert!(
+                !holds(&bytes, key.as_bytes()),
+                "{at}: {name} holds a team file key in plain"
+            );
+        }
+    }
+}
+
 fn copy_tree(from: &Path, to: &Path) {
     std::fs::create_dir_all(to).unwrap();
     for entry in std::fs::read_dir(from).unwrap().flatten() {
@@ -201,6 +233,20 @@ fn connect_mode(config: &RelayConfig) -> RelayConfig {
     config.team_vaults = false;
     config.free_connect = false;
     config.push = None;
+    config
+}
+
+/// `connect_mode` on any free port, for a start in this process.
+fn connect_on_any_port(config: &RelayConfig) -> RelayConfig {
+    let mut config = connect_mode(config);
+    config.listen = "127.0.0.1:0".parse().unwrap();
+    config
+}
+
+/// The configuration before the cutover on any free port.
+fn relay_on_any_port(config: &RelayConfig) -> RelayConfig {
+    let mut config = config.clone();
+    config.listen = "127.0.0.1:0".parse().unwrap();
     config
 }
 
@@ -356,27 +402,73 @@ impl Fixture {
         &self.config.data_dir
     }
 
-    fn run(&self, confirm: bool) -> apassy_relay::error::RelayResult<Report> {
-        cutover::run(
-            &self.config,
-            &Options {
-                confirm,
-                ..Options::default()
-            },
-            now(),
-        )
+    /// The dry run as it is now.
+    fn dry(&self) -> apassy_relay::error::RelayResult<Report> {
+        cutover::run(&self.config, &Options::default(), now())
     }
 
+    /// The `plan_sha256` of the dry run as it is now.
+    fn plan(&self) -> String {
+        self.dry().unwrap().plan_sha256
+    }
+
+    /// A dry run, or a confirmed run with the plan of a dry run just before it.
+    fn run(&self, confirm: bool) -> apassy_relay::error::RelayResult<Report> {
+        if !confirm {
+            return self.dry();
+        }
+        let plan = self.dry()?.plan_sha256;
+        self.run_with(Options {
+            confirm: Some(plan),
+            ..Options::default()
+        })
+    }
+
+    fn run_with(&self, options: Options) -> apassy_relay::error::RelayResult<Report> {
+        cutover::run(&self.config, &options, now())
+    }
+
+    /// A confirmed run stopped at `at` as a kill would stop it.
     fn run_until(&self, at: Interrupt) -> apassy_relay::error::RelayResult<Report> {
-        cutover::run(
-            &self.config,
-            &Options {
-                confirm: true,
-                interrupt: Some(at),
-                ..Options::default()
-            },
-            now(),
-        )
+        self.run_with(Options {
+            confirm: Some(self.plan()),
+            interrupt: Some(at),
+            ..Options::default()
+        })
+    }
+
+    /// A confirmed run that fails at `at` with an ordinary error.
+    fn fail_at(&self, at: Interrupt) -> apassy_relay::error::RelayResult<Report> {
+        self.run_with(Options {
+            confirm: Some(self.plan()),
+            fail: Some(at),
+            ..Options::default()
+        })
+    }
+
+    /// The file key of every team, from the keyed `relay.db`.
+    fn file_keys(&self) -> Vec<String> {
+        let directory =
+            Store::open_read_only(&self.config.directory_path(), &self.config.master_key).unwrap();
+        let keys: Vec<String> = directory
+            .with(directory::read_teams)
+            .unwrap()
+            .iter()
+            .map(|row| row.file_key.expose().to_string())
+            .collect();
+        assert_eq!(keys.len(), 5);
+        assert!(keys.iter().all(|key| key.len() >= 32));
+        keys
+    }
+
+    /// The folder of the fixture's stopped backup.
+    fn backup(&self) -> PathBuf {
+        std::fs::read_dir(&self.config.backup_dir)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .next()
+            .unwrap()
     }
 
     /// A relay in `connect` mode on the data directory, with the fake Stripe of the
@@ -724,6 +816,33 @@ fn health_headers(base: &str) -> (u16, String, Vec<(String, String)>) {
     )
 }
 
+/// The status of a `GET` written by hand on a TCP stream, with or without the headers of a
+/// WebSocket upgrade.
+fn raw_get(base: &str, path: &str, upgrade: bool) -> u16 {
+    let addr = base.strip_prefix("http://").unwrap();
+    let mut stream = std::net::TcpStream::connect(addr).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let extra = if upgrade {
+        "Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+    } else {
+        ""
+    };
+    let request = format!(
+        "GET {path} HTTP/1.1\r\nHost: relay.example.test\r\nX-Apassy-Edge: {EDGE_SECRET}\r\n{extra}\r\n"
+    );
+    stream.write_all(request.as_bytes()).unwrap();
+    // The status line comes first: one read is enough.
+    let mut answer = [0u8; 2048];
+    let read = stream.read(&mut answer).unwrap();
+    let text = String::from_utf8_lossy(&answer[..read]);
+    text.split_whitespace()
+        .nth(1)
+        .and_then(|status| status.parse().ok())
+        .unwrap_or_else(|| panic!("no status: {text}"))
+}
+
 fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
     headers
         .iter()
@@ -779,6 +898,15 @@ fn connect_mode_answers_every_retired_route_with_410_before_the_body() {
             (410, "hosted_retired"),
             "{method} {path}"
         );
+    }
+    // An `Upgrade` on a retired route is 400 before the 410: only the tunnel upgrades,
+    // on every route and in both modes (section 35.6).
+    for (path, upgrade, status) in [
+        ("/v1/questions", true, 400),
+        ("/v1/questions", false, 410),
+        ("/mcp", true, 400),
+    ] {
+        assert_eq!(raw_get(&base, path, upgrade), status, "{path} {upgrade}");
     }
     // Served: health with the mode, the well-known document, accounts, billing, the
     // tunnel, and relay sync of a vault store (401 without a token, 400 for a bad body).
@@ -1109,7 +1237,7 @@ fn the_cutover_refuses_while_the_relay_runs() {
         Some(f.operator.clone()),
         &f.owner_token,
     );
-    for confirm in [false, true] {
+    for confirm in [None, Some("0".repeat(64))] {
         let error = cutover::run(
             &relay.config,
             &Options {
@@ -1162,9 +1290,9 @@ fn the_cutover_needs_a_stopped_backup_of_the_data_directory_as_it_is() {
     let named = cutover::run(
         &config,
         &Options {
-            confirm: true,
+            confirm: Some("0".repeat(64)),
             backup: Some(online),
-            interrupt: None,
+            ..Options::default()
         },
         now(),
     )
@@ -1180,7 +1308,7 @@ fn the_cutover_needs_a_stopped_backup_of_the_data_directory_as_it_is() {
     let error = cutover::run(
         &config,
         &Options {
-            confirm: true,
+            confirm: Some("0".repeat(64)),
             ..Options::default()
         },
         now(),
@@ -1212,7 +1340,7 @@ fn the_cutover_needs_a_stopped_backup_of_the_data_directory_as_it_is() {
     let error = cutover::run(
         &config,
         &Options {
-            confirm: true,
+            confirm: Some("0".repeat(64)),
             ..Options::default()
         },
         now(),
@@ -1242,6 +1370,8 @@ fn the_cutover_keeps_the_account_stores_as_plain_files_that_connect_mode_opens()
         .collect();
     let report = f.run(true).unwrap();
     assert_eq!(report.state, "done");
+    assert!(report.changed);
+    assert!(cutover::summary(&report).contains("the cutover is done"));
     assert_eq!(report.kept.len(), 2);
     assert_eq!(report.deleted.len(), 3);
     assert_eq!(report.rows_deleted["team"], 3);
@@ -1336,6 +1466,9 @@ fn the_cutover_keeps_the_account_stores_as_plain_files_that_connect_mode_opens()
         (again.state.as_str(), again.finished_at),
         ("done", record.finished_at)
     );
+    assert!(!again.changed);
+    let line = cutover::summary(&again);
+    assert!(line.contains("nothing changed"), "{line}");
     assert_eq!(fingerprint(f.data()), before);
     // `connect` mode opens it: the account signs in, the store pulls and pushes.
     let operator = f.operator.clone();
@@ -1373,24 +1506,77 @@ impl CloneKey for DeviceKey {
 }
 
 #[test]
-fn a_cutover_stopped_at_any_point_is_finished_by_a_second_run() {
+fn a_cutover_stopped_before_its_commit_point_is_finished_by_a_second_run() {
     for at in [
         Interrupt::StagedOneStore,
+        Interrupt::ExportedDirectory,
         Interrupt::Staged,
+        Interrupt::KeptKeyed,
+    ] {
+        stopped_and_finished(at);
+    }
+}
+
+#[test]
+fn a_cutover_stopped_after_its_commit_point_is_finished_by_a_second_run() {
+    for at in [
         Interrupt::Committed,
         Interrupt::MovedOneStore,
         Interrupt::DeletedOneTeam,
         Interrupt::Recorded,
     ] {
+        stopped_and_finished(at);
+    }
+}
+
+/// A cutover stopped at `at` as a kill stops it: no team key on the disk in plain, no start
+/// in either mode, and a second run that finishes it to the same result.
+fn stopped_and_finished(at: Interrupt) {
+    {
         let f = fixture();
+        let keys = f.file_keys();
         let error = f.run_until(at).unwrap_err();
         assert!(
             error.message.contains("stopped for a test"),
             "{at:?}: {}",
             error.message
         );
-        let committed = !matches!(at, Interrupt::StagedOneStore | Interrupt::Staged);
+        // No team key is on the disk in plain at any point: the edits and the vacuum of
+        // relay.db are made on a keyed copy, and only the result is exported.
+        assert_no_plain_key(f.data(), &keys, &format!("{at:?}"));
+        let committed = !matches!(
+            at,
+            Interrupt::StagedOneStore
+                | Interrupt::ExportedDirectory
+                | Interrupt::Staged
+                | Interrupt::KeptKeyed
+        );
         assert_eq!(is_plain(&f.data().join("relay.db")), committed, "{at:?}");
+        // Neither mode starts on a cutover that is not finished, and the refused start
+        // changes nothing (no sweep, no migration, no write).
+        let before = contents(f.data());
+        let refused = match Relay::start(connect_on_any_port(&f.config)) {
+            Ok(running) => {
+                running.stop();
+                panic!("{at:?}: connect mode started on a cutover that is not finished");
+            }
+            Err(error) => error,
+        };
+        assert!(
+            refused.message.contains("connect-cutover"),
+            "{at:?}: {}",
+            refused.message
+        );
+        assert!(
+            !refused.message.contains("delete"),
+            "{at:?}: {}",
+            refused.message
+        );
+        assert_eq!(
+            contents(f.data()),
+            before,
+            "{at:?}: the refused start wrote"
+        );
         if committed {
             // The keys are still there until the end, and the record names the plan.
             assert!(
@@ -1401,11 +1587,37 @@ fn a_cutover_stopped_at_any_point_is_finished_by_a_second_run() {
                 cutover::keyed_row_exists(&f.config, &f.store).unwrap(),
                 "{at:?}"
             );
+            // The relay mode refuses the plain relay.db with a message that names the way.
+            let refused = match Relay::start(relay_on_any_port(&f.config)) {
+                Ok(running) => {
+                    running.stop();
+                    panic!("{at:?}: relay mode started on a committed cutover");
+                }
+                Err(error) => error,
+            };
+            assert!(
+                refused.message.contains("connect-cutover"),
+                "{at:?}: {}",
+                refused.message
+            );
+            // No backup of a committed cutover: the keyed copy is not part of it.
+            let error = cutover::stopped_backup(&f.config, now() + 11).unwrap_err();
+            assert!(
+                error.message.contains("connect-cutover"),
+                "{}",
+                error.message
+            );
             // A dry run of a committed cutover changes nothing and says what is left.
-            let before = fingerprint(f.data());
             let pending = f.run(false).unwrap();
             assert!(pending.pending.is_some(), "{at:?}");
-            assert_eq!(fingerprint(f.data()), before, "{at:?}");
+            assert_eq!(pending.state, "committing", "{at:?}");
+            assert!(!pending.changed, "{at:?}");
+            let line = cutover::summary(&pending);
+            assert!(
+                line.contains("committed and not finished"),
+                "{at:?}: {line}"
+            );
+            assert_eq!(contents(f.data()), before, "{at:?}");
         } else {
             // Before the commit point nothing of the relay changed: a backup check of the
             // data directory as it is still passes (the side files are not data).
@@ -1422,10 +1634,32 @@ fn a_cutover_stopped_at_any_point_is_finished_by_a_second_run() {
         assert!(f.config.sync_dir(&f.store).join("2.bin").exists(), "{at:?}");
         let report = f.run(true).unwrap();
         assert_eq!(report.state, "done", "{at:?}");
+        assert!(report.changed, "{at:?}");
         assert!(
             !f.data().join(cutover::KEYED_DIRECTORY_FILE).exists(),
             "{at:?}"
         );
+        // The record lists every file that went, also those of an earlier run.
+        let after: BTreeSet<&str> = report
+            .files_after
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        let gone: Vec<String> = report
+            .files_before
+            .iter()
+            .filter(|entry| !after.contains(entry.name.as_str()))
+            .map(|entry| entry.name.clone())
+            .collect();
+        assert_eq!(report.files_deleted, gone, "{at:?}");
+        for team in [&f.operator, &f.free, &f.suspended] {
+            assert!(
+                report.files_deleted.contains(&format!("teams/{team}.db")),
+                "{at:?}: {team}"
+            );
+        }
         let mut expected = vec![
             "relay.db".to_string(),
             cutover::CUTOVER_FILE.to_string(),
@@ -1443,6 +1677,244 @@ fn a_cutover_stopped_at_any_point_is_finished_by_a_second_run() {
         let (c, mut account, store, device, mut pusher, snapshots) = f.start_connect();
         check_store_works(&c, &mut account, &store, device, &mut pusher, &snapshots);
     }
+}
+
+#[test]
+fn a_cutover_that_fails_before_its_commit_point_leaves_no_side_file() {
+    for at in [
+        Interrupt::StagedOneStore,
+        Interrupt::ExportedDirectory,
+        Interrupt::Staged,
+        Interrupt::KeptKeyed,
+    ] {
+        let f = fixture();
+        let before = contents(f.data());
+        let error = f.fail_at(at).unwrap_err();
+        assert!(
+            error.message.contains("failed for a test"),
+            "{at:?}: {}",
+            error.message
+        );
+        // The error removed every side file: the data directory is the bytes it was, with
+        // no plain copy, no keyed copy, and no record.
+        assert_eq!(contents(f.data()), before, "{at:?}");
+        assert!(!is_plain(&f.data().join("relay.db")), "{at:?}");
+        // The backup still matches: a new run can start at once.
+        assert_eq!(f.run(false).unwrap().state, "dry_run", "{at:?}");
+    }
+}
+
+#[test]
+fn a_stale_keyed_copy_beside_a_keyed_relay_db_blocks_neither_backup_nor_cutover() {
+    let f = fixture();
+    // The process died between the two renames: relay.db is keyed and whole, and
+    // relay.db.keyed is a copy beside it.
+    f.run_until(Interrupt::KeptKeyed).unwrap_err();
+    assert!(f.data().join(cutover::KEYED_DIRECTORY_FILE).exists());
+    assert!(!is_plain(&f.data().join("relay.db")));
+    // The relay ran again on it, as before the cutover, and wrote.
+    let operator = f.operator.clone();
+    let owner_token = f.owner_token.clone();
+    let config = f.config.clone();
+    let relay = start_existing(config, f.dir, Some(operator.clone()), &owner_token);
+    relay.ok("GET", "/v1/me", &owner_token, None);
+    relay.operator(Command::Backup).unwrap();
+    let (config, dir) = relay.stop_keep();
+    // The backup of the stopped relay works, without the stale copy in it.
+    let manifest = cutover::stopped_backup(&config, now() + 7).unwrap();
+    assert!(
+        manifest["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["name"] != cutover::KEYED_DIRECTORY_FILE)
+    );
+    // The cutover recovers by itself: the stale copy goes, the run finishes.
+    let plan = cutover::run(&config, &Options::default(), now())
+        .unwrap()
+        .plan_sha256;
+    let report = cutover::run(
+        &config,
+        &Options {
+            confirm: Some(plan),
+            ..Options::default()
+        },
+        now(),
+    )
+    .unwrap();
+    assert_eq!(report.state, "done");
+    assert!(!config.data_dir.join(cutover::KEYED_DIRECTORY_FILE).exists());
+    assert!(is_plain(&config.directory_path()));
+    drop(dir);
+}
+
+#[test]
+fn a_resumed_cutover_checks_the_backup_again_before_it_deletes() {
+    let f = fixture();
+    let plan = f.plan();
+    f.run_until(Interrupt::Committed).unwrap_err();
+    let backup = f.backup();
+    let before = contents(f.data());
+    let resume = || {
+        f.run_with(Options {
+            confirm: Some(plan.clone()),
+            ..Options::default()
+        })
+    };
+    // The backup is gone: nothing is deleted.
+    let away = backup.with_file_name("moved-away");
+    std::fs::rename(&backup, &away).unwrap();
+    let error = resume().unwrap_err();
+    assert!(error.message.contains("backup"), "{}", error.message);
+    assert_eq!(contents(f.data()), before);
+    std::fs::rename(&away, &backup).unwrap();
+    // A file of the backup changed: nothing is deleted either.
+    let damaged = backup.join(format!("teams/{}.db", f.operator));
+    let kept = std::fs::read(&damaged).unwrap();
+    std::fs::write(&damaged, b"damaged").unwrap();
+    let error = resume().unwrap_err();
+    assert!(error.message.contains("backup"), "{}", error.message);
+    assert_eq!(contents(f.data()), before);
+    std::fs::write(&damaged, kept).unwrap();
+    // The backup as it was: the run finishes.
+    assert_eq!(resume().unwrap().state, "done");
+}
+
+#[test]
+fn the_keyed_copy_is_deleted_only_when_it_is_the_relay_db_of_the_inventory() {
+    let f = fixture();
+    let plan = f.plan();
+    f.run_until(Interrupt::Committed).unwrap_err();
+    let keyed = f.data().join(cutover::KEYED_DIRECTORY_FILE);
+    let mut bytes = std::fs::read(&keyed).unwrap();
+    bytes.extend_from_slice(&[0u8; 16]);
+    std::fs::write(&keyed, &bytes).unwrap();
+    let before = contents(f.data());
+    let error = f
+        .run_with(Options {
+            confirm: Some(plan),
+            ..Options::default()
+        })
+        .unwrap_err();
+    assert!(
+        error.message.contains(cutover::KEYED_DIRECTORY_FILE),
+        "{}",
+        error.message
+    );
+    assert!(keyed.exists());
+    assert_eq!(contents(f.data()), before);
+}
+
+#[test]
+fn the_confirmed_run_is_bound_to_the_plan_of_the_dry_run() {
+    let f = fixture();
+    let plan = f.plan();
+    assert_eq!(plan.len(), 64);
+    assert!(plan.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    // The same state gives the same plan.
+    assert_eq!(f.plan(), plan);
+    let before = contents(f.data());
+    let confirm = |plan: &str| {
+        f.run_with(Options {
+            confirm: Some(plan.to_string()),
+            ..Options::default()
+        })
+    };
+    for wrong in ["0".repeat(64), String::new(), plan[..32].to_string()] {
+        let error = confirm(&wrong).unwrap_err();
+        assert!(error.message.contains("plan"), "{}", error.message);
+        assert_eq!(contents(f.data()), before);
+    }
+    // A newer stopped backup is another plan: the old confirmation is refused.
+    cutover::stopped_backup(&f.config, now() + 9).unwrap();
+    let newer = f.plan();
+    assert_ne!(newer, plan);
+    let error = confirm(&plan).unwrap_err();
+    assert!(error.message.contains("plan"), "{}", error.message);
+    assert_eq!(contents(f.data()), before);
+    let report = confirm(&newer).unwrap();
+    assert_eq!((report.state.as_str(), report.plan_sha256), ("done", newer));
+}
+
+#[test]
+fn the_backup_and_the_cutover_cover_every_file_and_leave_no_keyed_copy_of_a_store() {
+    let f = fixture();
+    // Files of a migration that stopped: the cutover deletes them, so the backup has them.
+    for name in ["relay.db.migrating", "relay.db.migrating-journal"] {
+        std::fs::write(f.data().join(name), format!("left by a migration: {name}")).unwrap();
+    }
+    // A keyed copy of a kept store from before a schema change (`.pre-v7`): it becomes a
+    // plain copy, never an unreadable file.
+    let store_file = f.config.team_path(&f.store);
+    let pre = store_file.with_extension("db.pre-v7");
+    std::fs::copy(&store_file, &pre).unwrap();
+    let manifest = cutover::stopped_backup(&f.config, now() + 4).unwrap();
+    let listed: Vec<&str> = manifest["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["name"].as_str().unwrap())
+        .collect();
+    for name in [
+        "relay.db.migrating",
+        "relay.db.migrating-journal",
+        &format!("teams/{}.db.pre-v7", f.store),
+    ] {
+        assert!(listed.contains(&name), "{name} is not in the backup");
+    }
+    let plan = f.dry().unwrap();
+    assert!(
+        plan.converted
+            .contains(&format!("teams/{}.db.pre-v7", f.store)),
+        "{:?}",
+        plan.converted
+    );
+    let report = f.run(true).unwrap();
+    assert_eq!(report.state, "done");
+    for name in ["relay.db.migrating", "relay.db.migrating-journal"] {
+        assert!(!f.data().join(name).exists(), "{name}");
+        assert!(report.files_deleted.contains(&name.to_string()), "{name}");
+    }
+    assert!(
+        is_plain(&pre),
+        "the .pre-v7 copy of a kept store is still keyed"
+    );
+    let conn = rusqlite::Connection::open(&pre).unwrap();
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 8);
+    let heads: i64 = conn
+        .query_row("SELECT count(*) FROM sqlite_master", [], |row| row.get(0))
+        .unwrap();
+    assert!(heads > 0);
+}
+
+#[test]
+fn a_relay_without_a_teams_folder_cuts_over() {
+    let relay = start_with(|_| {}, UpstreamOptions::default());
+    let (mut config, dir) = relay.stop_keep();
+    config.data_dir = dir.path().join("empty");
+    config.backup_dir = dir.path().join("empty-backups");
+    Relay::init_empty(&config).unwrap();
+    assert!(!config.teams_dir().exists());
+    cutover::stopped_backup(&config, now()).unwrap();
+    let plan = cutover::run(&config, &Options::default(), now())
+        .unwrap()
+        .plan_sha256;
+    let report = cutover::run(
+        &config,
+        &Options {
+            confirm: Some(plan),
+            ..Options::default()
+        },
+        now(),
+    )
+    .unwrap();
+    assert_eq!((report.state.as_str(), report.kept.len()), ("done", 0));
+    assert!(is_plain(&config.directory_path()));
+    let running = Relay::start(connect_on_any_port(&config)).unwrap();
+    running.stop();
 }
 
 #[test]
@@ -1541,7 +2013,15 @@ fn the_cutover_never_deletes_a_file_of_an_account_store() {
     assert!(
         report
             .files_deleted
-            .contains(&format!("teams/{}.extra/", f.free))
+            .contains(&format!("teams/{}.extra/x.bin", f.free))
+    );
+    // A file of a store that is not a database of its key is left and named.
+    assert!(
+        report
+            .left
+            .contains(&format!("teams/{}.db.pre-v7", f.store)),
+        "{:?}",
+        report.left
     );
 }
 
@@ -1603,8 +2083,24 @@ fn the_binary_backs_up_cuts_over_and_serves_connect_mode() {
         (Some("dry_run"), Some(1))
     );
     assert!(!is_plain(&dir.path().join("data/relay.db")));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--confirm-delete-teams"));
+    let plan_sha256 = plan["plan_sha256"].as_str().unwrap().to_string();
+    assert_eq!(plan_sha256.len(), 64);
+    // Without the plan, or with another one, the binary refuses and changes nothing.
     let output = relay(None)
         .args(["connect-cutover", "--confirm-delete-teams"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let output = relay(None)
+        .args(["connect-cutover", "--confirm-delete-teams", &"0".repeat(64)])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("plan"));
+    assert!(!is_plain(&dir.path().join("data/relay.db")));
+    let output = relay(None)
+        .args(["connect-cutover", "--confirm-delete-teams", &plan_sha256])
         .output()
         .unwrap();
     assert_eq!(
