@@ -24,7 +24,9 @@
 //! storm of dials: `403 plan_required` (and no account) is `not_on_connect` for 15
 //! minutes, `503 tunnel_offline` (the Mac has no tunnel open) is `mac_offline` and
 //! `429 tunnel_limit` is `limit`, each with its own wait, and an unreachable Connect
-//! waits 1 s, doubling, at most 60 s. None of them is an error to show, and none names a
+//! (also `503 busy`, and a dial that Connect closed with 1013 because it could not check
+//! the plan) waits 1 s, doubling, at most 60 s. A dial closed with 4003 (the plan or the
+//! grant definitely ended) is `not_on_connect`. None of them is an error to show, and none names a
 //! plan, a price, or a purchase (plan section 6). `connect_status` reports the state and
 //! whether the Mac is reached through Connect now (`dial_route`).
 //!
@@ -376,6 +378,9 @@ impl Routes {
             close::NODE_OFFLINE => Failure::MacOffline,
             close::TUNNEL_LIMIT => Failure::Limit,
             close::REVOKED => Failure::NotOnConnect,
+            // Connect could not check the plan for a while: dial again with the backoff,
+            // not the long wait of a plan that ended.
+            close::TRY_AGAIN => Failure::Unreachable,
             _ => return,
         };
         self.after_dial(Some(failure));
@@ -946,6 +951,24 @@ mod tests {
         assert_eq!(timing.backoff_max, Duration::from_secs(60));
         assert_eq!(timing.kept_idle, Duration::from_secs(30));
         assert!(!timing.silent);
+    }
+
+    #[test]
+    fn a_close_that_says_try_again_waits_only_for_the_backoff() {
+        let accounts = Arc::new(Accounts::new(
+            std::path::PathBuf::from("/nonexistent/account.json"),
+            "https://connect.example.test".to_owned(),
+        ));
+        let transport = Transport::new(accounts, true);
+        transport.routes.closed_with(close::TRY_AGAIN);
+        assert_eq!(transport.dial_state(), DialState::Unreachable);
+        let held = guard(&transport.routes.memory)
+            .hold_until
+            .expect("a hold");
+        assert!(held <= Instant::now() + Timing::default().backoff_first);
+        // A definite end of the plan still waits long.
+        transport.routes.closed_with(close::REVOKED);
+        assert_eq!(transport.dial_state(), DialState::NotOnConnect);
     }
 
     #[test]
