@@ -610,6 +610,28 @@ pub enum OwnerAction {
         /// The entry that the step signs: the `unshare` or the `leave`.
         entries: Vec<ShareEntry>,
     },
+    /// The `store` entry of a vault store that this account made before the entry existed,
+    /// whose device list holds shares of it already (connect-account-v1 section 16): those
+    /// shares, with `people` (their verified names), count again. The proof names the store
+    /// and the entry.
+    ClaimConnectStore {
+        account_id: String,
+        team_id: String,
+        vault_name: String,
+        people: Vec<String>,
+        /// The entry that the step signs: the `store`.
+        entries: Vec<ShareEntry>,
+    },
+    /// "Take This Copy Without Its Earlier History…" at the first download of a vault store
+    /// of the Apassy Connect account (connect-account-v1 section 16.6): the head `head`
+    /// (version `version`), signed by a device that a verified list holds, while an earlier
+    /// entry of its history is by a key that no list verifies. The proof names the store and
+    /// the head.
+    TakeCopyWithoutHistory {
+        team_id: String,
+        version: u64,
+        head: String,
+    },
     /// Turn the tailnet route of this Mac's node on or off (plan S2–S3, unit N7): the
     /// iPhone and the other Macs reach the approvals of this Mac directly, or no longer.
     SetTailnetRoute {
@@ -875,6 +897,8 @@ impl OwnerAction {
             Self::JoinConnectShare { .. } => "Join a shared vault",
             Self::EndConnectShare { leave: false, .. } => "Stop sharing a vault",
             Self::EndConnectShare { leave: true, .. } => "Leave a shared vault",
+            Self::ClaimConnectStore { .. } => "Count the shares of a vault",
+            Self::TakeCopyWithoutHistory { .. } => "Take a copy without its history",
             Self::SetTailnetRoute { on: true } => {
                 concat!("Reach this ", crate::computer!(), " on your tailnet")
             }
@@ -1208,6 +1232,13 @@ impl OwnerAction {
                 short_device_name(vault_name),
                 short_device_name(peer_name)
             ),
+            Self::ClaimConnectStore { vault_name, .. } => format!(
+                "count the earlier shares of \"{}\" through Apassy Connect again",
+                short_device_name(vault_name)
+            ),
+            Self::TakeCopyWithoutHistory { .. } => {
+                "take the relay copy of this vault at Apassy Connect without its earlier history".to_owned()
+            }
             Self::SetTailnetRoute { on: true } => concat!(
                 "let your iPhone and ",
                 crate::computers!(),
@@ -1276,7 +1307,10 @@ impl OwnerAction {
     /// owner takes the copy that a removed device left on a vault store, connect-account-v1
     /// section 7.5). Every other action needs an unlocked vault.
     pub fn allowed_without_vault(&self) -> bool {
-        matches!(self, Self::TakeDepartedCopy { replace: false, .. })
+        matches!(
+            self,
+            Self::TakeDepartedCopy { replace: false, .. } | Self::TakeCopyWithoutHistory { .. }
+        )
     }
 
     pub fn needs_fresh_local_check(&self) -> bool {
@@ -1302,6 +1336,8 @@ impl OwnerAction {
                 | Self::RepinConnectPeer { .. }
                 | Self::JoinConnectShare { .. }
                 | Self::EndConnectShare { .. }
+                | Self::ClaimConnectStore { .. }
+                | Self::TakeCopyWithoutHistory { .. }
         )
     }
 
@@ -2782,6 +2818,18 @@ mod evaluation_tests {
                 vault_name: long.clone(),
                 leave: true,
                 entries: Vec::new(),
+            },
+            OwnerAction::ClaimConnectStore {
+                account_id: "acc_k7m2q4x3ca".into(),
+                team_id: "t_7k2m5q4x3c".into(),
+                vault_name: long.clone(),
+                people: vec![long.clone()],
+                entries: Vec::new(),
+            },
+            OwnerAction::TakeCopyWithoutHistory {
+                team_id: "t_7k2m5q4x3c".into(),
+                version: 7,
+                head: "a".repeat(64),
             },
         ] {
             assert!(action.needs_fresh_local_check(), "{action:?}");

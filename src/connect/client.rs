@@ -498,6 +498,10 @@ pub struct VaultStoreView {
     pub team_id: String,
     pub vault_id: String,
     pub name: String,
+    /// The account that made the store, as Connect has it (empty from a Connect without
+    /// it: then no `store` entry is signed by itself for it).
+    #[serde(default)]
+    pub account_id: String,
     pub created_at: u64,
     pub shared: bool,
     pub devices: Vec<StoreDevice>,

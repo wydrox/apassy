@@ -35,6 +35,7 @@ fn store(team: &str, name: &str) -> VaultStoreView {
         team_id: team.to_owned(),
         vault_id: "0f3c2a10-5b7e-4d9a-8c21-6f0e4b1d9a77".to_owned(),
         name: name.to_owned(),
+        account_id: String::new(),
         created_at: 1_790_000_000,
         shared: true,
         devices: Vec::new(),
@@ -94,6 +95,8 @@ fn status() -> ShareStatus {
                 ended: false,
                 void: false,
                 owner_suspended: false,
+                unverified: vec!["acc_annaaaaaaa".to_owned()],
+                waits_for: vec!["acc_olaaaaaaaa".to_owned()],
             },
             StoreStatus {
                 team_id: "t_gardenaaaa".to_owned(),
@@ -105,6 +108,8 @@ fn status() -> ShareStatus {
                 ended: false,
                 void: false,
                 owner_suspended: true,
+                unverified: vec!["acc_piotraaaaa".to_owned()],
+                waits_for: Vec::new(),
             },
             StoreStatus {
                 team_id: "t_caraaaaaaa".to_owned(),
@@ -116,6 +121,8 @@ fn status() -> ShareStatus {
                 ended: true,
                 void: false,
                 owner_suspended: false,
+                unverified: Vec::new(),
+                waits_for: vec!["acc_ewaaaaaaaa".to_owned()],
             },
         ],
         suspended: vec!["acc_annaaaaaaa".to_owned(), "acc_piotraaaaa".to_owned()],
@@ -531,8 +538,10 @@ fn the_reads_of_a_head_not_verified_yet_back_off() {
 }
 
 /// F11: a shared store is decided only by lists asked after its refusal: the time of a
-/// refresh counts for a store only when the lists of every account of it, and the own list,
-/// were asked and verified; a read that failed or did not verify gives no time.
+/// refresh counts for a store only when the lists that it waits for (its owner and members
+/// whose list can be verified here), and the own list, were asked and verified; a read
+/// that failed or did not verify gives no time. K3: an account whose pin is suspended, or
+/// whose read Connect refused, does not hold it back.
 #[test]
 fn a_store_is_decided_only_by_lists_that_verified() {
     let start = Instant::now();
@@ -540,17 +549,31 @@ fn a_store_is_decided_only_by_lists_that_verified() {
     let mut status = status();
     assert_eq!(status.asked_for("t_familyaaaa"), None, "no read at all");
     status.own_read = Some(later);
-    status.read.insert("acc_olaaaaaaaa".to_owned(), start);
     assert_eq!(
         status.asked_for("t_familyaaaa"),
         None,
-        "Anna's list was not read"
+        "Ola's list was not read"
+    );
+    status.read.insert("acc_olaaaaaaaa".to_owned(), start);
+    assert_eq!(
+        status.asked_for("t_familyaaaa"),
+        Some(start),
+        "Anna (a suspended pin) does not hold it back"
+    );
+    assert_eq!(
+        status.unverified_people("t_familyaaaa"),
+        ["Anna (not verified yet)"]
     );
     status.read.insert("acc_annaaaaaaa".to_owned(), later);
     assert_eq!(
         status.asked_for("t_familyaaaa"),
         Some(start),
         "the oldest read"
+    );
+    assert_eq!(
+        status.asked_for("t_gardenaaaa"),
+        Some(later),
+        "a store whose owner cannot be verified waits for the own list alone"
     );
     status.own_read = None;
     assert_eq!(

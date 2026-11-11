@@ -239,6 +239,31 @@ fn refresh_again(mut state: AccountState, list: &List, peers: &[&List]) -> Accou
     state
 }
 
+/// `state` after it read `served` (account → its list as Connect serves it) with the void
+/// marks `void`.
+fn refresh_with(
+    mut state: AccountState,
+    list: &List,
+    served: &[(&str, Vec<ListEntry>)],
+    void: &VoidShares,
+) -> AccountState {
+    let own = list.verified().unwrap();
+    let served: BTreeMap<String, Vec<ListEntry>> = served
+        .iter()
+        .map(|(account, entries)| ((*account).to_owned(), entries.clone()))
+        .collect();
+    learn_lists(
+        &mut state,
+        &own.shares,
+        ORIGIN,
+        &served,
+        void,
+        &ListCache::default(),
+    );
+    assert!(state.is_valid_for_test(), "{state:?}");
+    state
+}
+
 impl AccountState {
     fn is_valid_for_test(&self) -> bool {
         valid_state(&self.account_id, &self.peers, &self.stores)
@@ -1092,10 +1117,12 @@ fn a_join_counts_only_while_the_share_it_answers_is_active() {
     let state = refresh_again(state, &x, &[&a, &y]);
     let policy = store_signer_policy(&state, STORE).unwrap();
     assert!(policy.accepted.is_empty(), "{policy:?}");
+    // The share only ends: the co-member's pin stays, as an ended account of the store.
     assert!(
-        pin_of(&state, &y.id, Some(&a.id)).is_none(),
-        "no co-member pin"
+        pin_of(&state, &y.id, Some(&a.id)).is_some(),
+        "the co-member pin stays"
     );
+    assert!(left(&state, STORE, &y.root));
     // A shares again: X's join answers the old share, so the store stays ended here.
     a.share(SHARE, &x.id.clone(), None, Some(STORE));
     let state = refresh_again(state, &x, &[&a, &y]);
@@ -1239,4 +1266,145 @@ fn at_the_pin_cap_the_pins_that_no_store_needs_go_first() {
         assert!(store.members.contains(&member.id));
     }
     assert_eq!(via(&state), 252);
+}
+
+/// Y of `family()` adds a device and removes it again: the prefix of Y's list where that
+/// device is live, Y's whole list, and the device.
+fn y_with_a_removed_device(y: &mut List) -> (Vec<ListEntry>, DeviceKey) {
+    let gone = key();
+    y.add(&gone, 9);
+    let older = y.entries.clone();
+    let root = y.root_signer();
+    y.device(&root, "remove", &gone, None, None);
+    (older, gone)
+}
+
+/// K1: a void mark of X's share, and none in the next refresh (nothing signed changed): the
+/// store only ends while the mark lasts. Y's pin through A stays with its list pin, so an
+/// older prefix of Y's list is not taken afterwards, and the device that Y's list removed
+/// stays out.
+#[test]
+fn a_void_mark_only_ends_and_the_pins_of_the_co_members_stay() {
+    let (a, x, mut y) = family();
+    let (older, gone) = y_with_a_removed_device(&mut y);
+    let state = refreshed(&x, &[&a, &y]);
+    assert!(accepted(&state, STORE, &y.root));
+    assert!(left(&state, STORE, &gone) && !accepted(&state, STORE, &gone));
+    let pin = pin_of(&state, &y.id, Some(&a.id)).unwrap().clone();
+    let void: VoidShares = [(a.id.clone(), vec![(STORE.to_owned(), x.id.clone())])]
+        .into_iter()
+        .collect();
+    let lists = [
+        (a.id.as_str(), a.entries.clone()),
+        (y.id.as_str(), y.entries.clone()),
+    ];
+    let state = refresh_with(state, &x, &lists, &void);
+    let store = state
+        .stores
+        .iter()
+        .find(|store| store.team_id == STORE)
+        .unwrap();
+    assert!(
+        store.members.is_empty() && store.ended.contains(&y.id),
+        "{store:?}"
+    );
+    assert!(
+        store_signer_policy(&state, STORE)
+            .unwrap()
+            .accepted
+            .is_empty()
+    );
+    assert_eq!(
+        pin_of(&state, &y.id, Some(&a.id)),
+        Some(&pin),
+        "the pin stays"
+    );
+    // No mark now, and Connect serves an older prefix of Y's list.
+    let lists = [(a.id.as_str(), a.entries.clone()), (y.id.as_str(), older)];
+    let state = refresh_with(state, &x, &lists, &VoidShares::default());
+    assert!(accepted(&state, STORE, &a.root) && accepted(&state, STORE, &y.root));
+    assert!(
+        !accepted(&state, STORE, &gone),
+        "the removed device signs again"
+    );
+    assert!(left(&state, STORE, &gone));
+    assert_eq!(
+        pin_of(&state, &y.id, Some(&a.id)),
+        Some(&pin),
+        "the list pin"
+    );
+}
+
+/// K1: A ends the share with X and shares the store with X again, and X joins the new
+/// share: the store goes on from the pins that it kept.
+#[test]
+fn a_new_share_goes_on_from_the_pins_of_the_share_before() {
+    let (mut a, mut x, mut y) = family();
+    let (older, gone) = y_with_a_removed_device(&mut y);
+    let state = refreshed(&x, &[&a, &y]);
+    let pin = pin_of(&state, &y.id, Some(&a.id)).unwrap().clone();
+    a.share(UNSHARE, &x.id.clone(), None, Some(STORE));
+    let state = refresh_again(state, &x, &[&a, &y]);
+    assert_eq!(pin_of(&state, &y.id, Some(&a.id)), Some(&pin));
+    a.share(SHARE, &x.id.clone(), None, Some(STORE));
+    x.join(&a, STORE);
+    let lists = [(a.id.as_str(), a.entries.clone()), (y.id.as_str(), older)];
+    let state = refresh_with(state, &x, &lists, &VoidShares::default());
+    assert!(accepted(&state, STORE, &y.root));
+    assert!(
+        !accepted(&state, STORE, &gone),
+        "the removed device signs again"
+    );
+    assert_eq!(
+        pin_of(&state, &y.id, Some(&a.id)),
+        Some(&pin),
+        "the list pin"
+    );
+}
+
+/// A list that joins a share, leaves it, and joins the same share again is refused: the
+/// same share is not joined twice.
+#[test]
+fn the_same_share_is_not_joined_again_after_a_leave() {
+    let (a, mut x, _) = family();
+    x.share(LEAVE, &a.id.clone(), None, Some(STORE));
+    assert!(x.verified().is_some());
+    let mut again = fork(&x);
+    again.join(&a, STORE);
+    assert!(again.verified().is_none(), "the same share after its leave");
+    // A newer share of the store is a new offer: its join verifies.
+    let mut a2 = fork(&a);
+    a2.share(UNSHARE, &x.id.clone(), None, Some(STORE));
+    a2.share(SHARE, &x.id.clone(), None, Some(STORE));
+    x.join(&a2, STORE);
+    assert!(x.verified().is_some());
+}
+
+/// A pin through an owner that Connect suspended (it served a list of another root) is
+/// pinned anew, not suspended, when the owner's list names another root for that account,
+/// and it goes when no store needs it.
+#[test]
+fn a_suspended_pin_through_an_owner_follows_the_owners_list() {
+    let (mut a, x, y) = family();
+    let reset = List::new(&y.id);
+    let lists = [
+        (a.id.as_str(), a.entries.clone()),
+        (y.id.as_str(), reset.entries.clone()),
+    ];
+    let state = refresh_with(refreshed(&x, &[&a, &y]), &x, &lists, &VoidShares::default());
+    assert!(pin_of(&state, &y.id, Some(&a.id)).unwrap().suspended);
+    assert!(!accepted(&state, STORE, &y.root) && !accepted(&state, STORE, &reset.root));
+    // A pins the new root of Y (new words) and shares again.
+    a.share(UNSHARE, &y.id.clone(), None, Some(STORE));
+    a.share(UNPEER, &y.id.clone(), None, None);
+    a.peer(&reset);
+    a.share(SHARE, &y.id.clone(), None, Some(STORE));
+    let lists = [
+        (a.id.as_str(), a.entries.clone()),
+        (y.id.as_str(), reset.entries.clone()),
+    ];
+    let state = refresh_with(state, &x, &lists, &VoidShares::default());
+    let pin = pin_of(&state, &y.id, Some(&a.id)).unwrap();
+    assert!(!pin.suspended && pin.root == b64(&reset.root), "{pin:?}");
+    assert!(accepted(&state, STORE, &reset.root) && left(&state, STORE, &y.root));
 }

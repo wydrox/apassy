@@ -199,6 +199,19 @@ fn share_request_action(request: OwnerRequest) -> OwnerAction {
             leave,
             entries,
         },
+        OwnerRequest::ClaimConnectStore {
+            account_id,
+            team_id,
+            vault_name,
+            people,
+            entries,
+        } => OwnerAction::ClaimConnectStore {
+            account_id,
+            team_id,
+            vault_name,
+            people,
+            entries,
+        },
         other => other.action(),
     }
 }
@@ -924,6 +937,28 @@ pub enum OwnerRequest {
         leave: bool,
         entries: Vec<crate::broker::approvals::ShareEntry>,
     },
+    /// "Count Its Shares Again…" of a vault store made before the `store` entry existed:
+    /// the shares with `people` count again.
+    ClaimConnectStore {
+        account_id: String,
+        team_id: String,
+        vault_name: String,
+        people: Vec<String>,
+        entries: Vec<crate::broker::approvals::ShareEntry>,
+    },
+    /// "Take This Copy Without Its Earlier History…" of the first download of the vault
+    /// store `team_id` (the vault `vault_name`): the head `head` of version `version`, which
+    /// "`device_name`" signed at `time` (by its own clock). `start`: the start screen, where
+    /// the copy becomes the vault on this device.
+    TakeCopyWithoutHistory {
+        team_id: String,
+        version: u64,
+        head: String,
+        device_name: String,
+        time: u64,
+        vault_name: String,
+        start: bool,
+    },
     /// Turn the tailnet route of this Mac's node on or off (Settings > Devices, plan
     /// S2–S3, unit N7). The node checks nothing itself: the caller asks first.
     SetTailnetRoute {
@@ -1108,6 +1143,19 @@ impl OwnerRequest {
                 team_id,
                 vault_name,
                 leave,
+                entries,
+            },
+            OwnerAction::ClaimConnectStore {
+                account_id,
+                team_id,
+                vault_name,
+                people,
+                entries,
+            } => Self::ClaimConnectStore {
+                account_id,
+                team_id,
+                vault_name,
+                people,
                 entries,
             },
             _ => return None,
@@ -1538,6 +1586,16 @@ impl OwnerRequest {
                 version: *version,
                 head: head.clone(),
             },
+            Self::TakeCopyWithoutHistory {
+                team_id,
+                version,
+                head,
+                ..
+            } => OwnerAction::TakeCopyWithoutHistory {
+                team_id: team_id.clone(),
+                version: *version,
+                head: head.clone(),
+            },
             Self::AddStoreDevice {
                 team_id,
                 device_id,
@@ -1561,7 +1619,8 @@ impl OwnerRequest {
             | Self::AcceptConnectShare { .. }
             | Self::RepinConnectPeer { .. }
             | Self::JoinConnectShare { .. }
-            | Self::EndConnectShare { .. }) => share_request_action(share.clone()),
+            | Self::EndConnectShare { .. }
+            | Self::ClaimConnectStore { .. }) => share_request_action(share.clone()),
             Self::SetTailnetRoute { on } => OwnerAction::SetTailnetRoute { on: *on },
             Self::RevokeNodeDevice(request) => request.action(),
             Self::AllowConnect {
@@ -2225,6 +2284,47 @@ impl OwnerRequest {
                 "Leave \"{}\", shared by {}? This device stops syncing the shared copy; the vault stays here.",
                 page_text(vault_name),
                 person_text(peer_name, peer_hint, fingerprint)
+            ),
+            Self::ClaimConnectStore {
+                vault_name, people, ..
+            } => {
+                let people: Vec<String> = people
+                    .iter()
+                    .map(|person| format!("\u{201c}{}\u{201d}", page_text(person)))
+                    .collect();
+                format!(
+                    "Confirm that this account made \"{}\"? It was shared before Apassy recorded which account made a vault, so its shares do not count yet. After this, the shares of this vault count again: {} can sync it.",
+                    page_text(vault_name),
+                    if people.is_empty() {
+                        "the people you shared it with".to_owned()
+                    } else {
+                        people.join(", ")
+                    }
+                )
+            }
+            Self::TakeCopyWithoutHistory {
+                version,
+                device_name,
+                time,
+                vault_name,
+                start,
+                ..
+            } => format!(
+                concat!(
+                    "Take the copy of \"{vault}\" on the relay without its earlier history? Version {version} was saved by {device} on {day}. ",
+                    "Some earlier versions were saved by devices that this ",
+                    crate::computer!(),
+                    " cannot verify (a person who shares the vault reset their account), so Apassy does not check them. {then}"
+                ),
+                vault = page_text(vault_name),
+                version = version,
+                device = page_text(device_name),
+                day = crate::desktop::ui::kit::day_month_year(*time),
+                then = if *start {
+                    concat!("The vault on this ", crate::computer!(), " starts from this copy.")
+                } else {
+                    "Apassy takes this copy as it is now."
+                },
             ),
             Self::ChangeConnectGroup { change, .. } => match change {
                 crate::broker::approvals::ConnectGroupChange::ConfirmMember { name, .. } => format!(
@@ -3387,7 +3487,9 @@ impl DesktopApp {
             | OwnerRequest::AcceptConnectShare { .. }
             | OwnerRequest::RepinConnectPeer { .. }
             | OwnerRequest::JoinConnectShare { .. }
-            | OwnerRequest::EndConnectShare { .. } => {
+            | OwnerRequest::EndConnectShare { .. }
+            | OwnerRequest::ClaimConnectStore { .. }
+            | OwnerRequest::TakeCopyWithoutHistory { .. } => {
                 self.owner.connect_proof = Some(proof);
             }
             OwnerRequest::SetTailnetRoute { on } => self.devices_set_route(on, proof),

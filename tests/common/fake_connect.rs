@@ -1367,8 +1367,8 @@ fn store_view(store: &Store, state: &State) -> Value {
         .iter()
         .any(|device| device["account_id"] != json!(store.account));
     json!({"team_id": store.team_id, "vault_id": store.vault_id, "name": store.name,
-           "created_at": store.created_at, "shared": shared, "devices": devices,
-           "void": store.void})
+           "account_id": store.account, "created_at": store.created_at, "shared": shared,
+           "devices": devices, "void": store.void})
 }
 
 fn new_device(
