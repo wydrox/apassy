@@ -9,7 +9,8 @@
 // A WebSocket upgrade goes to the relay only on `GET /v1/tunnel/*` (connect-tunnel-v1),
 // unchanged, and the relay's `101` comes back as it is; an upgrade anywhere else is
 // refused here. Dials (`GET /v1/tunnel/dial/*`) and the node's WebSocket (`GET
-// /v1/tunnel/node`) share their own per-address limiter.
+// /v1/tunnel/node`) each have a per-address limiter of their own, so the dials of the
+// phones behind a node's address never keep the node offline.
 // One build serves both phases of the hosted relay (docs/operations/connect.md): the var
 // RELAY_MODE is `relay` (unset: today's hosted relay) or `connect` (after the cutover,
 // ADR 0037 stage 7). In `connect` mode the APNs sender `/internal/push` is off (404), the
@@ -60,8 +61,10 @@ export interface Env extends PushEnv {
   CONNECT_PREFIX_LIMITER?: CreateLimiter;
   /** Connect accounts (`POST /v1/account` and `/v1/account/recover`, connect-account-v1), per IPv4 address or IPv6 /64. */
   ACCOUNT_LIMITER?: CreateLimiter;
-  /** Tunnel dials (`GET /v1/tunnel/dial/*`) and node WebSockets (`GET /v1/tunnel/node`, connect-tunnel-v1), per IPv4 address or IPv6 /64. */
+  /** Tunnel dials (`GET /v1/tunnel/dial/*`, connect-tunnel-v1), per IPv4 address or IPv6 /64. */
   TUNNEL_LIMITER?: CreateLimiter;
+  /** Node WebSockets (`GET /v1/tunnel/node`, connect-tunnel-v1), per IPv4 address or IPv6 /64: a budget of their own, apart from the dials. */
+  TUNNEL_NODE_LIMITER?: CreateLimiter;
   /** Static files served without the relay or its edge secret. */
   ASSETS?: AssetService;
   /** `relay` (or unset) before the cutover, `connect` after it. A var. */
@@ -105,7 +108,7 @@ const RECOVER_PATH = "/v1/account/recover";
 const TUNNEL_PREFIX = "/v1/tunnel/";
 /** The dial of a node (connect-tunnel-v1 section 3.3), limited per client. */
 const DIAL_PREFIX = "/v1/tunnel/dial/";
-/** The WebSocket of a node (connect-tunnel-v1 section 3.2), limited as a dial. */
+/** The WebSocket of a node (connect-tunnel-v1 section 3.2), limited apart from the dials. */
 const NODE_PATH = "/v1/tunnel/node";
 
 // A request that asks to upgrade its connection: an `Upgrade` header, or a `Connection`
@@ -387,13 +390,13 @@ export default {
     // holds a whole /64.
     const isAccount =
       request.method === "POST" && (url.pathname === ACCOUNT_PATH || url.pathname === RECOVER_PATH);
-    // A dial and the WebSocket of a node are keyed the same way, in one budget of tunnel
-    // upgrades per client: a node connects once and reconnects with a backoff, so its share
-    // is small, and the attempts of one client on both routes stay at the one limit.
-    const isDial =
-      request.method === "GET" && (url.pathname.startsWith(DIAL_PREFIX) || url.pathname === NODE_PATH);
+    // A dial and the WebSocket of a node are keyed the same way, each in a budget of its
+    // own: the phones behind a node's address may spend the dial budget of that address,
+    // and the node still connects.
+    const isDial = request.method === "GET" && url.pathname.startsWith(DIAL_PREFIX);
+    const isNode = request.method === "GET" && url.pathname === NODE_PATH;
     const limiter = limiterFor(request.method, url.pathname, env);
-    if (limiter || isConnect || isAccount || isDial) {
+    if (limiter || isConnect || isAccount || isDial || isNode) {
       // Fail open if a binding is missing or fails: the relay itself checks codes, keys, and
       // signatures; this limit is a guard against floods, not an authorization check.
       // For Connect the relay also caps the teams of a day for everyone.
@@ -404,7 +407,9 @@ export default {
           ? [[env.ACCOUNT_LIMITER, connectKey(address)]]
           : isDial
             ? [[env.TUNNEL_LIMITER, connectKey(address)]]
-            : [[limiter, address]];
+            : isNode
+              ? [[env.TUNNEL_NODE_LIMITER, connectKey(address)]]
+              : [[limiter, address]];
       for (const [guard, key] of guards) {
         if (!guard) continue;
         try {
