@@ -211,8 +211,13 @@ verified device can be added to a store. A vault store has no device link: a dev
 gets the copy from the store that lists it, with the passphrase of the copy. A store that holds
 devices of another account opens only with a share of it that the device verified (below), else it
 is refused before any request. Sharing a vault, accepting a share, ending a share, and leaving a
-shared vault each need a fresh owner check; ending a share needs none while Connect shows either
-account outside the group, since an end gives no one access.
+shared vault each need a fresh owner check, and so does joining a vault that another account
+shares; each check names the vault by its name on this computer, the person by the name that their
+verified device list signed with the short fingerprint of their pinned root (Connect's name for
+them shows beside it as a hint only), and the step. A device of the owner ends a share by itself,
+without an owner check, only when the member's verified list left the vault or Connect shows the
+member (or this account) outside the family or team, since an end gives no one access; a re-pin
+after a reset has an owner check of its own that names the shares that end.
 
 **The device list** (connect-account-v1 section 7.5) is a signed list with a cryptographic root:
 version 1 is the first device of the account (after a recovery, the recovering device), signed by
@@ -248,7 +253,7 @@ devices take. A recovery starts a new root; a device of the old root learns
 it only by joining again with a link from the recovered device, never from Connect.
 
 **A vault shared between accounts** (connect-account-v1 section 16). The account that made a vault
-store is the only authority for it: what it says of other accounts are entries of its own device
+store is the authority for who signs its heads: what it says of other accounts are entries of its own device
 list (`peer`, `share`, `join`, and their ends), in the chain of its device entries, so they have one
 order with the device changes and a removed device signs none of them. No role in a group carries
 trust; the group view, a store's `shared` flag, and a store's device rows are hints only. A `peer`
@@ -257,19 +262,29 @@ compute from a share code that Connect never sees, both roots, and both devices'
 carries the fingerprint of the sharing account's root and device, so the answering device checks the
 account that Connect names. A device of another account signs in a store only when the signed
 `share` entries of the store's owner name its account, through a root that the client pinned (a
-co-member's root comes from the owner's `peer` entry and counts only in that owner's stores, and not
-where it differs from the client's own pin). A list of a peer from another root suspends that peer:
-its keys sign nothing new until the people compare new words, which a recovery of either account
-needs. When the owner's list ends a share, or a peer's list removes a device, those keys sign only
-what the client had merged. Connect also refuses a device of another account in a store without the
-owner's active share and one active group (a second line).
+co-member's root comes from the owner's `peer` entry and counts only in that owner's stores; the
+client keeps one pin for each pair of an account and the list that named it, so two owners that name
+different roots for one person stay apart, and a re-pin keeps the old keys as keys that left). A
+list of a peer from another root suspends that pin: its keys sign nothing new until the people
+compare new words, which a recovery of either account needs. When the owner's list ends a share, or
+a peer's list removes a device, those keys sign only what the client had merged and below an
+accepted head; the ended members of a store come from the verified lists, so every device computes
+the same, also one that reads a share and its end at once. Which account made a store is Connect's
+word (no signed entry names it): a client takes a store as another account's only through its own
+signed `join`, and never offers or joins a store that its own list holds or that a vault of the same
+computer syncs as its own; a store that another device of the account made, that this computer does
+not sync, and that the own list does not name, stays Connect's word (with a person who signs a
+`share` of it, a lying Connect could have such a store joined from that person). Connect also
+refuses a device of another account in a store without the owner's active share and one active
+group (a second line).
 
 What a client cannot detect here: a suffix of a list that Connect withholds (a removal or an
-`unshare`), or an old prefix that it gives to a new device or member, until a head of an up-to-date
-device reaches that client; a permanent partition, in which Connect keeps the devices of a share
-apart; and the time between an admin's removal of a member at Connect, which ends the member's
-sign-in to the store, and the owner's `unshare`, until which the member's earlier heads still
-count.
+`unshare`), or an old prefix that it gives to a new device or member, until Connect serves it the
+newer list (no head carries a list; until then that client takes the heads of the ended keys, and
+the other devices take them below its later head); a permanent partition, in which Connect keeps the
+devices of a share apart; and the time between an admin's removal of a member at Connect, which
+ends the member's sign-in to the store, and the next refresh of a device of the owner, which then
+signs the `unshare` by itself, until which the member's earlier heads still count.
 
 **The recovery code** is the seed of an Ed25519 key pair. Connect stores only the public key; a
 recovery is a signature by that key over the new device key and the next recovery key, so the code
