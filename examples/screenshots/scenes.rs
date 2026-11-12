@@ -671,7 +671,8 @@ pub(crate) fn steps(name: &str) -> Vec<super::Step> {
                 bottom(),
                 Wait(1.0),
                 Shot("share-joined"),
-                Click(982.0, 636.0),
+                // Leave… is the left button of the row (Download… is at its trailing edge).
+                Click(806.0, 636.0),
                 Wait(1.5),
                 Shot("share-leave"),
                 // Leave… asks the owner first; Escape cancels both.
