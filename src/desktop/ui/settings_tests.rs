@@ -11,9 +11,9 @@ use tempfile::TempDir;
 
 use super::super::devices::{
     self, ADD_DEVICE, Address, DeviceEntry, DevicesSheet, DevicesView, Kind, NodeProblem,
-    NodeState, ONLY_THIS_MAC, OtherMacsRow, Questions, ROUTE_LOCKED, ROUTE_OFF, ROUTE_ON,
-    ROUTE_SWITCH, RelayView, Route, Target, WIFI_GROUP, WIFI_LISTEN, WIFI_NOTICE_TITLE, WifiDevice,
-    WifiEnd, WifiView,
+    NodeState, ONLY_THIS_MAC, OtherMacsRow, Questions, ROUTE_LOCKED, ROUTE_OFF, ROUTE_SWITCH,
+    RelayView, Route, Target, WIFI_GROUP, WIFI_LISTEN, WIFI_NOTICE_TITLE, WifiDevice, WifiEnd,
+    WifiView,
 };
 use super::super::owner_tests::{PASS, WRONG, unlocked_app_with_item};
 use super::super::settings_view::SettingsSection;
@@ -539,7 +539,6 @@ fn devices_frame_one_draws_the_mockup() {
     for expected in [
         concat!("This ", crate::computer!()),
         ROUTE_SWITCH,
-        ROUTE_ON,
         "Address",
         "100.101.7.12",
         "Copy",
@@ -615,7 +614,7 @@ fn devices_node_states_draw_the_mockup() {
             "3a",
             with(NodeState::Missing, None),
             vec![ROUTE_OFF, "Tailscale is not installed.", "Get Tailscale…"],
-            vec!["Address", "Node Words", ROUTE_ON],
+            vec!["Address", "Node Words"],
         ),
         (
             "3b",
@@ -636,7 +635,7 @@ fn devices_node_states_draw_the_mockup() {
         (
             "3d",
             with(NodeState::On { address: None }, None),
-            vec![ROUTE_ON, "Address", "Starting…"],
+            vec![ROUTE_SWITCH, "Address", "Starting…"],
             vec!["Node Words", "Copy"],
         ),
         (
@@ -657,7 +656,7 @@ fn devices_node_states_draw_the_mockup() {
                     before_pairing: true,
                 }),
             ),
-            vec![ROUTE_ON, "Another app uses port 8444.", "Use Port 8445"],
+            vec![ROUTE_SWITCH, "Another app uses port 8444.", "Use Port 8445"],
             vec!["Starting…", "Address"],
         ),
         (
@@ -693,12 +692,7 @@ fn devices_node_states_draw_the_mockup() {
                 can_move: true,
                 ..frame_one()
             },
-            vec![
-                "Approvals go through Apassy relay",
-                "Move them here to keep them on your tailnet.",
-                MOVE,
-                ADD_DEVICE,
-            ],
+            vec!["Approvals go through Apassy relay", MOVE, ADD_DEVICE],
             vec![],
         ),
         (
@@ -857,7 +851,6 @@ fn devices_sheets_draw_the_mockup() {
         "Revoke Rafal's iPhone?",
         "It can no longer see or answer questions.",
         "Also revoke Rafal's Apple Watch",
-        "To use it again, pair it again.",
         "Cancel",
         "Revoke",
     ] {
@@ -1054,7 +1047,7 @@ fn devices_relay_group_restores_the_relay_and_the_other_macs() {
 /// A route that is off says "Approvals go through Apassy relay." only while the
 /// questions of the vault go through it (or the vault is locked); otherwise they stay on
 /// this Mac. The own row of the list carries the title-case badge "This Mac", and the
-/// move button reads "Move Approvals to This Mac…" in title case.
+/// move button reads "Move Here…" in title case.
 #[test]
 fn devices_route_off_line_follows_the_questions() {
     let with = |questions: Option<Questions>| DevicesView {
@@ -1095,10 +1088,7 @@ fn devices_route_off_line_follows_the_questions() {
         text.contains(concat!("This ", crate::computer_cap!())),
         "the badge in title case: {text}"
     );
-    assert_eq!(
-        devices::MOVE_APPROVALS,
-        concat!("Move Approvals to This ", crate::computer_cap!(), "…")
-    );
+    assert_eq!(devices::MOVE_APPROVALS, "Move Here…");
     assert_eq!(
         devices::MOVE_TITLE,
         concat!("Move Approvals to This ", crate::computer_cap!())
@@ -2517,24 +2507,21 @@ fn devices_connect_frames_draw_the_mockup() {
     for wanted in [
         MOVE_APPROVALS,
         MOVE_TO_CONNECT,
-        "Move them here: over your tailnet, or through Apassy Connect.",
+        "Approvals go through Apassy relay",
     ] {
         assert!(text.contains(wanted), "9a has {wanted}: {text}");
     }
-    // The text spans the row; the two buttons sit on their own row below it, the move to
-    // Connect on the right.
+    // The title spans the row on one line; the two buttons sit on their own row below
+    // it, the move to Connect on the right.
     let rects = view_rects(&both);
-    let note = rect_of(
-        &rects,
-        "Move them here: over your tailnet, or through Apassy Connect.",
-    );
+    let title = rect_of(&rects, "Approvals go through Apassy relay");
     let to_mac = rect_of(&rects, MOVE_APPROVALS);
     let to_connect = rect_of(&rects, MOVE_TO_CONNECT);
     assert!(
-        note.width() > 250.0,
-        "9a: the note is not a column: {note:?}"
+        title.height() < 24.0,
+        "9a: the title wraps in a column: {title:?}"
     );
-    assert!(to_mac.top() > note.bottom(), "{to_mac:?} under {note:?}");
+    assert!(to_mac.top() > title.bottom(), "{to_mac:?} under {title:?}");
     assert!((to_mac.center().y - to_connect.center().y).abs() < 2.0);
     assert!(
         to_connect.left() > to_mac.right(),
@@ -2550,7 +2537,7 @@ fn devices_connect_frames_draw_the_mockup() {
     let text = view_texts(&connect_only);
     assert!(text.contains(MOVE_TO_CONNECT), "{text}");
     assert!(!text.contains(MOVE_APPROVALS), "{text}");
-    assert!(text.contains("without Tailscale"), "{text}");
+    assert!(text.contains("Approvals go through Apassy relay"), "{text}");
     // Neither: no move row.
     let text = view_texts(&frame_one());
     assert!(!text.contains(MOVE_TO_CONNECT), "{text}");
@@ -2698,9 +2685,8 @@ fn connect_move_texts_follow_the_rules_of_plans_section_5() {
     // The ended state of a relay copy names both choices.
     for why in [PathEnded::FreeEnded, PathEnded::Retired] {
         let words = ended_copy_words(why);
-        assert!(words.contains("Linux node the sync home (free)"), "{words}");
+        assert!(words.contains("Linux node (free)"), "{words}");
         assert!(words.contains("Apassy Connect"), "{words}");
-        assert!(words.contains("is safe"), "{words}");
         let text = ended_text(why);
         assert!(text.contains("Questions wait on this"), "{text}");
         assert!(text.contains("Apassy Connect"), "{text}");

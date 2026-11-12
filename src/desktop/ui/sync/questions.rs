@@ -114,7 +114,7 @@ pub(crate) const REMOVED_SYNC: &str = concat!(
 
 /// The note after the confirmation of "Move Approvals to Connect": the old path stays
 /// until the first approval went through the new route (plan s7 unit M5).
-pub(crate) const CONNECT_MOVE_WAITS: &str = "Approvals now go through Apassy Connect. The old path through apassy-relay.wyderka.cc stays until the first approval went through Apassy Connect.";
+pub(crate) const CONNECT_MOVE_WAITS: &str = "Approvals now go through Apassy Connect.";
 
 /// The notice of ADR 0037 D14 (plan s7 unit N1): the free approvals through the hosted
 /// relay end with [`FREE_RELAY_PATHS_END_VERSION`]. Settings > Devices shows it under

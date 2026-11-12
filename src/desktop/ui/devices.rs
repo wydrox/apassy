@@ -3,7 +3,7 @@
 //!
 //! The section has, in this order: the This Mac group with the node of this Mac on the
 //! tailnet ("Reachable on Your Tailnet", its address, port, and Node Words, one line for
-//! each problem, "Move Approvals to This Mac…" when the approvals still go through
+//! each problem, "Move Here…" when the approvals still go through
 //! Apassy relay, and the notifications), the Devices list with one row for each device of
 //! each team (kind, roles, the route word, the last contact, and Revoke… or Details…),
 //! the one add button, and the Wi-Fi Pairing group while a Wi-Fi iPhone is paired
@@ -42,14 +42,6 @@ pub(super) mod rows;
 
 /// The label of the route switch, and its name for VoiceOver.
 pub(crate) const ROUTE_SWITCH: &str = "Reachable on Your Tailnet";
-/// The subline of the switch while the route is on.
-pub(crate) const ROUTE_ON: &str = concat!(
-    "Your iPhone and ",
-    crate::computers!(),
-    " reach this ",
-    crate::computer!(),
-    " directly."
-);
 /// The subline of the switch while the route is off or cannot be on, and the approvals
 /// go through Apassy relay (or the vault is locked, so the window cannot tell).
 pub(crate) const ROUTE_OFF: &str = "Approvals go through Apassy relay.";
@@ -61,14 +53,13 @@ pub(crate) const ROUTE_LOCKED: &str = "Stopped while the vault is locked.";
 /// The one add button of the section.
 pub(crate) const ADD_DEVICE: &str = concat!("Add an iPhone or a ", crate::computer!(), "…");
 /// The button of the move row (frame 4).
-pub(crate) const MOVE_APPROVALS: &str =
-    concat!("Move Approvals to This ", crate::computer_cap!(), "…");
+pub(crate) const MOVE_APPROVALS: &str = "Move Here…";
 /// The button of the move to Apassy Connect (frame 9a; plan s7 unit M5).
-pub(crate) const MOVE_TO_CONNECT: &str = "Move Approvals to Connect…";
+pub(crate) const MOVE_TO_CONNECT: &str = "Move to Connect…";
 /// The row of a move to Apassy Connect that waits for its first approval (frame 9c).
 pub(crate) const CONNECT_PENDING: &str = "Moving approvals to Apassy Connect";
 pub(crate) const CONNECT_PENDING_NOTE: &str =
-    "The old path stays until the first approval went through Apassy Connect.";
+    "The old path stays until an approval goes through Connect.";
 /// Its button: the hosted team carries the approvals again.
 pub(crate) const CONNECT_UNDO: &str = "Undo";
 /// The subline of the relay switch while the hosted relay ended the approvals (frame 9d).
@@ -88,16 +79,8 @@ pub(crate) const TAILSCALE_DOWNLOAD: &str = "https://tailscale.com/download";
 pub(crate) const STARTING_FOR: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// The help of the route switch (frame 3e).
-const ROUTE_HELP: [&str; 4] = [
-    concat!(
-        "Your iPhone and ",
-        crate::computers!(),
-        " reach this ",
-        crate::computer!(),
-        " over Tailscale."
-    ),
+const ROUTE_HELP: [&str; 2] = [
     "Only devices on your tailnet can connect. Nothing opens to the internet.",
-    "Each device still signs in with its own key.",
     concat!(
         "Switching needs ",
         crate::touch_id!(),
@@ -105,19 +88,9 @@ const ROUTE_HELP: [&str; 4] = [
     ),
 ];
 /// The help of Node Words: safety words to compare, never proof of the node (N8-7).
-const WORDS_HELP: [&str; 4] = [
-    concat!(
-        "Safety words to compare: six words from this ",
-        crate::computer!(),
-        "'s certificate."
-    ),
+const WORDS_HELP: [&str; 2] = [
     "Your iPhone shows them in Settings → Devices.",
     "Other words there: revoke that iPhone and pair again.",
-    concat!(
-        "The same words are not proof of this ",
-        crate::computer!(),
-        ". The iPhone checks the whole certificate."
-    ),
 ];
 /// The help of the Devices list.
 const DEVICES_HELP: [&str; 5] = [
@@ -138,11 +111,9 @@ const DEVICES_HELP: [&str; 5] = [
     "Wi-Fi: the old pairing. It ends soon.",
 ];
 /// The help of the Wi-Fi Pairing group (frame 6c).
-const WIFI_HELP: [&str; 4] = [
-    "The iPhone app now uses your tailnet or Apassy relay.",
-    "Both work away from home. Wi-Fi works only on one network.",
+const WIFI_HELP: [&str; 2] = [
+    "The iPhone app now uses your tailnet or Apassy relay, on any network.",
     "Paired iPhones keep working until the removal.",
-    "New Wi-Fi pairing is no longer possible.",
 ];
 
 /// The group of the questions through the relay, the feed, and the other Macs (the old
@@ -191,18 +162,16 @@ pub(crate) const ADD_MAC: &str = concat!("Add a ", crate::computer!(), "…");
 pub(crate) const OLD_RELAY_ENTRY: &str = "Old entry still on Apassy relay";
 
 /// The help of the relay switch.
-const RELAY_HELP: [&str; 4] = [
+const RELAY_HELP: [&str; 2] = [
     "Questions also reach your other devices of this vault.",
-    "The relay sees no command and no credential.",
     concat!(
         "Turning it on needs ",
         crate::touch_id!(),
         ". Off needs none."
     ),
-    "Relay sync of the vault does not change.",
 ];
 /// The help of the feed switch.
-const SHOW_AGENTS_HELP: [&str; 3] = [
+const SHOW_AGENTS_HELP: [&str; 2] = [
     concat!(
         "Your iPhone and your other ",
         crate::computers!(),
@@ -210,7 +179,6 @@ const SHOW_AGENTS_HELP: [&str; 3] = [
         crate::computer!(),
         "'s agents."
     ),
-    concat!("Only this ", crate::computer!(), " changes them."),
     concat!(
         "Off: Apassy deletes this ",
         crate::computer!(),
@@ -218,14 +186,11 @@ const SHOW_AGENTS_HELP: [&str; 3] = [
     ),
 ];
 /// The help of the other Macs row.
-const OTHER_MACS_HELP: [&str; 2] = [
-    concat!("The ", crate::computers!(), " that sync this vault."),
-    concat!(
-        "Devices… lists them; Add a ",
-        crate::computer!(),
-        "… links one more."
-    ),
-];
+const OTHER_MACS_HELP: [&str; 1] = [concat!(
+    "The ",
+    crate::computers!(),
+    " that sync this vault."
+)];
 /// The help of the old entry row (frame 4d).
 const OLD_RELAY_ENTRY_HELP: [&str; 2] = [
     concat!(
@@ -552,7 +517,7 @@ pub(crate) struct DevicesView {
     /// The approvals go through Apassy relay and the route runs: frame 4.
     pub(crate) can_move: bool,
     /// The approvals go through Apassy relay and the node runs on Apassy Connect: frame 9a
-    /// ("Move Approvals to Connect…").
+    /// ("Move to Connect…").
     pub(crate) can_move_connect: bool,
     /// A move to Apassy Connect waits for its first approval through Connect: frame 9c.
     pub(crate) connect_pending: bool,
@@ -601,7 +566,7 @@ pub(crate) enum Action {
     PairAgain,
     Copy(String),
     Move,
-    /// "Move Approvals to Connect…" (plan s7 unit M5).
+    /// "Move to Connect…" (plan s7 unit M5).
     MoveConnect,
     /// "Undo" of a move to Apassy Connect that waits for its first approval.
     UndoConnectMove,
@@ -824,17 +789,17 @@ fn this_mac_group(
     rows::group(ui, Some(concat!("This ", crate::computer!())), |g| {
         let off = route_off_line(view);
         let (subline, enabled) = match &view.node {
-            NodeState::Missing | NodeState::NotConnected => (off, false),
-            NodeState::Off => (off, !view.locked),
-            NodeState::Locked => (ROUTE_LOCKED, false),
-            NodeState::On { .. } => (ROUTE_ON, !view.locked),
+            NodeState::Missing | NodeState::NotConnected => (Some(off), false),
+            NodeState::Off => (Some(off), !view.locked),
+            NodeState::Locked => (Some(ROUTE_LOCKED), false),
+            NodeState::On { .. } => (None, !view.locked),
         };
         let was = view.route_on();
         let mut on = was;
         switch_row(
             g,
             ROUTE_SWITCH,
-            Some(subline),
+            subline,
             &mut on,
             enabled,
             Some(&ROUTE_HELP),
@@ -1001,29 +966,16 @@ fn connect_pending_row(g: &mut rows::Group<'_>, action: &mut Option<Action>) {
 }
 
 /// Frame 4: the approvals still go through Apassy relay. `to_mac`: the tailnet route
-/// runs ("Move Approvals to This Mac…"); `to_connect`: the node runs on Apassy Connect
-/// ("Move Approvals to Connect…", frame 9a). The first one is the blue button.
+/// runs ("Move Here…"); `to_connect`: the node runs on Apassy Connect
+/// ("Move to Connect…", frame 9a). The first one is the blue button.
 fn move_row(g: &mut rows::Group<'_>, to_mac: bool, to_connect: bool, action: &mut Option<Action>) {
-    let note = match (to_mac, to_connect) {
-        (true, true) => "Move them here: over your tailnet, or through Apassy Connect.",
-        (false, true) => concat!(
-            "Move them to Apassy Connect: your iPhone reaches this ",
-            crate::computer!(),
-            " without Tailscale."
-        ),
-        _ => "Move them here to keep them on your tailnet.",
-    };
     let text = |ui: &mut Ui| {
         ui.horizontal_top(|ui| {
             kit::icon_tile_sized(ui, Icon::Globe, kit::palette().accent, 22.0);
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing.y = 1.0;
-                ui.label(
-                    kit::medium("Approvals go through Apassy relay", Font::Body)
-                        .color(kit::palette().label),
-                );
-                ui.add(Label::new(rows::note(note)).wrap());
-            });
+            ui.label(
+                kit::medium("Approvals go through Apassy relay", Font::Body)
+                    .color(kit::palette().label),
+            );
         });
     };
     // Frame 9a: the text spans the row, and the two buttons have their own row below.
@@ -1512,16 +1464,13 @@ pub(crate) fn revoke_sheet(
         let (lead, note) = match (device.kind, vault) {
             (Kind::Mac, Some(vault)) => (
                 format!("It stops syncing {vault} and seeing approvals."),
-                concat!(
+                Some(concat!(
                     "Its copy of the vault stays on that ",
                     crate::computer!(),
                     "."
-                ),
+                )),
             ),
-            _ => (
-                "It can no longer see or answer questions.".to_owned(),
-                "To use it again, pair it again.",
-            ),
+            _ => ("It can no longer see or answer questions.".to_owned(), None),
         };
         kit::sheet_title(ui, &title, Some(&lead));
         if !watches.is_empty() {
@@ -1537,8 +1486,10 @@ pub(crate) fn revoke_sheet(
             });
             ui.add_space(8.0);
         }
-        kit::note(ui, note);
-        ui.add_space(8.0);
+        if let Some(note) = note {
+            kit::note(ui, note);
+            ui.add_space(8.0);
+        }
         kit::sheet_buttons(
             ui,
             |_| {},
@@ -1654,7 +1605,7 @@ pub(crate) fn wifi_notice(ctx: &egui::Context, tailnet: bool) -> (Option<Choice>
 
 // ---- Frames 2 and 4b–4d: the add and move sheets. ----
 //
-// The sheet of "Add an iPhone or a Mac…" and of "Move Approvals to This Mac…" is the
+// The sheet of "Add an iPhone or a Mac…" and of "Move Here…" is the
 // questions mode of "Add a device…" of relay sync (`sync/relay.rs`); these functions draw
 // its steps inside it, with the exact texts of the mockup, and the demo build draws them
 // from fixtures.
