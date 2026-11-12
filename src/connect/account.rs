@@ -321,6 +321,12 @@ pub struct AccountState {
     /// not had yet ([`PendingRotation`]): public values only, never the code.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery_pending: Option<PendingRotation>,
+    /// Unix seconds when this device recovered the account with its recovery code
+    /// (section 9): every vault store that the account had was deleted at Connect then, so
+    /// a vault whose store is gone says why and offers a new store. `None` for an account
+    /// that this device made or joined.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovered_at: Option<u64>,
     /// The other accounts whose root this account pinned (its own `peer` entries) or took
     /// from the `peer` entry of the account that made a store it joined (at most 64,
     /// section 16, [`PeerPin`]).
@@ -412,6 +418,7 @@ impl AccountState {
             recovery_unseen: false,
             recovery_key: None,
             recovery_pending: None,
+            recovered_at: None,
             peers: Vec::new(),
             stores: Vec::new(),
         }
@@ -1164,6 +1171,7 @@ impl ConnectAccount {
         );
         let mut account = Self::build(client, state, path, Arc::new(signer));
         account.state.created_at = account.now();
+        account.state.recovered_at = Some(account.state.created_at);
         account.state.recovery_key = Some(recovery_key);
         account.state.save(path)?;
         account.key_note = key_note;
@@ -3305,6 +3313,7 @@ impl JoinRequest {
                 .clone()
                 .filter(|key| valid_recovery_key(key)),
             recovery_pending: None,
+            recovered_at: None,
             peers: Vec::new(),
             stores: Vec::new(),
         };
@@ -3384,6 +3393,7 @@ mod tests {
             recovery_unseen: false,
             recovery_key: None,
             recovery_pending: None,
+            recovered_at: None,
             peers: Vec::new(),
             stores: Vec::new(),
         }
