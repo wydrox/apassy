@@ -1072,7 +1072,8 @@ fn not_on_connect(ui: &mut Ui, action: &mut Option<Action>) {
         g.tone_icon_row(SELF_HOST, Tone::Accent);
     });
     ui.add_space(12.0);
-    ui.horizontal(|ui| {
+    // The two buttons wrap onto two lines in a narrow window.
+    ui.horizontal_wrapped(|ui| {
         if kit::button(ui, CREATE, Style::Prominent).clicked() {
             *action = Some(Action::Create);
         }

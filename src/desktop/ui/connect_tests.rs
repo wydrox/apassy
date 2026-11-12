@@ -3306,10 +3306,7 @@ fn an_unanswered_recovery_is_settled_by_the_next_session() {
     let account = shown(&app).expect("account");
     assert!(account.recovery_unseen);
     assert_eq!(account.recovered, Some(Some(1)));
-    assert_eq!(
-        live::error_for_test(&app).as_deref(),
-        Some(super::connect::RECOVERED_UNSEEN)
-    );
+    assert_eq!(app.status_text, super::connect::RECOVERED_UNSEEN);
     let painted = text(&ctx, &mut app);
     assert!(
         painted.contains(super::connect::RECOVERY_UNSEEN),
@@ -3328,15 +3325,15 @@ fn a_lock_before_the_code_is_shown_leaves_the_lasting_line() {
         let dir = TempDir::new().expect("temp dir");
         let mut app = connect_app(&dir, &connect);
         let ctx = egui::Context::default();
-        connect.slow_next_answers(
-            if case == "create" {
-                "POST /v1/account "
-            } else {
-                "POST /v1/account/recover "
-            },
-            1,
-            Duration::from_millis(300),
-        );
+        // The request waits at Connect a moment, and the lock comes while it waits: after
+        // the owner check counted and the request left, before the answer.
+        let route = if case == "create" {
+            "POST /v1/account"
+        } else {
+            "POST /v1/account/recover"
+        };
+        let sent = connect.count(route);
+        connect.slow_next_answers(route, 1, Duration::from_millis(800));
         if case == "create" {
             act(&ctx, &mut app, Action::Create);
             if let Some(Sheet::Create { name, .. }) = &mut app.ui.connect.sheet {
@@ -3350,6 +3347,11 @@ fn a_lock_before_the_code_is_shown_leaves_the_lasting_line() {
             pass(&ctx, &mut app, live::step);
         }
         assert!(live::view(&app).busy, "{case}: the request runs");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while connect.count(route) == sent {
+            assert!(Instant::now() < deadline, "{case}: no request");
+            std::thread::sleep(Duration::from_millis(5));
+        }
         app.lock_vault(Some(&ctx));
         until(&ctx, &mut app, "the answer", |app| {
             !app.ui.connect.live.session().is_open()
@@ -3359,6 +3361,10 @@ fn a_lock_before_the_code_is_shown_leaves_the_lasting_line() {
         assert!(
             !matches!(app.ui.connect.sheet, Some(Sheet::Recovery { .. })),
             "{case}: no code to a locked vault"
+        );
+        assert!(
+            dir.path().join("data/connect/account.json").exists(),
+            "{case}: the account file"
         );
         unlock(&ctx, &mut app);
         until(&ctx, &mut app, "the account", |app| shown(app).is_some());

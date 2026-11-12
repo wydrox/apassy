@@ -506,6 +506,52 @@ impl Live {
 }
 
 impl DesktopApp {
+    /// A step of the screenshot tour in Settings › Connect (`examples/screenshots.rs`, step
+    /// `connect STEP`), on the fake Connect of the tour: `recover` opens the recovery sheet,
+    /// `recover-fill` puts `text` (the account id and the code, as the Copy button of a code
+    /// copies them) in it, `recover-go` presses "Recover…" (the owner check opens), and
+    /// `saved` presses "I Saved It". Returns false when the step does not fit the sheet.
+    #[doc(hidden)]
+    pub fn tour_connect(&mut self, ctx: &egui::Context, step: &str, text: Option<&str>) -> bool {
+        match step {
+            "recover" => {
+                act(self, ctx, Action::Recover);
+                matches!(self.ui.connect.sheet, Some(Sheet::Recover { .. }))
+            }
+            "recover-fill" => {
+                let (
+                    Some(text),
+                    Some(Sheet::Recover {
+                        account_id, code, ..
+                    }),
+                ) = (text, &mut self.ui.connect.sheet)
+                else {
+                    return false;
+                };
+                *code = Zeroizing::new(text.to_owned());
+                if let Some(id) = crate::connect::find_account_id(text) {
+                    *account_id = id;
+                }
+                true
+            }
+            "recover-go" => {
+                if !matches!(self.ui.connect.sheet, Some(Sheet::Recover { .. })) {
+                    return false;
+                }
+                choose(self, ctx, SheetChoice::Go);
+                self.owner.check.is_some()
+            }
+            "saved" => {
+                if !matches!(self.ui.connect.sheet, Some(Sheet::Recovery { .. })) {
+                    return false;
+                }
+                choose(self, ctx, SheetChoice::Done);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Before the app quits: a join of this device is cancelled at Connect, and the quit
     /// waits up to two seconds for it. A cancel that Connect did not take leaves the pending
     /// join on disk for the next start.
@@ -1318,7 +1364,7 @@ fn apply(app: &mut DesktopApp, ctx: &egui::Context, outcome: Outcome) {
                 if let Some(ticket) = live.session.retry() {
                     live.open(Some(ctx), ticket);
                 }
-                live.error = Some(super::RECOVERED_UNSEEN.to_owned());
+                app.set_note(super::RECOVERED_UNSEEN);
             } else {
                 live.error = Some(recover_message(&error));
             }
@@ -1334,7 +1380,9 @@ fn apply(app: &mut DesktopApp, ctx: &egui::Context, outcome: Outcome) {
                         unrecorded: false,
                     });
                 }
-                _ => live.error = Some(super::RECOVERED_UNSEEN.to_owned()),
+                // The note stays in the status line: the refresh that follows clears the
+                // error of the section.
+                _ => app.set_note(super::RECOVERED_UNSEEN),
             }
         }
         Outcome::RecoveryResumed(Ok(None)) => {}
