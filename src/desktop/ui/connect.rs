@@ -135,6 +135,9 @@ pub(crate) const RECOVERY_CHANGED_OK: &str = "OK";
 pub(crate) const ACCOUNT_ROW: &str = "Account";
 pub(crate) const MORE_ACCOUNT: &str = "More account actions";
 pub(crate) const COPY_ACCOUNT_ID: &str = "Copy Account ID";
+/// A member's leave of its family or team.
+pub(crate) const LEAVE_FAMILY: &str = "Leave Family…";
+pub(crate) const LEAVE_TEAM: &str = "Leave Team…";
 /// The row of an account without a family or team, with "Join…".
 pub(crate) const JOIN_ROW: &str = "Family or Team";
 /// The cap of a member that waits for the organizer's confirmation.
@@ -337,6 +340,8 @@ pub(crate) const TEXTS: &[&str] = &[
     ACCOUNT_ROW,
     MORE_ACCOUNT,
     COPY_ACCOUNT_ID,
+    LEAVE_FAMILY,
+    LEAVE_TEAM,
     JOIN_ROW,
     PENDING_MEMBER,
     ACCOUNT_ID,
@@ -1172,52 +1177,90 @@ fn account_section(
     devices_group(ui, view, account, action);
 }
 
-/// The ⋯ menu of the Account row: the account id with Copy, a new recovery code, forgetting
-/// this Mac, leaving a family or team, and the deletion in red. Every item that needs an
-/// owner check is off while the vault is locked.
+/// One item of the ⋯ menu of the Account row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MenuItem {
+    pub(crate) label: &'static str,
+    pub(crate) enabled: bool,
+    /// A destructive item, in red.
+    pub(crate) red: bool,
+    /// A separator goes above the item.
+    pub(crate) separated: bool,
+    pub(crate) action: Action,
+}
+
+/// The items of the ⋯ menu of the Account row, in order: Copy Account ID, a new recovery
+/// code, forgetting this Mac (only while the list holds it), leaving a family or team (a
+/// member only), and the deletion in red. Every item that needs an owner check is off
+/// while the vault is locked, and every item is off while a step runs: an open menu is
+/// its own area and does not follow the disabled pane.
+pub(crate) fn account_menu_items(view: &ConnectView, account: &Account) -> Vec<MenuItem> {
+    let free = !view.busy;
+    let checked = free && !view.locked;
+    let item = |label, enabled, action| MenuItem {
+        label,
+        enabled,
+        red: false,
+        separated: false,
+        action,
+    };
+    let mut items = vec![
+        item(COPY_ACCOUNT_ID, free, Action::CopyAccountId),
+        MenuItem {
+            separated: true,
+            ..item(
+                NEW_RECOVERY,
+                checked && account.list_verified,
+                Action::NewRecoveryCode,
+            )
+        },
+    ];
+    if let Some(index) = account.devices.iter().position(|device| device.this) {
+        items.push(item(FORGET_THIS_MAC, checked, Action::Revoke(index)));
+    }
+    if let Some(group) = account.group.as_ref().filter(|group| !group.manages()) {
+        let leave = if group.kind == "team" {
+            LEAVE_TEAM
+        } else {
+            LEAVE_FAMILY
+        };
+        items.push(item(leave, checked, Action::Leave));
+    }
+    items.push(MenuItem {
+        red: true,
+        separated: true,
+        ..item(DELETE, checked, Action::Delete)
+    });
+    items
+}
+
+/// The ⋯ menu of the Account row: the account id, then [`account_menu_items`].
 fn account_menu(ui: &mut Ui, view: &ConnectView, account: &Account, action: &mut Option<Action>) {
     let more = kit::icon_button(ui, Icon::More, MORE_ACCOUNT, kit::Size::Small);
     egui::Popup::menu(&more).show(|ui| {
         ui.set_min_width(220.0);
-        let item = |ui: &mut Ui, enabled: bool, label: &str| {
-            ui.add_enabled(enabled, egui::Button::selectable(false, label))
-                .clicked()
-        };
         ui.horizontal(|ui| {
             ui.label(kit::text(ACCOUNT_ID, Font::Callout).color(kit::palette().secondary));
             ui.label(
                 kit::text(account.account_id.as_str(), Font::Mono).color(kit::palette().label),
             );
         });
-        if item(ui, true, COPY_ACCOUNT_ID) {
-            *action = Some(Action::CopyAccountId);
-        }
-        ui.separator();
-        if item(ui, !view.locked && account.list_verified, NEW_RECOVERY) {
-            *action = Some(Action::NewRecoveryCode);
-        }
-        if let Some(index) = account.devices.iter().position(|device| device.this)
-            && item(ui, !view.locked, FORGET_THIS_MAC)
-        {
-            *action = Some(Action::Revoke(index));
-        }
-        if let Some(group) = account.group.as_ref().filter(|group| !group.manages()) {
-            let leave = if group.kind == "team" {
-                "Leave Team…"
-            } else {
-                "Leave Family…"
-            };
-            if item(ui, !view.locked, leave) {
-                *action = Some(Action::Leave);
+        for item in account_menu_items(view, account) {
+            if item.separated {
+                ui.separator();
             }
-        }
-        ui.separator();
-        let delete = kit::text(DELETE, Font::Body).color(Tone::Critical.text());
-        if ui
-            .add_enabled(!view.locked, egui::Button::selectable(false, delete))
-            .clicked()
-        {
-            *action = Some(Action::Delete);
+            let color = if item.red {
+                Tone::Critical.text()
+            } else {
+                kit::palette().label
+            };
+            let label = kit::text(item.label, Font::Body).color(color);
+            if ui
+                .add_enabled(item.enabled, egui::Button::selectable(false, label))
+                .clicked()
+            {
+                *action = Some(item.action);
+            }
         }
     });
 }

@@ -3487,3 +3487,218 @@ fn a_pending_member_keeps_its_role() {
         format!("Admin · Since {}", super::connect::day(1_790_000_000))
     );
 }
+
+/// An account of the menu tests: this device and another one, the list verified, a family
+/// that this account organizes (or, with `member`, is a member of).
+fn menu_account(member: bool, this_listed: bool) -> Account {
+    let device = |id: &str, this: bool| super::connect::Device {
+        id: id.to_owned(),
+        name: id.to_owned(),
+        platform: "mac".to_owned(),
+        created_at: 1_790_000_000,
+        last_seen_at: None,
+        this,
+        verified: true,
+        fingerprint: "3f0a 91c2 7be4".to_owned(),
+    };
+    let mut devices = vec![device("Laptop", false)];
+    if this_listed {
+        devices.insert(0, device("Desktop", true));
+    }
+    Account {
+        account_id: "acc_k7m2q4x3ca".to_owned(),
+        name: "Alex".to_owned(),
+        email: None,
+        plan: Plan {
+            plan: Some("family".to_owned()),
+            status: "active".to_owned(),
+            entitled: true,
+            interval: Some("month".to_owned()),
+            quantity: Some(4),
+            renews_at: Some(1_795_000_000),
+            ends_at: None,
+            grace_until: None,
+            read_only_until: None,
+            delete_at: None,
+        },
+        devices,
+        group: Some(super::connect::Group {
+            id: "grp_f4m6n2p7qa".to_owned(),
+            kind: "family".to_owned(),
+            role: if member { "member" } else { "owner" }.to_owned(),
+            state: "active".to_owned(),
+            owner_name: "Alex".to_owned(),
+            quantity: 4,
+            members: Vec::new(),
+        }),
+        list_verified: true,
+        list_nearly_full: false,
+        recovery_unseen: false,
+        recovery_changed: None,
+        recovered: None,
+    }
+}
+
+fn menu_view(account: Account, locked: bool, busy: bool) -> ConnectView {
+    ConnectView {
+        shown: Shown::Account(account),
+        plans: Some(fixture_plans()),
+        locked,
+        busy,
+        error: None,
+        now: 1_795_000_000,
+    }
+}
+
+/// The items of the ⋯ menu and whether each is on: every item that needs an owner check is
+/// off while locked, a new code also while the list is not verified, Forget This Mac only
+/// while the list holds this device, Leave only for a member, and every item while a step
+/// runs.
+#[test]
+fn the_account_menu_items_follow_the_state() {
+    use super::connect::{COPY_ACCOUNT_ID, DELETE, LEAVE_FAMILY, NEW_RECOVERY, account_menu_items};
+    let items = |view: &ConnectView| {
+        let Shown::Account(account) = &view.shown else {
+            unreachable!();
+        };
+        account_menu_items(view, account)
+            .into_iter()
+            .map(|item| (item.label, item.enabled))
+            .collect::<Vec<_>>()
+    };
+    let organizer = menu_view(menu_account(false, true), false, false);
+    assert_eq!(
+        items(&organizer),
+        [
+            (COPY_ACCOUNT_ID, true),
+            (NEW_RECOVERY, true),
+            (FORGET_THIS_MAC, true),
+            (DELETE, true),
+        ]
+    );
+    let locked = menu_view(menu_account(false, true), true, false);
+    assert_eq!(
+        items(&locked),
+        [
+            (COPY_ACCOUNT_ID, true),
+            (NEW_RECOVERY, false),
+            (FORGET_THIS_MAC, false),
+            (DELETE, false),
+        ]
+    );
+    let mut unverified = menu_account(false, true);
+    unverified.list_verified = false;
+    assert_eq!(
+        items(&menu_view(unverified, false, false)),
+        [
+            (COPY_ACCOUNT_ID, true),
+            (NEW_RECOVERY, false),
+            (FORGET_THIS_MAC, true),
+            (DELETE, true),
+        ]
+    );
+    assert_eq!(
+        items(&menu_view(menu_account(true, true), false, false)),
+        [
+            (COPY_ACCOUNT_ID, true),
+            (NEW_RECOVERY, true),
+            (FORGET_THIS_MAC, true),
+            (LEAVE_FAMILY, true),
+            (DELETE, true),
+        ]
+    );
+    assert_eq!(
+        items(&menu_view(menu_account(false, false), false, false)),
+        [
+            (COPY_ACCOUNT_ID, true),
+            (NEW_RECOVERY, true),
+            (DELETE, true)
+        ]
+    );
+    let busy = menu_view(menu_account(true, true), false, true);
+    assert!(items(&busy).iter().all(|(_, on)| !on), "{:?}", items(&busy));
+}
+
+/// One frame of the section alone: the painted text, the labeled AccessKit nodes with
+/// their bounds, and the press.
+fn section_frame(
+    ctx: &egui::Context,
+    view: &ConnectView,
+    events: Vec<egui::Event>,
+) -> (String, Vec<(String, egui::Rect)>, Option<Action>) {
+    let mut action = None;
+    let output = ctx.run_ui(input(0.0, events), |ui| {
+        action = super::connect::draw(ui, view);
+    });
+    let mut text = String::new();
+    for clipped in &output.shapes {
+        collect(&clipped.shape, &mut text);
+    }
+    let mut nodes = Vec::new();
+    if let Some(update) = &output.platform_output.accesskit_update {
+        for (_, node) in &update.nodes {
+            if let (Some(label), Some(bounds)) = (node.label(), node.bounds()) {
+                let rect = egui::Rect::from_min_max(
+                    egui::pos2(bounds.x0 as f32, bounds.y0 as f32),
+                    egui::pos2(bounds.x1 as f32, bounds.y1 as f32),
+                );
+                nodes.push((label.to_owned(), rect));
+            }
+        }
+    }
+    output.drop_without_applying_deltas();
+    (text, nodes, action)
+}
+
+/// A click on the node labeled `label` of the last frame; the press of its release.
+fn click_node(
+    ctx: &egui::Context,
+    view: &ConnectView,
+    nodes: &[(String, egui::Rect)],
+    label: &str,
+) -> Option<Action> {
+    let at = nodes
+        .iter()
+        .find(|(name, _)| name == label)
+        .map(|(_, rect)| rect.center())
+        .unwrap_or_else(|| panic!("no {label:?} in {nodes:?}"));
+    let button = |pressed| egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    section_frame(ctx, view, vec![egui::Event::PointerMoved(at)]);
+    section_frame(ctx, view, vec![button(true)]);
+    section_frame(ctx, view, vec![button(false)]).2
+}
+
+/// The ⋯ of the Account row opens a menu with the account id and its items; an item that
+/// is on acts, and Delete Account… does nothing while the vault is locked.
+#[test]
+fn the_account_menu_opens_and_its_items_act() {
+    use super::connect::{COPY_ACCOUNT_ID, DELETE, MORE_ACCOUNT};
+    for locked in [false, true] {
+        let view = menu_view(menu_account(false, true), locked, false);
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut nodes = Vec::new();
+        for _ in 0..3 {
+            nodes = section_frame(&ctx, &view, Vec::new()).1;
+        }
+        assert_eq!(click_node(&ctx, &view, &nodes, MORE_ACCOUNT), None);
+        let (text, nodes, _) = section_frame(&ctx, &view, Vec::new());
+        for item in ["acc_k7m2q4x3ca", COPY_ACCOUNT_ID, FORGET_THIS_MAC, DELETE] {
+            assert!(
+                text.contains(item),
+                "{locked}: the menu shows {item}: {text}"
+            );
+        }
+        let pressed = click_node(&ctx, &view, &nodes, DELETE);
+        if locked {
+            assert_eq!(pressed, None, "Delete Account… is off while locked");
+        } else {
+            assert_eq!(pressed, Some(Action::Delete));
+        }
+    }
+}
