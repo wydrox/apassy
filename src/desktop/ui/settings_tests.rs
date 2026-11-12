@@ -1011,7 +1011,10 @@ fn devices_relay_group_restores_the_relay_and_the_other_macs() {
     // The other Macs of a vault that syncs through the relay, and the D14 notice.
     let text = view_texts(&with(
         Questions::On,
-        Some(OtherMacsRow { relay: true }),
+        Some(OtherMacsRow {
+            relay: true,
+            removed: false,
+        }),
         true,
     ));
     for expected in [
@@ -1025,10 +1028,25 @@ fn devices_relay_group_restores_the_relay_and_the_other_macs() {
     // A folder sync has no row here: Vault › Sync names the folder.
     let text = view_texts(&with(
         Questions::CanTurnOn,
-        Some(OtherMacsRow { relay: false }),
+        Some(OtherMacsRow {
+            relay: false,
+            removed: false,
+        }),
         false,
     ));
     assert!(!text.contains(OTHER_MACS), "{text}");
+    assert!(!text.contains(ADD_MAC), "{text}");
+    // A Mac that the relay removed: the row says so, without buttons.
+    let text = view_texts(&with(
+        Questions::CanTurnOn,
+        Some(OtherMacsRow {
+            relay: false,
+            removed: true,
+        }),
+        false,
+    ));
+    assert!(text.contains(OTHER_MACS), "{text}");
+    assert!(text.contains(devices::OTHER_MACS_REMOVED), "{text}");
     assert!(!text.contains(ADD_MAC), "{text}");
     assert!(!text.contains("Free approvals"), "{text}");
 

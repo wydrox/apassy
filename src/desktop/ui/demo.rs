@@ -1875,7 +1875,10 @@ pub(crate) fn devices_view(frame: DevicesFrame) -> super::devices::DevicesView {
             Questions::On
         },
         feed_shown: ended.is_none(),
-        other_macs: Some(OtherMacsRow { relay: true }),
+        other_macs: Some(OtherMacsRow {
+            relay: true,
+            removed: false,
+        }),
         free_end: ended.is_none().then(|| "0.5.20".to_owned()),
         can_move: ended.is_some(),
         can_move_connect: ended.is_some(),

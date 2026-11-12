@@ -170,6 +170,8 @@ pub(crate) const OTHER_MACS: &str = concat!("Other ", crate::computers!());
 /// Its buttons while the vault syncs through the relay.
 pub(crate) const OTHER_MACS_DEVICES: &str = "Devices…";
 pub(crate) const ADD_MAC: &str = concat!("Add a ", crate::computer!(), "…");
+/// The Other Macs row of a vault whose relay team removed this Mac.
+pub(crate) const OTHER_MACS_REMOVED: &str = "Removed from the relay";
 /// The row of frame 4d after "Later": the hosted relay kept the old entry of a move.
 pub(crate) const OLD_RELAY_ENTRY: &str = "Old entry still on Apassy relay";
 
@@ -489,9 +491,11 @@ impl Questions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OtherMacsRow {
     /// The vault syncs through the relay and this Mac is in its team: Devices… and Add a
-    /// Mac… work, and only then is the row drawn (Vault › Sync names the way of a
-    /// folder).
+    /// Mac… work. Vault › Sync names the way of a folder: that vault has no row.
     pub(crate) relay: bool,
+    /// The relay removed this Mac from the vault's team: the row says so, without
+    /// buttons.
+    pub(crate) removed: bool,
 }
 
 /// The Relay group: the questions through the relay, the feed of the agents, the other
@@ -1278,15 +1282,22 @@ fn relay_group(ui: &mut Ui, relay: &RelayView, action: &mut Option<Action>) {
                 *action = Some(Action::ShowAgents(shown));
             }
         }
-        if relay.other_macs.as_ref().is_some_and(|others| others.relay) {
-            g.line(OTHER_MACS, None, |ui| {
-                if kit::small_button(ui, ADD_MAC, Style::Bordered).clicked() {
-                    *action = Some(Action::AddMac);
-                }
-                if kit::small_button(ui, OTHER_MACS_DEVICES, Style::Bordered).clicked() {
-                    *action = Some(Action::OtherMacs);
-                }
-            });
+        match &relay.other_macs {
+            Some(others) if others.relay => {
+                g.line(OTHER_MACS, None, |ui| {
+                    if kit::small_button(ui, ADD_MAC, Style::Bordered).clicked() {
+                        *action = Some(Action::AddMac);
+                    }
+                    if kit::small_button(ui, OTHER_MACS_DEVICES, Style::Bordered).clicked() {
+                        *action = Some(Action::OtherMacs);
+                    }
+                });
+            }
+            Some(others) if others.removed => {
+                let removed = kit::text(OTHER_MACS_REMOVED, Font::Body).color(Tone::Warning.text());
+                g.line(OTHER_MACS, Some(removed), |_| {});
+            }
+            _ => {}
         }
         if let Some((ended, version)) = &relay.ended {
             ended_row(g, relay, *ended, version, action);
@@ -2663,6 +2674,9 @@ mod live {
             let others = super::super::sync::other_macs(app);
             super::OtherMacsRow {
                 relay: others.relay.is_some(),
+                removed: app
+                    .current_vault()
+                    .is_some_and(|entry| app.relay_removed(&entry.id)),
             }
         });
         let free_end = app
