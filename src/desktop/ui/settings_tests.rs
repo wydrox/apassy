@@ -1229,22 +1229,42 @@ fn devices_rows_follow_their_label_as_under_this_mac() {
         .expect("the Devices label");
     // The top of the group under a label: the highest painted rectangle between the
     // label and the first text of the group.
-    let group_top = |label: Rect, first: Rect| {
+    let group_box = |label: Rect, first: Rect| {
         boxes
             .iter()
-            .map(|rect| rect.top())
-            .filter(|top| *top >= label.bottom() && *top <= first.top())
-            .fold(f32::INFINITY, f32::min)
+            .copied()
+            .filter(|rect| rect.top() >= label.bottom() && rect.top() <= first.top())
+            .min_by(|a, b| a.top().total_cmp(&b.top()))
     };
-    let under_this_mac = group_top(this_mac, reachable) - this_mac.bottom();
-    let under_devices = group_top(label, first) - label.bottom();
+    // The five painted rectangles with the smallest top at or below the label, for the
+    // failure message.
+    let highest = |label: Rect| {
+        let mut below: Vec<Rect> = boxes
+            .iter()
+            .copied()
+            .filter(|rect| rect.top() >= label.bottom())
+            .collect();
+        below.sort_by(|a, b| a.top().total_cmp(&b.top()));
+        below.truncate(5);
+        below
+    };
+    let this_mac_box = group_box(this_mac, reachable);
+    let devices_box = group_box(label, first);
+    let under_this_mac = this_mac_box.map_or(f32::INFINITY, |rect| rect.top()) - this_mac.bottom();
+    let under_devices = devices_box.map_or(f32::INFINITY, |rect| rect.top()) - label.bottom();
     assert!(
         under_this_mac.is_finite() && under_devices.is_finite(),
         "a group under each label: {under_this_mac} {under_devices}"
     );
     assert!(
         (under_devices - under_this_mac).abs() <= 1.0,
-        "the groups follow their labels: {under_devices} vs {under_this_mac}"
+        "the groups follow their labels: {under_devices} vs {under_this_mac}\n\
+         This Mac: label {this_mac:?}, selected {this_mac_box:?}, first text {reachable:?}, \
+         highest five {:?}\n\
+         Devices: label {label:?}, selected {devices_box:?}, first text {first:?}, \
+         highest five {:?}",
+        highest(this_mac),
+        highest(label),
     );
 }
 
