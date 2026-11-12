@@ -941,8 +941,16 @@ fn join_a_group_with_the_pasted_link() {
 
     let mut app = connect_app(&dir, &connect);
     create_account(&ctx, &mut app, "Ola");
-    assert!(text(&ctx, &mut app).contains("Join a Family or Team"));
+    // The row "Family or Team" with Join… (spoken "Join a Family or Team"); its sheet keeps
+    // the whole title.
+    let painted = text(&ctx, &mut app);
+    assert!(
+        painted.contains(super::connect::JOIN_ROW) && painted.contains("Join…"),
+        "{painted}"
+    );
     act(&ctx, &mut app, Action::JoinGroup);
+    let painted = text(&ctx, &mut app);
+    assert!(painted.contains(super::connect::JOIN_GROUP), "{painted}");
     if let Some(Sheet::JoinGroup { link, .. }) = &mut app.ui.connect.sheet {
         link.push_str("not a link");
     }

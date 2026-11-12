@@ -1159,7 +1159,10 @@ fn button_named(
         );
         paint_icon(painter, icon_rect, icon, fg);
     }
-    painter.galley(Pos2::new(start.x + icon_space, start.y), galley, fg);
+    // An icon button has no label: no empty text on screen (its layout has no extent).
+    if !label.is_empty() {
+        painter.galley(Pos2::new(start.x + icon_space, start.y), galley, fg);
+    }
     response
 }
 
