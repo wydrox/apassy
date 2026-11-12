@@ -84,6 +84,11 @@ pub(crate) enum Guarded {
     Delete,
     /// "New Recovery Code…" (connect-account-v1 section 9.1).
     NewRecoveryCode,
+    /// "Recover…" of the recovery of the account `account_id` (section 9): the code and
+    /// the name stay in the sheet.
+    Recover {
+        account_id: String,
+    },
     /// "Forget the Account on This Mac…" of an account file of an earlier version.
     ForgetOld,
     Group {
@@ -107,9 +112,16 @@ struct Snapshot {
 /// The result of one worker step.
 #[allow(clippy::large_enum_variant)] // One message at a time on the channel; a box buys nothing.
 enum Outcome {
-    /// A creation: the note about a new device key that it made, if any, and the words of
-    /// the recovery code, shown once.
-    Created(Result<(Option<String>, Zeroizing<String>), ConnectError>),
+    /// A creation: the note about a new device key that it made, if any, the account id,
+    /// and the words of the recovery code, shown once.
+    Created(Result<(Option<String>, String, Zeroizing<String>), ConnectError>),
+    /// A recovery (section 9): the note about a new device key, the account id, the words
+    /// of the new code, shown once, and the number of vault copies that Connect deleted.
+    Recovered(Result<(Option<String>, String, Zeroizing<String>, Option<u64>), ConnectError>),
+    /// A recovery of an earlier try that Connect had not answered was settled: `None` when
+    /// there was none or Connect did not take it; else the account id, the words of the new
+    /// code when this process still held them, and the number of deleted copies.
+    RecoveryResumed(Result<Option<(String, Option<Zeroizing<String>>, Option<u64>)>, ConnectError>),
     Refreshed(Result<(Snapshot, Option<PlansView>), ConnectError>),
     Plans(Result<PlansView, ConnectError>),
     Checkout(Result<(String, String), ConnectError>),
@@ -122,9 +134,9 @@ enum Outcome {
     /// A revoke: `Some` when this device revoked itself.
     Revoked(Result<Option<Forgotten>, ConnectError>),
     Deleted(Result<Forgotten, ConnectError>),
-    /// "New Recovery Code…": the words of the new code, shown once, and whether the account
-    /// file recorded it.
-    NewRecovery(Result<(Zeroizing<String>, bool), ConnectError>),
+    /// "New Recovery Code…": the account id, the words of the new code, shown once, and
+    /// whether the account file recorded it.
+    NewRecovery(Result<(String, Zeroizing<String>, bool), ConnectError>),
     /// "I Saved It" of the sheet of a recovery code: the mark of a code that nobody saw
     /// went.
     RecoverySeen(Result<(), ConnectError>),
@@ -153,6 +165,8 @@ impl Outcome {
     fn error(&self) -> Option<&ConnectError> {
         match self {
             Self::Created(Err(error))
+            | Self::Recovered(Err(error))
+            | Self::RecoveryResumed(Err(error))
             | Self::Refreshed(Err(error))
             | Self::Plans(Err(error))
             | Self::Checkout(Err(error))
@@ -259,6 +273,12 @@ pub(crate) struct Live {
     /// The key of a new recovery code whose request Connect did not answer
     /// ([`ConnectError::RecoveryUnanswered`]): the read that settles it replaces the error.
     unanswered_rotation: Option<String>,
+    /// This device recovered the account in this session: the number of vault copies that
+    /// Connect deleted, when it named it. The account group says so until "OK".
+    recovered: Option<Option<u64>>,
+    /// A recovery of this device that Connect had not answered was looked for in this
+    /// session ([`resume_recovery`]).
+    recovery_resume_tried: bool,
 }
 
 impl Live {
@@ -320,6 +340,8 @@ impl Live {
         self.error = None;
         self.signers = None;
         self.unanswered_rotation = None;
+        self.recovered = None;
+        self.recovery_resume_tried = false;
     }
 
     /// The join step ends (a lock, a quit, the end of the start-screen step, another
@@ -693,6 +715,7 @@ fn account_of(snapshot: &Snapshot, this_device: &str) -> Account {
         list_nearly_full: view.list_verified
             && adds_left <= crate::connect::trust::ADDS_LEFT_WARNING,
         recovery_unseen: false,
+        recovered: None,
         recovery_changed: view
             .recovery_changed
             .as_ref()
@@ -720,6 +743,7 @@ pub(crate) fn view(app: &DesktopApp) -> ConnectView {
         (Some(file), SessionState::Open) => match (&live.snapshot, &live.unreachable) {
             (Some(snapshot), _) => Shown::Account(Account {
                 recovery_unseen: file.recovery_unseen,
+                recovered: live.recovered,
                 ..account_of(snapshot, &file.device_id)
             }),
             (None, Some((error, _))) if !live.busy() => Shown::Unreachable {
@@ -835,6 +859,7 @@ pub(crate) fn step(app: &mut DesktopApp, ctx: &egui::Context) {
     }
     link_after_open(app, ctx);
     finish(app, ctx);
+    resume_recovery(app, ctx);
     hand_over_signers(app);
     guarded(app, ctx);
     polls(app, ctx);
@@ -921,6 +946,42 @@ fn resume_join(app: &mut DesktopApp, ctx: &egui::Context) {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(request);
         Outcome::JoinResumed(Some(shown))
+    });
+}
+
+/// A recovery of this device that Connect did not answer (a lost answer, a quit, a restart)
+/// is settled once for each vault session, while this device has no account file: Connect
+/// may have made this device the root of the account, and then the account file is written
+/// here (with the mark of a code that nobody saw, unless this process still holds the new
+/// code: then its sheet shows it).
+fn resume_recovery(app: &mut DesktopApp, ctx: &egui::Context) {
+    let live = &mut app.ui.connect.live;
+    if live.recovery_resume_tried || live.busy() || app.ui.connect.sheet.is_some() {
+        return;
+    }
+    let Some(epoch) = app.owner_ui.session.epoch() else {
+        return;
+    };
+    let (Some(store), Some(path)) = (live.store(), live.path()) else {
+        return;
+    };
+    live.recovery_resume_tried = true;
+    if live.file().is_some() || !crate::connect::has_pending_recovery(&path) {
+        return;
+    }
+    let session = live.session();
+    live.spawn(ctx, move || {
+        Outcome::RecoveryResumed(ConnectAccount::resume_recovery(store.as_ref(), &path).map(
+            |resumed| {
+                resumed.map(|(account, code, deleted)| {
+                    let account_id = account.state().account_id.clone();
+                    // The vault locked meanwhile: the account file stays, and the next unlock
+                    // opens it.
+                    session.install(account, Some(epoch));
+                    (account_id, code.map(|code| code.words()), deleted)
+                })
+            },
+        ))
     });
 }
 
@@ -1123,6 +1184,16 @@ fn message(error: &ConnectError) -> String {
     error.to_string()
 }
 
+/// The text of a failed recovery (section 9): Connect's one refusal names its three
+/// causes; a `429` says when to try again.
+fn recover_message(error: &ConnectError) -> String {
+    match error {
+        ConnectError::Forbidden => super::RECOVER_REFUSED.to_owned(),
+        ConnectError::RateLimited(seconds) => super::recover_wait(*seconds),
+        other => message(other),
+    }
+}
+
 /// Apply the result of the worker, if it is there.
 fn finish(app: &mut DesktopApp, ctx: &egui::Context) {
     let live = &mut app.ui.connect.live;
@@ -1207,25 +1278,78 @@ fn apply(app: &mut DesktopApp, ctx: &egui::Context, outcome: Outcome) {
     // Any step may have written the account file: a read of the account settles a pending
     // new recovery code, and a new code records its result. The section reads it again.
     live.file = OnceCell::new();
+    // A code is shown only to an unlocked vault: after a lock its words go, and the account
+    // file keeps the mark of a code that nobody saw (the lasting line after the unlock).
+    let locked = app.owner_ui.session.epoch().is_none();
     match outcome {
-        Outcome::Created(Ok((note, words))) => {
+        Outcome::Created(Ok((note, account_id, words))) => {
             live.refreshed_at = Some(Instant::now());
-            app.ui.connect.sheet = Some(Sheet::Recovery {
-                words,
-                unrecorded: false,
-            });
+            if !locked {
+                app.ui.connect.sheet = Some(Sheet::Recovery {
+                    account_id,
+                    words,
+                    unrecorded: false,
+                });
+            }
             if let Some(note) = note {
                 app.set_note(note);
             }
         }
-        Outcome::NewRecovery(Ok((words, recorded))) => {
+        Outcome::Recovered(Ok((note, account_id, words, deleted))) => {
+            live.refreshed_at = Some(Instant::now());
+            live.recovered = Some(deleted);
+            if !locked {
+                app.ui.connect.sheet = Some(Sheet::Recovery {
+                    account_id,
+                    words,
+                    unrecorded: false,
+                });
+            }
+            if let Some(note) = note {
+                app.set_note(note);
+            }
+        }
+        Outcome::Recovered(Err(error)) => {
+            if error == ConnectError::RecoveryCodeNotShown {
+                // An earlier try that Connect had taken was settled: the account file is
+                // written, and its new code was never shown.
+                app.ui.connect.sheet = None;
+                live.recovered = Some(None);
+                if let Some(ticket) = live.session.retry() {
+                    live.open(Some(ctx), ticket);
+                }
+                live.error = Some(super::RECOVERED_UNSEEN.to_owned());
+            } else {
+                live.error = Some(recover_message(&error));
+            }
+        }
+        Outcome::RecoveryResumed(Ok(Some((account_id, words, deleted)))) => {
+            live.recovered = Some(deleted);
+            match words {
+                Some(words) if !locked => {
+                    live.refreshed_at = Some(Instant::now());
+                    app.ui.connect.sheet = Some(Sheet::Recovery {
+                        account_id,
+                        words,
+                        unrecorded: false,
+                    });
+                }
+                _ => live.error = Some(super::RECOVERED_UNSEEN.to_owned()),
+            }
+        }
+        Outcome::RecoveryResumed(Ok(None)) => {}
+        Outcome::RecoveryResumed(Err(error)) => live.error = Some(recover_message(&error)),
+        Outcome::NewRecovery(Ok((account_id, words, recorded))) => {
             // The account file keeps the mark of a code that nobody saw until "I Saved It"
             // closes this sheet: a lock or a quit before it leaves the lasting line.
             live.unanswered_rotation = None;
-            app.ui.connect.sheet = Some(Sheet::Recovery {
-                words,
-                unrecorded: !recorded,
-            });
+            if !locked {
+                app.ui.connect.sheet = Some(Sheet::Recovery {
+                    account_id,
+                    words,
+                    unrecorded: !recorded,
+                });
+            }
         }
         Outcome::NewRecovery(Err(error @ ConnectError::RecoveryUnanswered)) => {
             // The next read of the account settles it, and its answer replaces this error.
@@ -1613,11 +1737,60 @@ fn run_guarded(
         }
         Guarded::NewRecoveryCode => {
             live.with_account(ctx, move |account| {
+                let account_id = account.state().account_id.clone();
                 Outcome::NewRecovery(
                     account
                         .new_recovery_code(proof, &epoch)
-                        .map(|rotated| (rotated.code.words(), rotated.recorded)),
+                        .map(|rotated| (account_id, rotated.code.words(), rotated.recorded)),
                 )
+            });
+        }
+        Guarded::Recover { account_id } => {
+            // The code and the name are those of the open sheet; a closed sheet drops the
+            // step.
+            let Some(Sheet::Recover {
+                code, device_name, ..
+            }) = &app.ui.connect.sheet
+            else {
+                return;
+            };
+            let (code, device_name) = (code.clone(), device_name.clone());
+            let (Some(store), Some(path)) = (store, path) else {
+                live.error = Some(message(&ConnectError::KeychainUnavailable));
+                return;
+            };
+            let client = live.client();
+            let session = live.session();
+            live.spawn(ctx, move || {
+                Outcome::Recovered(client.and_then(|client| {
+                    let typed = match crate::connect::read_recovery(&code) {
+                        crate::connect::TypedRecovery::Ready(typed) => typed,
+                        _ => return Err(ConnectError::Invalid),
+                    };
+                    let (account, recovery, deleted) = ConnectAccount::recover(
+                        client,
+                        store.as_ref(),
+                        &path,
+                        &account_id,
+                        &typed,
+                        &device_name,
+                        proof,
+                        &epoch,
+                    )?;
+                    let note = match account.left_in_other_account() {
+                        Some((confirmer, device)) => {
+                            Some(super::join_left_behind(confirmer, device))
+                        }
+                        None => account
+                            .made_new_key()
+                            .then(|| super::JOIN_NEW_KEY.to_owned()),
+                    };
+                    let id = account.state().account_id.clone();
+                    // The vault locked meanwhile: the account file and the key stay, and
+                    // the next unlock opens them.
+                    session.install(account, Some(epoch));
+                    Ok((note, id, recovery.words(), deleted))
+                }))
             });
         }
         Guarded::Group { group_id, change } => {
@@ -1745,6 +1918,24 @@ pub(crate) fn act(app: &mut DesktopApp, ctx: &egui::Context, action: Action) {
                 code: Zeroizing::new(String::new()),
             });
         }
+        Action::Recover => {
+            // Only for a device without an account file (the section offers it only then).
+            if app.ui.connect.live.file().is_some() {
+                return;
+            }
+            app.ui.connect.live.error = None;
+            app.ui.connect.sheet = Some(Sheet::Recover {
+                account_id: String::new(),
+                code: Zeroizing::new(String::new()),
+                device_name: crate::sync::device_name(),
+            });
+        }
+        Action::CopyAccountId => {
+            if let Some(account) = account {
+                ctx.copy_text(account.account_id);
+            }
+        }
+        Action::RecoveredSeen => app.ui.connect.live.recovered = None,
         Action::SignIn => sign_in(app, ctx),
         Action::ChoosePlan => {
             app.ui.connect.sheet = Some(Sheet::Picker {
@@ -1991,6 +2182,37 @@ pub(crate) fn choose(app: &mut DesktopApp, ctx: &egui::Context, choice: SheetCho
             }
         }
         (sheet @ Sheet::Recovery { .. }, _) => app.ui.connect.sheet = Some(sheet),
+        (
+            Sheet::Recover {
+                account_id,
+                code,
+                device_name,
+            },
+            SheetChoice::Go,
+        ) => {
+            let ready = super::recover_check(&account_id, &code, &device_name).2;
+            let id = account_id.trim().to_ascii_lowercase();
+            app.ui.connect.sheet = Some(Sheet::Recover {
+                account_id,
+                code,
+                device_name,
+            });
+            if !ready || app.ui.connect.live.busy() || app.ui.connect.live.file().is_some() {
+                return;
+            }
+            if app.owner_ui.session.epoch().is_none() {
+                app.ui.connect.live.error = Some(super::LOCKED.to_owned());
+                return;
+            }
+            app.ui.connect.live.error = None;
+            app.ui.connect.live.guarded = Some(Guarded::Recover {
+                account_id: id.clone(),
+            });
+            app.ask_owner(
+                OwnerRequest::RecoverConnectAccount { account_id: id },
+                Some(ctx),
+            );
+        }
         (Sheet::Create { name, device_name }, SheetChoice::Go) => {
             let live = &app.ui.connect.live;
             let (Some(store), Some(path), Some(epoch)) =
@@ -2017,10 +2239,11 @@ pub(crate) fn choose(app: &mut DesktopApp, ctx: &egui::Context, choice: SheetCho
                             .made_new_key()
                             .then(|| super::JOIN_NEW_KEY.to_owned()),
                     };
+                    let account_id = account.state().account_id.clone();
                     // The vault locked meanwhile: the account file and the key stay, and
                     // the next unlock opens them.
                     session.install(account, Some(epoch));
-                    Ok((note, recovery.words()))
+                    Ok((note, account_id, recovery.words()))
                 }))
             });
             app.ui.connect.sheet = Some(Sheet::Create { name, device_name });

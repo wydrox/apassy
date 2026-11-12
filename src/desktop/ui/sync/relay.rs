@@ -6858,6 +6858,13 @@ pub(super) fn connect_open_screen(app: &mut DesktopApp, ui: &mut egui::Ui) {
                     );
                     ui.add_space(14.0);
                     join = kit::wide_button(ui, ADD_THIS_MAC, Style::Bordered).clicked();
+                    ui.add_space(8.0);
+                    kit::paragraph(
+                        ui,
+                        super::super::connect::START_NO_DEVICE,
+                        Font::Callout,
+                        kit::palette().secondary,
+                    );
                     if let Some(error) = error {
                         ui.add_space(4.0);
                         kit::paragraph(ui, error, Font::Callout, Tone::Critical.text());

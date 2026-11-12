@@ -826,6 +826,10 @@ pub enum OwnerRequest {
     NewRecoveryCode {
         account_id: String,
     },
+    /// "Recover…" of the sheet that recovers an Apassy Connect account (section 9).
+    RecoverConnectAccount {
+        account_id: String,
+    },
     /// Forget an account file of an earlier version of Apassy on this Mac, with its key.
     ForgetOldConnectAccount,
     /// Delete the vault store (relay copy) `team_id` of the vault `vault_name` at Apassy
@@ -1561,6 +1565,9 @@ impl OwnerRequest {
             Self::NewRecoveryCode { account_id } => OwnerAction::NewRecoveryCode {
                 account_id: account_id.clone(),
             },
+            Self::RecoverConnectAccount { account_id } => OwnerAction::RecoverConnectAccount {
+                account_id: account_id.clone(),
+            },
             Self::ForgetOldConnectAccount => OwnerAction::ForgetOldConnectAccount,
             Self::DeleteVaultStore { team_id, .. } => OwnerAction::DeleteVaultStore {
                 team_id: team_id.clone(),
@@ -2094,6 +2101,14 @@ impl OwnerRequest {
             ),
             Self::DeleteConnectAccount { .. } => "Delete your Apassy Connect account? The subscription ends now, and every vault store, device, and link of the account is deleted at Connect. Your vaults stay on your devices.".to_owned(),
             Self::NewRecoveryCode { .. } => "Make a new recovery code for your Apassy Connect account? Apassy shows the new code once. The old recovery code stops working.".to_owned(),
+            Self::RecoverConnectAccount { account_id } => format!(
+                concat!(
+                    "Recover the Apassy Connect account {}? This ",
+                    crate::computer!(),
+                    " becomes its first device, the copies of your vaults at Connect are deleted, and a new recovery code replaces the old one. The vaults on your devices stay."
+                ),
+                page_text(account_id)
+            ),
             Self::ForgetOldConnectAccount => concat!("Forget the Apassy Connect account on this ", crate::computer!(), "? This version of Apassy cannot read its account file. The file and the account key go from this ", crate::computer!(), "; nothing changes at Connect, and your vaults stay. Then join the account again from another device of the account.").to_owned(),
             Self::DeleteVaultStore { vault_name, .. } => format!(
                 "Delete the relay copy of \"{}\" at Apassy Connect? Its snapshots go, and your devices stop syncing this vault through Connect. The vault stays on your devices.",
@@ -3477,6 +3492,7 @@ impl DesktopApp {
             | OwnerRequest::RevokeConnectDevice { .. }
             | OwnerRequest::DeleteConnectAccount { .. }
             | OwnerRequest::NewRecoveryCode { .. }
+            | OwnerRequest::RecoverConnectAccount { .. }
             | OwnerRequest::ForgetOldConnectAccount
             | OwnerRequest::DeleteVaultStore { .. }
             | OwnerRequest::TakeDepartedCopy { .. }
