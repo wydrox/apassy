@@ -130,6 +130,17 @@ pub(crate) fn fixture_plans() -> Plans {
     }
 }
 
+/// The name and the platform of this device in the demo: a Mac on macOS, a Linux
+/// computer on Linux, as the vault build names it there.
+#[cfg(not(target_os = "linux"))]
+const THIS_NAME: &str = "Mac mini (office)";
+#[cfg(not(target_os = "linux"))]
+const THIS_PLATFORM: &str = "mac";
+#[cfg(target_os = "linux")]
+const THIS_NAME: &str = "Linux desktop";
+#[cfg(target_os = "linux")]
+const THIS_PLATFORM: &str = "linux";
+
 fn devices() -> Vec<Device> {
     // The demo has no keys: each device shows a fixed fingerprint of the form of
     // `connect::key_fingerprint`, so the demo builds without the vault feature.
@@ -152,8 +163,8 @@ fn devices() -> Vec<Device> {
     vec![
         device(
             "dev_mmmmmmmmma",
-            "Mac mini (office)",
-            "mac",
+            THIS_NAME,
+            THIS_PLATFORM,
             CREATED,
             None,
             true,
@@ -265,7 +276,7 @@ fn frame(code: &str) -> (Shown, Option<Sheet>) {
             Shown::None,
             Some(Sheet::Create {
                 name: "Alex".to_owned(),
-                device_name: "Mac mini (office)".to_owned(),
+                device_name: THIS_NAME.to_owned(),
             }),
         ),
         "2b" => (
@@ -281,7 +292,7 @@ fn frame(code: &str) -> (Shown, Option<Sheet>) {
         "S" => (
             Shown::SignedOut {
                 name: Some("Alex".to_owned()),
-                device_name: "Mac mini (office)".to_owned(),
+                device_name: THIS_NAME.to_owned(),
             },
             None,
         ),
@@ -311,7 +322,7 @@ fn frame(code: &str) -> (Shown, Option<Sheet>) {
             family_owner(),
             Some(Sheet::Active {
                 title: "Connect Family Is Active".to_owned(),
-                line: "Renews 10 Nov 2027.".to_owned(),
+                line: super::active_lines(Some("family"), "Renews 10 Nov 2027."),
             }),
         ),
         "6a" => (personal(), None),
@@ -403,7 +414,7 @@ fn frame(code: &str) -> (Shown, Option<Sheet>) {
             personal(),
             Some(Sheet::Revoke {
                 index: 0,
-                name: "Mac mini (office)".to_owned(),
+                name: THIS_NAME.to_owned(),
                 this: true,
             }),
         ),
@@ -504,7 +515,7 @@ fn frame(code: &str) -> (Shown, Option<Sheet>) {
         "T2" => (
             Shown::Unreachable {
                 name: Some("Alex".to_owned()),
-                device_name: "Mac mini (office)".to_owned(),
+                device_name: THIS_NAME.to_owned(),
                 note: "Apassy Connect could not be reached. Check the internet connection and try again."
                     .to_owned(),
             },
@@ -513,7 +524,7 @@ fn frame(code: &str) -> (Shown, Option<Sheet>) {
         "T3" | "T4" => (
             Shown::Removed {
                 name: Some("Alex".to_owned()),
-                device_name: "Mac mini (office)".to_owned(),
+                device_name: THIS_NAME.to_owned(),
                 note: super::REMOVED_NOTE.to_owned(),
             },
             (code == "T4").then_some(Sheet::ForgetRemoved),

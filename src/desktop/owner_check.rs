@@ -208,15 +208,14 @@ fn share_request_action(request: OwnerRequest) -> OwnerAction {
 /// beside them as a hint only.
 fn person_text(name: &str, hint: &str, fingerprint: &str) -> String {
     let (name, hint, fingerprint) = (page_text(name), page_text(hint), page_text(fingerprint));
-    let verified = if name.is_empty() {
-        "an account that this device has not verified yet".to_owned()
-    } else {
-        format!("\u{201c}{name}\u{201d} (account key {fingerprint})")
-    };
-    if hint.is_empty() || hint == name {
-        verified
-    } else {
-        format!("{verified}, which Apassy Connect calls \u{201c}{hint}\u{201d},")
+    // One form, as the rows of Shared Vaults: the verified name, then the name at
+    // Connect and the key in brackets, so no clause ends the question.
+    match (name.is_empty(), hint.is_empty() || hint == name) {
+        (true, _) => "an account that this device has not verified yet".to_owned(),
+        (false, true) => format!("\u{201c}{name}\u{201d} (account key {fingerprint})"),
+        (false, false) => {
+            format!("\u{201c}{name}\u{201d} ({hint}, account key {fingerprint})")
+        }
     }
 }
 
@@ -2019,7 +2018,7 @@ impl OwnerRequest {
                 this_device: true,
                 ..
             } => format!(
-                concat!("Forget this ", crate::computer!(), " (\"{}\", key {}) in your Apassy Connect account? It leaves every vault store of the account and signs out. Your vaults stay on this ", crate::computer!(), "."),
+                concat!("Forget this ", crate::computer!(), " (\u{201c}{}\u{201d}, key {}) in your Apassy Connect account? It leaves every vault copy at Connect and signs out. Your vaults stay on this ", crate::computer!(), "."),
                 page_text(device_name),
                 page_text(fingerprint)
             ),
@@ -2028,7 +2027,7 @@ impl OwnerRequest {
                 fingerprint,
                 ..
             } => format!(
-                "Remove \"{}\" (key {}) from your Apassy Connect account? It signs out at once and leaves every vault store of the account. Its key fingerprint is shown in Settings › Connect on that device.",
+                "Revoke \u{201c}{}\u{201d} (key {})? It leaves your Apassy Connect account and every vault copy at Connect, and signs out at once. Its key fingerprint is shown in Settings › Connect on that device.",
                 page_text(device_name),
                 page_text(fingerprint)
             ),
@@ -2112,7 +2111,7 @@ impl OwnerRequest {
                 words,
                 ..
             } if words.is_empty() => format!(
-                "Share \"{}\" with {} through Apassy Connect? Their devices can then read and change the encrypted copy; they still need the passphrase to open the vault.",
+                "Share \u{201c}{}\u{201d} with {} through Apassy Connect? Their devices can then read and change the encrypted copy; they still need the passphrase to open the vault.",
                 page_text(vault_name),
                 person_text(peer_name, peer_hint, fingerprint)
             ),
@@ -2124,7 +2123,7 @@ impl OwnerRequest {
                 words,
                 ..
             } => format!(
-                "Share \"{}\" with {} through Apassy Connect? Both devices show: {}. Their devices can then read and change the encrypted copy of this vault; they still need its passphrase.",
+                "Share \u{201c}{}\u{201d} with {} through Apassy Connect? Both devices show: {}. Their devices can then read and change the encrypted copy of this vault; they still need its passphrase.",
                 page_text(vault_name),
                 person_text(peer_name, peer_hint, fingerprint),
                 page_text(words)
@@ -2184,7 +2183,7 @@ impl OwnerRequest {
                 let hint = if vault_hint.is_empty() {
                     String::new()
                 } else {
-                    format!(" Apassy Connect calls it \"{}\".", page_text(vault_hint))
+                    format!(" Apassy Connect calls it \u{201c}{}\u{201d}.", page_text(vault_hint))
                 };
                 format!(
                     "Join a vault shared by {}?{hint} This device downloads the shared copy and syncs it; you need the passphrase of the vault to open it.",
@@ -2198,7 +2197,7 @@ impl OwnerRequest {
                 vault_name,
                 ..
             } => format!(
-                "Join \"{}\", shared by {}, again? This device syncs the shared copy again.",
+                "Join \u{201c}{}\u{201d}, shared by {}, again? This device syncs the shared copy again.",
                 page_text(vault_name),
                 person_text(peer_name, peer_hint, fingerprint)
             ),
@@ -2210,7 +2209,7 @@ impl OwnerRequest {
                 leave: false,
                 ..
             } => format!(
-                "Stop sharing \"{}\" with {}? Their devices leave the shared copy now.",
+                "Stop sharing \u{201c}{}\u{201d} with {}? Their devices leave the shared copy now.",
                 page_text(vault_name),
                 person_text(peer_name, peer_hint, fingerprint)
             ),
@@ -2222,7 +2221,7 @@ impl OwnerRequest {
                 leave: true,
                 ..
             } => format!(
-                "Leave \"{}\", shared by {}? This device stops syncing the shared copy; the vault stays here.",
+                "Leave \u{201c}{}\u{201d}, shared by {}? This device stops syncing the shared copy; the vault stays here.",
                 page_text(vault_name),
                 person_text(peer_name, peer_hint, fingerprint)
             ),
