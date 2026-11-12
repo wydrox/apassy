@@ -158,7 +158,8 @@ demo_part() {
   # Settings › Connect: the frames of docs/design/connect-mockup.html, and the states
   # of the vault build without a frame (T1 to T8).
   for code in 1 2a 2b 2c 3 S T1 4a 4b 4c 5a 5b 5c 6a 6b 6c 6d 6e 6f 6g 6h 7a 7b 7c 7d T8 \
-    8a 8b 8c 9 9a 9b 9c 9d 9e 10a 10b 10c 11a 11b 13a 13c 13d 13e T2 T3 T4 T5 T6 T7; do
+    8a 8b 8c 9 9a 9b 9c 9d 9e 10a 10b 10c 11a 11b 13a 13c 13d 13e 14a 14b 14c 14d 14e 14f \
+    14g 14h T2 T3 T4 T5 T6 T7; do
     demo_frame "connect-demo-$code" APASSY_DEMO_DEVICES=1 APASSY_DEMO_CONNECT="$code"
   done
   # Settings › Devices: the frames of docs/design/devices-settings-mockup.html.

@@ -455,12 +455,15 @@ svg{display:block}
           <div class="fr top"><div class="kn"><div>Not on Connect</div><div class="nt">Apassy Connect is the hosted service of the Apassy project: it reaches your devices without Tailscale and keeps the encrypted copy of your vaults always online.</div></div></div>
           <div class="fr"><div class="tn acc" style="flex:1"><svg><use href="#i-info"/></svg><span>Everything Connect does also runs on your own hardware, free.</span></div></div>
         </div>
-        <div style="margin-top:12px;display:flex;gap:8px"><span class="btn pri">Create a Connect Account…</span><span class="btn">Add This Mac to an Account…</span></div>
+        <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap"><span class="btn pri">Create a Connect Account…</span><span class="btn">Add This Mac to an Account…</span></div>
         <div class="note">No password and no email: the key of this Mac, in the Keychain, signs in.</div>
+        <div class="grp" style="margin-top:10px">
+          <div class="fr"><div class="nt" style="flex:1">Lost every device of your account? Recover it with its account ID and recovery code.</div><div class="v"><span class="btn">Recover an Account…</span></div></div>
+        </div>
       </div></div>
     </section>
   </div>
-  <ul class="fnotes"><li><b>Status line</b> of the list row and the header: <code>Not on Connect</code>.</li><li><b>Create a Connect Account…</b> opens frame 2a. <b>Add This Mac to an Account…</b> opens frame 8 (this Mac joins as a device, connect-account-v1 section 7.2).</li><li>No price on this view: prices show only in the plan picker, from <code>GET /v1/plans</code>.</li><li>Text rules (plans section 5): "free" only for what is self-hosted; relay sync and shared vaults are never called the paid part; the hosted relay is never "for teams".</li></ul>
+  <ul class="fnotes"><li><b>Status line</b> of the list row and the header: <code>Not on Connect</code>.</li><li><b>Create a Connect Account…</b> opens frame 2a. <b>Add This Mac to an Account…</b> opens frame 8 (this Mac joins as a device, connect-account-v1 section 7.2). <b>Recover an Account…</b> opens frame 14a (connect-account-v1 section 9); it shows only without an account file.</li><li>No price on this view: prices show only in the plan picker, from <code>GET /v1/plans</code>.</li><li>Text rules (plans section 5): "free" only for what is self-hosted; relay sync and shared vaults are never called the paid part; the hosted relay is never "for teams".</li></ul>
 </section>
 <!-- ============================================================ 2 -->
 <section class="frame" id="f2">
@@ -482,6 +485,8 @@ svg{display:block}
       <div class="plabel">2b · The recovery code, shown once</div>
       <h2>Save Your Recovery Code</h2>
       <p class="lead">Shown once. Save it in another password manager.</p>
+      <div class="grp"><div class="fr"><div class="k">Account ID</div><div class="v l mono">acc_k7m2q4x3ca</div></div></div>
+      <div class="note">Save both. You need them together to recover the account.</div>
       <div class="rcode"><span data-n="1">blaze</span><span data-n="2">cable</span><span data-n="3">flute</span><span data-n="4">board</span><span data-n="5">seal</span><span data-n="6">tiger</span><span data-n="7">maple</span><span data-n="8">orbit</span><span data-n="9">cedar</span><span data-n="10">lemon</span><span data-n="11">quartz</span><span data-n="12">otter</span><span data-n="13">harbor</span><span data-n="14">mango</span><span data-n="15">piano</span><span data-n="16">river</span></div>
       <div class="note">If every device of the account is lost, this code gives the account to a new Mac. The vault copies at Connect are deleted then; your vaults stay on your devices.</div>
       <div class="sbar"><span class="btn left"><svg><use href="#i-copy"/></svg>Copy</span><span class="btn pri">I Saved It</span></div>
@@ -498,7 +503,7 @@ svg{display:block}
       <div class="sbar"><span class="spin left"></span><span class="btn">Cancel</span><span class="btn pri" style="opacity:.5">Create Account</span></div>
     </div>
   </div>
-  <ul class="fnotes"><li><b>Create Account</b>: <code>ConnectAccount::create</code> (M1): a device key in the Keychain (Touch ID), <code>POST /v1/account</code>, the account file. No owner check: it adds no device to anything and gives no authority over the vault.</li><li><b>2b</b> shows the 16 words of <code>RecoveryCode</code> once; Apassy never stores them. The sheet has no close button other than <b>I Saved It</b>; Escape does nothing. Copy puts the words on the pasteboard.</li><li>Errors show in red above the buttons, with the text of <code>ConnectError</code>.</li></ul>
+  <ul class="fnotes"><li><b>Create Account</b>: <code>ConnectAccount::create</code> (M1): a device key in the Keychain (Touch ID), <code>POST /v1/account</code>, the account file. No owner check: it adds no device to anything and gives no authority over the vault.</li><li><b>2b</b> shows the 16 words of <code>RecoveryCode</code> once; Apassy never stores them. The sheet has no close button other than <b>I Saved It</b>; Escape does nothing. Copy puts the account ID and the words on the pasteboard, one per line (<code>Account ID: …</code>, <code>Recovery Code: …</code>): a recovery needs both, and its sheet reads both back from that text.</li><li>Errors show in red above the buttons, with the text of <code>ConnectError</code>.</li></ul>
 </section>
 <!-- ============================================================ 3 -->
 <section class="frame" id="f3">
@@ -1016,13 +1021,77 @@ svg{display:block}
       <div class="plabel">13c · The new code, shown once</div>
       <h2>Save Your Recovery Code</h2>
       <p class="lead">Shown once. Save it in another password manager.</p>
+      <div class="grp"><div class="fr"><div class="k">Account ID</div><div class="v l mono">acc_k7m2q4x3ca</div></div></div>
+      <div class="note">Save both. You need them together to recover the account.</div>
       <div class="rcode"><span data-n="1">amber</span><span data-n="2">lotus</span><span data-n="3">quiet</span><span data-n="4">prism</span><span data-n="5">walnut</span><span data-n="6">ember</span><span data-n="7">falcon</span><span data-n="8">meadow</span><span data-n="9">pilot</span><span data-n="10">cobalt</span><span data-n="11">summit</span><span data-n="12">river</span><span data-n="13">nickel</span><span data-n="14">violet</span><span data-n="15">canyon</span><span data-n="16">tulip</span></div>
       <div class="note">If every device of the account is lost, this code gives the account to a new Mac. The vault copies at Connect are deleted then; your vaults stay on your devices.</div>
       <div class="sbar"><span class="btn left"><svg><use href="#i-copy"/></svg>Copy</span><span class="btn pri">I Saved It</span></div>
       <div class="note" style="color:var(--t-warn)">13e, the same sheet when the account file could not be written: “This Mac could not record the new code in its account file. The code works: save it now. Apassy records it when it next reads the account.” under the lead.</div>
     </div>
   </div>
-  <ul class="fnotes"><li><b>New Recovery Code…</b> runs the owner check <code>OwnerAction::NewRecoveryCode</code> (Touch ID or the passphrase), then <code>ConnectAccount::new_recovery_code</code>: a new code on this Mac, and <code>POST /v1/account/recovery</code> with its public key, signed by the device key over the key that Connect holds now. The button is off while the vault is locked and while the device list did not verify.</li><li><b>13c</b> is the sheet of 2b: the 16 words once; Apassy never stores them. After it the old code recovers nothing.</li><li>The warning of 13a comes from the account file (<code>recovery_unseen</code>), written when a creation finished after a restart without showing its code, and before each new code is sent; only “I Saved It” of 13c clears it, so a lock or a quit before it keeps the line.</li><li>The account file holds the pending rotation (public keys and the signed statement, never the code) until Connect names the new key; a lost answer sends the same body again. A Connect that names another key gives no code: “Apassy Connect did not take the new recovery code. Your current recovery code still works; nothing changed.”</li><li><b>13d</b>: another device made a new code (<code>recovery_rotated_by</code> and <code>recovery_rotated_at</code> of the account view, against the key that this device pinned). “OK” pins the new key and ends the line.</li></ul>
+  <ul class="fnotes"><li><b>New Recovery Code…</b> runs the owner check <code>OwnerAction::NewRecoveryCode</code> (Touch ID or the passphrase), then <code>ConnectAccount::new_recovery_code</code>: a new code on this Mac, and <code>POST /v1/account/recovery</code> with its public key, signed by the device key over the key that Connect holds now. The button is off while the vault is locked and while the device list did not verify.</li><li><b>13c</b> is the sheet of 2b: the account ID and the 16 words once; Apassy never stores the words. After it the old code recovers nothing.</li><li>The warning of 13a comes from the account file (<code>recovery_unseen</code>), on from the moment an account is made or recovered (2b, 14d) and before each new code is sent; only “I Saved It” of the sheet of the code clears it, so a lock or a quit before it keeps the line.</li><li>The account file holds the pending rotation (public keys and the signed statement, never the code) until Connect names the new key; a lost answer sends the same body again. A Connect that names another key gives no code: “Apassy Connect did not take the new recovery code. Your current recovery code still works; nothing changed.”</li><li><b>13d</b>: another device made a new code (<code>recovery_rotated_by</code> and <code>recovery_rotated_at</code> of the account view, against the key that this device pinned). “OK” pins the new key and ends the line.</li></ul>
+</section>
+<!-- ============================================================ 14 -->
+<section class="frame" id="f14">
+  <div class="flabel"><b><span class="fnum">14</span>Recover an account</b>
+    <span>A computer without an account file takes back an account whose every device is lost, with its account ID and recovery code (connect-account-v1 section 9).</span></div>
+  <div class="pgrid three">
+    <div class="shc">
+      <div class="plabel">14a · The sheet</div>
+      <h2>Recover an Account</h2>
+      <p class="lead">Use this only when you no longer have any device of the account. To add this Mac while another device still works, use Add This Mac to an Account…</p>
+      <div class="note" style="margin-top:0">This Mac becomes the account's first device. The copies of your vaults that Connect keeps are deleted; the vaults on your devices are not touched. The plan stays, and a new recovery code replaces the old one.</div>
+      <div class="grp" style="margin-top:10px">
+        <div class="fr pl"><div class="k">Account ID</div><div class="pst"><span class="mono" style="display:block;background:#fff;border-radius:6px;box-shadow:0 0 0 .5px rgba(0,0,0,.15);padding:4px 8px;color:var(--label)">acc_k7m2q4x3ca</span></div></div>
+        <div class="fr pl"><div class="k">Recovery Code</div><div class="pst"><span class="mono" style="display:block;background:#fff;border-radius:6px;box-shadow:0 0 0 .5px rgba(0,0,0,.15);padding:4px 8px;color:var(--label)">BLAZE CABLE FLUTE BOARD SEAL TIGER MAPLE ORBITT CEDAR LEMON QUARTZ OTTER HARBOR MANGO PIANO RIVER</span><span style="display:block;color:var(--t-crit);margin-top:4px">Word 8, “orbitt”, is not a word of a recovery code.</span></div></div>
+        <div class="fr"><div class="k" style="min-width:90px">This Mac</div><div class="v l">Mac mini (office)</div></div>
+      </div>
+      <div class="sbar"><span class="btn">Cancel</span><span class="btn pri" style="opacity:.5">Recover…</span></div>
+    </div>
+    <div class="shc">
+      <div class="plabel">14b · The owner check</div>
+      <div class="alert"><div class="aic" style="background:#007aff"><svg><use href="#i-lock"/></svg></div>
+        <h2>Recover the Apassy Connect Account?</h2>
+        <p>Recover the Apassy Connect account acc_k7m2q4x3ca? This Mac becomes its first device, the copies of your vaults at Connect are deleted, and a new recovery code replaces the old one. The vaults on your devices stay.</p>
+      </div>
+      <div class="sbar"><span class="btn">Cancel</span><span class="btn pri">Touch ID…</span></div>
+    </div>
+    <div class="shc">
+      <div class="plabel">14c · Connect's one refusal</div>
+      <h2>Recover an Account</h2>
+      <p class="lead">The sheet of 14a with the account ID and the words; the error under it:</p>
+      <div class="note" style="color:var(--t-crit);margin-top:0">Apassy Connect did not recover the account. It gives this one answer in three cases:<br>• The recovery code is not the current code of the account: a new code replaces the old one. Check the words you saved.<br>• The account ID is wrong. Check it against the one you saved with the code.<br>• A device of the account still works. Choose Add a Device… on it, then Add This Mac to an Account… here.</div>
+      <div class="note" style="color:var(--t-crit)">14d of the demo, too many tries: “Too many recovery tries. Try again in 30 minutes.”</div>
+      <div class="note" style="color:var(--t-crit)">14e, no answer: “Apassy Connect could not be reached, so the account is not recovered yet. Try again later. If Connect got the request, Apassy finishes the recovery the next time it reaches Connect.”</div>
+      <div class="sbar"><span class="btn">Cancel</span><span class="btn pri">Recover…</span></div>
+    </div>
+    <div class="shc">
+      <div class="plabel">14g · The new code with the account ID</div>
+      <h2>Save Your Recovery Code</h2>
+      <p class="lead">Shown once. Save it in another password manager.</p>
+      <div class="grp"><div class="fr"><div class="k">Account ID</div><div class="v l mono">acc_k7m2q4x3ca</div></div></div>
+      <div class="note">Save both. You need them together to recover the account.</div>
+      <div class="rcode"><span data-n="1">amber</span><span data-n="2">lotus</span><span data-n="3">quiet</span><span data-n="4">prism</span><span data-n="5">walnut</span><span data-n="6">ember</span><span data-n="7">falcon</span><span data-n="8">meadow</span><span data-n="9">pilot</span><span data-n="10">cobalt</span><span data-n="11">summit</span><span data-n="12">river</span><span data-n="13">nickel</span><span data-n="14">violet</span><span data-n="15">canyon</span><span data-n="16">tulip</span></div>
+      <div class="sbar"><span class="btn left"><svg><use href="#i-copy"/></svg>Copy</span><span class="btn pri">I Saved It</span></div>
+    </div>
+    <div class="shc">
+      <div class="plabel">14h · The account after the recovery</div>
+      <div class="grp" style="margin-top:6px">
+        <div class="fr"><div class="nt" style="flex:1;color:var(--label)">The account is recovered. Apassy Connect deleted the 2 vault copies of the account. Each vault can sync through Apassy Connect again: choose Sync Through Apassy Connect Again… in Settings › Vault › Sync.</div><div class="v"><span class="btn">OK</span></div></div>
+        <div class="fr"><div class="k">Name</div><div class="v">Alex</div></div>
+        <div class="fr pl"><div class="k">Account ID</div><div class="v"><span class="btn">Copy</span></div><div class="pst mono">acc_k7m2q4x3ca</div></div>
+        <div class="fr pl"><div class="k">Plan</div><div class="pst">Connect Personal · Renews 10 Dec 2026</div></div>
+      </div>
+      <div class="note">The vault on this Mac whose copy went says once: “The copy of this vault at Apassy Connect was deleted when the account was recovered.”, with <b>Sync Through Apassy Connect Again…</b> (a new copy at Connect).</div>
+    </div>
+    <div class="shc">
+      <div class="plabel">14 · The start screen, the Apassy Connect path</div>
+      <p class="lead" style="margin-top:4px">On a device of the account, choose Add a Device…, then add this Mac here.</p>
+      <div class="sbar" style="justify-content:flex-start;padding-top:4px;margin-top:0"><span class="btn">Add This Mac to an Account…</span></div>
+      <div class="note">No other device of the account? Make a vault on this Mac first, then recover the account in Settings › Connect.</div>
+    </div>
+  </div>
+  <ul class="fnotes"><li><b>Recover…</b> is on only with an account ID of the form <code>acc_</code> and 10 characters, 16 words of the list (any case; spaces, line breaks, the numbers of 2b, and the labels of its Copy text are skipped), and a name. It runs the owner check <code>OwnerAction::RecoverConnectAccount</code> (always asked again; the prompt names the account ID), then <code>ConnectAccount::recover</code> on a worker: <code>POST /v1/account/recover</code>, signed with the old code's key, which never leaves this Mac.</li><li>The body is written as the pending recovery (<code>connect/pending-recovery.json</code>, public values only) before the first try; a lost answer sends it again. Without an answer the next try or the next unlocked session settles it (the same body for 9 minutes, then a sign-in of this Mac's key), so a quit never leaves a used key without an account file.</li><li><b>14g</b> is the sheet of 2b. A lock before it shows the code nowhere; the account then keeps the warning of 13a until a new code is made.</li><li><b>14h</b>: the line comes from <code>deleted_stores</code> of the answer, until <b>OK</b> or the lock. The account ID row shows in every account (selectable, with Copy).</li><li>The iPhone has no recovery screen in this release.</li></ul>
 </section>
 <section class="notes">
   <h2>Rules for every view</h2>

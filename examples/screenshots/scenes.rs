@@ -39,6 +39,7 @@ pub const SCENES: &[&str] = &[
     "connect-member",
     "start-join",
     "start-connect",
+    "connect-recover",
 ];
 
 /// The fake relay keeps the vault stores of the fake Connect, as in tests/common/mod.rs.
@@ -146,6 +147,9 @@ pub struct Scene {
     answer: Option<SharePeerJoin>,
     /// The device link that Alex made for this computer (`start-join`).
     link: Option<apassy::connect::DeviceLink>,
+    /// The account id and the recovery code of Alex's account, whose every device is lost,
+    /// as the Copy button of a code copies them (`connect-recover`).
+    recovery: Option<String>,
 }
 
 fn client(connect: &FakeConnect) -> ConnectClient {
@@ -258,6 +262,7 @@ pub fn setup(name: &str) -> Option<Scene> {
         code: None,
         answer: None,
         link: None,
+        recovery: None,
     };
     let connect = &scene.connect;
     match name {
@@ -310,6 +315,29 @@ pub fn setup(name: &str) -> Option<Scene> {
             );
             scene.this_account = Some(this.state().account_id.clone());
             scene.other = Some(alex);
+        }
+        "connect-recover" => {
+            // Alex's account with two vault copies at Connect; its only device is lost.
+            let dir = TempDir::new().expect("dir");
+            let keys = MemoryKeyStore::new();
+            let (account, code) = ConnectAccount::create(
+                client(connect),
+                &keys,
+                &account_file(&dir.path().join("Apassy")),
+                "Alex",
+                "Alex's MacBook Pro",
+            )
+            .expect("account");
+            let id = account.state().account_id.clone();
+            let device = account.state().device_id.clone();
+            connect.entitle(&id);
+            connect.store_without_entry(&id, &device, "t_familyaaaa", "Family");
+            connect.store_without_entry(&id, &device, "t_workaaaaaa", "Work");
+            connect.revoke(&device);
+            scene.recovery = Some(format!(
+                "Account ID: {id}\nRecovery Code: {}",
+                code.words().as_str()
+            ));
         }
         _ => unreachable!(),
     }
@@ -452,6 +480,11 @@ impl Scene {
             .map(|link| link.code().to_owned())
             .or_else(|| self.link.as_ref().map(|link| link.code().to_owned()))
             .expect("owner-shares or owner-link first")
+    }
+
+    /// The account id and the recovery code of `connect-recover`.
+    pub fn recovery_text(&self) -> Option<String> {
+        self.recovery.clone()
     }
 
     fn plan(&self, plan: serde_json::Value) {
@@ -722,6 +755,31 @@ pub(crate) fn steps(name: &str) -> Vec<super::Step> {
             Wait(5.0),
             Shot("start-connect-error"),
         ]),
+        "connect-recover" => {
+            steps.extend(settings);
+            steps.extend([
+                Click(SETTINGS_X, CONNECT_ROW),
+                Wait(2.0),
+                Pages("connect-recover-none"),
+                top(),
+                Connect("recover"),
+                Wait(1.0),
+                Shot("connect-recover-sheet-empty"),
+                Connect("recover-fill"),
+                Wait(1.0),
+                Shot("connect-recover-sheet"),
+                Connect("recover-go"),
+                Wait(1.5),
+                Shot("owner-check-recover"),
+                Type(super::PASS),
+                enter(),
+                Wait(5.0),
+                Shot("connect-recover-code"),
+                Connect("saved"),
+                Wait(4.0),
+                Pages("connect-recover-account"),
+            ]);
+        }
         "start-join" => steps.extend([
             Wait(1.0),
             Click(550.0, 466.0),
