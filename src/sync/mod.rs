@@ -53,8 +53,8 @@ pub use folder::{
     file_name_for, list_folder_vaults, start_download,
 };
 pub use relay::connect::{
-    ConnectEnableReport, MoveFailure, MoveRecord, MoveStep, StoreError, StorePlan, is_plan_refusal,
-    waits_for_account,
+    ConnectEnableReport, MoveFailure, MoveRecord, MoveStep, StoreDeleted, StoreError, StorePlan,
+    is_plan_refusal, store_deleted, waits_for_account,
 };
 pub use relay::{
     DepartedHead, DeviceView, JoinedDevice, KEPT_HEADS, KeySource, LINK_INVALID_TEXT,
@@ -309,6 +309,10 @@ pub enum SyncError {
     RelayUnreachable,
     /// The relay refuses the device of this Mac: it was removed.
     RemovedFromRelay,
+    /// The vault store of this sync was deleted at Apassy Connect when an account was
+    /// recovered (connect-account-v1 section 9; [`RelaySync::store_deleted`]): nothing is
+    /// asked of Connect for it any more.
+    StoreDeleted,
     /// The relay serves an older copy than this Mac saw.
     StaleCopy,
     /// The relay serves a copy whose chain does not include this Mac's last change.
@@ -454,6 +458,9 @@ impl fmt::Display for SyncError {
             }
             Self::RemovedFromRelay => f.write_str(
                 concat!("removed from the relay. This ", crate::computer!(), " keeps its vault. Turn relay sync off, then join again with a link from another ", crate::computer!()),
+            ),
+            Self::StoreDeleted => f.write_str(
+                "the copy of this vault at Apassy Connect was deleted when the account was recovered",
             ),
             Self::StaleCopy => f.write_str(
                 concat!("the relay has an older copy than this ", crate::computer!(), " saw. To go on, select “Use the relay copy…” in Settings > Vault > Sync"),

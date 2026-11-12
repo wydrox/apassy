@@ -61,8 +61,9 @@ use crate::questions::{QuestionsClient, TeamDevice};
 use crate::sync::{
     DEFAULT_RELAY_URL, DepartedHead, DeviceKey, DeviceView, JoinedDevice, KeySource, LinkCode,
     LinkKind, PIN_CHANGED_TEXT, PairedLink, PendingJoin, PendingLink, Receipt, RelayAdoptReport,
-    RelayConfig, RelayDownload, RelayEnableReport, RelayRefusal, RelaySync, RelayUrl, StorePlan,
-    SyncError, SyncOutcome, TlsTrust, VaultSync, device_name, link_code_team, valid_team_code,
+    RelayConfig, RelayDownload, RelayEnableReport, RelayRefusal, RelaySync, RelayUrl, StoreDeleted,
+    StorePlan, SyncError, SyncOutcome, TlsTrust, VaultSync, device_name, link_code_team,
+    valid_team_code,
 };
 use crate::vault::{TrustedDeviceKind, Vault, VaultErrorKind};
 use crate::vaults::{self, Registry, SyncLink, VaultEntry};
@@ -126,6 +127,21 @@ const TAKE_DEPARTED: &str = "sync-relay-take-departed";
 const TAKE_WITHOUT_HISTORY: &str = "sync-relay-take-without-history";
 /// The button of a first download whose earlier history does not verify.
 pub(crate) const WITHOUT_HISTORY: &str = "Take This Copy Without Its Earlier History…";
+/// The step of a vault whose vault store Apassy Connect deleted at a recovery: the sync
+/// through Apassy Connect turns on again with a new store ([`DesktopApp::relay_enable_connect`]).
+pub(crate) const SYNC_AGAIN: &str = "Sync Through Apassy Connect Again…";
+/// The line of a vault store that refuses this device: it does not claim why.
+pub(crate) const STORE_REFUSED_WORDS: &str = concat!(
+    "Apassy Connect no longer lets this ",
+    crate::computer!(),
+    " into the copy of this vault: the copy was deleted, or this ",
+    crate::computer!(),
+    " is no longer a device of it. The vault on this ",
+    crate::computer!(),
+    " is safe. Settings › Connect shows whether this ",
+    crate::computer!(),
+    " is still a device of the account."
+);
 /// A vault store that checks the device list this long says that Connect cannot be reached
 /// to check it, with "Try Again" (connect-account-v1 section 7.5).
 pub(crate) const CHECK_LIST_LONG: Duration = Duration::from_secs(10 * 60);
@@ -1056,6 +1072,7 @@ pub(crate) fn connect_tag(state: ConnectState) -> (&'static str, Tone) {
         ConnectState::Suspended { .. } => ("Connect: suspended", Tone::Warning),
         ConnectState::SignedOut => ("Connect: signed out", Tone::Warning),
         ConnectState::HostedEnded(_) => ("Relay copy ended", Tone::Warning),
+        ConnectState::StoreDeleted(_) => ("Copy at Connect deleted", Tone::Warning),
     }
 }
 
@@ -1097,6 +1114,9 @@ pub(crate) fn connect_words(state: ConnectState) -> String {
         },
         ConnectState::SignedOut => concat!("Connect: signed out on this ", crate::computer!(), ". Open Settings › Connect and select “Sign In…” to sync this vault.").to_owned(),
         ConnectState::HostedEnded(why) => crate::desktop::sync_worker::ended_copy_words(why),
+        ConnectState::StoreDeleted(why) => {
+            crate::desktop::sync_worker::deleted_copy_words(why).to_owned()
+        }
     }
 }
 
@@ -1146,6 +1166,12 @@ pub(crate) fn words_of(status: &UiStatus, received: Option<&Receipt>, connect: b
         {
             CONNECT_UNREACHABLE.to_owned()
         }
+        // A vault store has no device link: never "join again with a link".
+        UiStatus::Problem(text)
+            if connect && problem(text) == Some(SyncError::RemovedFromRelay) =>
+        {
+            STORE_REFUSED_WORDS.to_owned()
+        }
         UiStatus::Problem(text) => match problem(text) {
             Some(SyncError::Relay(RelayRefusal::RateLimited)) => {
                 "The relay asks Apassy to wait a minute. Apassy syncs after that.".to_owned()
@@ -1163,6 +1189,23 @@ pub(crate) fn words_of(status: &UiStatus, received: Option<&Receipt>, connect: b
         }
         UiStatus::Connect(state) => connect_words(*state),
     }
+}
+
+/// The row of a vault whose vault store Apassy Connect deleted at a recovery: its line, and
+/// [`SYNC_AGAIN`] when the vault is open and unlocked (`offer`). The line wraps, and the
+/// button goes under it when the row is narrow ([`rows::text_buttons`]), so nothing of the
+/// row passes the window at any width. Returns whether the owner pressed the button.
+///
+/// [`rows::text_buttons`]: super::super::settings::rows::text_buttons
+pub(crate) fn deleted_store_row(ui: &mut egui::Ui, why: StoreDeleted, offer: bool) -> bool {
+    use super::super::settings::rows;
+    let line = crate::desktop::sync_worker::deleted_copy_words(why);
+    let buttons: &[(&str, Style)] = if offer {
+        &[(SYNC_AGAIN, Style::Prominent)]
+    } else {
+        &[]
+    };
+    rows::text_buttons(ui, rows::note(line), buttons).is_some()
 }
 
 /// The line of a vault store of Apassy Connect that cannot reach it.
@@ -1424,6 +1467,62 @@ impl DesktopApp {
             .is_some_and(RelaySync::is_removed)
     }
 
+    /// Why the vault store of the vault `id` is gone, when Apassy Connect deleted it at a
+    /// recovery ([`RelaySync::store_deleted`], [`Self::relay_note_deleted_stores`]). Its row
+    /// then offers only [`SYNC_AGAIN`].
+    pub(crate) fn relay_store_deleted(&self, id: &str) -> Option<StoreDeleted> {
+        lock(&self.sync.relay.cache)
+            .get(id)
+            .and_then(RelaySync::store_deleted)
+    }
+
+    /// Mark the relay sync of each vault of the list whose vault store Apassy Connect
+    /// deleted at a recovery, from the account file and the sync state of the vault alone
+    /// ([`crate::sync::store_deleted`]; no network, and no answer of Connect is waited
+    /// for): it asks Connect nothing more, and says so once. Every other relay sync loses
+    /// the mark. The statuses follow at once when a mark changed.
+    pub(crate) fn relay_note_deleted_stores(&mut self) {
+        let file = self.ui.connect.live.session().account_state();
+        let ids: Vec<String> = self
+            .vault_list
+            .registry
+            .entries()
+            .iter()
+            .filter(|entry| entry.sync_relay().is_some())
+            .map(|entry| entry.id.clone())
+            .collect();
+        let mut changed = false;
+        for id in ids {
+            let Some(relay) = self.relay_of(&id) else {
+                continue;
+            };
+            let deleted = file
+                .as_ref()
+                .zip(relay.state().ok().flatten())
+                .and_then(|(file, state)| crate::sync::store_deleted(file, &state));
+            if relay.store_deleted() != deleted {
+                relay.set_store_deleted(deleted);
+                changed = true;
+            }
+        }
+        if changed {
+            self.sync_refresh();
+        }
+    }
+
+    /// [`SYNC_AGAIN`] for the open, unlocked vault `id` whose vault store was deleted at a
+    /// recovery: the setup sheet on its "Apassy Connect" choice, whose "Turn on" is the step
+    /// that turns on the sync through Apassy Connect with a new store
+    /// ([`Self::relay_enable_connect`]; it drops the sync of the deleted store on this Mac
+    /// first).
+    pub(crate) fn relay_sync_again(&mut self, id: &str, ctx: Option<&egui::Context>) {
+        if !self.relay_open(id) || self.relay_store_deleted(id).is_none() {
+            return;
+        }
+        self.sync_open_sheet(SyncSheet::RelaySetup { id: id.to_owned() }, ctx);
+        self.sync.relay.mode = SetupMode::Connect;
+    }
+
     /// The relay sync of the listed vault `id`, when it syncs through the relay. Each
     /// call gives a clone of one value per vault and configuration. A link of a node
     /// keeps its pin and alternatives (`RelayConfig::for_link`); a stored pin that is not
@@ -1630,6 +1729,9 @@ impl DesktopApp {
             return;
         }
         self.sync.relay.connect_tick = Some(Instant::now());
+        // A vault store that Connect deleted at a recovery asks nothing more, before the
+        // key of the account reaches its sync.
+        self.relay_note_deleted_stores();
         // A sync of a vault store that was refused, or waits for another device of the
         // account, asks Connect for the account soon: a removal or a newer device reaches
         // the policy of the running sessions within a minute, not at the next refresh.
@@ -2562,6 +2664,15 @@ impl DesktopApp {
         if self.relay_changing(id) {
             return Ok(());
         }
+        // The vault store of this vault was deleted at a recovery ("Sync Through Apassy
+        // Connect Again…"): its sync goes on this Mac first (no network), so the new store
+        // is the only sync of the vault.
+        let entry = if self.relay_store_deleted(id).is_some() {
+            self.sync_disable(id);
+            self.relay_target(id)?
+        } else {
+            entry
+        };
         let relay = self.relay_staged(&entry, &url);
         let before = entry.sync.clone();
         let slot = self.relay_slot();
@@ -3286,7 +3397,11 @@ impl DesktopApp {
     /// "Sync now" for the open vault `id` on the relay, then the receipts of the other
     /// Macs, on its own thread.
     pub(crate) fn relay_sync_now(&mut self, id: &str) {
-        if self.relay_busy(id, Job::SyncNow) || !self.relay_open(id) {
+        // A vault store that Connect deleted at a recovery is asked nothing.
+        if self.relay_busy(id, Job::SyncNow)
+            || !self.relay_open(id)
+            || self.relay_store_deleted(id).is_some()
+        {
             return;
         }
         let Some(relay) = self.relay_of(id) else {
@@ -5281,6 +5396,12 @@ impl DesktopApp {
 
 #[cfg(test)]
 impl DesktopApp {
+    /// [`Self::relay_connect_tick`] now, whenever it ran last.
+    pub(crate) fn relay_connect_tick_now_for_test(&mut self) {
+        self.sync.relay.connect_tick = None;
+        self.relay_connect_tick();
+    }
+
     /// Take the answers of the relay calls and look at a Mac that joins until no
     /// thread runs for them. At most 20 seconds.
     pub(crate) fn relay_settle_for_test(&mut self) {

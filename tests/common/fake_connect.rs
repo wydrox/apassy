@@ -926,6 +926,19 @@ impl FakeConnect {
             .collect()
     }
 
+    /// Delete the vault store `team_id` with its copy at the relay, as a recovery of its
+    /// account does (section 9), without anything else of a recovery.
+    pub fn delete_store(&self, team_id: &str) {
+        let relay = {
+            let mut state = lock(&self.shared);
+            state.stores.retain(|store| store.team_id != team_id);
+            state.relay.clone()
+        };
+        if let Some(relay) = relay {
+            relay.remove_team(team_id);
+        }
+    }
+
     /// The `PlanView` that `GET /v1/account` and `GET /v1/account/plan` answer for
     /// `account`; `entitled` follows its `entitled` field.
     pub fn set_plan(&self, account: &str, plan: Value) {
@@ -1893,6 +1906,18 @@ fn route(shared: &Arc<Mutex<State>>, request: &Incoming) -> Outgoing {
                 .iter()
                 .filter(|store| store.account == account)
                 .count();
+            // Section 9: the stores go with their copies at the relay too.
+            let gone: Vec<String> = state
+                .stores
+                .iter()
+                .filter(|store| store.account == account)
+                .map(|store| store.team_id.clone())
+                .collect();
+            if let Some(relay) = state.relay.clone() {
+                for team in &gone {
+                    relay.remove_team(team);
+                }
+            }
             state.stores.retain(|store| store.account != account);
             if let Some(entry) = state.accounts.get_mut(&account) {
                 entry.before_reset = std::mem::take(&mut entry.list);

@@ -714,6 +714,21 @@ pub(super) fn valid_state(account_id: &str, peers: &[PeerPin], stores: &[StoreSh
         && stores.iter().all(|store| store.is_valid(account_id))
 }
 
+/// The account that made the store `team`, when that is another account and this
+/// account's own pin of it is suspended: Connect serves a list of another root for it, so
+/// it was recovered (section 16.7), and a recovery deletes every store of the account
+/// (section 9). `None` for a store of this account, and for a store that the account file
+/// does not hold.
+pub fn reset_owner<'a>(state: &'a AccountState, team: &str) -> Option<&'a str> {
+    let store = state
+        .stores
+        .iter()
+        .find(|store| store.team_id == team && !store.is_own())?;
+    pin_of(state, &store.owner, None)
+        .is_some_and(|pin| pin.suspended)
+        .then_some(store.owner.as_str())
+}
+
 fn pin_of<'a>(state: &'a AccountState, account: &str, via: Option<&str>) -> Option<&'a PeerPin> {
     state
         .peers

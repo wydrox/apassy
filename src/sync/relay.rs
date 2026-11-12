@@ -447,12 +447,15 @@ struct Token {
 /// The mark of a device that the relay refused (contract section 13): a challenge got
 /// `401`, or a call got `401` again after a new sign-in. While it holds, no sign-in asks
 /// the relay; after [`REMOVED_PROBE_EVERY`] one sign-in may ask again, and a sign-in
-/// that works clears it.
+/// that works clears it. It also carries the mark of a vault store that was deleted at a
+/// recovery ([`RelaySync::set_store_deleted`]): while that holds, no call asks at all.
 #[derive(Debug)]
 pub(crate) struct Removal {
     /// When a sign-in may ask the relay again; `None` while the device is not marked.
     until: Mutex<Option<Instant>>,
     every: Duration,
+    /// The vault store was deleted at a recovery: no call asks the relay, with no probe.
+    deleted: Mutex<Option<connect::StoreDeleted>>,
 }
 
 impl Removal {
@@ -460,7 +463,16 @@ impl Removal {
         Self {
             until: Mutex::new(None),
             every,
+            deleted: Mutex::new(None),
         }
+    }
+
+    fn set_deleted(&self, deleted: Option<connect::StoreDeleted>) {
+        *lock(&self.deleted) = deleted;
+    }
+
+    fn deleted(&self) -> Option<connect::StoreDeleted> {
+        *lock(&self.deleted)
     }
 
     /// When a sign-in may ask the relay again, while the relay refused the device and no
@@ -637,6 +649,9 @@ pub(crate) struct Session {
     /// ([`RelayTransport::with_signer_policy`]). A session with the account key starts with
     /// a policy that accepts no key.
     signer_keys: Option<SignerSource>,
+    /// For a vault store: the account that made it, as the account file said
+    /// ([`Self::for_store_of`]). The state of the sync keeps it.
+    store_account: Option<String>,
 }
 
 impl fmt::Debug for Session {
@@ -666,8 +681,26 @@ impl Session {
             removed: Arc::new(Removal::new(REMOVED_PROBE_EVERY)),
             sign_ins: SignIns::default(),
             signer_keys: None,
+            store_account: None,
         }
         .with_account_default()
+    }
+
+    /// The session of a vault store that the account `account_id` made.
+    pub(crate) fn for_store_of(mut self, account_id: &str) -> Self {
+        self.store_account = Some(account_id.to_owned());
+        self
+    }
+
+    /// Note in `state` which account made the store of this session and which account key
+    /// of this device signs in to it: a store from before a recovery of the account is
+    /// told from a later one by that key (`crate::sync::store_deleted`). Nothing for a
+    /// session with a key of its own.
+    fn mark_store(&self, state: &mut SyncState) {
+        if self.key.is_account() {
+            state.store_account.clone_from(&self.store_account);
+            state.store_key = Some(self.key.public_key_b64u());
+        }
     }
 
     /// A session of the account key accepts no head until it gets its policy: a vault
@@ -720,7 +753,7 @@ impl Session {
         let SessionKey::Account(signer) = &self.key else {
             return None;
         };
-        let session = Self::new(
+        let mut session = Self::new(
             self.url.clone(),
             &self.team_id,
             SessionKey::Account(Arc::clone(signer)),
@@ -728,6 +761,7 @@ impl Session {
         )
         .sharing_removed(removed)
         .with_shared_signers(Arc::clone(slot));
+        session.store_account.clone_from(&self.store_account);
         if let Some(token) = lock(&self.token).as_ref() {
             *lock(&session.token) = Some(Token {
                 value: token.value.clone(),
@@ -882,6 +916,10 @@ impl Session {
     fn bearer_ready(&self, until: Option<Instant>) -> Option<Result<Zeroizing<String>, ApiError>> {
         if self.cancel.is_closed() {
             return Some(Err(SyncError::Vault(VaultErrorKind::Locked).into()));
+        }
+        // A vault store that was deleted at a recovery is asked nothing.
+        if self.removed.deleted().is_some() {
+            return Some(Err(SyncError::StoreDeleted.into()));
         }
         // A removed device signs in no more until its next try ([`Removal`]), the owner
         // turns sync off, or joins again (contract section 13).
@@ -2479,6 +2517,16 @@ impl RelaySync {
         Ok(())
     }
 
+    /// `StoreDeleted` while the vault store of this sync is marked as deleted at a
+    /// recovery ([`Self::set_store_deleted`]): before the session, so not even a key of an
+    /// earlier account is read for it.
+    fn not_deleted(&self) -> Result<(), SyncError> {
+        match self.store_deleted() {
+            Some(_) => Err(SyncError::StoreDeleted),
+            None => Ok(()),
+        }
+    }
+
     /// Whether the vault has synced content that the last sync did not see. The vault
     /// must be unlocked.
     pub fn local_changed(&self, vault: &Vault) -> Result<bool, SyncError> {
@@ -2763,6 +2811,7 @@ impl RelaySync {
         deadline: Option<Instant>,
     ) -> Result<SyncOutcome, SyncError> {
         let _run = self.try_run()?;
+        self.not_deleted()?;
         self.clear_work();
         let mut state = self.require_state()?;
         let session = self.checked_session(vault, &state)?;
@@ -2786,6 +2835,7 @@ impl RelaySync {
         accept: impl Fn(&Vault) -> bool,
     ) -> Result<SyncOutcome, SyncError> {
         let _run = self.run_shared()?;
+        self.not_deleted()?;
         self.clear_work();
         let mut state = self.require_state()?;
         let mut access = SharedSlot { slot, accept };
@@ -3503,6 +3553,7 @@ impl RelaySync {
     ) -> Result<RelayEnableReport, SyncError> {
         *lock(&self.session) = Some(Arc::clone(&session));
         self.removed.clear();
+        self.removed.set_deleted(None);
         let result = self.finish_enable_with(vault, &session, vault_id, team, passphrase);
         if result.is_err() {
             let mut held = lock(&self.session);
@@ -3527,6 +3578,7 @@ impl RelaySync {
         let device_id = session.device_id().ok_or(SyncError::NotEnabled)?;
         let mut state =
             SyncState::new_relay(session.url.as_str(), &session.team_id, device_id, vault_id);
+        session.mark_store(&mut state);
         let transport = self.transport(Arc::clone(session), &state);
         // The relay copy is the copy of the team: this vault takes its passphrase, as
         // a folder sync does, and merges it (contract section 6).
@@ -3602,6 +3654,7 @@ impl RelaySync {
             device_id,
             &adopted.identity.vault_id,
         );
+        session.mark_store(&mut state);
         state.last_remote_version = download.head.fields.version;
         state.last_head_sha256 = Some(download.head.hash());
         // A copy of an earlier schema: the first sync pushes the current schema.
@@ -3651,6 +3704,7 @@ impl RelaySync {
         }
         self.forget();
         self.removed.clear();
+        self.removed.set_deleted(None);
         state::remove(&self.config.state_path)
     }
 
@@ -3659,6 +3713,7 @@ impl RelaySync {
     /// they differ, else after a push or `timeout`). `Locked` when the key is not in
     /// memory (no sync since the unlock) or the vault locked during the poll.
     pub fn poll(&self, timeout: Duration) -> Result<RelayPoll, SyncError> {
+        self.not_deleted()?;
         let state = self.require_state()?;
         let session = lock(&self.session)
             .clone()

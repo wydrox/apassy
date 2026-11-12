@@ -665,6 +665,7 @@ impl DesktopApp {
                         VaultSync::Relay(relay) => {
                             if backoff.load(Ordering::SeqCst)
                                 || relay.is_removed()
+                                || relay.store_deleted().is_some()
                                 || !relay.local_changed(vault).unwrap_or(false)
                             {
                                 return;
@@ -1719,6 +1720,7 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let mut check_list: Option<String> = None;
     let mut open_connect = false;
     let mut connect_setup = false;
+    let mut sync_again: Option<String> = None;
     let connect_offered = app.connect_sync_available();
     super::settings::rows::section(
         ui,
@@ -1749,6 +1751,14 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 };
                 // Removed from the relay: the line says to turn relay sync off.
                 let removed = on_relay && app.relay_removed(&entry.id);
+                // A vault store that Connect deleted at a recovery: its line, and a new
+                // store as the only step.
+                let deleted = if on_relay {
+                    app.relay_store_deleted(&entry.id)
+                } else {
+                    None
+                };
+                let removed = removed || deleted.is_some();
                 g.row(|ui| {
                     let label = super::settings::rows::label_text(&entry.name);
                     super::settings::rows::one_line(ui, label.into(), None, |ui| {
@@ -1823,7 +1833,11 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                         }
                     };
                     // A plan state of Apassy Connect is a warning, with its icon.
-                    if matches!(status, Some(UiStatus::Connect(_))) && !syncing {
+                    if let Some(why) = deleted {
+                        if relay::deleted_store_row(ui, why, open_unlocked && !changing) {
+                            sync_again = Some(entry.id.clone());
+                        }
+                    } else if matches!(status, Some(UiStatus::Connect(_))) && !syncing {
                         kit::tone_note_icon(ui, line, Tone::Warning, Font::Callout);
                     } else {
                         ui.add(Label::new(super::settings::rows::note(&line)).wrap());
@@ -1981,6 +1995,10 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
     if open_connect {
         super::open_settings(app, super::settings_view::SettingsSection::Connect);
+    }
+    if let Some(id) = sync_again {
+        app.relay_sync_again(&id, Some(&ctx));
+        return;
     }
     if let Some(id) = check_list {
         app.relay_check_list_again(&id);
