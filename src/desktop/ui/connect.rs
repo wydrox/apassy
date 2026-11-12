@@ -1125,26 +1125,12 @@ fn account_section(
             Tone::Neutral => kit::palette().secondary,
             tone => tone.text(),
         };
-        // One line: the label, the status, and the buttons at the trailing edge. The
-        // status wraps rather than ends in "…" ("Connect Personal · Renews 10 Dec 2026"
-        // stays whole at the width of Settings), and the buttons go under it only when the
-        // row is too narrow.
+        // One line as the Account and People rows: the label, the status at the trailing
+        // edge before the buttons. A status that does not fit goes whole under the label
+        // rather than ends in "…" ("Connect Personal · Renews 10 Dec 2026" at the width
+        // of Settings).
         g.row(|ui| {
-            let mut line = egui::text::LayoutJob::default();
-            rows::label_text("Plan").append_to(
-                &mut line,
-                ui.style(),
-                egui::FontSelection::Default,
-                egui::Align::Center,
-            );
-            kit::text(format!("   {value}"), Font::Body)
-                .color(color)
-                .append_to(
-                    &mut line,
-                    ui.style(),
-                    egui::FontSelection::Default,
-                    egui::Align::Center,
-                );
+            let status = kit::text(value, Font::Body).color(color);
             let mut buttons: Vec<(&str, &str, Style)> = Vec::new();
             if billing {
                 buttons.push((MANAGE_BILLING, MANAGE_BILLING, Style::Bordered));
@@ -1152,7 +1138,7 @@ fn account_section(
             if can_choose {
                 buttons.push((CHOOSE_PLAN, CHOOSE_PLAN, Style::Prominent));
             }
-            if let Some(index) = rows::text_buttons_named(ui, line, &buttons) {
+            if let Some(index) = rows::value_buttons(ui, "Plan", status, &buttons) {
                 *action = Some(if buttons[index].0 == MANAGE_BILLING {
                     Action::ManageBilling
                 } else {

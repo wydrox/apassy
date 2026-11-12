@@ -389,6 +389,60 @@ fn one_line_widget(
     );
 }
 
+/// A row with a label, and its value at the trailing edge before small buttons, as
+/// [`one_line`] draws the rows beside it, while the whole value fits. In a narrower row
+/// the label and the buttons keep the line and the whole value wraps under them: it is
+/// never cut with "…" (the Plan row of Settings › Connect). The first button is the
+/// rightmost; each is `(label, spoken, style)`. Returns the index of the pressed button.
+pub(crate) fn value_buttons(
+    ui: &mut Ui,
+    label: &str,
+    value: RichText,
+    buttons: &[(&str, &str, Style)],
+) -> Option<usize> {
+    let measure = |ui: &Ui, text: WidgetText| -> f32 {
+        text.into_galley(
+            ui,
+            Some(TextWrapMode::Extend),
+            f32::INFINITY,
+            egui::TextStyle::Body,
+        )
+        .size()
+        .x
+    };
+    let label_width = measure(ui, label_text(label).into());
+    let value_width = measure(ui, value.clone().into());
+    let buttons_width: f32 = buttons
+        .iter()
+        .map(|(text, _, style)| kit::button_width(ui, text, *style, Size::Small) + BUTTON_GAP)
+        .sum();
+    let fits = label_width + GAP + value_width + GAP + buttons_width <= ui.available_width();
+    let mut pressed = None;
+    let draw = |ui: &mut Ui, pressed: &mut Option<usize>| {
+        for (index, (text, spoken, style)) in buttons.iter().enumerate() {
+            let button = kit::small_button(ui, text, *style);
+            if spoken != text {
+                ui.ctx()
+                    .accesskit_node_builder(button.id, |node| node.set_label(*spoken));
+            }
+            if button.clicked() {
+                *pressed = Some(index);
+            }
+        }
+    };
+    if fits {
+        one_line(ui, label_text(label).into(), Some(value), |ui| {
+            draw(ui, &mut pressed);
+        });
+    } else {
+        one_line(ui, label_text(label).into(), None, |ui| {
+            draw(ui, &mut pressed);
+        });
+        ui.add(Label::new(value).wrap());
+    }
+    pressed
+}
+
 /// The content of a row with a text that wraps and small buttons at the trailing edge (the
 /// first button is the rightmost), for rows whose text or buttons name a person, a
 /// device, or a vault. The buttons stay on the line of the text while the text keeps
