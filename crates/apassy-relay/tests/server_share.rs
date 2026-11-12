@@ -2447,6 +2447,106 @@ fn an_earlier_1006_file_gets_the_store_op_and_every_share_mark_at_open() {
     drop(dir);
 }
 
+/// A join gives its account the lists of a store only while it counts. Outside the group,
+/// after the owner's `unshare` the member reads the owner's list up to that entry (with
+/// the rows of the devices there) and no other list, and after its own `leave` no list
+/// through the store: not the owner's later entries, and not an account that joined
+/// later. The owner and the other members still read the list of an account whose join
+/// ended.
+#[test]
+fn an_ended_join_reads_the_lists_only_up_to_its_end() {
+    let f = family();
+    let (c, rafal, ola) = (&f.c, &f.owner, &f.member);
+    let (anna, bob) = (c.account("Anna"), c.account("Bob"));
+    for dev in [&anna, &bob] {
+        c.add_member(rafal, dev);
+    }
+    for dev in [ola, &anna, &bob] {
+        c.share_store(rafal, dev, &f.team);
+        c.join_store(dev, rafal, &f.team);
+    }
+    let answer = |by: &Dev, pin: Value| {
+        let (status, answer) = lists(c, by, json!([pin]));
+        assert_eq!(status, 200, "{answer}");
+        answer["result"]["accounts"][0].clone()
+    };
+    let state = |by: &Dev, of: &Dev| {
+        answer(by, no_pin(&of.account))["state"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let view = |by: &Dev, of: &Dev| {
+        c.call(
+            "GET",
+            &format!("/v1/account/peers/{}", of.account),
+            Some(&by.token),
+            None,
+        )
+    };
+    // Outside the group, a join that counts reads the owner and the other members.
+    remove_member(c, rafal, ola);
+    assert_eq!(state(ola, &anna), "newer");
+    assert_eq!(state(ola, rafal), "newer");
+    // Rafal ends Ola's share, then shares the store with Eve, who joins.
+    assert_eq!(
+        c.list_entry(rafal, "unshare", &ola.account, None, Some(&f.team))
+            .0,
+        200
+    );
+    let (end, end_hash) = c.list_head(&rafal.account);
+    let eve = c.account("Eve");
+    c.add_member(rafal, &eve);
+    c.share_store(rafal, &eve, &f.team);
+    c.join_store(&eve, rafal, &f.team);
+    let (head, head_hash) = c.list_head(&rafal.account);
+    assert!(head > end);
+    // Ola reads Rafal's list up to the unshare, and nothing later.
+    let read = answer(ola, no_pin(&rafal.account));
+    assert_eq!(read["state"], "newer", "{read}");
+    let entries = read["device_list"].as_array().unwrap();
+    assert_eq!(entries.len() as u64, end, "the list up to the unshare");
+    assert_eq!(entries.last().unwrap()["op"], "unshare");
+    let at_end = json!({"account_id": rafal.account, "version": end, "head": end_hash});
+    assert_eq!(answer(ola, at_end)["state"], "same");
+    let at_head = json!({"account_id": rafal.account, "version": head, "head": head_hash});
+    assert_eq!(answer(ola, at_head)["state"], "refused");
+    let (status, seen) = view(ola, rafal);
+    assert_eq!(status, 200, "{seen}");
+    let entries = seen["result"]["device_list"].as_array().unwrap();
+    assert_eq!(entries.len() as u64, end);
+    assert_eq!(seen["result"]["devices"].as_array().unwrap().len(), 1);
+    for of in [&anna, &eve] {
+        assert_eq!(state(ola, of), "refused", "Ola reads {}", of.account);
+        assert_eq!(code(&view(ola, of)), (403, Some("not_in_group")));
+    }
+    // Bob's join counts and reads Eve, who joined later; after his leave, nothing.
+    remove_member(c, rafal, &bob);
+    assert_eq!(state(&bob, &eve), "newer");
+    assert_eq!(
+        c.list_entry(&bob, "leave", &rafal.account, None, Some(&f.team))
+            .0,
+        200
+    );
+    for of in [rafal, &anna, &eve] {
+        assert_eq!(state(&bob, of), "refused", "Bob reads {}", of.account);
+        assert_eq!(code(&view(&bob, of)), (403, Some("not_in_group")));
+    }
+    // The owner and the members whose join counts read both ended accounts.
+    for by in [rafal, &anna, &eve] {
+        for of in [ola, &bob] {
+            assert_eq!(
+                state(by, of),
+                "newer",
+                "{} reads {}",
+                by.account,
+                of.account
+            );
+            assert_eq!(view(by, of).0, 200);
+        }
+    }
+}
+
 /// L1: outside one group a list is read only between the owner of a store and the accounts
 /// that joined it, and between those accounts: a share that was never joined gives no
 /// read, also after the owner left the group; two members shared at different times read
