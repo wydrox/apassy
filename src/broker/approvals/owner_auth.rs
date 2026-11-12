@@ -604,7 +604,7 @@ pub enum OwnerAction {
         vault_hint: String,
     },
     /// End a vault shared between accounts: the owner's `unshare` ("Stop Sharing with
-    /// <name>…", `leave` false) or a member's `leave` ("Leave This Shared Vault…").
+    /// <name>…", `leave` false) or a member's `leave` ("Leave Vault…").
     EndConnectShare {
         account_id: String,
         peer_account: String,

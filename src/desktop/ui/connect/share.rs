@@ -9,14 +9,14 @@
 //!   When the member answers, both Macs show six words; Confirm runs the owner check, and
 //!   this Mac signs the `peer` and the `share` and adds the member's verified devices to the
 //!   store.
-//! - **Accept a Shared Vault…**: paste the code. The Mac checks the account and the device
+//! - **Accept Shared Vault…**: paste the code. The Mac checks the account and the device
 //!   that Connect names against the code ("The code does not match the account that
 //!   answered." otherwise), shows the six words, and "The Words Match" runs the owner check
 //!   and signs the `peer`. The stores that the other account shares with this one then
 //!   show here: "<vault>, shared by <name>: Join". Join runs an owner check that names the
 //!   vault and the person, signs the `join`, and opens the download of "Use a Vault from
 //!   Another Mac" with the passphrase of the copy.
-//! - **Stop Sharing with <name>…** and **Leave This Shared Vault…** sign `unshare` and
+//! - **Stop Sharing with <name>…** and **Leave Vault…** sign `unshare` and
 //!   `leave` after an owner check. Leave turns off the sync of that vault here and keeps the
 //!   vault; the other devices of the account do the same when they read the `leave`. The
 //!   ends that need no owner check (a member who left, a member outside the family or team)
@@ -56,15 +56,12 @@ use crate::desktop::owner_check::{OwnerRequest, Task, TaskPoll};
 // ---- Texts (plain English, the style of the other Connect screens). ----
 
 pub(crate) const SECTION: &str = "Shared Vaults";
-pub(crate) const SECTION_NOTE: &str =
-    "Share a vault with a person of your family or team. Each of you compares six words once.";
+pub(crate) const SECTION_NOTE: &str = "Share a vault with someone in your family or team.";
 pub(crate) const SHARE_WITH: &str = "Share with…";
-pub(crate) const ACCEPT: &str = "Accept a Shared Vault…";
+pub(crate) const ACCEPT: &str = "Accept Shared Vault…";
 pub(crate) const PICK_TITLE: &str = "Share a Vault";
-pub(crate) const PICK_LEAD: &str =
-    "Choose the person. They need the passphrase of the vault to open it.";
-pub(crate) const NO_MEMBERS: &str =
-    "Your family or team has no other active member. Invite someone first.";
+pub(crate) const PICK_LEAD: &str = "They need the vault's passphrase to open it.";
+pub(crate) const NO_MEMBERS: &str = "No other active member yet. Invite someone first.";
 pub(crate) const CODE_TITLE: &str = "Share Code";
 pub(crate) const CODE_WAITING: &str = "Waiting for the other person…";
 pub(crate) const CONFIRM_TITLE: &str = "Compare the Words";
@@ -75,23 +72,22 @@ pub(crate) const WORDS_DIFFER: &str = "The Words Differ";
 pub(crate) const DIFFERENT: &str =
     "Nothing was signed. Make a new code and compare the words again.";
 pub(crate) const MISMATCH: &str = "The code does not match the account that answered.";
-pub(crate) const EXPIRED: &str = "The code expired. Nothing was signed. Make a new code.";
+pub(crate) const EXPIRED: &str = "The code expired. Make a new code.";
 pub(crate) const JOIN: &str = "Join";
-pub(crate) const LEAVE: &str = "Leave This Shared Vault…";
+pub(crate) const LEAVE: &str = "Leave Vault…";
 pub(crate) const CHECKING: &str = "Checking who shares this vault…";
 pub(crate) const WAITING_SHARED: &str = "Waiting for a device that shares this vault";
-pub(crate) const ENDED: &str = "The share ended. The vault stays on this device.";
-pub(crate) const LEAVE_LEAD: &str = "This device stops syncing the shared copy. The vault stays on this device, and the other person keeps theirs.";
+pub(crate) const ENDED: &str = "The share ended. The vault stays here.";
+pub(crate) const LEAVE_LEAD: &str =
+    "This device stops syncing the shared copy. The vault stays here.";
 pub(crate) const STOP_LEAD: &str =
-    "Their devices leave the shared copy now. The vault stays on every device that has it.";
-pub(crate) const ACCEPTED_LEAD: &str =
-    "The vaults that they share with you show in Settings › Connect.";
-pub(crate) const LEFT_HERE: &str =
-    "You left this shared vault. It stays on this device and does not sync the shared copy.";
-pub(crate) const UNPINNED: &str = "Some people who share a vault that you joined could not be verified on this device. Their devices sign nothing here.";
-pub(crate) const DOWNLOAD: &str = "Download the Shared Copy…";
+    "Their devices leave the shared copy now. Every device keeps the vault.";
+pub(crate) const ACCEPTED_LEAD: &str = "Their shared vaults show in Settings › Connect.";
+pub(crate) const LEFT_HERE: &str = "You left this shared vault. It stays on this device.";
+pub(crate) const UNPINNED: &str = "Some people who share your vaults could not be verified here.";
+pub(crate) const DOWNLOAD: &str = "Download Copy…";
 pub(crate) const VAULT_OFFERED: &str = "A vault";
-pub(crate) const CLAIM: &str = "Count Its Shares Again…";
+pub(crate) const CLAIM: &str = "Count Shares Again…";
 
 /// Every fixed text of the section, for the wording tests.
 #[cfg(test)]
@@ -133,9 +129,7 @@ pub(crate) const TEXTS: &[&str] = &[
 /// A store of this account made before Apassy recorded which account made a vault, with
 /// shares already: they count again after an owner check.
 pub(crate) fn claim_line(vault: &str) -> String {
-    format!(
-        "“{vault}” was shared before Apassy recorded which account made a vault. Its shares count again once you confirm that this account made it."
-    )
+    format!("Confirm that this account made “{vault}” to count its shares again.")
 }
 
 /// Two verified lists claim the store of an offer: it is not offered.
@@ -145,10 +139,7 @@ pub(crate) fn contested(vault: &str) -> String {
 
 /// The people of a shared store whose devices this device could not verify.
 pub(crate) fn unverified(people: &str) -> String {
-    format!(
-        "The devices of {people} could not be verified on this {}. Their changes are not taken.",
-        crate::computer!()
-    )
+    format!("The devices of {people} could not be verified, so their changes are not taken.")
 }
 
 /// "Send this to <name>."
@@ -192,7 +183,7 @@ pub(crate) fn not_joined(name: &str) -> String {
 
 /// A member whose list does not pin this account yet: they did not finish the words.
 pub(crate) fn not_accepted(name: &str) -> String {
-    format!("{name}: has not finished comparing the words. Share with… shows a new code.")
+    format!("{name}: has not compared the words yet")
 }
 
 /// The owner's line for a member that reset its account.
@@ -252,9 +243,7 @@ pub(crate) fn connect_calls(name: &str) -> String {
 
 /// Join worked, and Connect does not list this device in the store yet.
 pub(crate) fn not_listed(name: &str) -> String {
-    format!(
-        "This device is not in the shared copy yet. It is added when {name} opens Apassy on a device that syncs this vault. Then choose {DOWNLOAD}"
-    )
+    format!("{name} adds this device when they next open Apassy. Then choose {DOWNLOAD}")
 }
 
 // ---- The model of the section. ----
@@ -366,7 +355,7 @@ pub(crate) enum ShareSheet {
         device: String,
         words: String,
     },
-    /// "Accept a Shared Vault…": the pasted code.
+    /// "Accept Shared Vault…": the pasted code.
     Paste { code: Zeroizing<String> },
     /// The words on the device that answered.
     Match {
@@ -689,10 +678,7 @@ fn sheet_body(
             kit::sheet_title(
                 ui,
                 CONFIRM_TITLE,
-                Some(&format!(
-                    "{} Both devices show these words. {CONFIRM_TAIL}",
-                    asks(name, device),
-                )),
+                Some(&format!("{} {CONFIRM_TAIL}", asks(name, device))),
             );
             big_words(ui, words);
             buttons(
@@ -716,10 +702,7 @@ fn sheet_body(
             kit::sheet_title(
                 ui,
                 CONFIRM_TITLE,
-                Some(&format!(
-                    "{} Both devices show these words. {MATCH_TAIL}",
-                    shares_with_you(name, device),
-                )),
+                Some(&format!("{} {MATCH_TAIL}", shares_with_you(name, device))),
             );
             big_words(ui, words);
             buttons(

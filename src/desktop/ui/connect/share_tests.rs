@@ -688,10 +688,7 @@ fn every_row_fits_its_column_at_each_width() {
                 }
                 // The person's button keeps its start, cut with "…" at most.
                 assert!(text.contains("Stop Sharing with"), "at {width}:\n{text}");
-                assert!(
-                    text.contains("Each of you compares six words once."),
-                    "at {width}:\n{text}"
-                );
+                assert!(text.contains(SECTION_NOTE), "at {width}:\n{text}");
             }
             output.drop_without_applying_deltas();
         }
