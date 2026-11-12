@@ -105,6 +105,31 @@ struct Owner {
     gate: OwnerGate,
 }
 
+/// `ConnectAccount::recover` after a fresh owner check for it.
+fn recover_with(
+    client: ConnectClient,
+    store: &dyn apassy::connect::DeviceKeyStore,
+    path: &std::path::Path,
+    account_id: &str,
+    recovery: &str,
+    device_name: &str,
+) -> Result<(ConnectAccount, apassy::connect::RecoveryCode, Option<u64>), ConnectError> {
+    let owner = owner();
+    let (proof, epoch) = owner.proof(ConnectAccount::recover_action(
+        &account_id.trim().to_ascii_lowercase(),
+    ));
+    ConnectAccount::recover(
+        client,
+        store,
+        path,
+        account_id,
+        recovery,
+        device_name,
+        proof,
+        &epoch,
+    )
+}
+
 fn owner() -> Owner {
     let dir = TempDir::new().expect("dir");
     let mut vault = Vault::create(&dir.path().join("owner.db"), PASS).expect("vault");
@@ -1181,7 +1206,7 @@ fn a_reset_account_is_shared_again_only_with_new_words() {
         .expect("X removes itself");
     let fresh = mac(&f.cloud, "x-fresh");
     let code = f.recovery_x.text();
-    let (mut new_x, _, _) = ConnectAccount::recover(
+    let (mut new_x, _, _) = recover_with(
         client(&f.cloud),
         &fresh.keys,
         &fresh.account_path,
@@ -1285,7 +1310,7 @@ fn a_re_pin_near_the_end_of_the_list_signs_nothing() {
     f.account_x.revoke(&row, proof, &epoch).expect("revoke");
     let fresh = mac(&f.cloud, "x-fresh");
     let code = f.recovery_x.text();
-    let (mut new_x, _, _) = ConnectAccount::recover(
+    let (mut new_x, _, _) = recover_with(
         client(&f.cloud),
         &fresh.keys,
         &fresh.account_path,
@@ -2381,7 +2406,7 @@ fn a_first_download_after_a_writer_reset_its_account() {
     let (proof, epoch) = f.owner_x.proof(f.account_x.revoke_action(&row));
     f.account_x.revoke(&row, proof, &epoch).expect("X leaves");
     let fresh = mac(&f.cloud, "x-fresh");
-    let (mut new_x, _, _) = ConnectAccount::recover(
+    let (mut new_x, _, _) = recover_with(
         client(&f.cloud),
         &fresh.keys,
         &fresh.account_path,

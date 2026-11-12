@@ -479,6 +479,107 @@ impl RecoveryCode {
     }
 }
 
+/// What a recovery code that the person typed or pasted holds (the sheet that recovers an
+/// account): the 16 words in any case, with any spaces, line breaks, and commas between
+/// them, or the text form. The numbers of the sheet that showed the words (`1`, `2.`) and
+/// an account id pasted with them are skipped. Debug never shows the words.
+#[derive(Clone, PartialEq, Eq)]
+pub enum TypedRecovery {
+    /// Nothing typed yet.
+    Empty,
+    /// A code that [`RecoveryCode::parse`] takes: the words, one space between them, or
+    /// the text form.
+    Ready(Zeroizing<String>),
+    /// The word at `position` (from 1) is not a word of the list.
+    UnknownWord { position: usize, word: String },
+    /// Every word is of the list, and there are this many, not 16.
+    Count(usize),
+}
+
+impl fmt::Debug for TypedRecovery {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => f.write_str("Empty"),
+            Self::Ready(_) => f.write_str("Ready([redacted])"),
+            Self::UnknownWord { position, .. } => f
+                .debug_struct("UnknownWord")
+                .field("position", position)
+                .finish_non_exhaustive(),
+            Self::Count(count) => f.debug_tuple("Count").field(count).finish(),
+        }
+    }
+}
+
+/// The pieces of a typed recovery code: words, numbers, and an account id, split at
+/// spaces, line breaks, and commas, in lower case. A label at the start of a line
+/// ("Account ID:", "Recovery Code:", of the Copy button) is skipped.
+fn typed_tokens(text: &str) -> Vec<String> {
+    text.lines()
+        .map(|line| match line.split_once(':') {
+            Some((head, tail))
+                if head.trim().contains(' ')
+                    && head.chars().all(|c| c.is_alphabetic() || c == ' ') =>
+            {
+                tail
+            }
+            _ => line,
+        })
+        .flat_map(|line| line.split(|c: char| c.is_whitespace() || c == ',' || c == ';'))
+        .filter(|token| !token.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// Read a recovery code that the person typed or pasted ([`TypedRecovery`]).
+pub fn read_recovery(text: &str) -> TypedRecovery {
+    let tokens = typed_tokens(text);
+    let words: Vec<&str> = tokens
+        .iter()
+        .map(|token| token.trim_end_matches(['.', ')', ':']))
+        .filter(|token| !token.is_empty())
+        .filter(|token| !token.bytes().all(|byte| byte.is_ascii_digit()))
+        .filter(|token| !valid_account_id(token))
+        .collect();
+    if words.is_empty() {
+        return TypedRecovery::Empty;
+    }
+    if let [single] = words.as_slice() {
+        if single.starts_with(RECOVERY_PREFIX) {
+            return if RecoveryCode::parse(single).is_some() {
+                TypedRecovery::Ready(Zeroizing::new((*single).to_owned()))
+            } else {
+                TypedRecovery::UnknownWord {
+                    position: 1,
+                    word: (*single).to_owned(),
+                }
+            };
+        }
+    }
+    if let Some((index, word)) = words
+        .iter()
+        .enumerate()
+        .find(|(_, word)| !WORDS.contains(word))
+    {
+        return TypedRecovery::UnknownWord {
+            position: index + 1,
+            word: (*word).to_owned(),
+        };
+    }
+    if words.len() != RECOVERY_BYTES {
+        return TypedRecovery::Count(words.len());
+    }
+    TypedRecovery::Ready(Zeroizing::new(words.join(" ")))
+}
+
+/// The account id in a pasted text (the Copy button of the recovery code copies the id with
+/// the words), in lower case.
+pub fn find_account_id(text: &str) -> Option<String> {
+    typed_tokens(text)
+        .into_iter()
+        .map(|token| token.trim_end_matches(['.', ')', ':']).to_owned())
+        .find(|token| valid_account_id(token))
+}
+
 /// The Ed25519 key pair of a recovery code, in memory while a creation or a recovery
 /// runs. Debug shows the public key only.
 pub struct RecoveryKey(Ed25519KeyPair);
@@ -512,6 +613,69 @@ impl RecoveryKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The sheet that recovers an account takes the words in any case, with extra spaces,
+    /// line breaks, the numbers of the sheet that showed them, and the account id pasted
+    /// with them; it names the first word that is not of the list, and counts the words.
+    #[test]
+    fn a_typed_recovery_code_tolerates_its_layout_and_names_a_wrong_word() {
+        let code = RecoveryCode::from_bytes([7; RECOVERY_BYTES]);
+        let words = code.words();
+        let list: Vec<&str> = words.split(' ').collect();
+        let numbered: String = list
+            .iter()
+            .enumerate()
+            .map(|(index, word)| format!("{:>2} {}", index + 1, word.to_uppercase()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for typed in [
+            words.to_string(),
+            format!("  {}  ", list.join("   ")),
+            list.join("\n"),
+            numbered,
+            format!("acc_k7m2q4x3ca\n{}", words.as_str()),
+            format!(
+                "Account ID: acc_k7m2q4x3ca\nRecovery Code: {}",
+                words.as_str()
+            ),
+            list.join(", "),
+        ] {
+            let TypedRecovery::Ready(ready) = read_recovery(&typed) else {
+                panic!("not read: {:?}", read_recovery(&typed));
+            };
+            assert_eq!(ready.as_str(), words.as_str());
+            assert_eq!(
+                RecoveryCode::parse(&ready)
+                    .unwrap()
+                    .key()
+                    .unwrap()
+                    .public_key_b64u(),
+                code.key().unwrap().public_key_b64u()
+            );
+        }
+        assert_eq!(read_recovery(" \n "), TypedRecovery::Empty);
+        let text = code.text();
+        assert_eq!(read_recovery(&text), TypedRecovery::Ready(text.clone()));
+        let mut wrong = list.clone();
+        wrong[4] = "zzzq";
+        assert_eq!(
+            read_recovery(&wrong.join(" ")),
+            TypedRecovery::UnknownWord {
+                position: 5,
+                word: "zzzq".to_owned()
+            }
+        );
+        assert_eq!(
+            read_recovery(&list[..15].join(" ")),
+            TypedRecovery::Count(15)
+        );
+        assert_eq!(format!("{:?}", read_recovery(&words)), "Ready([redacted])");
+        assert_eq!(
+            find_account_id(&format!("ACC_K7M2Q4X3CA\n{}", words.as_str())).as_deref(),
+            Some("acc_k7m2q4x3ca")
+        );
+        assert_eq!(find_account_id(&words), None);
+    }
 
     #[test]
     fn a_new_account_id_has_the_form_of_section_2() {

@@ -484,6 +484,13 @@ pub enum OwnerAction {
     NewRecoveryCode {
         account_id: String,
     },
+    /// Recover the Apassy Connect account `account_id` with its recovery code
+    /// (connect-account-v1 section 9): this device becomes its first device, every vault
+    /// store of the account is deleted at Connect, and a new recovery code replaces the old
+    /// one.
+    RecoverConnectAccount {
+        account_id: String,
+    },
     /// Forget an account file of an earlier version of Apassy on this Mac, with the account
     /// key: the device joins its account again after it. Connect is not asked.
     ForgetOldConnectAccount,
@@ -882,6 +889,7 @@ impl OwnerAction {
             Self::RevokeConnectDevice { .. } => "Remove a device from Apassy Connect",
             Self::DeleteConnectAccount { .. } => "Delete the Apassy Connect account",
             Self::NewRecoveryCode { .. } => "Make a new recovery code",
+            Self::RecoverConnectAccount { .. } => "Recover the Apassy Connect account",
             Self::ForgetOldConnectAccount => "Forget the Apassy Connect account here",
             Self::DeleteVaultStore { .. } => "Delete a relay copy at Apassy Connect",
             Self::TakeDepartedCopy { replace: false, .. } => "Use the copy of a device that left",
@@ -1129,6 +1137,14 @@ impl OwnerAction {
             Self::NewRecoveryCode { .. } => {
                 "make a new recovery code for your Apassy Connect account; the old code stops working".to_owned()
             }
+            Self::RecoverConnectAccount { account_id } => format!(
+                "recover the Apassy Connect account {}; its vault copies at Connect are deleted",
+                account_id
+                    .chars()
+                    .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .take(14)
+                    .collect::<String>()
+            ),
             Self::ForgetOldConnectAccount => {
                 "forget the Apassy Connect account on this device".to_owned()
             }
@@ -1325,6 +1341,7 @@ impl OwnerAction {
                 | Self::RevokeConnectDevice { .. }
                 | Self::DeleteConnectAccount { .. }
                 | Self::NewRecoveryCode { .. }
+                | Self::RecoverConnectAccount { .. }
                 | Self::ForgetOldConnectAccount
                 | Self::DeleteVaultStore { .. }
                 | Self::TakeDepartedCopy { .. }
@@ -2702,6 +2719,9 @@ mod evaluation_tests {
                 account_id: "acc_k7m2q4x3ca".into(),
             },
             OwnerAction::NewRecoveryCode {
+                account_id: "acc_k7m2q4x3ca".into(),
+            },
+            OwnerAction::RecoverConnectAccount {
                 account_id: "acc_k7m2q4x3ca".into(),
             },
             OwnerAction::ChangeConnectGroup {

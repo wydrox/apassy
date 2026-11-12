@@ -103,6 +103,31 @@ impl Owner {
     }
 }
 
+/// `ConnectAccount::recover` after a fresh owner check for it.
+fn recover_with(
+    client: ConnectClient,
+    store: &dyn apassy::connect::DeviceKeyStore,
+    path: &std::path::Path,
+    account_id: &str,
+    recovery: &str,
+    device_name: &str,
+) -> Result<(ConnectAccount, apassy::connect::RecoveryCode, Option<u64>), ConnectError> {
+    let owner = owner();
+    let (proof, epoch) = owner.proof(ConnectAccount::recover_action(
+        &account_id.trim().to_ascii_lowercase(),
+    ));
+    ConnectAccount::recover(
+        client,
+        store,
+        path,
+        account_id,
+        recovery,
+        device_name,
+        proof,
+        &epoch,
+    )
+}
+
 fn client(connect: &FakeConnect) -> ConnectClient {
     ConnectClient::new(&connect.url).expect("client")
 }
@@ -115,12 +140,14 @@ fn recorded_waits() -> (Sleeper, Arc<Mutex<Vec<Duration>>>) {
     (sleeper, waits)
 }
 
-/// A new account on device `a`. Its sign-in rounds do not sleep.
+/// A new account on device `a`, whose owner closed the sheet of its recovery code with
+/// "I Saved It". Its sign-in rounds do not sleep.
 fn create(connect: &FakeConnect, a: &Device) -> (ConnectAccount, RecoveryCode) {
     let (mut account, recovery) =
         ConnectAccount::create(client(connect), &a.store, &a.path, "Rafal", "MacBook Pro")
             .expect("create");
     account.set_sleeper(recorded_waits().0);
+    account.recovery_code_seen().expect("I Saved It");
     (account, recovery)
 }
 
@@ -1980,7 +2007,7 @@ fn recovery_replaces_the_code_and_works_only_without_a_live_device() {
     let b = device();
     // A live device: refused.
     assert_eq!(
-        ConnectAccount::recover(
+        recover_with(
             client(&connect),
             &b.store,
             &b.path,
@@ -1995,7 +2022,7 @@ fn recovery_replaces_the_code_and_works_only_without_a_live_device() {
     // A wrong code: refused, with the same answer.
     let wrong = RecoveryCode::generate().unwrap();
     assert_eq!(
-        ConnectAccount::recover(
+        recover_with(
             client(&connect),
             &b.store,
             &b.path,
@@ -2006,7 +2033,7 @@ fn recovery_replaces_the_code_and_works_only_without_a_live_device() {
         .unwrap_err(),
         ConnectError::Forbidden
     );
-    let (mut recovered, new_code, _) = ConnectAccount::recover(
+    let (mut recovered, new_code, _) = recover_with(
         client(&connect),
         &b.store,
         &b.path,
@@ -2036,7 +2063,7 @@ fn recovery_replaces_the_code_and_works_only_without_a_live_device() {
     connect.revoke(&recovered.state().device_id);
     let c = device();
     assert_eq!(
-        ConnectAccount::recover(
+        recover_with(
             client(&connect),
             &c.store,
             &c.path,
@@ -2047,7 +2074,7 @@ fn recovery_replaces_the_code_and_works_only_without_a_live_device() {
         .unwrap_err(),
         ConnectError::Forbidden
     );
-    ConnectAccount::recover(
+    recover_with(
         client(&connect),
         &c.store,
         &c.path,
@@ -2069,7 +2096,7 @@ fn a_lost_recovery_answer_is_retried_with_the_same_body() {
     connect.revoke(&account.state().device_id);
     connect.lose_next_answers("POST /v1/account/recover", 1);
     let b = device();
-    let (mut recovered, _, _) = ConnectAccount::recover(
+    let (mut recovered, _, _) = recover_with(
         client(&connect),
         &b.store,
         &b.path,
@@ -2487,7 +2514,7 @@ fn a_new_recovery_code_replaces_the_old_one() {
     // The old code recovers nothing; the new one recovers the account.
     let b = device();
     assert_eq!(
-        ConnectAccount::recover(
+        recover_with(
             client(&connect),
             &b.store,
             &b.path,
@@ -2498,7 +2525,7 @@ fn a_new_recovery_code_replaces_the_old_one() {
         .unwrap_err(),
         ConnectError::Forbidden
     );
-    ConnectAccount::recover(
+    recover_with(
         client(&connect),
         &b.store,
         &b.path,
@@ -2737,7 +2764,7 @@ fn a_pending_join_without_its_signature_is_not_offered() {
 /// last live device `device_id` was revoked.
 fn recovers(connect: &FakeConnect, account_id: &str, code: &str) -> Result<(), ConnectError> {
     let b = device();
-    ConnectAccount::recover(
+    recover_with(
         client(connect),
         &b.store,
         &b.path,
@@ -3252,7 +3279,7 @@ fn a_creation_or_a_recovery_ends_a_pending_join() {
     let pending = c.path.with_file_name("pending-join.json");
     assert!(pending.exists());
     connect.revoke(&device_id);
-    ConnectAccount::recover(
+    recover_with(
         client(&connect),
         &c.store,
         &c.path,
@@ -3306,7 +3333,7 @@ fn a_creation_or_a_recovery_after_a_late_confirmed_join_leaves_it_and_makes_a_ne
                     .0
             }
             _ => {
-                ConnectAccount::recover(
+                recover_with(
                     client(&connect),
                     &b.store,
                     &b.path,
@@ -3382,6 +3409,219 @@ fn a_join_of_another_account_leaves_the_account_that_confirmed_late() {
                 Some(("MacBook Pro", "iPhone"))
             );
             assert!(connect.live_devices(&a_id).contains(&added.device_id));
+        }
+    }
+}
+
+// ---- Round 8: the recovery after a lost answer, and the mark of a code that nobody saw. ----
+
+/// The account file of a creation and of a recovery keeps the mark of a code that nobody
+/// saw from the moment the account exists until the owner closes the sheet of the code
+/// ("I Saved It"): a lock or a quit before it leaves the mark.
+#[test]
+fn the_mark_of_an_unseen_code_holds_from_the_creation_or_recovery_until_i_saved_it() {
+    let connect = FakeConnect::start();
+    let a = device();
+    let (mut account, recovery) =
+        ConnectAccount::create(client(&connect), &a.store, &a.path, "Rafal", "MacBook Pro")
+            .expect("create");
+    assert!(
+        AccountState::load(&a.path)
+            .unwrap()
+            .unwrap()
+            .recovery_unseen,
+        "the creation"
+    );
+    account.recovery_code_seen().expect("I Saved It");
+    assert!(
+        !AccountState::load(&a.path)
+            .unwrap()
+            .unwrap()
+            .recovery_unseen
+    );
+    let account_id = account.state().account_id.clone();
+    connect.revoke(&account.state().device_id);
+    drop(account);
+    let b = device();
+    let (mut recovered, _, deleted) = recover_with(
+        client(&connect),
+        &b.store,
+        &b.path,
+        &account_id,
+        &recovery.words(),
+        "MacBook Air",
+    )
+    .expect("recover");
+    assert_eq!(deleted, Some(0));
+    let state = AccountState::load(&b.path).unwrap().unwrap();
+    assert!(state.recovery_unseen, "the recovery");
+    assert!(state.recovered_at.is_some());
+    recovered.recovery_code_seen().expect("I Saved It");
+    assert!(
+        !AccountState::load(&b.path)
+            .unwrap()
+            .unwrap()
+            .recovery_unseen
+    );
+}
+
+/// The recovery needs a fresh owner check for that account id: a proof for another
+/// account, or for another step, sends nothing.
+#[test]
+fn a_recovery_needs_the_owner_check_of_its_account() {
+    let connect = FakeConnect::start();
+    let owner = owner();
+    let a = device();
+    let (account, recovery) = create(&connect, &a);
+    let account_id = account.state().account_id.clone();
+    connect.revoke(&account.state().device_id);
+    let b = device();
+    for action in [
+        ConnectAccount::recover_action("acc_aaaaaaaaaa"),
+        OwnerAction::NewRecoveryCode {
+            account_id: account_id.clone(),
+        },
+    ] {
+        let (proof, epoch) = owner.proof(action);
+        assert!(matches!(
+            ConnectAccount::recover(
+                client(&connect),
+                &b.store,
+                &b.path,
+                &account_id,
+                &recovery.words(),
+                "MacBook Air",
+                proof,
+                &epoch,
+            )
+            .unwrap_err(),
+            ConnectError::OwnerCheck(_)
+        ));
+    }
+    assert_eq!(connect.count("POST /v1/account/recover"), 0);
+}
+
+/// Every answer of a recovery is lost: the call says so, the pending recovery stays on
+/// disk (public values only), and the next call settles it with the same body: Connect
+/// answers the same device, and the code that this process still holds is shown.
+#[test]
+fn an_unanswered_recovery_stays_pending_and_the_next_try_settles_it() {
+    let connect = FakeConnect::start();
+    let a = device();
+    let (account, recovery) = create(&connect, &a);
+    let account_id = account.state().account_id.clone();
+    connect.revoke(&account.state().device_id);
+    let b = device();
+    connect.lose_next_answers("POST /v1/account/recover", 50);
+    assert_eq!(
+        recover_with(
+            client(&connect),
+            &b.store,
+            &b.path,
+            &account_id,
+            &recovery.words(),
+            "MacBook Air",
+        )
+        .unwrap_err(),
+        ConnectError::RecoverUnanswered
+    );
+    connect.keep_answers();
+    let pending = b.path.with_file_name("pending-recovery.json");
+    let text = std::fs::read_to_string(&pending).expect("pending");
+    assert!(!text.contains(recovery.words().as_str()));
+    assert!(!text.contains(recovery.text().as_str()));
+    assert!(AccountState::load(&b.path).unwrap().is_none());
+    assert_eq!(
+        connect.live_devices(&account_id).len(),
+        1,
+        "Connect took it"
+    );
+    let (resumed, code, deleted) = ConnectAccount::resume_recovery(&b.store, &b.path)
+        .expect("resume")
+        .expect("the account");
+    assert!(code.is_some(), "this process holds the new code");
+    assert_eq!(deleted, Some(0));
+    assert_eq!(
+        connect.live_devices(&account_id),
+        [resumed.state().device_id.clone()]
+    );
+    assert!(!pending.exists());
+    assert!(
+        AccountState::load(&b.path)
+            .unwrap()
+            .unwrap()
+            .recovery_unseen
+    );
+}
+
+/// A pending recovery older than Connect's repeat window (a restart much later) is settled
+/// with a sign-in of the device's key: Connect took it, so the account file is written,
+/// with the mark of a code that nobody saw (the code went with the restart); a key that is
+/// no device of the account means Connect did not take it, and the pending recovery goes.
+#[test]
+fn an_old_pending_recovery_is_settled_by_a_sign_in() {
+    let connect = FakeConnect::start();
+    for taken in [true, false] {
+        let a = device();
+        let (account, recovery) = create(&connect, &a);
+        let account_id = account.state().account_id.clone();
+        connect.revoke(&account.state().device_id);
+        let b = device();
+        if taken {
+            connect.lose_next_answers("POST /v1/account/recover", 50);
+        } else {
+            connect.answer_route_error("POST /v1/account/recover", 503, "busy");
+        }
+        assert_eq!(
+            recover_with(
+                client(&connect),
+                &b.store,
+                &b.path,
+                &account_id,
+                &recovery.words(),
+                "MacBook Air",
+            )
+            .unwrap_err(),
+            ConnectError::RecoverUnanswered,
+            "taken: {taken}"
+        );
+        connect.keep_answers();
+        connect.clear_route_errors();
+        // A restart much later: no code in memory, and the window of the repeat is over.
+        apassy::connect::account::forget_pending_creation_codes();
+        let pending = b.path.with_file_name("pending-recovery.json");
+        let mut body: Value =
+            serde_json::from_str(&std::fs::read_to_string(&pending).unwrap()).unwrap();
+        body["sent_at"] = json!(1_000);
+        std::fs::write(&pending, serde_json::to_vec(&body).unwrap()).unwrap();
+        let recovers_before = connect.count("POST /v1/account/recover");
+        let resumed = ConnectAccount::resume_recovery(&b.store, &b.path).expect("resume");
+        assert_eq!(
+            connect.count("POST /v1/account/recover"),
+            recovers_before,
+            "no repeat after the window"
+        );
+        assert!(!pending.exists(), "taken: {taken}");
+        if taken {
+            let (account, code, deleted) = resumed.expect("the account");
+            assert!(code.is_none());
+            assert_eq!(deleted, None);
+            let state = AccountState::load(&b.path).unwrap().unwrap();
+            assert!(state.recovery_unseen);
+            assert_eq!(state.device_id, account.state().device_id);
+            assert_eq!(state.root, state.public_key);
+        } else {
+            assert!(resumed.is_none());
+            assert!(AccountState::load(&b.path).unwrap().is_none());
+            recover_with(
+                client(&connect),
+                &b.store,
+                &b.path,
+                &account_id,
+                &recovery.words(),
+                "MacBook Air",
+            )
+            .expect("the old code still recovers");
         }
     }
 }
