@@ -49,6 +49,8 @@ pub(super) struct ShareState {
     pending_key: Option<Vec<u8>>,
     /// owner → the shares of its list that the fake counts as void: (store, member).
     void: BTreeMap<String, Vec<(String, String)>>,
+    /// The reads give no `reset_list` (a Connect that keeps no list before a reset).
+    no_reset_lists: bool,
 }
 
 impl FakeConnect {
@@ -60,6 +62,12 @@ impl FakeConnect {
             Some(list) => state.share.served.insert(account.to_owned(), list),
             None => state.share.served.remove(account),
         };
+    }
+
+    /// The reads of other accounts' lists give the list of an account before its last
+    /// recovery (`reset_list`), or not (`false`: a Connect that keeps none).
+    pub fn serve_reset_lists(&self, serve: bool) {
+        lock(&self.shared).share.no_reset_lists = !serve;
     }
 
     /// The next join answers name `inviter` as the device of the code.
@@ -247,6 +255,16 @@ fn may_read(state: &State, account: &str, other: &str) -> bool {
                 let held = participants(state, &store.team_id);
                 held.iter().any(|held| held == account) && held.iter().any(|held| held == other)
             }))
+}
+
+/// The list of `account` before its last recovery, for a read (none when the fake serves
+/// none, or the account has none).
+fn reset_of(state: &State, account: &str) -> Option<Vec<Value>> {
+    state
+        .accounts
+        .get(account)
+        .map(|entry| entry.before_reset.clone())
+        .filter(|list| !list.is_empty() && !state.share.no_reset_lists)
 }
 
 /// The void marks of the list of `owner` in a peer view.
@@ -464,10 +482,12 @@ pub(super) fn route(
                     items.push(json!({"account_id": other, "state": "same", "void": void_of(state, &other)}));
                 } else {
                     let list = served.unwrap_or_else(|| entry.list.clone());
-                    items.push(
-                        json!({"account_id": other, "state": "newer", "name": entry.name,
-                                      "device_list": list, "void": void_of(state, &other)}),
-                    );
+                    let mut item = json!({"account_id": other, "state": "newer", "name": entry.name,
+                                      "device_list": list, "void": void_of(state, &other)});
+                    if let Some(reset) = reset_of(state, &other) {
+                        item["reset_list"] = json!(reset);
+                    }
+                    items.push(item);
                 }
             }
             ok(json!({"accounts": items}))
@@ -495,10 +515,12 @@ pub(super) fn route(
                                      "public_key": encode_b64u(&device.public_key)})
                 })
                 .collect();
-            ok(
-                json!({"account_id": other, "name": entry.name, "devices": devices, "device_list": list,
-                       "void": void_of(state, other)}),
-            )
+            let mut view = json!({"account_id": other, "name": entry.name, "devices": devices,
+                                  "device_list": list, "void": void_of(state, other)});
+            if let Some(reset) = reset_of(state, other) {
+                view["reset_list"] = json!(reset);
+            }
+            ok(view)
         }
         _ => return None,
     };

@@ -1408,3 +1408,62 @@ fn a_suspended_pin_through_an_owner_follows_the_owners_list() {
     assert!(!pin.suspended && pin.root == b64(&reset.root), "{pin:?}");
     assert!(accepted(&state, STORE, &reset.root) && left(&state, STORE, &y.root));
 }
+
+/// K2: Y resets its account, and A pins Y's new root (new words). A new device of X, whose
+/// account file knew nothing of Y's old root, takes Y's last list before the reset only
+/// from the root that A's list pinned for Y earlier, and its keys only as keys that left; a
+/// key that no list held signs nothing, and a list from a root that A never pinned counts
+/// for nothing.
+#[test]
+fn the_list_before_a_reset_gives_keys_that_left_only() {
+    let (mut a, x, mut y_old) = family();
+    let old_device = key();
+    y_old.add(&old_device, 3);
+    let mut y_new = List::new(&y_old.id);
+    y_new.peer(&a);
+    a.share(UNSHARE, &y_old.id.clone(), None, Some(STORE));
+    a.share(UNPEER, &y_old.id.clone(), None, None);
+    a.peer(&y_new);
+    a.share(SHARE, &y_new.id.clone(), None, Some(STORE));
+    y_new.join(&a, STORE);
+    let stranger = key();
+    let lists: BTreeMap<String, Vec<ListEntry>> = [
+        (a.id.clone(), a.entries.clone()),
+        (y_new.id.clone(), y_new.entries.clone()),
+    ]
+    .into_iter()
+    .collect();
+    let learn = |reset: &BTreeMap<String, Vec<ListEntry>>| {
+        let mut state = state_of(&x);
+        learn_lists_with(
+            &mut state,
+            &x.verified().unwrap().shares,
+            ORIGIN,
+            &lists,
+            reset,
+            &VoidShares::default(),
+            &ListCache::default(),
+        );
+        assert!(state.is_valid_for_test(), "{state:?}");
+        state
+    };
+    let reset: BTreeMap<String, Vec<ListEntry>> = [(y_old.id.clone(), y_old.entries.clone())]
+        .into_iter()
+        .collect();
+    let state = learn(&reset);
+    assert!(accepted(&state, STORE, &y_new.root));
+    assert!(left(&state, STORE, &old_device) && left(&state, STORE, &y_old.root));
+    assert!(!accepted(&state, STORE, &old_device) && !accepted(&state, STORE, &y_old.root));
+    assert!(!accepted(&state, STORE, &stranger) && !left(&state, STORE, &stranger));
+    // Without the list before the reset the old keys are unknown here.
+    let bare = learn(&BTreeMap::new());
+    assert!(!left(&bare, STORE, &old_device) && !accepted(&bare, STORE, &old_device));
+    // A list of another root that A's list never pinned for Y gives nothing.
+    let mut forged = List::new(&y_old.id);
+    forged.add(&stranger, 4);
+    let forged: BTreeMap<String, Vec<ListEntry>> = [(y_old.id.clone(), forged.entries.clone())]
+        .into_iter()
+        .collect();
+    let state = learn(&forged);
+    assert!(!left(&state, STORE, &stranger) && !accepted(&state, STORE, &stranger));
+}

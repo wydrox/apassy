@@ -1150,6 +1150,9 @@ pub(crate) struct HeadNotes {
     /// ([`RelaySync::served_head`]).
     served: Mutex<Option<DepartedHead>>,
     unlisted: Mutex<Option<UnlistedEntry>>,
+    /// The head of a first download whose chain holds an entry by a key that no list
+    /// verifies, after the lists were read again ([`SyncError::HistoryUnverified`]).
+    history: Mutex<Option<DepartedHead>>,
     /// When the newest device list that verified on this Mac was asked of Connect
     /// ([`RelaySync::note_device_list`]); `None` before one.
     listed: Mutex<Option<Instant>>,
@@ -1301,6 +1304,9 @@ pub struct RelayTransport {
     /// The download of a new device ([`JoinedDevice::download`]): with no anchor, the chain
     /// below the head of a vault store is checked too ([`Self::check_first_chain`]).
     first_chain: bool,
+    /// The head (version, hash) that the owner took without its earlier history
+    /// ([`Self::with_head_without_history`]).
+    without_history: Option<(u64, String)>,
     /// The one current head that the owner chose to take with "Use the relay copy…" (its
     /// version and hash, [`RelaySync::use_relay_copy_approved`]): with no anchor, any other
     /// head is [`SyncError::StaleCopy`], and nothing changes.
@@ -1331,6 +1337,7 @@ impl RelayTransport {
             notes: Arc::default(),
             departed: None,
             first_chain: false,
+            without_history: None,
             approved: None,
         }
     }
@@ -1429,6 +1436,41 @@ impl RelayTransport {
                 SyncError::ChecksDeviceList
             }
         }
+    }
+
+    /// Whether the owner took `head` without its earlier history
+    /// ([`Self::with_head_without_history`]).
+    fn takes_without_history(&self, head: &SignedHead) -> bool {
+        self.without_history
+            .as_ref()
+            .is_some_and(|(version, hash)| *version == head.fields.version && *hash == head.hash())
+    }
+
+    /// A first download whose chain holds an entry by a key that a fresh list still does
+    /// not hold: [`SyncError::HistoryUnverified`] (the head noted for the owner's choice)
+    /// when a device of a verified list signed `head`, else `Damaged`.
+    fn history_refused(&self, head: &SignedHead, signers: &[Signer]) -> SyncError {
+        if self.signing(head, signers, Role::Head(head.fields.version), 0) != Signing::Accepted {
+            return SyncError::Damaged;
+        }
+        *lock(&self.notes.history) =
+            signer_key(signers, head.fields.device_id).map(|key| DepartedHead {
+                key,
+                device_id: head.fields.device_id,
+                version: head.fields.version,
+                head_hash: head.hash(),
+                time: head.fields.time,
+            });
+        SyncError::HistoryUnverified
+    }
+
+    /// The first download takes `head` without the checks of the entries below it whose
+    /// key no list verifies, as the owner chose ("Take This Copy Without Its Earlier
+    /// History…"): only that head, still signed by a device of a verified list, and a chain
+    /// that links to it; any other head is checked as usual.
+    pub(crate) fn with_head_without_history(mut self, head: &DepartedHead) -> Self {
+        self.without_history = Some((head.version, head.head_hash.clone()));
+        self
     }
 
     /// Whether the current head that the last [`SyncTransport::head`] accepted was signed
@@ -1595,10 +1637,17 @@ impl RelayTransport {
                 };
                 match self.signing(entry, &view.signers, role, 0) {
                     Signing::Accepted | Signing::Left => Ok(true),
+                    // The owner took this head without its earlier history.
+                    Signing::Unlisted
+                        if role == Role::Below && self.takes_without_history(head) =>
+                    {
+                        Ok(true)
+                    }
                     // A first download offers no relay copy to take instead: a signer that a
-                    // fresh list still does not hold makes the copy damaged.
+                    // fresh list still does not hold makes the copy damaged, or, below a head
+                    // of a verified device, waits for the owner's choice.
                     Signing::Unlisted => Err(match self.unlisted(&head.hash()) {
-                        SyncError::UnknownSigner => SyncError::Damaged,
+                        SyncError::UnknownSigner => self.history_refused(head, &view.signers),
                         waiting => waiting,
                     }),
                     // The head itself passed `check_identity`, also a head of a device that
@@ -3943,6 +3992,42 @@ impl JoinedDevice {
         lock(&self.notes.waiting).clone()
     }
 
+    /// The head of the last download whose earlier history holds an entry by a key that no
+    /// list verifies ([`SyncError::HistoryUnverified`]): signed by a device of a verified
+    /// list. Its device names it in the owner's choice.
+    pub fn unverified_history_head(&self) -> Option<DepartedHead> {
+        lock(&self.notes.history).clone()
+    }
+
+    /// The lists of the other accounts of a shared store were asked of Connect at `asked`
+    /// and verified (their signers reached [`Self::set_signers`] first): a chain entry
+    /// refused before then by a key that the signers still do not hold decides the next
+    /// download ([`SyncError::HistoryUnverified`] or `Damaged`) instead of waiting.
+    pub fn note_device_list(&self, asked: Instant) {
+        let mut listed = lock(&self.notes.listed);
+        if listed.is_none_or(|held| asked > held) {
+            *listed = Some(asked);
+        }
+    }
+
+    /// [`Self::download`] that takes `head`, the head of the last download whose earlier
+    /// history did not verify, as the owner chose ("Take This Copy Without Its Earlier
+    /// History…"): that head only, still signed by a device of a verified list, and a chain
+    /// that links to it; the entries below it whose key no list verifies are not checked.
+    /// Another head is checked as usual.
+    pub fn download_without_history(
+        &self,
+        work_dir: &Path,
+        head: &DepartedHead,
+    ) -> Result<RelayDownload, SyncError> {
+        let mut transport =
+            RelayTransport::new(Arc::clone(&self.session), None, 0, None, MAX_SNAPSHOT_BYTES)
+                .with_notes(Arc::clone(&self.notes))
+                .with_first_chain_check()
+                .with_head_without_history(head);
+        self.download_on(work_dir, &mut transport)
+    }
+
     /// [`Self::download`] that takes `head`, the head that the last download waited on,
     /// once, as the owner chose ("Use the Copy That … Left…"): the adoption makes it the
     /// anchor, and the first sync pushes a head of this device over it. Only for a key that
@@ -3971,6 +4056,15 @@ impl JoinedDevice {
         if let Some(head) = departed {
             transport = transport.with_departed(head.clone());
         }
+        self.download_on(work_dir, &mut transport)
+    }
+
+    fn download_on(
+        &self,
+        work_dir: &Path,
+        transport: &mut RelayTransport,
+    ) -> Result<RelayDownload, SyncError> {
+        *lock(&self.notes.history) = None;
         let head = match transport.head()? {
             Remote::Head(head) => head,
             Remote::Empty => return Err(SyncError::RelayEmpty),

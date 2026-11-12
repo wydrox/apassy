@@ -192,6 +192,10 @@ pub struct ListShares {
     /// Every store entry of the list, in its order: what ended, who signed it, and which
     /// share each one is about.
     pub ops: Vec<StoreOp>,
+    /// Every `peer` entry of the list, also one that an `unpeer` ended, in its order: the
+    /// account and the root that it pinned then. The list of an account before its reset
+    /// verifies from an earlier root of it ([`learn_lists_with`]).
+    pub peer_roots: Vec<(String, Vec<u8>)>,
 }
 
 impl ListShares {
@@ -432,6 +436,7 @@ impl ListShares {
             (STORE, Some(team)) => self.stores.push(team),
             (PEER, None) => {
                 let root = entry.root.as_deref().and_then(point).ok_or(Refusal::Rule)?;
+                self.peer_roots.push((peer.clone(), root.clone()));
                 self.peers.push((peer, root));
             }
             (UNPEER, None) => self.peers.retain(|(held, _)| *held != peer),
@@ -583,6 +588,25 @@ impl PeerPin {
         self.list_head = list.head().to_owned();
         self.name.clone_from(&list.root_name);
         *self != before
+    }
+
+    /// Take `list`, the last list of this account before its reset, verified from an
+    /// earlier root that the naming list pinned for it: its devices and its keys that left
+    /// become keys that left here (never devices). Returns whether anything changed.
+    fn learn_reset(&mut self, list: &Verified) -> bool {
+        let before = self.left.len();
+        let keys = list
+            .live
+            .iter()
+            .chain(&list.removed)
+            .map(|key| encode_b64u(key));
+        for key in keys {
+            if !self.known.contains(&key) && !self.left.contains(&key) {
+                self.left.insert(0, key);
+            }
+        }
+        bound_oldest(&mut self.left, MAX_PEER_LEFT);
+        self.left.len() != before
     }
 
     /// The list that named this account names another root now (after a reset and new
@@ -1012,6 +1036,24 @@ pub(super) fn learn_lists(
     void: &VoidShares,
     cache: &ListCache,
 ) -> Learned {
+    learn_lists_with(state, own, origin, served, &BTreeMap::new(), void, cache)
+}
+
+/// [`learn_lists`] with `reset`: the last list of an account before its reset, as Connect
+/// served it (by account). A pin whose naming list (this account's own list for an own
+/// pin, the verified list of the owner of the store for a pin through it) pinned an earlier
+/// root of that account takes the list, when it verifies from that root, as keys that left
+/// ([`PeerPin::learn_reset`]): they sign only below a head of an accepted key and up to the
+/// anchor, never as devices.
+pub(super) fn learn_lists_with(
+    state: &mut AccountState,
+    own: &ListShares,
+    origin: &str,
+    served: &BTreeMap<String, Vec<ListEntry>>,
+    reset: &BTreeMap<String, Vec<ListEntry>>,
+    void: &VoidShares,
+    cache: &ListCache,
+) -> Learned {
     learn_own(state, own);
     let mut learned = Learned::default();
     for pin in state.peers.iter_mut().filter(|pin| pin.via.is_none()) {
@@ -1116,6 +1158,36 @@ pub(super) fn learn_lists(
     }
     for (account, list) in &learned.own {
         note_names(&mut learned.names, account, list);
+    }
+    // The lists before a reset: from an earlier root that the naming list pinned.
+    for pin in &mut state.peers {
+        let Some(entries) = reset.get(&pin.account_id) else {
+            continue;
+        };
+        let Some(earlier) = entries
+            .first()
+            .and_then(|entry| entry.key.as_deref())
+            .and_then(point)
+            .filter(|earlier| *earlier != pin.root_key())
+        else {
+            continue;
+        };
+        let naming = match pin.via.as_deref() {
+            None => Some(&own.peer_roots),
+            Some(owner) => learned.own.get(owner).map(|list| &list.shares.peer_roots),
+        };
+        let pinned = naming.is_some_and(|roots| {
+            roots
+                .iter()
+                .any(|(account, root)| *account == pin.account_id && *root == earlier)
+        });
+        if !pinned {
+            continue;
+        }
+        if let Some(list) = cache.verify(origin, &pin.account_id, &earlier, entries) {
+            pin.learn_reset(&list);
+            note_names(&mut learned.names, &pin.account_id, &list);
+        }
     }
     drop_unused_pins(state, own);
     learned
@@ -1341,6 +1413,9 @@ struct PeerView {
     device_list: Vec<ListEntry>,
     #[serde(default)]
     void: Vec<VoidMark>,
+    /// The last list of that account before its reset, while a store names the account.
+    #[serde(default)]
+    reset_list: Vec<ListEntry>,
 }
 
 /// One account of `POST /v1/account/peers/lists`, with the pin of its list that this
@@ -1369,6 +1444,10 @@ struct PeerListItem {
     device_list: Vec<ListEntry>,
     #[serde(default)]
     void: Vec<VoidMark>,
+    /// With `newer`: the last list of that account before its reset, while a store names
+    /// the account.
+    #[serde(default)]
+    reset_list: Vec<ListEntry>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1378,6 +1457,15 @@ struct PeerListsAnswer {
 
 /// The most accounts of one `POST /v1/account/peers/lists`.
 pub const LISTS_PER_READ: usize = 64;
+
+/// What the reads of a refresh gave ([`ConnectAccount::read_lists`]): the lists by account
+/// (the ones held in memory for an account that this refresh did not read anew), the lists
+/// of accounts before their reset, and the void marks.
+struct ReadLists {
+    served: BTreeMap<String, Vec<ListEntry>>,
+    reset: BTreeMap<String, Vec<ListEntry>>,
+    void: VoidShares,
+}
 /// The most entries of the lists that a device keeps in memory between two refreshes
 /// (to ask Connect only for lists that changed); over it, a list is asked again whole.
 const MAX_HELD_ENTRIES: usize = 100_000;
@@ -1400,6 +1488,8 @@ pub struct ShareMemory {
     turn: usize,
     /// The stores whose `store` entry Connect refused in this session: not asked again.
     refused_claims: BTreeSet<String>,
+    /// Account → the last list before its reset, as Connect served it last.
+    reset: HashMap<String, Vec<ListEntry>>,
 }
 
 impl ShareMemory {
@@ -2770,9 +2860,21 @@ impl ConnectAccount {
         }
         let origin = self.client().origin().to_owned();
         let cache = ListCache::default();
-        let (served, void) = self.read_lists(&own, &cache, &mut status)?;
+        let ReadLists {
+            served,
+            reset,
+            void,
+        } = self.read_lists(&own, &cache, &mut status)?;
         let before = self.state().clone();
-        let learned = learn_lists(self.state_mut(), &own, &origin, &served, &void, &cache);
+        let learned = learn_lists_with(
+            self.state_mut(),
+            &own,
+            &origin,
+            &served,
+            &reset,
+            &void,
+            &cache,
+        );
         if *self.state() != before {
             self.save_state()?;
         }
@@ -2957,7 +3059,7 @@ impl ConnectAccount {
         own: &ListShares,
         cache: &ListCache,
         status: &mut ShareStatus,
-    ) -> Result<(BTreeMap<String, Vec<ListEntry>>, VoidShares), ConnectError> {
+    ) -> Result<ReadLists, ConnectError> {
         let origin = self.client().origin().to_owned();
         let now = self.now();
         status.read.clear();
@@ -3045,6 +3147,11 @@ impl ConnectAccount {
                                 item.device_list.clone(),
                                 head,
                             );
+                            if !item.reset_list.is_empty() {
+                                self.share_memory()
+                                    .reset
+                                    .insert(item.account_id.clone(), item.reset_list.clone());
+                            }
                             self.note_void(&item.account_id, &item.void);
                             status.read.insert(item.account_id.clone(), asked);
                             served.insert(item.account_id.clone(), item.device_list);
@@ -3082,7 +3189,16 @@ impl ConnectAccount {
                 .or_insert_with(|| entries.clone());
         }
         status.names.clone_from(&memory.names);
-        Ok((served, memory.void.clone()))
+        let reset = memory
+            .reset
+            .iter()
+            .map(|(account, entries)| (account.clone(), entries.clone()))
+            .collect();
+        Ok(ReadLists {
+            served,
+            reset,
+            void: memory.void.clone(),
+        })
     }
 
     /// The void marks that Connect gave with the list of `owner` (only ends are taken from
@@ -3536,10 +3652,25 @@ impl ConnectAccount {
         let own = self.own_shares()?;
         let cache = ListCache::default();
         let mut status = ShareStatus::default();
-        let (mut served, void) = self.read_lists(&own, &cache, &mut status)?;
+        let ReadLists {
+            mut served,
+            mut reset,
+            void,
+        } = self.read_lists(&own, &cache, &mut status)?;
         served.insert(owner.to_owned(), view.device_list);
+        if !view.reset_list.is_empty() {
+            reset.insert(owner.to_owned(), view.reset_list);
+        }
         let before = self.state().clone();
-        learn_lists(self.state_mut(), &own, &origin, &served, &void, &cache);
+        learn_lists_with(
+            self.state_mut(),
+            &own,
+            &origin,
+            &served,
+            &reset,
+            &void,
+            &cache,
+        );
         if *self.state() != before {
             self.save_state()?;
         }

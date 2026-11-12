@@ -137,6 +137,8 @@ struct Account {
     /// list hash of each.
     list: Vec<Value>,
     hashes: Vec<String>,
+    /// The last list before the last recovery (`reset_list` of the peer reads).
+    before_reset: Vec<Value>,
 }
 
 /// The message of the entry `version` of a device list.
@@ -1521,6 +1523,7 @@ fn route(shared: &Arc<Mutex<State>>, request: &Incoming) -> Outgoing {
                     customer: false,
                     list: Vec::new(),
                     hashes: Vec::new(),
+                    before_reset: Vec::new(),
                 },
             );
             if let Some(entry) = state.accounts.get_mut(&account_id) {
@@ -1862,6 +1865,7 @@ fn route(shared: &Arc<Mutex<State>>, request: &Incoming) -> Outgoing {
                 .count();
             state.stores.retain(|store| store.account != account);
             if let Some(entry) = state.accounts.get_mut(&account) {
+                entry.before_reset = std::mem::take(&mut entry.list);
                 entry.start_list(
                     &origin,
                     &account,

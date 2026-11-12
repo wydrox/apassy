@@ -326,6 +326,12 @@ pub enum SyncError {
     /// The chain of a vault store holds an entry by a key that a device list fetched after
     /// the first refusal still does not hold. "Use the relay copy…" goes on from there.
     UnknownSigner,
+    /// The first download of a vault store: its head is signed by a device of a verified
+    /// list, and an earlier entry of its chain by a key that no list verifies, also after
+    /// the lists were read again (a person who shares the vault reset their account).
+    /// Nothing was taken; the owner can take the head without its earlier history
+    /// (`JoinedDevice::download_without_history`).
+    HistoryUnverified,
     /// Another sync of this vault runs now. The next sync tries again.
     Running,
     /// The copy is larger than the relay takes (64 MiB).
@@ -466,6 +472,11 @@ impl fmt::Display for SyncError {
             Self::UnknownSigner => f.write_str(
                 "the relay copy has a change by a device that is not in the device list of this account. To go on, select “Use the relay copy…” in Settings > Vault > Sync",
             ),
+            Self::HistoryUnverified => f.write_str(concat!(
+                "the relay copy has earlier versions saved by devices that this ",
+                crate::computer!(),
+                " cannot verify; nothing was taken"
+            )),
             Self::Running => f.write_str("another sync of this vault runs now. Apassy tries again"),
             Self::TooLarge => f.write_str("the vault is too large for the relay (64 MiB)"),
             Self::InvalidRelayAddress => f.write_str(
