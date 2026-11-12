@@ -161,7 +161,7 @@ checksum = "fc7eb209b1518d6bb87b283c20095f5228ecda460da70b44f0802523dea6da04"
 
 [[package]]
 name = "apassy"
-version = "0.5.19"
+version = "0.5.20"
 dependencies = [
  "arboard",
  "base64",
@@ -198,7 +198,7 @@ dependencies = [
 
 [[package]]
 name = "apassy-app"
-version = "0.5.19"
+version = "0.5.20"
 dependencies = [
  "apassy",
  "apassy-relay",
@@ -217,7 +217,7 @@ dependencies = [
 
 [[package]]
 name = "apassy-core"
-version = "0.5.19"
+version = "0.5.20"
 dependencies = [
  "apassy",
  "apassy-relay",
@@ -232,7 +232,7 @@ dependencies = [
 
 [[package]]
 name = "apassy-relay"
-version = "0.5.19"
+version = "0.5.20"
 dependencies = [
  "apassy",
  "base64",
