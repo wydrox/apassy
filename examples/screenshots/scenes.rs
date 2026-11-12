@@ -585,10 +585,12 @@ pub(crate) fn steps(name: &str) -> Vec<super::Step> {
                 Pages("connect-live-account"),
                 top(),
                 Wait(1.0),
-                Click(1025.0, 645.0),
+                // The rows of the pane have no fixed place: Revoke… of the first other
+                // device, then the button of its alert, by name.
+                Connect("revoke"),
                 Wait(1.5),
                 Shot("connect-live-revoke"),
-                Click(720.0, 440.0),
+                Connect("go"),
                 Wait(2.0),
                 Shot("owner-check-revoke"),
                 escape(),
@@ -597,7 +599,7 @@ pub(crate) fn steps(name: &str) -> Vec<super::Step> {
                 bottom(),
                 Wait(1.0),
                 Shot("share-section"),
-                Click(1016.0, 652.0),
+                Connect("share-with"),
                 Wait(1.5),
                 Shot("share-pick"),
                 Click(721.0, 436.0),
@@ -632,7 +634,7 @@ pub(crate) fn steps(name: &str) -> Vec<super::Step> {
                 bottom(),
                 Wait(1.0),
                 Shot("share-syncs"),
-                Click(930.0, 652.0),
+                Connect("share-stop"),
                 Wait(1.5),
                 Shot("share-stop"),
                 // Stop Sharing… asks the owner first; Escape cancels both.
@@ -643,7 +645,9 @@ pub(crate) fn steps(name: &str) -> Vec<super::Step> {
                 Wait(1.0),
                 escape(),
                 Wait(1.0),
-                Click(991.0, 450.0),
+                // "New Recovery Code…": the button of the line of a code that nobody saw
+                // (else the item of the ⋯ menu of the Account row).
+                Connect("new-recovery"),
                 Wait(2.0),
                 Shot("owner-check-recovery"),
             ]);
@@ -673,7 +677,8 @@ pub(crate) fn steps(name: &str) -> Vec<super::Step> {
                 bottom(),
                 Wait(1.0),
                 Hook("owner-shares"),
-                Click(987.0, 690.0),
+                // Accept Shared Vault… is the button under the group.
+                Connect("share-accept"),
                 Wait(1.5),
                 Shot("share-accept-empty"),
                 PasteCode,
@@ -695,7 +700,7 @@ pub(crate) fn steps(name: &str) -> Vec<super::Step> {
                 bottom(),
                 Wait(1.0),
                 Shot("share-offer-join"),
-                Click(1040.0, 635.0),
+                Connect("share-join"),
                 Wait(2.0),
                 Shot("owner-check-join"),
                 Type(super::PASS),
@@ -704,8 +709,8 @@ pub(crate) fn steps(name: &str) -> Vec<super::Step> {
                 bottom(),
                 Wait(1.0),
                 Shot("share-joined"),
-                // Leave… is the left button of the row (Download… is at its trailing edge).
-                Click(806.0, 636.0),
+                // Leave… of the joined vault (Download… is at the trailing edge of its row).
+                Connect("share-leave"),
                 Wait(1.5),
                 Shot("share-leave"),
                 // Leave… asks the owner first; Escape cancels both.

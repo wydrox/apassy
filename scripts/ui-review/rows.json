@@ -209,7 +209,7 @@
      "note": ""
     },
     {
-     "title": "Removed: Forget the Account…",
+     "title": "Removed: Forget This Mac…",
      "mockups": [],
      "shots": [
       "connect-demo-T4.png"
@@ -225,7 +225,7 @@
      "note": ""
     },
     {
-     "title": "Recovery Code row: a code that was never shown",
+     "title": "Recovery line: a code that was never shown (13a)",
      "mockups": [
       "connect-13a.png"
      ],
@@ -236,7 +236,7 @@
      "note": ""
     },
     {
-     "title": "Recovery Code row: a new code of another device (13d)",
+     "title": "Recovery line: a new code of another device (13d)",
      "mockups": [
       "connect-13a.png"
      ],
@@ -247,7 +247,7 @@
      "note": "Demo frame 13d."
     },
     {
-     "title": "New Recovery Code… (owner check)",
+     "title": "Recovery Code › New Code… (owner check)",
      "mockups": [
       "connect-13b.png"
      ],
@@ -522,6 +522,14 @@
      "note": ""
     },
     {
+     "title": "Leave the family (a member)",
+     "mockups": [
+      "connect-9g.png"
+     ],
+     "shots": [],
+     "note": "Mockup only: the alert of Leave… on a member's Family row."
+    },
+    {
      "title": "Change the people (seats)",
      "mockups": [
       "connect-9d.png"
@@ -562,7 +570,7 @@
      "note": ""
     },
     {
-     "title": "Delete Account…",
+     "title": "⋯ › Delete Account…",
      "mockups": [
       "connect-11a.png"
      ],
@@ -595,7 +603,7 @@
    "title": "2. Settings › Connect › Shared Vaults (frame 12; screens under rework in fix/connect-vault-sharing-3)",
    "rows": [
     {
-     "title": "The section: own vault, Share with…, Accept a Shared Vault…",
+     "title": "The section: own vault, Share with…, Accept Shared Vault…",
      "mockups": [
       "connect-12a.png"
      ],
@@ -607,7 +615,7 @@
     {
      "title": "A member who did not finish the words",
      "mockups": [
-      "connect-12a.png"
+      "connect-12i.png"
      ],
      "shots": [
       "share-not-compared.png"
@@ -617,7 +625,7 @@
     {
      "title": "\"has not joined yet\"",
      "mockups": [
-      "connect-12a.png"
+      "connect-12i.png"
      ],
      "shots": [
       "share-not-joined.png"
@@ -625,7 +633,7 @@
      "note": ""
     },
     {
-     "title": "The member syncs the vault; Stop Sharing with …",
+     "title": "The member syncs the vault; Stop Sharing…",
      "mockups": [
       "connect-12a.png"
      ],
@@ -645,7 +653,7 @@
      "note": ""
     },
     {
-     "title": "Joined: Leave This Shared Vault… (the member)",
+     "title": "Joined: Leave… (the member)",
      "mockups": [
       "connect-12a.png"
      ],
@@ -653,6 +661,22 @@
       "share-joined.png"
      ],
      "note": ""
+    },
+    {
+     "title": "People in other states (reset, not joined, left)",
+     "mockups": [
+      "connect-12i.png"
+     ],
+     "shots": [],
+     "note": "Mockup only."
+    },
+    {
+     "title": "Vaults of other accounts in other states (stopped, offer, left, claim)",
+     "mockups": [
+      "connect-12j.png"
+     ],
+     "shots": [],
+     "note": "Mockup only."
     },
     {
      "title": "Share with…: pick a person",
@@ -693,7 +717,7 @@
      "note": ""
     },
     {
-     "title": "Accept a Shared Vault…",
+     "title": "Accept Shared Vault…",
      "mockups": [
       "connect-12e.png"
      ],
@@ -722,7 +746,7 @@
      "note": ""
     },
     {
-     "title": "Stop Sharing with …",
+     "title": "Stop Sharing…",
      "mockups": [
       "connect-12g.png"
      ],
@@ -732,7 +756,7 @@
      "note": ""
     },
     {
-     "title": "Leave This Shared Vault…",
+     "title": "Leave…",
      "mockups": [
       "connect-12g.png"
      ],
@@ -899,7 +923,7 @@
    "title": "5. Settings › Devices (demo frames)",
    "rows": [
     {
-     "title": "Both moves: Move Approvals to This Mac / to Connect",
+     "title": "Both moves: Move to This Mac… / Move to Connect…",
      "mockups": [
       "devices-settings-9a.png"
      ],
@@ -966,7 +990,9 @@
     },
     {
      "title": "The Relay group with the end of the free approvals",
-     "mockups": [],
+     "mockups": [
+      "devices-settings-8.png"
+     ],
      "shots": [
       "devices-demo-R.png",
       "devices-demo-R-2.png"

@@ -209,7 +209,7 @@ impl LinkCode {
         &self.0[LINK_CODE_LEN - FINGERPRINT_BYTES * 2..]
     }
 
-    /// The text, for the Copy button and the QR code of "Add a device…".
+    /// The text, for the Copy button and the QR code of "Add a Device…".
     pub fn expose(&self) -> &str {
         &self.0
     }

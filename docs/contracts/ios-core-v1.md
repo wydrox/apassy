@@ -202,7 +202,7 @@ Error codes:
 
 ### 5.2 Joining a vault (contract relay-sync-v1, section 7.2)
 
-The owner selects "Add a device…" on the Mac; the Mac shows a QR code and the link `<relay URL>/link#apassy_lnk_…`. The iPhone scans it (or the owner pastes it).
+The owner selects "Add a Device…" on the Mac; the Mac shows a QR code and the link `<relay URL>/link#apassy_lnk_…`. The iPhone scans it (or the owner pastes it).
 
 | Op | Parameters | Result |
 | --- | --- | --- |
@@ -537,7 +537,7 @@ Answers (relay-questions-v1 sections 5.3, 9, and 13):
 
 `join_attach` refuses a vault that has a questions team already, unless the key of that membership belongs to a removed row (the owner removed this iPhone) and the membership is for questions only: then the new key replaces the old one after the confirmation. A removed iPhone that syncs the vault through the relay (a sync membership) gets `invalid_input` that asks the owner to turn sync through the relay off and join again.
 
-`join_start` (the sync join, section 5.2) takes the same optional `answer_key` (b64u) and appends it to the device name in the same way. A Mac that confirms a device in "Add a device…" of the relay sync writes the row of the iPhone when the name of the link carries a key.
+`join_start` (the sync join, section 5.2) takes the same optional `answer_key` (b64u) and appends it to the device name in the same way. A Mac that confirms a device in "Add a Device…" of the relay sync writes the row of the iPhone when the name of the link carries a key.
 
 `answer_key_register` writes nothing. It checks that the vault holds the row of this iPhone (found by `sign_key` = the key of the membership) with this `answer_key`, and returns the row. Its errors: `not_registered` (the row has not reached this iPhone with the sync yet), `removed` (the owner removed this iPhone), and `answer_key_changed` (the row holds another key, for example after a new Face ID enrollment: the owner removes the iPhone on the Mac and connects it again). `question_answer_string` and `question_answer` give `removed` or `not_registered` when there is no row.
 
@@ -795,7 +795,7 @@ New error codes: `already_connected`, `mac_update_needed`. `answer_key_changed` 
 
 Added 2026-11-10. The iPhone **joins** the Apassy Connect account of a Mac and shows the plan of that account. It never creates an account, never recovers one (no recovery screen in this release: an account whose devices are all lost is recovered on a Mac or a Linux computer, connect-account-v1 section 9, and the iPhone is then added from it), never starts a checkout or opens the portal, never reads `GET /v1/plans`, and never collects an email: the account and its plan are managed in Apassy on the Mac ([plan s7](../design/implementation-plan-s7-connect.md) section 6, App Store Review Guideline 3.1; [connect-billing-v1](connect-billing-v1.md) section 10). No answer of these calls holds a price, a currency, or a URL. The calls are of the `app` role only; `autofill` and `watch` get `not_allowed`. The flow and its checks are those of the Mac (`apassy::connect`, connect-account-v1 sections 6 and 7): the link code, the link hash, the `apassy-connect join v1` signature with the account key (section 2.2), the link fingerprint, the signed device list and the pinned root of section 7.5, the six safety words of section 7.3, the challenge with its origin check, and the 15-minute account token in memory. The token never leaves the core; it goes only to the Connect origin of the account, also for the dials of section 5.15.
 
-**`connect_join`** `{"link": "apassy_alk_<account id>_<64 hex>_<32 hex>", "device_name": "Rafał’s iPhone"}`: the code that "Add a device…" shows on the Mac (as text, or the QR code of the same text), trimmed. `device_name` is optional (default: `device_name` of the config). The core makes the account key if it has none, sends `POST /v1/account/devices/join` with `platform: "iphone"`, and answers:
+**`connect_join`** `{"link": "apassy_alk_<account id>_<64 hex>_<32 hex>", "device_name": "Rafał’s iPhone"}`: the code that "Add a Device…" shows on the Mac (as text, or the QR code of the same text), trimmed. `device_name` is optional (default: `device_name` of the config). The core makes the account key if it has none, sends `POST /v1/account/devices/join` with `platform: "iphone"`, and answers:
 
 ```json
 {"state": "waiting", "account_id": "acc_k7m2q4x3ca", "confirmer": "MacBook Pro", "words": ["audio", "coyote", "forest", "mint", "magnet", "apple"], "expires_at": 1790000600}

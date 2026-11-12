@@ -486,6 +486,7 @@ fn connect_screens(screens: &mut Vec<Screen>) {
                 index: 0,
                 name: device_name.clone(),
                 this: true,
+                detail: String::new(),
             },
         ),
         ("forget after a removal", ConnectSheet::ForgetRemoved),
@@ -629,6 +630,8 @@ fn the_connect_sync_texts_use_the_linux_words() {
         relay::CONNECT_DEVICES_NOTE.to_owned(),
         relay::CONNECT_UNREACHABLE.to_owned(),
         relay::MOVE_OLD_DELETED.to_owned(),
+        relay::CHECK_LIST_UNREACHABLE.to_owned(),
+        relay::STORE_REFUSED_WORDS.to_owned(),
     ];
     for status in [
         UiStatus::UpToDate(None),
@@ -649,7 +652,7 @@ fn the_connect_sync_texts_use_the_linux_words() {
     let all = texts.join("\n");
     assert_eq!(mac_words(&all), Vec::<String>::new(), "{all}");
     assert!(
-        all.contains("The account key of this computer signs each change"),
+        all.contains("Changes stay on this computer until then."),
         "{all}"
     );
     assert!(all.contains("Saved to Apassy Connect."), "{all}");
@@ -679,12 +682,10 @@ fn linux_screens_use_the_linux_words() {
         "Tab, Shift+Tab",
         "Quit Apassy",
         "Apassy does not update itself on Linux",
-        "Add This Computer to an Account…",
-        "No password and no email: the key of this computer, in a private file of your user, signs in.",
+        "Add This Computer…",
         "Forget This Computer?",
         "This Computer",
         "Connect unreachable",
-        "Apassy reads the Connect key of this computer from its private file.",
     ] {
         assert!(all.contains(expected), "no screen shows {expected:?}");
     }
@@ -717,10 +718,8 @@ fn mac_views_keep_their_mac_words() {
         "Tab, ⇧Tab",
         "⌘H stays the macOS shortcut for \"Hide Apassy\", so showing values uses ⌘⇧H.",
         "This Mac",
-        "Add This Mac to an Account…",
-        "No password and no email: the key of this Mac, in the Keychain, signs in.",
+        "Add This Mac…",
         "Forget This Mac?",
-        "Touch ID reads the Connect key of this Mac.",
     ] {
         assert!(all.contains(expected), "no screen shows {expected:?}");
     }

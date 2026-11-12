@@ -230,16 +230,16 @@ pub(crate) enum ConnectState {
 pub(crate) fn deleted_copy_words(why: StoreDeleted) -> &'static str {
     match why {
         StoreDeleted::Recovered => {
-            "The copy of this vault at Apassy Connect was deleted when the account was recovered."
+            "The copy at Apassy Connect was deleted by the account recovery."
         }
         StoreDeleted::OwnerRecovered => {
-            "The copy of this vault at Apassy Connect was deleted when the person who shares it with you recovered their account."
+            "The copy at Apassy Connect was deleted: its owner recovered their account."
         }
     }
 }
 
-/// The state of a free relay copy whose path the hosted relay ended, in a sentence: the
-/// vault on this Mac is safe, and the two choices of the notice (plan s7 unit M5; plans
+/// The state of a free relay copy whose path the hosted relay ended, in a sentence: why,
+/// that the vault stays on this Mac, and the two choices of the notice (plan s7 unit M5; plans
 /// section 5: relay sync is not the paid feature, Apassy Connect is).
 pub(crate) fn ended_copy_words(why: PathEnded) -> String {
     let head = match why {
@@ -251,11 +251,11 @@ pub(crate) fn ended_copy_words(why: PathEnded) -> String {
     };
     format!(
         concat!(
-            "{} The vault on this ",
+            "{} The vault stays on this ",
             crate::computer!(),
-            " is safe and does not change. Make your own ",
+            ". Sync through your own ",
             crate::computer!(),
-            " or Linux node the sync home (free), or move the copy to Apassy Connect."
+            " or Linux node (free), or move the copy to Apassy Connect."
         ),
         head
     )

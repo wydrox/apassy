@@ -760,7 +760,7 @@ pub enum OwnerRequest {
         approval_key: Vec<u8>,
     },
     /// Add a device to the relay sync of the vault `vault` (a list ID; ADR 0022). The
-    /// values are the link exactly as the "Add a device…" sheet showed it with its safety
+    /// values are the link exactly as the "Add a Device…" sheet showed it with its safety
     /// words.
     ConfirmSyncDevice {
         vault: String,
@@ -798,7 +798,7 @@ pub enum OwnerRequest {
         action: OwnerAction,
     },
     /// Add a device to the Apassy Connect account (connect-account-v1 section 7.1): the
-    /// join exactly as "Add a device…" showed it, with the six safety words. The proof
+    /// join exactly as "Add a Device…" showed it, with the six safety words. The proof
     /// goes to [`OwnerFlows::take_connect_proof`] for the Connect view (unit M2), which passes it
     /// to `ConnectAccount::confirm_join`.
     ConfirmConnectDevice {
@@ -930,7 +930,7 @@ pub enum OwnerRequest {
         entries: Vec<crate::broker::approvals::ShareEntry>,
         vault_hint: String,
     },
-    /// "Stop Sharing with <name>…" or "Leave This Shared Vault…".
+    /// "Stop Sharing…" or "Leave…".
     EndConnectShare {
         account_id: String,
         peer_account: String,
@@ -942,7 +942,7 @@ pub enum OwnerRequest {
         leave: bool,
         entries: Vec<crate::broker::approvals::ShareEntry>,
     },
-    /// "Count Its Shares Again…" of a vault store made before the `store` entry existed:
+    /// "Confirm…" of a vault store made before the `store` entry existed:
     /// the shares with `people` count again.
     ClaimConnectStore {
         account_id: String,
@@ -2086,7 +2086,7 @@ impl OwnerRequest {
                 this_device: true,
                 ..
             } => format!(
-                concat!("Forget this ", crate::computer!(), " (\u{201c}{}\u{201d}, key {}) in your Apassy Connect account? It leaves every vault copy at Connect and signs out. Your vaults stay on this ", crate::computer!(), "."),
+                concat!("Forget this ", crate::computer!(), " (\u{201c}{}\u{201d}, key {}) in your Apassy Connect account? It leaves every vault copy at Connect, signs out, and its Connect key is deleted. Your vaults stay on this ", crate::computer!(), "."),
                 page_text(device_name),
                 page_text(fingerprint).replace(' ', "\u{a0}")
             ),
@@ -2099,13 +2099,13 @@ impl OwnerRequest {
                 page_text(device_name),
                 page_text(fingerprint).replace(' ', "\u{a0}")
             ),
-            Self::DeleteConnectAccount { .. } => "Delete your Apassy Connect account? The subscription ends now, and every vault store, device, and link of the account is deleted at Connect. Your vaults stay on your devices.".to_owned(),
-            Self::NewRecoveryCode { .. } => "Make a new recovery code for your Apassy Connect account? Apassy shows the new code once. The old recovery code stops working.".to_owned(),
+            Self::DeleteConnectAccount { .. } => "Delete your Apassy Connect account? The plan ends now, and every vault copy, device, and link of the account is deleted at Connect. Your vaults stay on your devices.".to_owned(),
+            Self::NewRecoveryCode { .. } => "Make a new recovery code? Apassy shows it once. The old code stops working.".to_owned(),
             Self::RecoverConnectAccount { account_id } => format!(
                 concat!(
                     "Recover the Apassy Connect account {}? This ",
                     crate::computer!(),
-                    " becomes its first device, the copies of your vaults at Connect are deleted, and a new recovery code replaces the old one. The vaults on your devices stay."
+                    " becomes its first device, the account's vault copies at Connect are deleted, and a new recovery code replaces the old one. Your vaults stay on your devices."
                 ),
                 page_text(account_id)
             ),
@@ -2341,7 +2341,17 @@ impl OwnerRequest {
                     "Apassy takes this copy as it is now."
                 },
             ),
-            Self::ChangeConnectGroup { change, .. } => match change {
+            Self::ChangeConnectGroup {
+                account_id: own,
+                change,
+                ..
+            } => match change {
+                // A member's own leave: the change removes the account of this device.
+                crate::broker::approvals::ConnectGroupChange::RemoveMember { account_id, .. }
+                    if account_id == own =>
+                {
+                    "Leave your Apassy Connect family or team? Your account stays, without a plan, and leaves the vaults that are shared with you.".to_owned()
+                }
                 crate::broker::approvals::ConnectGroupChange::ConfirmMember { name, .. } => format!(
                     "Add \"{}\" to your Apassy Connect family or team? They get the plan and can join the vaults that you share.",
                     page_text(name)
@@ -4374,7 +4384,7 @@ mod connect_proof_tests {
     }
 
     /// K2, K4: "Take This Copy Without Its Earlier History…" names the store, the head, its
-    /// version, its device, and its time; "Count Its Shares Again…" names the vault and the
+    /// version, its device, and its time; "Confirm…" names the vault and the
     /// people whose shares count again, each name once in its quotes.
     #[test]
     fn the_copy_without_history_and_the_store_claim_name_their_actions() {
@@ -4468,6 +4478,40 @@ mod connect_proof_tests {
 #[cfg(test)]
 mod connect_prompt_tests {
     use super::OwnerRequest;
+
+    /// A member's own leave says Leave, not "Remove <own name>", and what stays; the
+    /// organizer's removal names the person. The deletion says what goes at Connect, now.
+    #[test]
+    fn the_group_and_deletion_prompts_say_what_is_lost() {
+        use crate::broker::approvals::ConnectGroupChange;
+        let change = |member: &str| OwnerRequest::ChangeConnectGroup {
+            account_id: "acc_ownaaaaaa".to_owned(),
+            group_id: "grp_aaaaaaaaaa".to_owned(),
+            change: ConnectGroupChange::RemoveMember {
+                account_id: member.to_owned(),
+                name: "Ola".to_owned(),
+            },
+        };
+        let leave = change("acc_ownaaaaaa").describe();
+        assert!(
+            leave.starts_with("Leave your Apassy Connect family or team?"),
+            "{leave}"
+        );
+        assert!(
+            leave.contains("without a plan") && !leave.contains("Remove"),
+            "{leave}"
+        );
+        let remove = change("acc_olaaaaaaaa").describe();
+        assert!(remove.starts_with("Remove \"Ola\""), "{remove}");
+        let delete = OwnerRequest::DeleteConnectAccount {
+            account_id: "acc_ownaaaaaa".to_owned(),
+        }
+        .describe();
+        assert!(
+            delete.contains("The plan ends now, and every vault copy, device, and link of the account is deleted at Connect."),
+            "{delete}"
+        );
+    }
 
     /// The owner compares the code of the browser page with this one: the prompt names
     /// the page in the browser, not "the agent", and says that the connect makes a new

@@ -449,7 +449,7 @@ fn no_price_is_written_in_the_section() {
 
 // ---- Checkout and portal. ----
 
-/// "Continue in the Browser…" asks Connect for a checkout with the exact body of
+/// "Continue to Payment…" asks Connect for a checkout with the exact body of
 /// connect-billing-v1 section 4, and the browser opens the URL that Connect returned.
 /// While the waiting sheet is open the app asks `GET /v1/account` again and again; it
 /// stops when the plan is entitled, and shows the plan.
@@ -494,7 +494,7 @@ fn checkout_opens_the_url_of_connect_and_polling_stops_on_active() {
     });
     assert!(matches!(app.ui.connect.sheet, Some(Sheet::Waiting { .. })));
 
-    // "Open the Page Again" opens the same URL.
+    // "Open Page Again" opens the same URL.
     let again = choose(&ctx, &mut app, SheetChoice::OpenAgain);
     assert_eq!(
         opened_urls(&again),
@@ -862,7 +862,8 @@ fn invite_confirm_and_remove_a_family_member() {
             .and_then(|account| account.group)
             .is_some_and(|group| group.members.iter().any(|member| member.state == "pending"))
     });
-    assert!(text(&ctx, &mut app).contains("Waits for your confirmation"));
+    // One line for the pending member: its cap, Confirm… and Remove….
+    assert!(text(&ctx, &mut app).contains("Pending"));
     let index = shown(&app)
         .and_then(|account| account.group)
         .and_then(|group| {
@@ -940,8 +941,16 @@ fn join_a_group_with_the_pasted_link() {
 
     let mut app = connect_app(&dir, &connect);
     create_account(&ctx, &mut app, "Ola");
-    assert!(text(&ctx, &mut app).contains("Join a Family or Team"));
+    // The row "Family or Team" with Join… (spoken "Join a Family or Team"); its sheet keeps
+    // the whole title.
+    let painted = text(&ctx, &mut app);
+    assert!(
+        painted.contains(super::connect::JOIN_ROW) && painted.contains("Join…"),
+        "{painted}"
+    );
     act(&ctx, &mut app, Action::JoinGroup);
+    let painted = text(&ctx, &mut app);
+    assert!(painted.contains(super::connect::JOIN_GROUP), "{painted}");
     if let Some(Sheet::JoinGroup { link, .. }) = &mut app.ui.connect.sheet {
         link.push_str("not a link");
     }
@@ -966,7 +975,8 @@ fn join_a_group_with_the_pasted_link() {
             .is_some_and(|group| group.state == "pending")
     });
     let text = text(&ctx, &mut app);
-    assert!(text.contains("Waiting for Rafal to confirm you."), "{text}");
+    // One row of the Account group: who has to confirm this account.
+    assert!(text.contains("Waiting for Rafal"), "{text}");
     assert!(
         !text.contains(MANAGE_BILLING),
         "a member has no billing: {text}"
@@ -1124,9 +1134,14 @@ fn every_state_of_the_plan_row() {
                     .is_some_and(|line| line.contains("by 4 Nov 2026")),
                 "{name}: {note:?}"
             ),
-            "read_only" | "suspended" => assert!(
+            "read_only" => assert!(
                 note.as_deref()
                     .is_some_and(|line| line.contains("deleted on 2 Feb 2027")),
+                "{name}: {note:?}"
+            ),
+            "suspended" => assert!(
+                note.as_deref()
+                    .is_some_and(|line| line.contains("before 2 Feb 2027")),
                 "{name}: {note:?}"
             ),
             _ => assert_eq!(note, None, "{name}"),
@@ -1256,10 +1271,7 @@ fn a_cancelled_read_at_the_unlock_is_signed_out_and_the_vault_stays_open() {
         SessionState::SignedOut(ConnectError::Cancelled)
     );
     let painted = text(&ctx, &mut app);
-    assert!(
-        painted.contains(super::connect::SIGNED_OUT_NOTE),
-        "{painted}"
-    );
+    assert!(painted.contains(super::connect::SIGNED_OUT), "{painted}");
     assert!(painted.contains(super::connect::SIGN_IN), "{painted}");
 }
 
@@ -1709,40 +1721,24 @@ fn sign_in_reads_nothing_while_locked() {
 fn mac_connect_texts_are_unchanged() {
     use super::connect::*;
     for (text, before) in [
-        (ADD_THIS_MAC, "Add This Mac to an Account…"),
-        (
-            KEY_NOTE,
-            "No password and no email: the key of this Mac, in the Keychain, signs in.",
-        ),
-        (
-            SIGNED_OUT_NOTE,
-            "Touch ID reads the Connect key of this Mac.",
-        ),
-        (
-            CREATE_LEAD,
-            "No password and no email: the key of this Mac, in the Keychain, signs in. You choose a plan later.",
-        ),
-        (
-            RECOVERY_NOTE,
-            "If every device of the account is lost, this code gives the account to a new Mac. The vault copies at Connect are deleted then; your vaults stay on your devices.",
-        ),
+        (ADD_THIS_MAC, "Add This Mac…"),
         (
             ADD_LEAD,
-            "On the new device, choose Add This Mac to an Account (on a Mac) or scan this code (on the iPhone).",
+            "Scan this code with the iPhone, or paste it on the other Mac.",
         ),
         (FORGET_TITLE, "Forget This Mac?"),
         (
             REMOVED_NOTE,
-            "Apassy Connect says this Mac was removed from its account. Its Connect key and its account file stay on this Mac until you forget the account here.",
+            "Apassy Connect removed this Mac from its account. Forget this Mac here.",
         ),
         (FORGET_THIS_MAC, "Forget This Mac…"),
         (
             FORGET_REMOVED_LEAD,
-            "The Connect key and the account file of this Mac are deleted, and the vault copies of the account stop syncing on this Mac. To use the account here again, add this Mac from another device of the account.",
+            "The Connect key and the account file of this Mac are deleted, and the vault copies of the account stop syncing on this Mac. To come back, add it from another device.",
         ),
         (
             FORGET_LEAD,
-            "This Mac leaves your Connect account, and its Connect key is deleted. To use the account here again, add this Mac from another device of the account.",
+            "This Mac leaves your Connect account, and its Connect key is deleted. To come back, add it from another device.",
         ),
         (JOIN_ACCOUNT_TITLE, "Add This Mac to an Account"),
         (JOINED_TITLE, "This Mac Is Added"),
@@ -1845,7 +1841,6 @@ fn linux_connect_texts_name_nothing_of_the_mac() {
             "{text}"
         );
     }
-    assert!(super::connect::KEY_NOTE.contains("in a private file of your user"));
 }
 
 /// A vault store of two devices whose removed device pushed the last head (an iMac that
@@ -2417,7 +2412,7 @@ fn an_account_without_a_seen_recovery_code_says_so_until_a_new_code() {
         painted.contains(super::connect::RECOVERY_UNSEEN),
         "{painted}"
     );
-    assert!(painted.contains(super::connect::NEW_RECOVERY), "{painted}");
+    assert!(painted.contains(super::connect::NEW_CODE), "{painted}");
     // A refresh, and a new session of the section, keep the line.
     act(&ctx, &mut app, Action::SignIn);
     settle(&ctx, &mut app);
@@ -2467,7 +2462,8 @@ fn an_account_without_a_seen_recovery_code_says_so_until_a_new_code() {
         !painted.contains(super::connect::RECOVERY_UNSEEN),
         "{painted}"
     );
-    assert!(painted.contains(super::connect::NEW_RECOVERY), "{painted}");
+    // Without the line, the Recovery Code row keeps its button.
+    assert!(painted.contains(super::connect::NEW_CODE), "{painted}");
 }
 
 // ---- Round 7: a new recovery code that Connect took without an answer. ----
@@ -2560,11 +2556,7 @@ fn a_new_code_left_unseen_and_a_new_code_elsewhere_show_lasting_lines() {
     });
     let painted = text(&ctx, &mut app);
     assert!(
-        painted.contains("The recovery code was changed on another device on"),
-        "{painted}"
-    );
-    assert!(
-        painted.contains("The old code no longer works."),
+        painted.contains("Your recovery code was replaced on another device on"),
         "{painted}"
     );
     assert!(
@@ -3143,7 +3135,7 @@ fn a_recovery_asks_the_owner_then_shows_the_new_code_and_the_deleted_copies() {
     let new = words.clone();
     let painted = text(&ctx, &mut app);
     assert!(painted.contains(&account_id), "{painted}");
-    assert!(painted.contains(super::connect::RECOVERY_BOTH), "{painted}");
+    assert!(painted.contains(super::connect::RECOVERY_LEAD), "{painted}");
     assert_eq!(connect.live_devices(&account_id).len(), 1);
     assert!(
         connect.stores(&account_id).is_empty(),
@@ -3157,14 +3149,15 @@ fn a_recovery_asks_the_owner_then_shows_the_new_code_and_the_deleted_copies() {
     let account = shown(&app).expect("account");
     assert_eq!(account.recovered, Some(Some(1)));
     let painted = text(&ctx, &mut app);
+    // The line first; the account id is in the menu of the Account row.
     for line in [
         super::connect::recovered_line(Some(1)).as_str(),
-        super::connect::ACCOUNT_ID,
-        account_id.as_str(),
+        super::connect::ACCOUNT_ROW,
     ] {
         assert!(painted.contains(line), "{line:?} in {painted}");
     }
-    assert!(!painted.contains(super::connect::RECOVER_ROW), "{painted}");
+    assert!(!painted.contains(account_id.as_str()), "{painted}");
+    assert!(!painted.contains(super::connect::RECOVER), "{painted}");
     let copied = act(&ctx, &mut app, Action::CopyAccountId);
     assert!(
         copied
@@ -3197,10 +3190,10 @@ fn a_recovery_asks_the_owner_then_shows_the_new_code_and_the_deleted_copies() {
 }
 
 /// Connect's one refusal (a wrong code, an unknown account id, an account that still has
-/// a device) shows one text that names the three causes and what to do for each; nothing
-/// changed on this device. A `429` says when to try again.
+/// a device) shows one text for the three causes: what to check, and the way of a device
+/// that still works; nothing changed on this device. A `429` says when to try again.
 #[test]
-fn a_refused_recovery_names_its_three_causes_and_too_many_tries_say_when() {
+fn a_refused_recovery_says_what_to_check_and_too_many_tries_say_when() {
     let connect = FakeConnect::start();
     let dir = TempDir::new().expect("temp dir");
     let mut app = connect_app(&dir, &connect);
@@ -3231,13 +3224,10 @@ fn a_refused_recovery_names_its_three_causes_and_too_many_tries_say_when() {
             live::error_for_test(&app).as_deref(),
             Some(super::connect::RECOVER_REFUSED)
         );
+        // One text for the three causes: what to check, and the way of a device that
+        // still works.
         let painted = text(&ctx, &mut app);
-        for cause in [
-            "recovery code is not the current code",
-            "account ID is wrong",
-            "device of the account still works",
-            "Add a Device…",
-        ] {
+        for cause in ["account ID", "the code", "a device that still works"] {
             assert!(painted.contains(cause), "{cause:?} in {painted}");
         }
         assert!(matches!(app.ui.connect.sheet, Some(Sheet::Recover { .. })));
@@ -3377,7 +3367,7 @@ fn a_lock_before_the_code_is_shown_leaves_the_lasting_line() {
             painted.contains(super::connect::RECOVERY_UNSEEN),
             "{case}: {painted}"
         );
-        assert!(painted.contains(super::connect::NEW_RECOVERY), "{case}");
+        assert!(painted.contains(super::connect::NEW_CODE), "{case}");
     }
 }
 
@@ -3429,7 +3419,7 @@ fn the_recovery_rows_fit_their_column_at_each_width() {
         (Shown::None, vec![super::connect::RECOVER]),
         (
             Shown::Account(account),
-            vec!["Copy", "OK", "acc_k7m2q4x3ca"],
+            vec!["OK", "Recovered.", super::connect::NEW_CODE],
         ),
     ] {
         let view = ConnectView {
@@ -3469,5 +3459,604 @@ fn the_recovery_rows_fit_their_column_at_each_width() {
                 output.drop_without_applying_deltas();
             }
         }
+    }
+}
+
+/// A pending member keeps its role beside "Pending" on its painted row (an organizer
+/// confirms an admin knowingly); an active member's row has no "Pending". The role and
+/// the day it joined are its hover text.
+#[test]
+fn a_pending_member_keeps_its_role() {
+    use super::connect::{Member, member_detail};
+    let member = |id: &str, name: &str, role: &str, state: &str| Member {
+        account_id: id.to_owned(),
+        name: name.to_owned(),
+        role: role.to_owned(),
+        state: state.to_owned(),
+        joined_at: Some(1_790_000_000),
+    };
+    let mut account = menu_account(false, true);
+    if let Some(group) = account.group.as_mut() {
+        group.kind = "team".to_owned();
+        group.members = vec![
+            member("acc_olaaaaaaaa", "Ola", "member", "active"),
+            member("acc_janaaaaaaa", "Jan", "admin", "pending"),
+        ];
+    }
+    let view = menu_view(account, false, false);
+    let ctx = egui::Context::default();
+    let mut texts = Vec::new();
+    for _ in 0..3 {
+        texts = galleys(&ctx, &view);
+    }
+    let row = |name: &str| {
+        texts
+            .iter()
+            .find(|(text, _)| text == name)
+            .map(|(_, rect)| *rect)
+            .unwrap_or_else(|| panic!("no row {name}: {texts:?}"))
+    };
+    let on_row = |row: egui::Rect, cap: &str| {
+        texts.iter().any(|(text, rect)| {
+            text == cap
+                && (rect.center().y - row.center().y).abs() < 6.0
+                && rect.left() > row.right()
+        })
+    };
+    let jan = row("Jan");
+    assert!(on_row(jan, "Admin"), "Jan's row has Admin: {texts:?}");
+    assert!(on_row(jan, "Pending"), "Jan's row has Pending: {texts:?}");
+    let ola = row("Ola");
+    assert!(
+        !on_row(ola, "Pending"),
+        "Ola's row has no Pending: {texts:?}"
+    );
+    assert_eq!(
+        member_detail("team", &member("acc_janaaaaaaa", "Jan", "admin", "pending")),
+        "Admin · Pending"
+    );
+    assert_eq!(
+        member_detail(
+            "family",
+            &member("acc_janaaaaaaa", "Jan", "member", "pending")
+        ),
+        "Member · Pending"
+    );
+    assert_eq!(
+        member_detail("team", &member("acc_janaaaaaaa", "Jan", "admin", "active")),
+        "Admin · Since 21 Sep 2026"
+    );
+}
+
+/// The painted galleys of one frame of the section: each text with its rectangle.
+fn galleys(ctx: &egui::Context, view: &ConnectView) -> Vec<(String, egui::Rect)> {
+    fn walk(shape: &egui::Shape, out: &mut Vec<(String, egui::Rect)>) {
+        match shape {
+            egui::Shape::Text(text) => out.push((
+                text.galley.text().to_owned(),
+                text.galley.rect.translate(text.pos.to_vec2()),
+            )),
+            egui::Shape::Vec(nested) => nested.iter().for_each(|inner| walk(inner, out)),
+            _ => {}
+        }
+    }
+    let output = ctx.run_ui(input(0.0, Vec::new()), |ui| {
+        let _ = super::connect::draw(ui, view);
+    });
+    let mut out = Vec::new();
+    for clipped in &output.shapes {
+        walk(&clipped.shape, &mut out);
+    }
+    output.drop_without_applying_deltas();
+    out
+}
+
+/// An account of the menu tests: this device and another one, the list verified, a family
+/// that this account organizes (or, with `member`, is a member of).
+fn menu_account(member: bool, this_listed: bool) -> Account {
+    let device = |id: &str, this: bool| super::connect::Device {
+        id: id.to_owned(),
+        name: id.to_owned(),
+        platform: "mac".to_owned(),
+        created_at: 1_790_000_000,
+        last_seen_at: None,
+        this,
+        verified: true,
+        fingerprint: "3f0a 91c2 7be4".to_owned(),
+    };
+    let mut devices = vec![device("Laptop", false)];
+    if this_listed {
+        devices.insert(0, device("Desktop", true));
+    }
+    Account {
+        account_id: "acc_k7m2q4x3ca".to_owned(),
+        name: "Alex".to_owned(),
+        email: None,
+        plan: Plan {
+            plan: Some("family".to_owned()),
+            status: "active".to_owned(),
+            entitled: true,
+            interval: Some("month".to_owned()),
+            quantity: Some(4),
+            renews_at: Some(1_795_000_000),
+            ends_at: None,
+            grace_until: None,
+            read_only_until: None,
+            delete_at: None,
+        },
+        devices,
+        group: Some(super::connect::Group {
+            id: "grp_f4m6n2p7qa".to_owned(),
+            kind: "family".to_owned(),
+            role: if member { "member" } else { "owner" }.to_owned(),
+            state: "active".to_owned(),
+            owner_name: "Alex".to_owned(),
+            quantity: 4,
+            members: Vec::new(),
+        }),
+        list_verified: true,
+        list_nearly_full: false,
+        recovery_unseen: false,
+        recovery_changed: None,
+        recovered: None,
+    }
+}
+
+fn menu_view(account: Account, locked: bool, busy: bool) -> ConnectView {
+    ConnectView {
+        shown: Shown::Account(account),
+        plans: Some(fixture_plans()),
+        locked,
+        busy,
+        error: None,
+        now: 1_795_000_000,
+    }
+}
+
+/// The items of the ⋯ menu and whether each is on: Copy Account ID always (but while a
+/// step runs), Forget This Mac only while the list holds this device and off while
+/// locked, Delete Account… off while locked, and every item while a step runs. A new
+/// code and Leave… are rows of the pane: the Recovery Code row, and a member's group row.
+#[test]
+fn the_account_menu_items_follow_the_state() {
+    use super::connect::{COPY_ACCOUNT_ID, DELETE, LEAVE_FAMILY, NEW_CODE, account_menu_items};
+    let items = |view: &ConnectView| {
+        let Shown::Account(account) = &view.shown else {
+            unreachable!();
+        };
+        account_menu_items(view, account)
+            .into_iter()
+            .map(|item| (item.label, item.enabled))
+            .collect::<Vec<_>>()
+    };
+    let all_on = [
+        (COPY_ACCOUNT_ID, true),
+        (FORGET_THIS_MAC, true),
+        (DELETE, true),
+    ];
+    assert_eq!(
+        items(&menu_view(menu_account(false, true), false, false)),
+        all_on
+    );
+    assert_eq!(
+        items(&menu_view(menu_account(false, true), true, false)),
+        [
+            (COPY_ACCOUNT_ID, true),
+            (FORGET_THIS_MAC, false),
+            (DELETE, false),
+        ]
+    );
+    let mut unverified = menu_account(false, true);
+    unverified.list_verified = false;
+    assert_eq!(items(&menu_view(unverified, false, false)), all_on);
+    assert_eq!(
+        items(&menu_view(menu_account(true, true), false, false)),
+        all_on
+    );
+    assert_eq!(
+        items(&menu_view(menu_account(false, false), false, false)),
+        [(COPY_ACCOUNT_ID, true), (DELETE, true)]
+    );
+    let busy = menu_view(menu_account(true, true), false, true);
+    assert!(items(&busy).iter().all(|(_, on)| !on), "{:?}", items(&busy));
+    // The rows that left the menu: New Code… for everyone, Leave… for a member only.
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let member = menu_view(menu_account(true, true), false, false);
+    let (text, nodes, _) = section_frame(&ctx, &member, Vec::new());
+    assert!(text.contains(NEW_CODE) && text.contains("Leave…"), "{text}");
+    assert!(
+        nodes.iter().any(|(name, _)| name == LEAVE_FAMILY),
+        "Leave… is spoken Leave Family…: {nodes:?}"
+    );
+    let ctx = egui::Context::default();
+    let organizer = menu_view(menu_account(false, true), false, false);
+    let (text, _, _) = section_frame(&ctx, &organizer, Vec::new());
+    assert!(
+        text.contains(NEW_CODE) && !text.contains("Leave…"),
+        "{text}"
+    );
+}
+
+/// One frame of the section alone: the painted text, the labeled AccessKit nodes with
+/// their bounds, and the press.
+fn section_frame(
+    ctx: &egui::Context,
+    view: &ConnectView,
+    events: Vec<egui::Event>,
+) -> (String, Vec<(String, egui::Rect)>, Option<Action>) {
+    let mut action = None;
+    let output = ctx.run_ui(input(0.0, events), |ui| {
+        action = super::connect::draw(ui, view);
+    });
+    let mut text = String::new();
+    for clipped in &output.shapes {
+        collect(&clipped.shape, &mut text);
+    }
+    let mut nodes = Vec::new();
+    if let Some(update) = &output.platform_output.accesskit_update {
+        for (_, node) in &update.nodes {
+            if let (Some(label), Some(bounds)) = (node.label(), node.bounds()) {
+                let rect = egui::Rect::from_min_max(
+                    egui::pos2(bounds.x0 as f32, bounds.y0 as f32),
+                    egui::pos2(bounds.x1 as f32, bounds.y1 as f32),
+                );
+                nodes.push((label.to_owned(), rect));
+            }
+        }
+    }
+    output.drop_without_applying_deltas();
+    (text, nodes, action)
+}
+
+/// A click on the node labeled `label` of the last frame; the press of its release.
+fn click_node(
+    ctx: &egui::Context,
+    view: &ConnectView,
+    nodes: &[(String, egui::Rect)],
+    label: &str,
+) -> Option<Action> {
+    let at = nodes
+        .iter()
+        .find(|(name, _)| name == label)
+        .map(|(_, rect)| rect.center())
+        .unwrap_or_else(|| panic!("no {label:?} in {nodes:?}"));
+    let button = |pressed| egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    section_frame(ctx, view, vec![egui::Event::PointerMoved(at)]);
+    section_frame(ctx, view, vec![button(true)]);
+    section_frame(ctx, view, vec![button(false)]).2
+}
+
+/// The ⋯ of the Account row opens a menu with the account id and its items, and each
+/// item that is on acts: Copy Account ID copies, Forget This Mac… and Delete Account… open
+/// their alerts, and the two that need an owner check do nothing while the vault is
+/// locked. New Code… of the Recovery Code row is off while the vault is locked and while
+/// the device list did not verify.
+#[test]
+fn the_account_menu_opens_and_its_items_act() {
+    use super::connect::{MORE_ACCOUNT, NEW_RECOVERY};
+    const COPY: &str = "Copy Account ID acc_k7m2q4x3ca";
+    const FORGET: &str = concat!("Forget This ", crate::computer_cap!(), "…");
+    const DELETE: &str = "Delete Account…";
+    let press = |view: &ConnectView, item: &str| {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut nodes = Vec::new();
+        for _ in 0..3 {
+            nodes = section_frame(&ctx, view, Vec::new()).1;
+        }
+        assert_eq!(click_node(&ctx, view, &nodes, MORE_ACCOUNT), None);
+        let (text, nodes, _) = section_frame(&ctx, view, Vec::new());
+        for shown in ["Copy Account ID", FORGET, DELETE] {
+            assert!(text.contains(shown), "the menu shows {shown}: {text}");
+        }
+        click_node(&ctx, view, &nodes, item)
+    };
+    let open = menu_view(menu_account(false, true), false, false);
+    assert_eq!(press(&open, COPY), Some(Action::CopyAccountId));
+    assert_eq!(press(&open, DELETE), Some(Action::Delete));
+    // This device is the second of the list here: Forget names its own index.
+    let mut later = menu_account(false, true);
+    later.devices.reverse();
+    assert!(later.devices[1].this, "this device is second");
+    let later = menu_view(later, false, false);
+    assert_eq!(press(&later, FORGET), Some(Action::Revoke(1)));
+    let locked = menu_view(menu_account(false, true), true, false);
+    assert_eq!(press(&locked, COPY), Some(Action::CopyAccountId));
+    assert_eq!(
+        press(&locked, FORGET),
+        None,
+        "Forget This Mac… is off while locked"
+    );
+    assert_eq!(
+        press(&locked, DELETE),
+        None,
+        "Delete Account… is off while locked"
+    );
+    // New Code… (spoken "New Recovery Code…") of the Recovery Code row.
+    let new_code = |view: &ConnectView| {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut nodes = Vec::new();
+        for _ in 0..3 {
+            nodes = section_frame(&ctx, view, Vec::new()).1;
+        }
+        click_node(&ctx, view, &nodes, NEW_RECOVERY)
+    };
+    assert_eq!(new_code(&open), Some(Action::NewRecoveryCode));
+    assert_eq!(new_code(&locked), None, "New Code… is off while locked");
+    let mut unverified = menu_account(false, true);
+    unverified.list_verified = false;
+    assert_eq!(
+        new_code(&menu_view(unverified, false, false)),
+        None,
+        "New Code… is off while the device list did not verify"
+    );
+    // What each item opens, on a live account: its own view drawn, its press acted on.
+    let dir = TempDir::new().expect("temp dir");
+    let connect = FakeConnect::start();
+    let mut app = connect_app(&dir, &connect);
+    let ctx = egui::Context::default();
+    let account_id = create_account(&ctx, &mut app, "Rafal");
+    let live_view = live::view(&app);
+    let copy = format!("Copy Account ID {account_id}");
+    let copied = act(
+        &ctx,
+        &mut app,
+        press(&live_view, &copy).expect("Copy Account ID acts"),
+    );
+    assert!(
+        copied
+            .iter()
+            .any(|command| matches!(command, OutputCommand::CopyText(text) if *text == account_id)),
+        "Copy Account ID copies the ID: {copied:?}"
+    );
+    act(
+        &ctx,
+        &mut app,
+        press(&live_view, FORGET).expect("Forget This Mac… acts"),
+    );
+    assert!(
+        matches!(app.ui.connect.sheet, Some(Sheet::Revoke { this: true, .. })),
+        "Forget This Mac… opens the alert of this device"
+    );
+    app.ui.connect.sheet = None;
+    act(
+        &ctx,
+        &mut app,
+        press(&live_view, DELETE).expect("Delete Account… acts"),
+    );
+    assert!(
+        matches!(app.ui.connect.sheet, Some(Sheet::Delete)),
+        "Delete Account… opens its alert"
+    );
+}
+
+/// The labeled AccessKit nodes of the section that carry a description.
+fn section_descriptions(ctx: &egui::Context, view: &ConnectView) -> Vec<(String, String)> {
+    let mut found = Vec::new();
+    for _ in 0..3 {
+        let output = ctx.run_ui(input(0.0, Vec::new()), |ui| {
+            let _ = super::connect::draw(ui, view);
+        });
+        found = output
+            .platform_output
+            .accesskit_update
+            .iter()
+            .flat_map(|update| update.nodes.iter())
+            // A label's text is its AccessKit value, a button's its label.
+            .filter_map(|(_, node)| {
+                let name = node.label().or_else(|| node.value())?;
+                Some((name.to_owned(), node.description()?.to_owned()))
+            })
+            .collect();
+        output.drop_without_applying_deltas();
+    }
+    found
+}
+
+/// The facts that moved from a second line to the hover text stay readable: a device row
+/// describes its kind, the day it was added, and its key; a member row its role and since
+/// when, or Pending.
+#[test]
+fn account_rows_describe_their_facts() {
+    let mut account = menu_account(false, true);
+    if let Some(group) = account.group.as_mut() {
+        group.members = vec![
+            super::connect::Member {
+                account_id: "acc_olaaaaaaaa".to_owned(),
+                name: "Ola".to_owned(),
+                role: "member".to_owned(),
+                state: "active".to_owned(),
+                joined_at: Some(1_790_000_000),
+            },
+            super::connect::Member {
+                account_id: "acc_janaaaaaaa".to_owned(),
+                name: "Jan".to_owned(),
+                role: "admin".to_owned(),
+                state: "pending".to_owned(),
+                joined_at: None,
+            },
+        ];
+    }
+    let view = menu_view(account, false, false);
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let found = section_descriptions(&ctx, &view);
+    for (label, description) in [
+        ("Laptop", "Mac · Added 21 Sep 2026 · Key 3f0a 91c2 7be4"),
+        ("Ola", "Member · Since 21 Sep 2026"),
+        ("Jan", "Admin · Pending"),
+    ] {
+        assert!(
+            found
+                .iter()
+                .any(|(name, said)| *name == label && *said == description),
+            "{label}: {description} in {found:?}"
+        );
+        let hover = hovered(&view, label);
+        assert!(
+            hover.contains(description),
+            "the hover text of {label} is {description}: {hover}"
+        );
+    }
+}
+
+/// The painted text of the section after the pointer rests on the node named `name` (a
+/// label's text or a button's name) long enough for its hover text.
+fn hovered(view: &ConnectView, name: &str) -> String {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut at = None;
+    for _ in 0..3 {
+        let output = ctx.run_ui(input(0.0, Vec::new()), |ui| {
+            let _ = super::connect::draw(ui, view);
+        });
+        at = output
+            .platform_output
+            .accesskit_update
+            .iter()
+            .flat_map(|update| update.nodes.iter())
+            .find_map(|(_, node)| {
+                (node.label().or_else(|| node.value()) == Some(name))
+                    .then(|| node.bounds())
+                    .flatten()
+            })
+            .map(|bounds| {
+                egui::pos2(
+                    ((bounds.x0 + bounds.x1) / 2.0) as f32,
+                    ((bounds.y0 + bounds.y1) / 2.0) as f32,
+                )
+            });
+        output.drop_without_applying_deltas();
+    }
+    let at = at.unwrap_or_else(|| panic!("no node {name}"));
+    let mut text = String::new();
+    for (time, events) in [
+        (0.1, vec![egui::Event::PointerMoved(at)]),
+        (1.0, Vec::new()),
+        (2.0, Vec::new()),
+        (2.1, Vec::new()),
+    ] {
+        let output = ctx.run_ui(input(time, events), |ui| {
+            let _ = super::connect::draw(ui, view);
+        });
+        text.clear();
+        for clipped in &output.shapes {
+            collect(&clipped.shape, &mut text);
+        }
+        output.drop_without_applying_deltas();
+    }
+    text
+}
+
+/// The Plan row puts its status at the trailing edge, on the line of its label, as the
+/// Account and People rows put their values, while it fits beside the buttons; in a
+/// narrower row the whole status goes under the label, never cut with "…".
+#[test]
+fn the_plan_status_sits_at_the_trailing_edge_or_whole_under_the_label() {
+    const STATUS: &str = "Connect Family · Renews 18 Nov 2026";
+    let view = menu_view(menu_account(false, true), false, false);
+    let placed = |width: f32| {
+        let ctx = egui::Context::default();
+        let mut out = Vec::new();
+        for _ in 0..3 {
+            let output = ctx.run_ui(input(0.0, Vec::new()), |ui| {
+                ui.allocate_ui(egui::vec2(width, 1200.0), |ui| {
+                    ui.set_max_width(width);
+                    let _ = super::connect::draw(ui, &view);
+                });
+            });
+            out.clear();
+            for clipped in &output.shapes {
+                placed_texts(&clipped.shape, &mut out);
+            }
+            output.drop_without_applying_deltas();
+        }
+        out
+    };
+    let find = |texts: &[(String, egui::Rect)], text: &str| {
+        texts
+            .iter()
+            .find(|(painted, _)| painted == text)
+            .map(|(_, rect)| *rect)
+            .unwrap_or_else(|| panic!("no {text:?} in {texts:?}"))
+    };
+    // Wide: the status on the line of "Plan", its right edge with the values beside it.
+    let wide = placed(640.0);
+    let label = find(&wide, "Plan");
+    let status = find(&wide, STATUS);
+    let billing = find(&wide, "Manage Billing…");
+    assert!(
+        (status.center().y - label.center().y).abs() < 4.0,
+        "one line: {label:?} {status:?}"
+    );
+    assert!(
+        status.left() > label.right() + 100.0,
+        "the status sits at the trailing edge, not right after the label: {label:?} {status:?}"
+    );
+    // Everything painted on the line of the Plan label, for the failure message.
+    let line: Vec<&(String, egui::Rect)> = wide
+        .iter()
+        .filter(|(_, rect)| (rect.center().y - label.center().y).abs() < 12.0)
+        .collect();
+    assert!(
+        status.right() <= billing.left() && billing.left() - status.right() < 24.0,
+        "the status ends right before the buttons: {status:?} {billing:?}; \
+         pane 640 points wide; the Plan line: {line:?}"
+    );
+    // Narrow: the whole status under the label.
+    let narrow = placed(330.0);
+    let label = find(&narrow, "Plan");
+    let status = find(&narrow, STATUS);
+    assert!(
+        status.top() >= label.bottom(),
+        "the status goes under the label: {label:?} {status:?}"
+    );
+}
+
+/// Each painted text with its galley rectangle. The galley's own rectangle is placed at
+/// the text's position: a right-aligned galley (a value at the trailing edge) has its
+/// anchor at its right edge, so `pos` plus `size` would point past the text.
+fn placed_texts(shape: &egui::Shape, out: &mut Vec<(String, egui::Rect)>) {
+    match shape {
+        egui::Shape::Text(text) => out.push((
+            text.galley.text().to_owned(),
+            text.galley.rect.translate(text.pos.to_vec2()),
+        )),
+        egui::Shape::Vec(nested) => nested.iter().for_each(|inner| placed_texts(inner, out)),
+        _ => {}
+    }
+}
+
+/// A recovery code made on another device: the line with OK, and the ⓘ beside it says that
+/// the old code no longer works and what to do when it was not you.
+#[test]
+fn a_replaced_recovery_code_says_more_behind_its_info_button() {
+    use super::connect::RecoveryLine;
+    let mut account = menu_account(false, true);
+    account.recovery_changed = Some(RecoveryLine {
+        text: super::connect::recovery_changed(Some("MacBook Air"), Some(1_790_000_000)),
+        recovery_key: "key".to_owned(),
+    });
+    let view = menu_view(account, false, false);
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut nodes = Vec::new();
+    for _ in 0..3 {
+        nodes = section_frame(&ctx, &view, Vec::new()).1;
+    }
+    let _ = click_node(&ctx, &view, &nodes, "About Recovery Code");
+    let (text, _, _) = section_frame(&ctx, &view, Vec::new());
+    for line in [
+        "The old code no longer works.",
+        "Not you? Revoke that device, then make a new code.",
+    ] {
+        assert!(text.contains(line), "{line} in {text}");
     }
 }

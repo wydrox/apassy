@@ -32,9 +32,17 @@ const BUTTON_GAP: f32 = 8.0;
 
 /// The label of a group: 12 points, semibold, secondary.
 pub(crate) fn group_label(ui: &mut Ui, title: &str) {
+    group_label_with_help(ui, title, &[]);
+}
+
+/// [`group_label`] with an ⓘ beside the title when `help` has lines. The ⓘ is drawn in a
+/// child area centred on the title, so it never makes the title row taller: the group
+/// starts as far under this title as under every other.
+pub(crate) fn group_label_with_help(ui: &mut Ui, title: &str, help: &[&str]) {
+    const HELP_SIZE: f32 = 18.0;
     ui.add_space(LABEL_TOP);
     // A frame, not a horizontal row: a row would be one control high.
-    Frame::NONE
+    let label = Frame::NONE
         .inner_margin(Margin {
             left: 2,
             ..Margin::ZERO
@@ -47,8 +55,24 @@ pub(crate) fn group_label(ui: &mut Ui, title: &str) {
                         .color(kit::palette().secondary),
                 )
                 .selectable(false),
-            );
-        });
+            )
+        })
+        .inner;
+    if !help.is_empty() {
+        let rect = egui::Rect::from_center_size(
+            egui::pos2(
+                label.rect.right() + 4.0 + HELP_SIZE / 2.0,
+                label.rect.center().y,
+            ),
+            Vec2::splat(HELP_SIZE),
+        );
+        let mut child = ui.new_child(
+            UiBuilder::new()
+                .max_rect(rect)
+                .layout(Layout::left_to_right(Align::Center)),
+        );
+        kit::help_button(&mut child, title, help);
+    }
     ui.add_space(6.0);
 }
 
@@ -102,7 +126,7 @@ pub(crate) fn group<R>(
 }
 
 /// The rows of a group without the space above: for a group under its own label, such
-/// as "Devices ⓘ 6", which has the space of a group label already.
+/// as "Devices ⓘ", which has the space of a group label already.
 pub(crate) fn group_box<R>(ui: &mut Ui, add: impl FnOnce(&mut Group<'_>) -> R) -> R {
     Frame::NONE
         .fill(kit::palette().surface)
@@ -389,6 +413,60 @@ fn one_line_widget(
     );
 }
 
+/// A row with a label, and its value at the trailing edge before small buttons, as
+/// [`one_line`] draws the rows beside it, while the whole value fits. In a narrower row
+/// the label and the buttons keep the line and the whole value wraps under them: it is
+/// never cut with "…" (the Plan row of Settings › Connect). The first button is the
+/// rightmost; each is `(label, spoken, style)`. Returns the index of the pressed button.
+pub(crate) fn value_buttons(
+    ui: &mut Ui,
+    label: &str,
+    value: RichText,
+    buttons: &[(&str, &str, Style)],
+) -> Option<usize> {
+    let measure = |ui: &Ui, text: WidgetText| -> f32 {
+        text.into_galley(
+            ui,
+            Some(TextWrapMode::Extend),
+            f32::INFINITY,
+            egui::TextStyle::Body,
+        )
+        .size()
+        .x
+    };
+    let label_width = measure(ui, label_text(label).into());
+    let value_width = measure(ui, value.clone().into());
+    let buttons_width: f32 = buttons
+        .iter()
+        .map(|(text, _, style)| kit::button_width(ui, text, *style, Size::Small) + BUTTON_GAP)
+        .sum();
+    let fits = label_width + GAP + value_width + GAP + buttons_width <= ui.available_width();
+    let mut pressed = None;
+    let draw = |ui: &mut Ui, pressed: &mut Option<usize>| {
+        for (index, (text, spoken, style)) in buttons.iter().enumerate() {
+            let button = kit::small_button(ui, text, *style);
+            if spoken != text {
+                ui.ctx()
+                    .accesskit_node_builder(button.id, |node| node.set_label(*spoken));
+            }
+            if button.clicked() {
+                *pressed = Some(index);
+            }
+        }
+    };
+    if fits {
+        one_line(ui, label_text(label).into(), Some(value), |ui| {
+            draw(ui, &mut pressed);
+        });
+    } else {
+        one_line(ui, label_text(label).into(), None, |ui| {
+            draw(ui, &mut pressed);
+        });
+        ui.add(Label::new(value).wrap());
+    }
+    pressed
+}
+
 /// The content of a row with a text that wraps and small buttons at the trailing edge (the
 /// first button is the rightmost), for rows whose text or buttons name a person, a
 /// device, or a vault. The buttons stay on the line of the text while the text keeps
@@ -401,23 +479,63 @@ pub(crate) fn text_buttons(
     text: impl Into<WidgetText>,
     buttons: &[(&str, Style)],
 ) -> Option<usize> {
+    let named: Vec<(&str, &str, Style)> = buttons
+        .iter()
+        .map(|(label, style)| (*label, *label, *style))
+        .collect();
+    text_buttons_named(ui, text, &named)
+}
+
+/// [`text_buttons`] whose buttons carry a spoken name besides their short label
+/// (`(label, spoken, style)`): "Stop Sharing…" that VoiceOver reads as "Stop Sharing with
+/// Ola…".
+pub(crate) fn text_buttons_named(
+    ui: &mut Ui,
+    text: impl Into<WidgetText>,
+    buttons: &[(&str, &str, Style)],
+) -> Option<usize> {
+    text_buttons_detailed(ui, text, None, buttons)
+}
+
+/// [`text_buttons_named`] whose text has a detail: its hover text and its description for
+/// VoiceOver (the device of a person, the account of a vault's owner).
+pub(crate) fn text_buttons_detailed(
+    ui: &mut Ui,
+    text: impl Into<WidgetText>,
+    detail: Option<&str>,
+    buttons: &[(&str, &str, Style)],
+) -> Option<usize> {
     let text = text.into();
+    let add_text = |ui: &mut Ui, text: WidgetText| {
+        let label = ui.add(Label::new(text).wrap());
+        if let Some(detail) = detail {
+            ui.ctx().accesskit_node_builder(label.id, |node| {
+                node.set_description(detail);
+            });
+            label.on_hover_text(detail);
+        }
+    };
     let width = ui.available_width();
     let needed: f32 = buttons
         .iter()
-        .map(|(label, style)| kit::button_width(ui, label, *style, Size::Small) + BUTTON_GAP)
+        .map(|(label, _, style)| kit::button_width(ui, label, *style, Size::Small) + BUTTON_GAP)
         .sum();
     let mut pressed = None;
     let draw = |ui: &mut Ui, pressed: &mut Option<usize>| {
         ui.spacing_mut().item_spacing.x = BUTTON_GAP;
-        for (index, (label, style)) in buttons.iter().enumerate() {
-            if kit::small_button_fit(ui, label, *style, width).clicked() {
+        for (index, (label, spoken, style)) in buttons.iter().enumerate() {
+            let button = kit::small_button_fit(ui, label, *style, width);
+            if spoken != label {
+                ui.ctx()
+                    .accesskit_node_builder(button.id, |node| node.set_label(*spoken));
+            }
+            if button.clicked() {
                 *pressed = Some(index);
             }
         }
     };
     if buttons.is_empty() {
-        ui.add(Label::new(text).wrap());
+        add_text(ui, text);
     } else if needed + TEXT_MIN <= width {
         egui::Sides::new()
             .shrink_left()
@@ -426,12 +544,12 @@ pub(crate) fn text_buttons(
             .show(
                 ui,
                 |ui| {
-                    ui.add(Label::new(text).wrap());
+                    add_text(ui, text);
                 },
                 |ui| draw(ui, &mut pressed),
             );
     } else {
-        ui.add(Label::new(text).wrap());
+        add_text(ui, text);
         // A line of its own for the buttons: as high as a button, not the rest of the
         // column.
         ui.allocate_ui_with_layout(

@@ -1876,8 +1876,8 @@ pub(crate) fn devices_view(frame: DevicesFrame) -> super::devices::DevicesView {
         },
         feed_shown: ended.is_none(),
         other_macs: Some(OtherMacsRow {
-            words: "Through the Apassy relay".to_owned(),
             relay: true,
+            removed: false,
         }),
         free_end: ended.is_none().then(|| "0.5.20".to_owned()),
         can_move: ended.is_some(),

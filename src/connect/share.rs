@@ -2672,7 +2672,7 @@ impl ConnectAccount {
         Ok(confirmed)
     }
 
-    /// "Accept a Shared Vault…": the pasted `code` of another account. This device signs
+    /// "Accept Shared Vault…": the pasted `code` of another account. This device signs
     /// the answer with its account, its root, and its key; Connect names the account and
     /// the device of the code. The root of the list that Connect gives (its version 1)
     /// and the inviting key must give the fingerprint of the code, the list must verify
@@ -3031,7 +3031,7 @@ impl ConnectAccount {
         }
     }
 
-    /// "Count Its Shares Again…" of a store of [`ShareStatus::claims`], after a fresh owner
+    /// "Confirm…" of a store of [`ShareStatus::claims`], after a fresh owner
     /// check for [`Self::claim_store_action`]: this device reads Connect's store view and
     /// its own list again, and signs the `store` entry of `team_id` only while the store
     /// still may get one ([`Self::claimable_stores`]; `local_teams` the stores that this
@@ -3696,8 +3696,8 @@ impl ConnectAccount {
         Ok(())
     }
 
-    /// The owner check of the end of a share: the owner's "Stop Sharing with <name>…"
-    /// (`leave` false, it signs `unshare`) or a member's "Leave This Shared Vault…" (`leave`
+    /// The owner check of the end of a share: the owner's "Stop Sharing…"
+    /// (`leave` false, it signs `unshare`) or a member's "Leave…" (`leave`
     /// true, it signs `leave`).
     pub fn end_share_action(
         &self,
@@ -3721,7 +3721,7 @@ impl ConnectAccount {
         }
     }
 
-    /// "Stop Sharing with <name>…": this device signs `unshare` of the store `team_id` for
+    /// "Stop Sharing…": this device signs `unshare` of the store `team_id` for
     /// `peer_account` after a fresh owner check for [`Self::end_share_action`], and
     /// Connect removes that account's devices from the store in the same step. (The ends
     /// without an owner check are [`Self::refresh_shares`]'s.) The pin of the peer stays:
@@ -3744,7 +3744,7 @@ impl ConnectAccount {
         self.share_entry(UNSHARE, Some(peer_account), None, Some(team_id))
     }
 
-    /// "Leave This Shared Vault…": this device signs `leave` of the store `team_id` of
+    /// "Leave…": this device signs `leave` of the store `team_id` of
     /// `owner` after a fresh owner check for [`Self::end_share_action`]; Connect removes
     /// this account's devices from the store in the same step. The vault stays on this
     /// device; its sync with the store ends here, and on the other devices of this account

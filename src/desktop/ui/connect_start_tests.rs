@@ -17,7 +17,7 @@ use super::connect::live;
 use zeroize::Zeroizing;
 
 use super::connect::{
-    ADD_THIS_MAC, Action, FORGET_OLD_FILE, JOIN_ACCOUNT_TITLE, JOINED_TITLE, OLD_FILE,
+    ADD_THIS_MAC, Action, FORGET_THIS_MAC, JOIN_ACCOUNT_TITLE, JOINED_TITLE, OLD_FILE,
     OLD_FILE_TITLE, REMOVED, SIGN_IN, Sheet, SheetChoice, Shown, TRY_AGAIN,
 };
 use super::connect_tests::fake_connect::FakeConnect;
@@ -220,8 +220,10 @@ fn a_computer_without_a_vault_joins_the_account_and_gets_a_vault_from_connect() 
     pass(&ctx, &mut b, |app, ctx| {
         live::act(app, ctx, Action::AddThisMac)
     });
-    let text = frame(&ctx, &mut b);
-    assert!(text.contains(JOIN_ACCOUNT_TITLE), "the join sheet: {text}");
+    // The sheet paints from its second frame on.
+    frames_until(&ctx, &mut b, "the join sheet", |text| {
+        text.contains(JOIN_ACCOUNT_TITLE)
+    });
 
     // A makes the code; B pastes it and shows the words and the name of A.
     pass(&a_ctx, &mut a, |app, ctx| {
@@ -262,7 +264,12 @@ fn a_computer_without_a_vault_joins_the_account_and_gets_a_vault_from_connect() 
         _ => panic!("the account of A"),
     };
     assert_eq!(confirmer, a_name, "the name of the device that confirms");
-    assert!(text.contains("Both devices show these words"), "{text}");
+    assert!(
+        text.contains(&format!(
+            "Confirm on {confirmer} only if it shows these words."
+        )),
+        "{text}"
+    );
     for word in words.split_whitespace() {
         assert!(text.contains(word), "{word}: {text}");
     }
@@ -552,7 +559,7 @@ fn an_old_account_file_says_join_the_account_again() {
     let text = frame(&ctx, &mut app) + &frame(&ctx, &mut app);
     assert!(text.contains(title), "{text}");
     assert!(text.contains(OLD_FILE), "{text}");
-    assert!(text.contains(FORGET_OLD_FILE), "{text}");
+    assert!(text.contains(FORGET_THIS_MAC), "{text}");
     assert!(!text.contains(REMOVED), "{text}");
 }
 

@@ -30,6 +30,55 @@ fn painted(mut add: impl FnMut(&egui::Context, &mut Ui)) -> String {
     text
 }
 
+/// Painted texts or spoken names, each with its rectangle.
+type Placed = Vec<(String, egui::Rect)>;
+
+/// The painted galleys (each text with its rectangle) and the AccessKit buttons (each
+/// spoken name with its rectangle) of the section for `view`.
+fn layout(view: &ShareView) -> (Placed, Placed) {
+    fn walk(shape: &egui::Shape, out: &mut Vec<(String, egui::Rect)>) {
+        match shape {
+            egui::Shape::Text(text) => out.push((
+                text.galley.text().to_owned(),
+                text.galley.rect.translate(text.pos.to_vec2()),
+            )),
+            egui::Shape::Vec(nested) => nested.iter().for_each(|inner| walk(inner, out)),
+            _ => {}
+        }
+    }
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut texts = Vec::new();
+    let mut buttons = Vec::new();
+    for _ in 0..3 {
+        let output = ctx.run_ui(input(0.0, Vec::new()), |ui| {
+            let _ = draw(ui, view);
+        });
+        texts.clear();
+        buttons.clear();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut texts);
+        }
+        if let Some(update) = &output.platform_output.accesskit_update {
+            for (_, node) in &update.nodes {
+                if node.role() == egui::accesskit::Role::Button
+                    && let (Some(name), Some(at)) = (node.label(), node.bounds())
+                {
+                    buttons.push((
+                        name.to_owned(),
+                        egui::Rect::from_min_max(
+                            egui::pos2(at.x0 as f32, at.y0 as f32),
+                            egui::pos2(at.x1 as f32, at.y1 as f32),
+                        ),
+                    ));
+                }
+            }
+        }
+        output.drop_without_applying_deltas();
+    }
+    (texts, buttons)
+}
+
 fn store(team: &str, name: &str) -> VaultStoreView {
     VaultStoreView {
         team_id: team.to_owned(),
@@ -155,33 +204,82 @@ fn stores() -> Vec<VaultStoreView> {
 #[test]
 fn the_section_shows_each_state_of_a_shared_vault() {
     let view = view_of(&status(), &stores(), &local(), true, &[]);
+    let (texts, buttons) = layout(&view);
+    let text: String = texts.iter().map(|(text, _)| format!("{text}\n")).collect();
+    for expected in ["Shared Vaults", "Accept Shared Vault…"] {
+        assert!(text.contains(expected), "{expected} in:\n{text}");
+    }
+    // Each row: its painted text (the person or the vault, and a state word only off the
+    // normal state, on the same line), the problem line under it, and exactly its buttons
+    // by their spoken names, on the line of the text.
+    let rows: [(&str, Option<&str>, &[&str]); 9] = [
+        ("Family", None, &["Share Family with…"]),
+        ("Ola   Not joined", None, &["Stop Sharing Family with Ola…"]),
+        (
+            "Anna   Account reset",
+            Some("Anna reset the account. Share again."),
+            &[
+                "Share Family with Anna Again…",
+                "Stop Sharing Family with Anna…",
+            ],
+        ),
+        ("Piotr   Left", None, &["Share Family with Piotr Again…"]),
+        ("Ewa   Ended", None, &["Share Family with Ewa Again…"]),
+        (
+            "Garden · Piotr",
+            Some("Piotr must verify this account again."),
+            &["Leave Garden · Piotr"],
+        ),
+        (
+            "Car · Ewa",
+            Some("Ewa stopped sharing this vault."),
+            &["Leave Car · Ewa"],
+        ),
+        (
+            "\u{201c}Travel\u{201d} at Connect · Ola",
+            None,
+            &["Join \u{201c}Travel\u{201d} at Connect · Ola"],
+        ),
+        ("Accept Shared Vault…", None, &["Accept Shared Vault…"]),
+    ];
+    for (row, problem, expected) in rows {
+        let rect = texts
+            .iter()
+            .find(|(text, _)| text == row)
+            .map(|(_, rect)| *rect)
+            .unwrap_or_else(|| panic!("no row {row:?} in:\n{text}"));
+        let on_line: Vec<&str> = buttons
+            .iter()
+            .filter(|(_, at)| (at.center().y - rect.center().y).abs() < 8.0)
+            .map(|(name, _)| name.as_str())
+            .collect();
+        let mut on_line_sorted = on_line.clone();
+        on_line_sorted.sort_unstable();
+        let mut expected_sorted = expected.to_vec();
+        expected_sorted.sort_unstable();
+        assert_eq!(on_line_sorted, expected_sorted, "the buttons of {row:?}");
+        if let Some(problem) = problem {
+            let under = texts
+                .iter()
+                .find(|(text, _)| text == problem)
+                .map(|(_, at)| *at)
+                .unwrap_or_else(|| panic!("no {problem:?} in:\n{text}"));
+            assert!(
+                under.top() >= rect.bottom() - 1.0 && under.top() < rect.bottom() + 30.0,
+                "{problem:?} is under {row:?}: {under:?} {rect:?}"
+            );
+        }
+    }
+    // An offer whose store Connect does not name here: "A vault · Ola".
+    let unnamed: Vec<VaultStoreView> = stores()
+        .into_iter()
+        .filter(|store| store.team_id != "t_travelaaaa")
+        .collect();
+    let view = view_of(&status(), &unnamed, &local(), true, &[]);
     let text = painted(|_, ui| {
         draw(ui, &view);
     });
-    for expected in [
-        SECTION,
-        "Family",
-        SHARE_WITH,
-        &not_joined("Ola"),
-        &reset_owner("Anna"),
-        &stop("Ola"),
-        &stop("Anna"),
-        &shared_by("Garden", "Piotr"),
-        &reset_member("Piotr"),
-        &shared_by("Car", "Ewa"),
-        &stopped("Ewa"),
-        &shared_by(VAULT_OFFERED, "Ola"),
-        &connect_calls("Travel"),
-        &left_vault("Piotr"),
-        &sharing_ended("Ewa"),
-        &share_again("Piotr"),
-        &share_again("Ewa"),
-        JOIN,
-        LEAVE,
-        ACCEPT,
-    ] {
-        assert!(text.contains(expected), "{expected} in:\n{text}");
-    }
+    assert!(text.contains("A vault · Ola"), "{text}");
     // A head of a key not verified yet: the joined store says so.
     let checking = view_of(
         &status(),
@@ -197,7 +295,7 @@ fn the_section_shows_each_state_of_a_shared_vault() {
         .unwrap();
     assert_eq!(
         joined.joined.as_deref(),
-        Some(stopped("Ewa").as_str()),
+        Some("Ewa stopped sharing this vault."),
         "the end comes first"
     );
     let mut alive = status();
@@ -221,7 +319,7 @@ fn the_section_shows_each_state_of_a_shared_vault() {
         draw(ui, &alone);
     });
     assert!(
-        !text.contains(SHARE_WITH) && !text.contains(ACCEPT) && !text.contains(&share_again("Ewa")),
+        !text.contains(SHARE_WITH) && !text.contains(ACCEPT) && !text.contains(SHARE_AGAIN),
         "{text}"
     );
 }
@@ -258,7 +356,7 @@ fn the_rows_of_left_void_and_absent_stores_come_from_the_status() {
         &left_on("Laptop"),
         LEFT_HERE,
         ENDED,
-        &connect_calls("Garden"),
+        "\u{201c}Garden\u{201d} at Connect · ",
     ] {
         assert!(text.contains(expected), "{expected} in:\n{text}");
     }
@@ -445,14 +543,14 @@ fn the_texts_name_nothing_of_one_platform() {
         not_joined("Ola"),
         reset_owner("Ola"),
         reset_member("Ola"),
-        stop("Ola"),
+        stop("Family", "Ola"),
+        share_with("Family"),
         shared_by("Family", "Ola"),
         shared_with("Ola"),
         stopped("Ola"),
-        left_vault("Ola"),
-        sharing_ended("Ola"),
-        share_again("Ola"),
-        connect_calls("Family"),
+        not_accepted("Ola"),
+        share_again("Family", "Ola"),
+        offered_at("Family", "Ola"),
         not_listed("Ola"),
         left_on("Laptop"),
     ];
@@ -614,8 +712,8 @@ fn a_store_is_decided_only_by_lists_that_verified() {
 /// Item A1 of the 0.5.20 review: every row of Shared Vaults stays inside its column, from
 /// the width of Settings in the smallest window (`MIN_WINDOW`, about 340 points for the
 /// section) to the 1100-point window. Long names and long button labels wrap or are cut
-/// with "…" inside the row, each button stays whole, and the footer keeps "Accept a
-/// Shared Vault…".
+/// with "…" inside the row, each short button stays whole, the spoken names carry the
+/// person, and "Accept Shared Vault…" stays under the group.
 #[test]
 fn every_row_fits_its_column_at_each_width() {
     let long = "\u{201c}Aleksandra's MacBook Air in the study upstairs\u{201d} (Aleksandra Nowak-Kowalska)";
@@ -623,23 +721,23 @@ fn every_row_fits_its_column_at_each_width() {
         own: vec![OwnStore {
             team_id: "t_familyaaaa".to_owned(),
             vault: "Family photos, documents and the passwords of the household".to_owned(),
-            members: vec![(
-                long.to_owned(),
-                "acc_olaaaaaaaa".to_owned(),
-                not_accepted(long),
-            )],
-            ended: vec![(
-                long.to_owned(),
-                "acc_ewaaaaaaaa".to_owned(),
-                sharing_ended(long),
-            )],
+            members: vec![Person {
+                name: long.to_owned(),
+                account: "acc_olaaaaaaaa".to_owned(),
+                state: PersonState::NotAccepted,
+            }],
+            ended: vec![Person {
+                name: long.to_owned(),
+                account: "acc_ewaaaaaaaa".to_owned(),
+                state: PersonState::Ended,
+            }],
         }],
         others: vec![OtherStore {
             team_id: "t_gardenaaaa".to_owned(),
             owner: "acc_piotraaaaa".to_owned(),
+            owner_name: long.to_owned(),
             title: shared_by("Garden and the summer house", long),
             joined: Some("Syncs.".to_owned()),
-            note: None,
             download: true,
             left: false,
         }],
@@ -655,6 +753,7 @@ fn every_row_fits_its_column_at_each_width() {
     };
     for width in [300.0_f32, 340.0, 560.0] {
         let ctx = egui::Context::default();
+        ctx.enable_accesskit();
         let left = 20.0;
         for frame in 0..3 {
             let screen = egui::RawInput {
@@ -683,14 +782,32 @@ fn every_row_fits_its_column_at_each_width() {
                         clipped.shape
                     );
                 }
-                for whole in [ACCEPT, SHARE_WITH, LEAVE, DOWNLOAD, SECTION, CLAIM] {
+                // The short labels stay whole; the spoken names carry the person.
+                for whole in [
+                    ACCEPT,
+                    SHARE_WITH,
+                    LEAVE,
+                    DOWNLOAD,
+                    SECTION,
+                    CLAIM,
+                    STOP_SHARING,
+                    SHARE_AGAIN,
+                ] {
                     assert!(text.contains(whole), "at {width}: no {whole:?} in\n{text}");
                 }
-                // The person's button keeps its start, cut with "…" at most.
-                assert!(text.contains("Stop Sharing with"), "at {width}:\n{text}");
+                let spoken: Vec<String> = output
+                    .platform_output
+                    .accesskit_update
+                    .iter()
+                    .flat_map(|update| update.nodes.iter())
+                    .filter_map(|(_, node)| node.label().map(str::to_owned))
+                    .collect();
                 assert!(
-                    text.contains("Each of you compares six words once."),
-                    "at {width}:\n{text}"
+                    spoken
+                        .iter()
+                        .any(|name| name == &stop(&view.own[0].vault, long)),
+                    "at {width}: no spoken {:?} in {spoken:?}",
+                    stop(&view.own[0].vault, long)
                 );
             }
             output.drop_without_applying_deltas();
@@ -714,4 +831,27 @@ fn the_words_name_the_person_once() {
     for tail in [CONFIRM_TAIL, MATCH_TAIL] {
         assert!(!tail.contains(")'s"), "{tail}");
     }
+}
+
+/// Without a family or team and with nothing shared, offered, left, or claimed, the
+/// section is not drawn at all; a vault of this account that nobody shares is no row.
+#[test]
+fn the_section_is_not_drawn_without_anything_to_show() {
+    let empty = painted(|_, ui| {
+        draw(ui, &ShareView::default());
+    });
+    assert!(empty.is_empty(), "{empty}");
+    let alone = ShareView {
+        own: vec![OwnStore {
+            team_id: "t_familyaaaa".to_owned(),
+            vault: "Family".to_owned(),
+            members: Vec::new(),
+            ended: Vec::new(),
+        }],
+        ..ShareView::default()
+    };
+    let text = painted(|_, ui| {
+        draw(ui, &alone);
+    });
+    assert!(text.is_empty(), "{text}");
 }

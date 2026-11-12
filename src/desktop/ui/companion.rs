@@ -81,7 +81,7 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut Ui) {
 /// Draw the QR code black on white with a quiet zone of 4 modules. The modules are whole
 /// points, so the code is about `size` points wide and stays sharp. A run of dark
 /// modules in a row is one rectangle, so no seam shows between two modules. `label` names
-/// the image for VoiceOver. The pairing QR code here and the link of "Add a device…" in
+/// the image for VoiceOver. The pairing QR code here and the link of "Add a Device…" in
 /// Settings > Vault > Sync use it.
 pub(super) fn draw_qr(ui: &mut Ui, qr: &QrModules, size: f32, label: &str) -> Response {
     let total = qr.width() + 2 * QUIET_ZONE;

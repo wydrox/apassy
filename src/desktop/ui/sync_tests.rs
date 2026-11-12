@@ -234,7 +234,7 @@ fn create_with_sync_writes_the_file_and_settings_shows_the_status() {
         "Saved to sync folder",
         "Personal.apassy",
         "Dropbox",
-        "Sync now",
+        "Sync Now",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
@@ -639,7 +639,7 @@ fn without_sync_the_app_shows_no_sync_control() {
     create(&mut app, "Personal", PASS, None);
     super::open_settings(&mut app, super::SettingsSection::Vault);
     let text = frames(&mut app);
-    assert!(!text.contains("Sync now"), "{text}");
+    assert!(!text.contains("Sync Now"), "{text}");
     app.start_sync_worker(&egui::Context::default());
     assert!(!app.sync.worker.running(), "no sync thread without sync");
 }
@@ -846,7 +846,7 @@ fn the_worker_pushes_and_merges_without_any_frame() {
 
 /// A question that waits for the owner (Decisions, up to 5 minutes) does not hold sync:
 /// the worker pushes a change of this Mac and merges a change of another Mac while it
-/// waits, as "Sync now" does. A merge that takes another version of a credential raises
+/// waits, as "Sync Now" does. A merge that takes another version of a credential raises
 /// its revision, and the broker checks the revision of each credential of the question
 /// again after the answer. That the approval then refuses the run, and that the same
 /// request again asks again, is in `tests/agent_run.rs` (`merged`).
@@ -1100,7 +1100,7 @@ fn settled_frames(app: &mut DesktopApp) -> String {
     frames(app)
 }
 
-/// The words of the open "Add a device…" sheet of Mac A, after Mac B sent `link`.
+/// The words of the open "Add a Device…" sheet of Mac A, after Mac B sent `link`.
 fn send_link(b: &mut DesktopApp, link: &str) -> String {
     b.sync.relay.link_input = link.to_owned();
     b.sync.relay.device_input = "Synthetic Mac mini".to_owned();
@@ -1134,7 +1134,7 @@ fn assert_qr_encodes(qr: &crate::desktop::companion::QrModules, link: &str) {
 /// A vault that syncs through a vault store of the Connect account is named "Apassy
 /// Connect" everywhere the window names its sync: Settings › Vault › Sync (the picker,
 /// the tag, the line), the Vault row of Settings and the sidebar; and its buttons fit
-/// Connect: no device link ("Add a device…", "Devices…"), the devices of the account
+/// Connect: no device link ("Add a Device…", "Devices…"), the devices of the account
 /// instead.
 #[test]
 fn a_vault_on_connect_is_named_apassy_connect() {
@@ -1157,15 +1157,16 @@ fn a_vault_on_connect_is_named_apassy_connect() {
     for expected in [
         "Apassy Connect",
         "Saved to Apassy Connect",
-        "Devices of the Account…",
-        "Sync now",
+        super::sync::relay::CONNECT_DEVICES,
+        "Sync Now",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
+    // Open Connect…, not the relay's device links.
     for refused in [
         "Apassy relay",
         "Saved to the relay",
-        "Add a device…",
+        "Add a Device…",
         "Devices…",
     ] {
         assert!(!text.contains(refused), "{refused}: {text}");
@@ -1351,8 +1352,8 @@ fn add_a_mac_shows_a_link_then_the_safety_words_and_confirm_needs_the_owner_chec
     for expected in [
         "Saved to the relay",
         "Apassy relay",
-        "Sync now",
-        "Add a device…",
+        "Sync Now",
+        "Add a Device…",
         "Devices…",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
@@ -1571,7 +1572,7 @@ fn add_a_mac_shows_a_link_then_the_safety_words_and_confirm_needs_the_owner_chec
     assert!(entry.sync_relay().is_some());
     assert!(b.sync.relay.join_view(None).is_none());
 
-    // Both Macs sync: Sync now on B, a lock on B, and the worker of A.
+    // Both Macs sync: Sync Now on B, a lock on B, and the worker of A.
     add_item(&mut b, "From B", "SYNTH-from-b");
     b.sync_now();
     b.relay_settle_for_test();
@@ -1717,7 +1718,7 @@ fn turn_off_of_a_removed_or_last_mac_says_what_happened() {
     let (mut b, id_b) = join_b(&folders, &mut a, &id);
     super::open_settings(&mut b, super::SettingsSection::Vault);
     let text = settled_frames(&mut b);
-    for expected in ["Sync now", "Add a device…", "Devices…"] {
+    for expected in ["Sync Now", "Add a Device…", "Devices…"] {
         assert!(
             text.contains(expected),
             "before the removal: {expected}: {text}"
@@ -1744,7 +1745,7 @@ fn turn_off_of_a_removed_or_last_mac_says_what_happened() {
         b.status_text
     );
 
-    // A removed Mac offers only turning relay sync off: Settings has no "Sync now", "Add
+    // A removed Mac offers only turning relay sync off: Settings has no "Sync Now", "Add
     // a device…", or "Devices…", and a sheet that opens anyway shows why, with nothing
     // that would ask the relay again ("Check again", "New link", "Refresh").
     assert!(b.relay_removed(&id_b));
@@ -1753,7 +1754,7 @@ fn turn_off_of_a_removed_or_last_mac_says_what_happened() {
         text.contains("Turn relay sync off, then join again"),
         "{text}"
     );
-    for gone in ["Sync now", "Add a device…", "Devices…"] {
+    for gone in ["Sync Now", "Add a Device…", "Devices…"] {
         assert!(!text.contains(gone), "removed: {gone}: {text}");
     }
     // The sync menu stays: "Off" is the way back.
@@ -1890,7 +1891,7 @@ fn turning_relay_sync_off_keeps_the_copy_and_the_last_mac_can_delete_it() {
     );
 }
 
-/// Mac A confirms the one Mac that waits in its "Add a device…" sheet.
+/// Mac A confirms the one Mac that waits in its "Add a Device…" sheet.
 fn confirm_waiting_mac(a: &mut DesktopApp) {
     a.relay_add_mac_poll_for_test();
     let links = a.relay_add_mac_links_for_test();
@@ -2326,7 +2327,7 @@ fn frame_texts(
 }
 
 /// A quick click (press and release in one frame, as a tap on a trackpad) on
-/// "Confirm…" opens the owner check above "Add a device…", also the second time, and its
+/// "Confirm…" opens the owner check above "Add a Device…", also the second time, and its
 /// passphrase field takes the typed passphrase.
 #[test]
 fn a_quick_click_on_confirm_opens_the_owner_check_on_top_each_time() {
@@ -2398,7 +2399,7 @@ fn a_quick_click_on_confirm_opens_the_owner_check_on_top_each_time() {
             "round {round}: the passphrase field has the focus"
         );
         if round == 1 {
-            // Escape closes the check; a click in "Add a device…" brings it to the front.
+            // Escape closes the check; a click in "Add a Device…" brings it to the front.
             let _ = frame(&mut a, vec![key(egui::Key::Escape)]);
             texts = frame(&mut a, Vec::new());
             assert!(a.owner.check.is_none());
@@ -2466,7 +2467,7 @@ fn relay_calls_of_the_owner_leave_the_window_responsive() {
     );
     assert_eq!(relay.version(), 1);
 
-    // "Sync now" with a slow relay.
+    // "Sync Now" with a slow relay.
     let head = relay.hold("GET /v1/sync/head", SLOW);
     let started = Instant::now();
     a.sync_now();
@@ -2483,7 +2484,7 @@ fn relay_calls_of_the_owner_leave_the_window_responsive() {
     assert_eq!(a.status_text, "Saved to the relay.");
     assert_eq!(relay.version(), 2, "the change made during the upload");
 
-    // "Add a device…" and "Devices…" with a slow relay.
+    // "Add a Device…" and "Devices…" with a slow relay.
     let links = relay.hold("POST /v1/devices/links", SLOW);
     let devices = relay.hold("GET /v1/devices", SLOW);
     let started = Instant::now();
@@ -2718,14 +2719,18 @@ fn received_by_shows_the_receipt_of_the_other_mac() {
     super::open_settings(&mut a, super::SettingsSection::Vault);
     let text = settled_frames(&mut a);
     // The fake relay sends no device names; the real relay does (contract section 9).
+    // The tag of the row says "Saved to the relay"; the line under it does not say it
+    // again.
+    assert!(text.contains("Saved to the relay"), "the tag: {text}");
     assert!(
         text.contains(concat!(
-            "Saved to the relay. Received by another ",
+            "Received by another ",
             crate::computer!(),
             " just now."
         )),
         "{text}"
     );
+    assert!(!text.contains("Saved to the relay. Received"), "{text}");
 }
 
 /// A passphrase that changed on another Mac: the check with the relay copy runs on its
@@ -2891,7 +2896,7 @@ fn use_the_relay_copy_asks_for_the_passphrase_of_an_older_copy() {
     unlock(&mut a, NEW_PASS);
 }
 
-/// "Sync now" that a pause ends (the pause of "Turn off", or a lock) tells nothing: no
+/// "Sync Now" that a pause ends (the pause of "Turn off", or a lock) tells nothing: no
 /// problem status and no "The vault is locked." while the vault is unlocked.
 #[test]
 fn a_sync_now_that_a_pause_ends_tells_nothing() {
@@ -3414,17 +3419,15 @@ fn add_an_iphone_to_the_questions_shows_a_qr_code_and_needs_the_owner_check() {
     );
     a.ui.sheet = None;
     // Settings > Devices of N7 (Devices mockup, frame 1): the row of the iPhone with its
-    // kind and role, its route, and "Revoke…" for a device on the relay.
+    // route and "Revoke…" for a device on the relay; its kind and role are the hover
+    // text of the row.
     super::open_settings(&mut a, super::SettingsSection::Devices);
     let text = frames(&mut a);
     a.questions_settle_for_test();
     // This Mac's row has the name of the machine, not its device name on the relay.
     for expected in [
         concat!("This ", crate::computer!()),
-        concat!(crate::computer_cap!(), " · Asks for approvals"),
         "Test iPhone",
-        "iPhone · Approves runs",
-        "via Apassy relay",
         "Revoke…",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
@@ -4312,7 +4315,7 @@ fn node_pairing_link(
 
 /// "Your own node" (plan S2–S3 unit L4): the pairing link of a Linux node makes the
 /// team on the node through its pin, and the sync link of the vault list and the
-/// membership keep the pin. "Add a device…" then gives the iPhone (and a Mac) a device
+/// membership keep the pin. "Add a Device…" then gives the iPhone (and a Mac) a device
 /// link with the node's origin and pin, and a Mac that joins with it adopts the vault
 /// with the pin and syncs through the node.
 #[test]
@@ -4363,7 +4366,7 @@ fn your_own_node_takes_a_pairing_link_and_the_iphone_link_names_the_node_and_its
         concat!(
             "“Personal” syncs through your own node. To add another ",
             crate::computer!(),
-            " or an iPhone, select “Add a device…”."
+            " or an iPhone, select “Add a Device…”."
         )
     );
     assert!(a.sync.relay.pair_input.is_empty(), "the code is erased");
@@ -4412,7 +4415,7 @@ fn your_own_node_takes_a_pairing_link_and_the_iphone_link_names_the_node_and_its
     assert_eq!(a.status_text, "Saved to the relay.");
     assert_eq!(relay.version(), 2);
 
-    // "Add a device…": the link for the iPhone names the node origin and the pin.
+    // "Add a Device…": the link for the iPhone names the node origin and the pin.
     a.sync_open_sheet(SyncSheet::AddMac { id: id.clone() }, None);
     let text = settled_frames(&mut a);
     let device_link = a.relay_add_mac_link_for_test().expect("a link");
@@ -4644,11 +4647,11 @@ fn a_store_deleted_at_a_recovery_says_so_and_nothing_else() {
     let deleted = |why| UiStatus::Connect(ConnectState::StoreDeleted(why));
     assert_eq!(
         words_of(&deleted(StoreDeleted::Recovered), None, true),
-        "The copy of this vault at Apassy Connect was deleted when the account was recovered."
+        "The copy at Apassy Connect was deleted by the account recovery."
     );
     assert_eq!(
         words_of(&deleted(StoreDeleted::OwnerRecovered), None, true),
-        "The copy of this vault at Apassy Connect was deleted when the person who shares it with you recovered their account."
+        "The copy at Apassy Connect was deleted: its owner recovered their account."
     );
     for why in [StoreDeleted::Recovered, StoreDeleted::OwnerRecovered] {
         let words = words_of(&deleted(why), None, true);
@@ -4673,7 +4676,7 @@ fn a_store_deleted_at_a_recovery_says_so_and_nothing_else() {
     );
 }
 
-/// The row of a deleted store keeps its line and "Sync Through Apassy Connect Again…"
+/// The row of a deleted store keeps its line and "Sync Again…"
 /// inside the row from the narrowest Settings column to a wide one
 /// (`rows::text_buttons`): the line wraps, and the button goes under it.
 #[test]
@@ -4718,7 +4721,7 @@ fn the_row_of_a_deleted_store_fits_its_column_at_each_width() {
 /// says that this device recovered the account, and the state of the sync names an earlier
 /// account key (as after a recovery, which also deleted the store at Connect). The window
 /// marks the sync at its Connect step: its row says so with "Sync Through Apassy Connect
-/// Again…", no sync and no "Sync now" asks Connect, and the button opens the step that
+/// Again…", no sync and no "Sync Now" asks Connect, and the button opens the step that
 /// turns on the sync through Apassy Connect, which makes a new store that syncs.
 #[test]
 fn a_store_deleted_at_a_recovery_is_named_once_and_a_new_store_syncs() {
@@ -4828,11 +4831,11 @@ fn a_store_deleted_at_a_recovery_is_named_once_and_a_new_store_syncs() {
     super::open_settings(&mut app, super::SettingsSection::Vault);
     let text = frames(&mut app);
     assert!(
-        text.contains("was deleted when the account was recovered."),
+        text.contains("was deleted by the account recovery."),
         "{text}"
     );
     assert!(text.contains(SYNC_AGAIN), "{text}");
-    for wrong in ["Damaged", "Removed from", "join again", "Sync now"] {
+    for wrong in ["Damaged", "Removed from", "join again", "Sync Now"] {
         assert!(!text.contains(wrong), "{wrong:?} in {text}");
     }
 
@@ -4868,5 +4871,51 @@ fn a_store_deleted_at_a_recovery_is_named_once_and_a_new_store_syncs() {
         "{:?} {}",
         app.sync.statuses.get(&id),
         app.status_text
+    );
+}
+
+/// The line of a Sync row does not repeat the tag beside it; any other line stays whole.
+#[test]
+fn the_sync_line_does_not_repeat_its_tag() {
+    use super::sync::without_tag;
+    assert_eq!(
+        without_tag(
+            "Connect: past due. Sync works until 10 Dec 2026.",
+            "Connect: past due"
+        ),
+        "Sync works until 10 Dec 2026."
+    );
+    assert_eq!(
+        without_tag(
+            "Connect: read-only until 4 Jan 2027. Changes made here upload later.",
+            "Connect: read-only"
+        ),
+        "Connect: read-only until 4 Jan 2027. Changes made here upload later."
+    );
+    assert_eq!(
+        without_tag(
+            "Saved to Apassy Connect. Last sync just now.",
+            "Saved to Apassy Connect"
+        ),
+        "Last sync just now."
+    );
+    assert_eq!(
+        without_tag("Up to date as a.apassy in iCloud Drive.", "Up to date"),
+        "Up to date as a.apassy in iCloud Drive."
+    );
+}
+
+/// The Sync row's move of a hosted relay copy starts at once, without a sheet, so its
+/// name has no "…" and differs from the approvals move of Settings › Devices; VoiceOver
+/// reads the vault in it.
+#[test]
+fn the_move_copy_button_names_the_vault() {
+    use super::sync::relay::{MOVE_COPY, move_copy_spoken};
+    assert_eq!(MOVE_COPY, "Move Copy to Connect");
+    assert!(!MOVE_COPY.ends_with('…'), "{MOVE_COPY}");
+    assert_ne!(MOVE_COPY, super::devices::MOVE_TO_CONNECT);
+    assert_eq!(
+        move_copy_spoken("Personal"),
+        "Move the copy of Personal to Apassy Connect"
     );
 }

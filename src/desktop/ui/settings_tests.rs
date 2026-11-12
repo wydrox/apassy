@@ -11,9 +11,9 @@ use tempfile::TempDir;
 
 use super::super::devices::{
     self, ADD_DEVICE, Address, DeviceEntry, DevicesSheet, DevicesView, Kind, NodeProblem,
-    NodeState, ONLY_THIS_MAC, OtherMacsRow, Questions, ROUTE_LOCKED, ROUTE_OFF, ROUTE_ON,
-    ROUTE_SWITCH, RelayView, Route, Target, WIFI_GROUP, WIFI_LISTEN, WIFI_NOTICE_TITLE, WifiDevice,
-    WifiEnd, WifiView,
+    NodeState, ONLY_THIS_MAC, OtherMacsRow, Questions, ROUTE_LOCKED, ROUTE_OFF, ROUTE_SWITCH,
+    RelayView, Route, Target, WIFI_GROUP, WIFI_LISTEN, WIFI_NOTICE_TITLE, WifiDevice, WifiEnd,
+    WifiView,
 };
 use super::super::owner_tests::{PASS, WRONG, unlocked_app_with_item};
 use super::super::settings_view::SettingsSection;
@@ -539,23 +539,14 @@ fn devices_frame_one_draws_the_mockup() {
     for expected in [
         concat!("This ", crate::computer!()),
         ROUTE_SWITCH,
-        ROUTE_ON,
         "Address",
-        "100.101.7.12",
+        "100.101.7.12:8444",
         "Copy",
-        "Port",
-        "8444",
         "Node Words",
         "harbor lemon quartz otter cedar mango",
         "Notifications",
         "Devices",
-        "6",
         "Mac mini (office)",
-        concat!(crate::computer_cap!(), " · Hosts approvals"),
-        "iPhone · Approves runs",
-        "Apple Watch · Sees requests",
-        concat!(crate::computer_cap!(), " · Syncs Personal"),
-        "Linux node · Syncs Acme team",
         concat!("via your ", crate::computer!()),
         "via Apassy relay",
         "Tailnet",
@@ -570,14 +561,14 @@ fn devices_frame_one_draws_the_mockup() {
         WIFI_GROUP,
         "Wi-Fi pairing ends in two versions.",
         WIFI_LISTEN,
-        "Paired 12 Sep",
-        "Wi-Fi",
         "3 h ago",
         "Remove…",
         "Reset Pairing…",
     ] {
         assert!(text.contains(expected), "frame 1 shows {expected}: {text}");
     }
+    // One line for each device: the kind and the roles, and the day of a Wi-Fi pairing,
+    // are hover texts; the Port has its place in the Address.
     for gone in [
         "Pair an iPhone",
         "Pair…",
@@ -585,6 +576,10 @@ fn devices_frame_one_draws_the_mockup() {
         MOVE,
         ONLY_THIS_MAC,
         "Get approvals on your iPhone",
+        "Port",
+        "iPhone · Approves runs",
+        "Linux node · Syncs Acme team",
+        "Paired 12 Sep",
     ] {
         assert!(!text.contains(gone), "frame 1 has no {gone}: {text}");
     }
@@ -615,7 +610,7 @@ fn devices_node_states_draw_the_mockup() {
             "3a",
             with(NodeState::Missing, None),
             vec![ROUTE_OFF, "Tailscale is not installed.", "Get Tailscale…"],
-            vec!["Address", "Node Words", ROUTE_ON],
+            vec!["Address", "Node Words"],
         ),
         (
             "3b",
@@ -636,7 +631,7 @@ fn devices_node_states_draw_the_mockup() {
         (
             "3d",
             with(NodeState::On { address: None }, None),
-            vec![ROUTE_ON, "Address", "Starting…"],
+            vec![ROUTE_SWITCH, "Address", "Starting…"],
             vec!["Node Words", "Copy"],
         ),
         (
@@ -645,8 +640,8 @@ fn devices_node_states_draw_the_mockup() {
                 locked: true,
                 ..with(NodeState::Locked, None)
             },
-            vec![ROUTE_LOCKED, "Address", "Off"],
-            vec!["Node Words", "Copy"],
+            vec![ROUTE_LOCKED],
+            vec!["Node Words", "Copy", "Address"],
         ),
         (
             "3g",
@@ -657,7 +652,7 @@ fn devices_node_states_draw_the_mockup() {
                     before_pairing: true,
                 }),
             ),
-            vec![ROUTE_ON, "Another app uses port 8444.", "Use Port 8445"],
+            vec![ROUTE_SWITCH, "Another app uses port 8444.", "Use Port 8445"],
             vec!["Starting…", "Address"],
         ),
         (
@@ -693,12 +688,7 @@ fn devices_node_states_draw_the_mockup() {
                 can_move: true,
                 ..frame_one()
             },
-            vec![
-                "Approvals go through Apassy relay",
-                "Move them here to keep them on your tailnet.",
-                MOVE,
-                ADD_DEVICE,
-            ],
+            vec!["Approvals go through Apassy relay", MOVE, ADD_DEVICE],
             vec![],
         ),
         (
@@ -856,8 +846,8 @@ fn devices_sheets_draw_the_mockup() {
     for expected in [
         "Revoke Rafal's iPhone?",
         "It can no longer see or answer questions.",
-        "Also revoke Rafal's Apple Watch",
         "To use it again, pair it again.",
+        "Also revoke Rafal's Apple Watch",
         "Cancel",
         "Revoke",
     ] {
@@ -969,14 +959,21 @@ fn devices_relay_group_restores_the_relay_and_the_other_macs() {
     ] {
         let text = view_texts(&with(questions, None, false));
         let (subline, _) = questions.subline();
-        for expected in [RELAY_GROUP, RELAY_QUESTIONS, subline] {
+        for expected in [RELAY_GROUP, RELAY_QUESTIONS] {
             assert!(text.contains(expected), "{questions:?}: {expected}: {text}");
         }
+        // A switch that is on says nothing more; its words are the first line of ⓘ.
         assert_eq!(
-            text.contains(SHOW_AGENTS) && text.contains(SHOW_AGENTS_NOTE),
+            text.contains(subline),
+            questions != Questions::On,
+            "{questions:?}: {subline}: {text}"
+        );
+        assert_eq!(
+            text.contains(SHOW_AGENTS),
             questions == Questions::On,
             "the feed switch only while the questions are on: {questions:?}: {text}"
         );
+        assert!(!text.contains(SHOW_AGENTS_NOTE), "{text}");
         assert_eq!(
             text.contains(RELAY_QUESTIONS_REMOVED_SYNC_FIX),
             questions == Questions::RemovedSync,
@@ -1016,30 +1013,41 @@ fn devices_relay_group_restores_the_relay_and_the_other_macs() {
     let text = view_texts(&with(
         Questions::On,
         Some(OtherMacsRow {
-            words: "Through the Apassy relay".to_owned(),
             relay: true,
+            removed: false,
         }),
         true,
     ));
     for expected in [
         OTHER_MACS,
-        "Through the Apassy relay",
         OTHER_MACS_DEVICES,
         ADD_MAC,
         devices::free_end_line("0.5.20").as_str(),
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
-    // A folder sync names the folder and has no relay buttons.
+    // A folder sync has no row here: Vault › Sync names the folder.
     let text = view_texts(&with(
         Questions::CanTurnOn,
         Some(OtherMacsRow {
-            words: "Through iCloud Drive".to_owned(),
             relay: false,
+            removed: false,
         }),
         false,
     ));
-    assert!(text.contains("Through iCloud Drive"), "{text}");
+    assert!(!text.contains(OTHER_MACS), "{text}");
+    assert!(!text.contains(ADD_MAC), "{text}");
+    // A Mac that the relay removed: the row says so, without buttons.
+    let text = view_texts(&with(
+        Questions::CanTurnOn,
+        Some(OtherMacsRow {
+            relay: false,
+            removed: true,
+        }),
+        false,
+    ));
+    assert!(text.contains(OTHER_MACS), "{text}");
+    assert!(text.contains(devices::OTHER_MACS_REMOVED), "{text}");
     assert!(!text.contains(ADD_MAC), "{text}");
     assert!(!text.contains("Free approvals"), "{text}");
 
@@ -1054,7 +1062,7 @@ fn devices_relay_group_restores_the_relay_and_the_other_macs() {
 /// A route that is off says "Approvals go through Apassy relay." only while the
 /// questions of the vault go through it (or the vault is locked); otherwise they stay on
 /// this Mac. The own row of the list carries the title-case badge "This Mac", and the
-/// move button reads "Move Approvals to This Mac…" in title case.
+/// move button reads "Move to This Mac…" in title case.
 #[test]
 fn devices_route_off_line_follows_the_questions() {
     let with = |questions: Option<Questions>| DevicesView {
@@ -1097,7 +1105,7 @@ fn devices_route_off_line_follows_the_questions() {
     );
     assert_eq!(
         devices::MOVE_APPROVALS,
-        concat!("Move Approvals to This ", crate::computer_cap!(), "…")
+        concat!("Move to This ", crate::computer_cap!(), "…")
     );
     assert_eq!(
         devices::MOVE_TITLE,
@@ -1202,11 +1210,13 @@ fn devices_route_chip_sits_under_the_qr_code() {
     );
 }
 
-/// "Devices ⓘ 6" has the space of a group label above it, and its rows follow at the
-/// same distance as under "This Mac": no second space between the label and the rows.
+/// "Devices ⓘ" has the space of a group label above it, and its group starts at the same
+/// distance under it as the group under "This Mac": no second space between the label
+/// and the rows. The top of the group is measured, not the text: a one-line device row
+/// centers its name on the taller glyph.
 #[test]
 fn devices_rows_follow_their_label_as_under_this_mac() {
-    let texts = view_rects(&frame_one());
+    let (texts, boxes) = view_boxes(&frame_one());
     let this_mac = rect_of(&texts, concat!("This ", crate::computer!()));
     let reachable = rect_of(&texts, devices::ROUTE_SWITCH);
     let first = rect_of(&texts, "Mac mini (office)");
@@ -1217,12 +1227,84 @@ fn devices_rows_follow_their_label_as_under_this_mac() {
         .find(|(text, rect)| text == "Devices" && rect.bottom() < first.top())
         .map(|(_, rect)| *rect)
         .expect("the Devices label");
-    let under_this_mac = reachable.top() - this_mac.bottom();
-    let under_devices = first.top() - label.bottom();
+    // The top of the group under a label: the highest painted rectangle between the
+    // label and the first text of the group.
+    let group_box = |label: Rect, first: Rect| {
+        boxes
+            .iter()
+            .copied()
+            .filter(|rect| rect.top() >= label.bottom() && rect.top() <= first.top())
+            .min_by(|a, b| a.top().total_cmp(&b.top()))
+    };
+    // The five painted rectangles with the smallest top at or below the label, for the
+    // failure message.
+    let highest = |label: Rect| {
+        let mut below: Vec<Rect> = boxes
+            .iter()
+            .copied()
+            .filter(|rect| rect.top() >= label.bottom())
+            .collect();
+        below.sort_by(|a, b| a.top().total_cmp(&b.top()));
+        below.truncate(5);
+        below
+    };
+    let this_mac_box = group_box(this_mac, reachable);
+    let devices_box = group_box(label, first);
+    // From the top of each label, not the bottom: the rectangles are the glyphs' painted
+    // bounds, and their bottom follows the letters. On Linux the label is "This computer",
+    // whose "p" reaches 2 points under the baseline, while "Devices" has no descender.
+    let under_this_mac = this_mac_box.map_or(f32::INFINITY, |rect| rect.top()) - this_mac.top();
+    let under_devices = devices_box.map_or(f32::INFINITY, |rect| rect.top()) - label.top();
     assert!(
-        (under_devices - under_this_mac).abs() < 6.0,
-        "the rows follow the label: {under_devices} vs {under_this_mac}"
+        under_this_mac.is_finite() && under_devices.is_finite(),
+        "a group under each label: {under_this_mac} {under_devices}"
     );
+    assert!(
+        (under_devices - under_this_mac).abs() <= 1.0,
+        "the groups follow their labels: {under_devices} vs {under_this_mac}\n\
+         This Mac: label {this_mac:?}, selected {this_mac_box:?}, first text {reachable:?}, \
+         highest five {:?}\n\
+         Devices: label {label:?}, selected {devices_box:?}, first text {first:?}, \
+         highest five {:?}",
+        highest(this_mac),
+        highest(label),
+    );
+}
+
+/// The painted texts of the Devices section with their rectangles, and the rectangles of
+/// its filled shapes (the group boxes, the glyph tiles).
+fn view_boxes(view: &DevicesView) -> (Vec<(String, Rect)>, Vec<Rect>) {
+    fn rects(shape: &egui::Shape, out: &mut Vec<Rect>) {
+        match shape {
+            egui::Shape::Rect(rect) => out.push(rect.rect),
+            egui::Shape::Vec(nested) => nested.iter().for_each(|inner| rects(inner, out)),
+            _ => {}
+        }
+    }
+    let ctx = egui::Context::default();
+    let mut texts = Vec::new();
+    let mut boxes = Vec::new();
+    for _ in 0..3 {
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(720.0, 2400.0))),
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                devices::draw(ui, view, |g| {
+                    g.labeled("Notifications", super::rows::value("On"));
+                });
+            });
+        });
+        texts.clear();
+        boxes.clear();
+        for clipped in &output.shapes {
+            texts_of(&clipped.shape, clipped.clip_rect, &mut texts);
+            rects(&clipped.shape, &mut boxes);
+        }
+        output.drop_without_applying_deltas();
+    }
+    (texts, boxes)
 }
 
 /// Frames 2a–2c and 4b–4d use the exact texts of the mockup table.
@@ -1808,12 +1890,8 @@ fn devices_list_the_team_and_revoke_needs_the_owner_check() {
         texts = frame(&ctx, &mut app, TALL, Vec::new());
     }
     let text = joined(&texts);
-    for expected in [
-        "Synthetic iPhone",
-        "iPhone · Approves runs",
-        "via Apassy relay",
-        "Revoke…",
-    ] {
+    // One device on one route: no chip (the chips show only where routes differ).
+    for expected in ["Synthetic iPhone", "Revoke…"] {
         assert!(text.contains(expected), "shows {expected}: {text}");
     }
     let at = center_of(&texts, "Revoke…", TALL.x).expect("Revoke… is painted");
@@ -2517,24 +2595,17 @@ fn devices_connect_frames_draw_the_mockup() {
     for wanted in [
         MOVE_APPROVALS,
         MOVE_TO_CONNECT,
-        "Move them here: over your tailnet, or through Apassy Connect.",
+        "Approvals go through Apassy relay",
     ] {
         assert!(text.contains(wanted), "9a has {wanted}: {text}");
     }
-    // The text spans the row; the two buttons sit on their own row below it, the move to
-    // Connect on the right.
+    // The two buttons sit on their own row below the title, the move to Connect on the
+    // right.
     let rects = view_rects(&both);
-    let note = rect_of(
-        &rects,
-        "Move them here: over your tailnet, or through Apassy Connect.",
-    );
+    let title = rect_of(&rects, "Approvals go through Apassy relay");
     let to_mac = rect_of(&rects, MOVE_APPROVALS);
     let to_connect = rect_of(&rects, MOVE_TO_CONNECT);
-    assert!(
-        note.width() > 250.0,
-        "9a: the note is not a column: {note:?}"
-    );
-    assert!(to_mac.top() > note.bottom(), "{to_mac:?} under {note:?}");
+    assert!(to_mac.top() > title.bottom(), "{to_mac:?} under {title:?}");
     assert!((to_mac.center().y - to_connect.center().y).abs() < 2.0);
     assert!(
         to_connect.left() > to_mac.right(),
@@ -2550,7 +2621,9 @@ fn devices_connect_frames_draw_the_mockup() {
     let text = view_texts(&connect_only);
     assert!(text.contains(MOVE_TO_CONNECT), "{text}");
     assert!(!text.contains(MOVE_APPROVALS), "{text}");
-    assert!(text.contains("without Tailscale"), "{text}");
+    assert!(text.contains("Approvals go through Apassy relay"), "{text}");
+    // The move row says it; the switch above does not say it again.
+    assert!(!text.contains(ROUTE_OFF), "{text}");
     // Neither: no move row.
     let text = view_texts(&frame_one());
     assert!(!text.contains(MOVE_TO_CONNECT), "{text}");
@@ -2698,11 +2771,208 @@ fn connect_move_texts_follow_the_rules_of_plans_section_5() {
     // The ended state of a relay copy names both choices.
     for why in [PathEnded::FreeEnded, PathEnded::Retired] {
         let words = ended_copy_words(why);
-        assert!(words.contains("Linux node the sync home (free)"), "{words}");
+        assert!(words.contains("Linux node (free)"), "{words}");
         assert!(words.contains("Apassy Connect"), "{words}");
-        assert!(words.contains("is safe"), "{words}");
         let text = ended_text(why);
         assert!(text.contains("Questions wait on this"), "{text}");
         assert!(text.contains("Apassy Connect"), "{text}");
     }
+}
+
+/// N8-7 (node-pairing-v1 section 4a): the help of Node Words calls them safety words to
+/// compare and says that the same words are not proof of this computer.
+#[test]
+fn node_words_help_says_the_words_are_no_proof() {
+    let view = frame_one();
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut nodes = Vec::new();
+    for _ in 0..3 {
+        nodes = devices_frame(&ctx, &view, Vec::new()).1;
+    }
+    let at = nodes
+        .iter()
+        .find(|(name, _)| name == "About Node Words")
+        .map(|(_, rect)| rect.center())
+        .unwrap_or_else(|| panic!("no ⓘ of Node Words in {nodes:?}"));
+    let button = |pressed| Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Modifiers::NONE,
+    };
+    devices_frame(&ctx, &view, vec![Event::PointerMoved(at)]);
+    devices_frame(&ctx, &view, vec![button(true)]);
+    devices_frame(&ctx, &view, vec![button(false)]);
+    let mut text = String::new();
+    for _ in 0..2 {
+        text = devices_frame(&ctx, &view, Vec::new()).0;
+    }
+    for line in [
+        concat!(
+            "Safety words to compare: six words from this ",
+            crate::computer!(),
+            "'s certificate."
+        ),
+        "Your iPhone shows them in Settings → Devices.",
+        "Other words there: revoke that iPhone and pair again.",
+        concat!(
+            "The same words are not proof of this ",
+            crate::computer!(),
+            ". The iPhone checks the whole certificate."
+        ),
+    ] {
+        assert!(text.contains(line), "the open ⓘ shows {line:?}: {text}");
+    }
+}
+
+/// One frame of the Devices section for `view` with `events`: the painted text, and the
+/// AccessKit nodes that have a label and bounds.
+fn devices_frame(
+    ctx: &egui::Context,
+    view: &DevicesView,
+    events: Vec<Event>,
+) -> (String, Vec<(String, Rect)>) {
+    let input = RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(720.0, 2400.0))),
+        events,
+        ..Default::default()
+    };
+    let output = ctx.run_ui(input, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
+            devices::draw(ui, view, |g| {
+                g.labeled("Notifications", super::rows::value("On"));
+            });
+        });
+    });
+    let mut texts = Vec::new();
+    for clipped in &output.shapes {
+        texts_of(&clipped.shape, clipped.clip_rect, &mut texts);
+    }
+    let mut nodes = Vec::new();
+    if let Some(update) = &output.platform_output.accesskit_update {
+        for (_, node) in &update.nodes {
+            if let (Some(name), Some(at)) = (node.label(), node.bounds()) {
+                nodes.push((
+                    name.to_owned(),
+                    Rect::from_min_max(
+                        egui::pos2(at.x0 as f32, at.y0 as f32),
+                        egui::pos2(at.x1 as f32, at.y1 as f32),
+                    ),
+                ));
+            }
+        }
+    }
+    output.drop_without_applying_deltas();
+    (joined(&texts), nodes)
+}
+
+/// The labeled AccessKit nodes of the Devices section for `view` that carry a
+/// description: (label, description).
+fn view_descriptions(view: &DevicesView) -> Vec<(String, String)> {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut found = Vec::new();
+    for _ in 0..3 {
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(720.0, 2400.0))),
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                devices::draw(ui, view, |g| {
+                    g.labeled("Notifications", super::rows::value("On"));
+                });
+            });
+        });
+        found = output
+            .platform_output
+            .accesskit_update
+            .iter()
+            .flat_map(|update| update.nodes.iter())
+            // A label's text is its AccessKit value, a button's its label.
+            .filter_map(|(_, node)| {
+                let name = node.label().or_else(|| node.value())?;
+                Some((name.to_owned(), node.description()?.to_owned()))
+            })
+            .collect();
+        output.drop_without_applying_deltas();
+    }
+    found
+}
+
+/// The facts that moved from a second line to the hover text stay readable: each device
+/// row describes its kind and roles, and a Wi-Fi iPhone the day of its pairing.
+#[test]
+fn device_rows_describe_their_facts() {
+    let found = view_descriptions(&frame_one());
+    for (label, description) in [
+        ("Rafal's iPhone", "iPhone · Approves runs"),
+        ("build-box", "Linux node · Syncs Acme team"),
+        ("Rafal's iPhone", "Paired 12 Sep"),
+    ] {
+        assert!(
+            found
+                .iter()
+                .any(|(name, said)| name == label && said == description),
+            "{label}: {description} in {found:?}"
+        );
+    }
+}
+
+/// A route chip only where the route differs from the common one: with every device on
+/// one route, no row draws a chip; a device on another route keeps its chip.
+#[test]
+fn route_chips_show_only_where_routes_differ() {
+    let mut view = frame_one();
+    for device in &mut view.devices {
+        if device.route.is_some() {
+            device.route = Some(Route::Relay);
+        }
+    }
+    let text = view_texts(&view);
+    assert!(!text.contains("via Apassy relay"), "{text}");
+    view.devices[1].route = Some(Route::Connect);
+    let text = view_texts(&view);
+    assert!(text.contains("via Apassy Connect"), "{text}");
+    assert!(!text.contains("via Apassy relay"), "{text}");
+    // A node that runs only on Apassy Connect: every row goes through Connect, so no row
+    // has a chip, and the This Mac group names the route once, not the relay.
+    view.node = NodeState::Off;
+    for device in &mut view.devices {
+        if device.route.is_some() {
+            device.route = Some(Route::Connect);
+        }
+    }
+    let text = view_texts(&view);
+    assert!(!text.contains("via Apassy Connect"), "{text}");
+    assert!(!text.contains("Apassy relay"), "{text}");
+    assert_eq!(
+        text.matches("Approvals go through Apassy Connect.").count(),
+        1,
+        "{text}"
+    );
+    // The switch is on and its front is not bound yet ("Starting…"), while the node runs
+    // on Connect: the line names Connect there too.
+    view.node = NodeState::On { address: None };
+    let text = view_texts(&view);
+    assert!(!text.contains("via Apassy Connect"), "{text}");
+    assert_eq!(
+        text.matches("Approvals go through Apassy Connect.").count(),
+        1,
+        "{text}"
+    );
+    // The move row says that the approvals go through Apassy relay (approvals pinned to
+    // another node, this node only on Connect): no Connect line beside it.
+    view.node = NodeState::Off;
+    view.can_move_connect = true;
+    let text = view_texts(&view);
+    assert!(
+        text.contains("Approvals go through Apassy relay"),
+        "the move row: {text}"
+    );
+    assert!(
+        !text.contains("Approvals go through Apassy Connect."),
+        "{text}"
+    );
 }
