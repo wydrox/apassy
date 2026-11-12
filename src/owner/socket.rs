@@ -27,7 +27,10 @@ use serde::Serialize;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::broker::server::{prepare_directory, remove_stale_socket};
-use crate::owner::wire::{MAX_REQUEST_BYTES, Request, Response};
+pub(crate) use crate::browser::caller::PeerSeen;
+#[cfg(feature = "desktop")]
+use crate::owner::wire::MAX_REQUEST_BYTES;
+use crate::owner::wire::{Request, Response};
 
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
 const ACCEPT_POLL: Duration = Duration::from_millis(50);
@@ -51,7 +54,18 @@ pub(crate) trait LineWire: 'static {
 
     /// Check the program at the other end of the connection before the UI thread sees
     /// the request. An error is the response to send. The default accepts every peer.
-    fn check_peer(_stream: &UnixStream, _request: &Self::Request) -> Result<(), Self::Response> {
+    /// What the check saw goes to [`Self::check_peer_again`].
+    fn check_peer(
+        _stream: &UnixStream,
+        _request: &Self::Request,
+    ) -> Result<PeerSeen, Self::Response> {
+        Ok(PeerSeen::default())
+    }
+
+    /// Check the peer again after the UI thread answered, before the answer is written,
+    /// with what [`Self::check_peer`] saw. An error is the response to send instead, and
+    /// the answer is dropped. The default checks nothing.
+    fn check_peer_again(_stream: &UnixStream, _seen: &PeerSeen) -> Result<(), Self::Response> {
         Ok(())
     }
 
@@ -80,9 +94,11 @@ impl PeerGone {
 /// How often the socket thread looks at the connection of a watched request.
 const WATCH_POLL: Duration = Duration::from_millis(100);
 
-/// The owner wire (ADR 0017).
+/// The owner wire (ADR 0017): `owner.sock`, hosted by the window only.
+#[cfg(feature = "desktop")]
 pub(crate) struct OwnerWire;
 
+#[cfg(feature = "desktop")]
 impl LineWire for OwnerWire {
     type Request = Request;
     type Response = Response;
@@ -113,6 +129,8 @@ pub(crate) type WireEnvelope<W> = Envelope<<W as LineWire>::Request, <W as LineW
 
 /// The running owner socket. Drop stops the accept loop and removes the socket file.
 pub(crate) struct OwnerSocket {
+    /// Open connections, for the window's busy state.
+    #[cfg(feature = "desktop")]
     active: Arc<AtomicUsize>,
     socket: PathBuf,
     stop: Arc<AtomicBool>,
@@ -128,9 +146,11 @@ impl std::fmt::Debug for OwnerSocket {
 }
 
 impl OwnerSocket {
+    #[cfg(feature = "desktop")]
     pub(crate) fn update_busy(&self) -> bool {
         self.active.load(Ordering::SeqCst) != 0
     }
+    #[cfg(feature = "desktop")]
     pub(crate) fn socket_path(&self) -> &Path {
         &self.socket
     }
@@ -154,6 +174,7 @@ impl Drop for OwnerSocket {
 
 /// Start the owner socket. Requests go to the returned receiver. `wake` tells the UI
 /// thread that a request waits, also when the window is hidden.
+#[cfg(feature = "desktop")]
 pub(crate) fn start(
     socket: &Path,
     wake: impl Fn() + Send + Sync + 'static,
@@ -182,6 +203,7 @@ pub(crate) fn start_line<W: LineWire>(
         .spawn(move || accept_loop::<W>(&listener, &sender, &wake, &thread_stop, &thread_active))?;
     Ok((
         OwnerSocket {
+            #[cfg(feature = "desktop")]
             active,
             socket: socket.to_path_buf(),
             stop,
@@ -256,9 +278,10 @@ fn serve<W: LineWire>(
         Ok(request) => request,
         Err(response) => return write_response(&mut writer, &response),
     };
-    if let Err(response) = W::check_peer(&writer, &request) {
-        return write_response(&mut writer, &response);
-    }
+    let seen = match W::check_peer(&writer, &request) {
+        Ok(seen) => seen,
+        Err(response) => return write_response(&mut writer, &response),
+    };
     let response = match W::watch(&request) {
         None => ask_ui::<W>(sender, wake, request),
         Some(gone) => match ask_ui_watching::<W>(sender, wake, request, &reader, &gone) {
@@ -267,6 +290,10 @@ fn serve<W: LineWire>(
             None => return Ok(()),
         },
     };
+    if let Err(refusal) = W::check_peer_again(&writer, &seen) {
+        drop(response);
+        return write_response(&mut writer, &refusal);
+    }
     write_response(&mut writer, &response)
 }
 

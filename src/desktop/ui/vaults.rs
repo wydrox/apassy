@@ -204,6 +204,16 @@ impl DesktopApp {
         self.ui.start = step;
     }
 
+    /// Leave the open vault for "Use a vault from another Mac" › "Apassy Connect": the
+    /// vault stores of the account that this computer does not have yet, for a second
+    /// vault here. The account session opens again for that step of the start screen;
+    /// "Back" there shows the unlock screen of the vault that the owner left.
+    pub(crate) fn leave_vault_for_connect(&mut self, ctx: Option<&egui::Context>) {
+        self.leave_vault(ctx);
+        super::sync::begin_open(self);
+        self.sync.relay.source = super::sync::OpenSource::Connect;
+    }
+
     /// Forget each piece of state of the vault that was open: typed secrets and their
     /// undo history, forms, the selection, the navigation, the owner check, a Touch ID
     /// unlock or change that still runs, inbox marks, the learning view, and a parsed
@@ -472,11 +482,16 @@ fn shown_path(path: &Path) -> String {
 enum Pick {
     Switch(String),
     Leave(Step),
+    FromConnect,
 }
+
+/// The menu item of a second vault from the Connect account.
+pub(crate) const FROM_CONNECT: &str = "Use a vault from Apassy Connect…";
 
 /// The open vault at the top of the sidebar: its name, where it lives, and the state of
 /// its sync, with a lock button. Its menu has every vault (the open one checked),
-/// "New vault…", "Open vault file…", and "Lock".
+/// "New vault…", "Open vault file…", "Use a vault from Apassy Connect…" (when sync is
+/// offered), and "Lock".
 pub(super) fn sidebar_switcher(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let current = app.vault_list.current.clone();
     let name = app
@@ -518,9 +533,18 @@ pub(super) fn sidebar_switcher(app: &mut DesktopApp, ui: &mut egui::Ui) {
         if ui.selectable_label(false, "Open vault file…").clicked() {
             pick = Some(Pick::Leave(Step::Open));
         }
+        if app.sync.offered && ui.selectable_label(false, FROM_CONNECT).clicked() {
+            pick = Some(Pick::FromConnect);
+        }
         ui.separator();
         if ui
-            .selectable_label(false, format!("Lock “{name}”   ⌘L"))
+            .selectable_label(
+                false,
+                format!(
+                    concat!("Lock “{name}”   ", crate::shortcut!("L")),
+                    name = name
+                ),
+            )
             .clicked()
         {
             lock = true;
@@ -537,6 +561,7 @@ pub(super) fn sidebar_switcher(app: &mut DesktopApp, ui: &mut egui::Ui) {
     match pick {
         Some(Pick::Switch(id)) => app.switch_vault(&id, Some(&ctx)),
         Some(Pick::Leave(step)) => app.leave_vault_for(step, Some(&ctx)),
+        Some(Pick::FromConnect) => app.leave_vault_for_connect(Some(&ctx)),
         None => {}
     }
 }
@@ -686,7 +711,7 @@ pub(super) fn short_location(path: &Path, home: Option<&Path>, data_dir: &Path) 
         return shown_path(path);
     };
     if folder == data_dir {
-        return "On this Mac".to_owned();
+        return concat!("On this ", crate::computer!()).to_owned();
     }
     let names = |rest: &Path| -> Vec<String> {
         rest.components()
@@ -758,6 +783,7 @@ enum RowAction {
     Finder(PathBuf),
     Lock,
     Leave(Step),
+    FromConnect,
 }
 
 /// Settings > Vault: one row for each vault with its name and where it lives,
@@ -771,6 +797,7 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     list_note(app, ui);
     let current = app.vault_list.current.clone();
     let several = app.vault_list.registry.entries().len() > 1;
+    let offered = app.sync.offered;
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let mut action = None;
     let header = if several { "Vaults" } else { "Vault" };
@@ -807,7 +834,9 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                                     ui.add_enabled(enabled, egui::Button::selectable(false, label))
                                         .clicked()
                                 };
-                                if item(ui, present, "Show in Finder") {
+                                // `open -R` is macOS only: Linux has no Finder to reveal in.
+                                if cfg!(target_os = "macos") && item(ui, present, "Show in Finder")
+                                {
                                     action = Some(RowAction::Finder(entry.path.clone()));
                                 }
                                 if item(ui, true, "Rename…") {
@@ -836,6 +865,9 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                                 if item(ui, true, "Open vault file…") {
                                     action = Some(RowAction::Leave(Step::Open));
                                 }
+                                if offered && item(ui, true, FROM_CONNECT) {
+                                    action = Some(RowAction::FromConnect);
+                                }
                             });
                             if !is_open
                                 && present
@@ -856,6 +888,7 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
         Some(RowAction::Lock) => app.lock_vault(Some(&ctx)),
         Some(RowAction::Open(id)) => app.switch_vault(&id, Some(&ctx)),
         Some(RowAction::Leave(step)) => app.leave_vault_for(step, Some(&ctx)),
+        Some(RowAction::FromConnect) => app.leave_vault_for_connect(Some(&ctx)),
         Some(RowAction::Finder(path)) => {
             if let Err(err) = show_in_finder(&path) {
                 app.set_err(format!("Apassy cannot show {} ({err}).", path.display()));
@@ -919,7 +952,7 @@ fn rename_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &VaultEntry) -
             |_| {},
             |ui| {
                 save |= kit::button(ui, "Save", Style::Prominent)
-                    .on_hover_text("⌘S")
+                    .on_hover_text(crate::shortcut!("S"))
                     .clicked();
                 cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();
             },

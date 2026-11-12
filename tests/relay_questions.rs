@@ -2789,6 +2789,73 @@ fn an_old_relay_without_questions_keeps_them_on_this_mac() {
     assert_eq!(settled(second).outcome, ApprovalOutcome::Denied);
 }
 
+/// Plan s7 unit M5: the hosted relay ends the free questions of the team (`410
+/// free_connect_ended`). The questions stay on this Mac, the waiter asks the relay no
+/// more (no retry storm), Settings gets one state with the choices, and Activity says it
+/// once. Nothing local changes: the membership stays for a move.
+#[test]
+fn a_hosted_relay_that_ended_the_free_questions_is_asked_no_more() {
+    use apassy::questions::worker::ended_text;
+    use apassy::relay::membership::PathEnded;
+    let world = world(true);
+    world
+        .relay
+        .fail_next("POST /v1/questions", 1000, fake_relay::FREE_CONNECT_ENDED);
+    world
+        .relay
+        .fail_next("GET /v1/questions", 1000, fake_relay::FREE_CONNECT_ENDED);
+    let first = world.ask(world.run(contract_answers()), Duration::from_secs(60));
+    let start = Instant::now();
+    let view = loop {
+        let view = world.worker.view();
+        if view.ended.is_some() {
+            break view;
+        }
+        assert!(start.elapsed() < Duration::from_secs(10), "{view:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(view.ended, Some(PathEnded::FreeEnded));
+    assert_eq!(
+        view.problem.as_deref(),
+        Some(ended_text(PathEnded::FreeEnded).as_str())
+    );
+    // The question waits here and the owner answers it on this Mac.
+    while world.queue.pending().is_empty() {
+        assert!(start.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(world.queue.deny(world.queue.pending()[0].id));
+    assert_eq!(settled(first).outcome, ApprovalOutcome::Denied);
+    // The loops stop: a second question asks the relay nothing.
+    std::thread::sleep(Duration::from_millis(500));
+    let asked = world.relay.count("POST /v1/questions") + world.relay.count("GET /v1/questions");
+    let second = world.ask(world.run(contract_answers()), Duration::from_secs(60));
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(
+        world.relay.count("POST /v1/questions") + world.relay.count("GET /v1/questions"),
+        asked,
+        "no call after the end"
+    );
+    let lines: Vec<String> = world
+        .refused_lines()
+        .into_iter()
+        .filter(|line| *line == ended_text(PathEnded::FreeEnded))
+        .collect();
+    assert_eq!(lines.len(), 1, "once in Activity");
+    while world.queue.pending().is_empty() {
+        assert!(start.elapsed() < Duration::from_secs(15));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(world.queue.deny(world.queue.pending()[0].id));
+    assert_eq!(settled(second).outcome, ApprovalOutcome::Denied);
+    let kept = world.with_a(|vault| {
+        apassy::relay::membership::questions_membership(vault)
+            .unwrap()
+            .is_some()
+    });
+    assert!(kept, "the membership stays for a move");
+}
+
 /// A vault in iCloud Drive with a notifications-only team of Mac A, and the path of a
 /// copy of the vault for Mac B.
 struct Cloud {
@@ -3013,7 +3080,11 @@ fn a_second_mac_joins_the_questions_team_of_the_vault() {
             team_id: team.clone()
         }
     );
-    assert_eq!(client_a.devices().unwrap().len(), 2, "one team, two Macs");
+    assert_eq!(
+        client_a.devices().unwrap().len(),
+        2,
+        concat!("one team, two ", apassy::computers!())
+    );
 }
 
 /// The JSON `body` without its string values that are long base64url text (random

@@ -1,6 +1,6 @@
 [package]
 name = "apassy-core"
-version = "0.5.19"
+version = "0.5.20"
 edition = "2024"
 rust-version = "1.97"
 publish = false
@@ -27,8 +27,11 @@ default = ["openssl"]
 openssl = ["apassy/openssl"]
 
 [dev-dependencies]
+# tests/connect_dial.rs (plan s7 unit I2): the loopback Connect is the relay crate's own
+# server with the account routes and the tunnel. A workspace member, no new crate.
+apassy-relay = { path = "../../crates/apassy-relay" }
 tempfile = "=3.27.0"
-rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled-sqlcipher-vendored-openssl"] }
+rusqlite = { version = "=0.42.0", default-features = false, features = ["bundled-sqlcipher-vendored-openssl"] }
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

@@ -351,8 +351,9 @@ fn automatic_command_settings_require_the_owner_check() {
     }
 }
 
-/// A4: "Show" shows the owner check. Touch ID answers `not_available`, and
-/// the dialog says so. A wrong passphrase reveals nothing. The right one reveals.
+/// A4: "Show" waits for the owner check and explains the platform's authentication.
+/// The synthetic Touch ID helper answers `not_available`. A wrong passphrase reveals
+/// nothing. The right one reveals.
 #[test]
 fn reveal_waits_for_the_owner_check_and_falls_back_to_the_passphrase() {
     let dir = TempDir::new().expect("temp dir");
@@ -369,12 +370,12 @@ fn reveal_waits_for_the_owner_check_and_falls_back_to_the_passphrase() {
     app.ask_owner(OwnerRequest::Reveal { item_id }, Some(&ctx));
     let text = app_frame(&ctx, &mut app);
     assert!(text.contains("Confirm that it is you"), "{text}");
-    assert!(
-        text.contains(
-            "Touch ID is not available: the Touch ID keyboard is not connected or not paired"
-        ),
-        "{text}"
-    );
+    let auth_note = if cfg!(target_os = "linux") {
+        "Confirm with your vault passphrase. System authentication is optional and requires an installed polkit policy."
+    } else {
+        "Touch ID is not available: the Touch ID keyboard is not connected or not paired"
+    };
+    assert!(text.contains(auth_note), "{text}");
     assert!(!text.contains(TOKEN));
     assert!(
         app.owner
@@ -516,7 +517,7 @@ fn open_settings_from_decisions_shows_the_notifications_tab() {
     assert_eq!(app.ui.settings_section, super::SettingsSection::Devices);
     let text = app_frame(&egui::Context::default(), &mut app);
     assert!(
-        text.contains("This Mac") && text.contains("Notifications"),
+        text.contains(concat!("This ", crate::computer!())) && text.contains("Notifications"),
         "{text}"
     );
     assert!(!text.contains("Keyboard shortcuts"), "{text}");

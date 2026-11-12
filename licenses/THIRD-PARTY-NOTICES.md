@@ -1,7 +1,7 @@
 # Third-party notices
 
 Date: 2026-09-26.
-Source: `Cargo.lock` at commit `768bbf3`, and the additions for the iPhone companion (ADR 0020) on 2026-09-30. Review: [storage dependencies](../docs/reviews/storage-dependencies.md).
+Source: `Cargo.lock` at commit `768bbf3`, the additions for the iPhone companion (ADR 0020) on 2026-09-30, and the storage stack (SQLCipher 4.20.0, rusqlite 0.42.0) on 2026-11-12. Review: [storage dependencies](../docs/reviews/storage-dependencies.md).
 
 This file lists the licenses of the storage stack, the TLS stack, eframe/egui, and the QR code crate.
 The license texts are in the subdirectories of `licenses/`. They are verbatim copies from the crate sources in `~/.cargo/registry/src/`, except `egui/LICENSE-MIT`. That file comes from the egui repository at the crate commit `49682f8b`, because the egui crates do not include a license file.
@@ -24,18 +24,19 @@ Where a crate has a choice of licenses ("OR"), Apassy uses the MIT license. The 
 
 | Component | Version | License used | Text | In the binary |
 | --- | --- | --- | --- | --- |
-| SQLCipher (Community Edition, Zetetic LLC) | 4.14.0, bundled in libsqlite3-sys | BSD-3-Clause | `sqlcipher/LICENSE` | Yes, compiled from `sqlcipher/sqlite3.c` |
-| SQLite | 3.51.3, the base of SQLCipher 4.14.0 | Public domain | None required | Yes |
+| SQLCipher (Community Edition, Zetetic LLC) | 4.20.0, from sqlcipher-src | BSD-3-Clause | `sqlcipher/LICENSE` | Yes, compiled from `sqlcipher/sqlcipher.c` of sqlcipher-src |
+| SQLite | 3.54.1, the base of SQLCipher 4.20.0 | Public domain | None required | Yes |
 | OpenSSL (libcrypto) | 3.6.3 | Apache-2.0 | `openssl/LICENSE.txt` | Yes, static `libcrypto.a` (and `libssl.a`, linked by openssl-sys) |
-| rusqlite | 0.40.2 | MIT | `rusqlite/LICENSE` | Yes |
-| libsqlite3-sys | 0.38.2 | MIT | `libsqlite3-sys/LICENSE` | Yes |
+| rusqlite | 0.42.0 | MIT | `rusqlite/LICENSE` | Yes |
+| libsqlite3-sys | 0.40.0 | MIT | `libsqlite3-sys/LICENSE` | Yes |
+| sqlcipher-src | 420.0.0+sqlcipher-4.20.0-sqlite-3.54.1-libtomcrypt-1.18.2 | MIT (crate code) | `sqlcipher-src/LICENSE` | No. Build dependency of libsqlite3-sys only. It supplies the SQLCipher source. Its libtomcrypt sources are not compiled: the build uses OpenSSL (or CommonCrypto on the Apple Watch). |
 | openssl-sys | 0.9.117 | MIT | `openssl-sys/LICENSE-MIT` | Yes |
 | openssl-src | 300.6.1+3.6.3 | MIT (choice from MIT/Apache-2.0) | `openssl-src/LICENSE-MIT` | No. Build script only. It supplies the OpenSSL source. |
 
 ### SQLCipher notice
 
-The SQLCipher source in the binary has this notice (`sqlcipher/sqlite3.c`, file `sqlcipher.c`).
-The file `sqlcipher/LICENSE` has the same terms with the years 2008-2020.
+The SQLCipher source in the binary has this notice (file `sqlcipher.c` of the amalgamation `sqlcipher/sqlcipher.c` in sqlcipher-src).
+The file `sqlcipher/LICENSE` is the `sqlcipher/LICENSE-sqlcipher` file of sqlcipher-src. It has the same terms with the line "Copyright (c) 2025, ZETETIC LLC".
 
 ```
 SQLCipher
@@ -77,7 +78,7 @@ May you find forgiveness for yourself and forgive others.
 May you share freely, never taking more than you give.
 ```
 
-The xoshiro256++ generator in SQLCipher is also public domain (source comment in `sqlite3.c`). SQLCipher does not use it for cryptography.
+The xoshiro256++ generator in SQLCipher is also public domain (source comment in the amalgamation). SQLCipher does not use it for cryptography.
 
 ### OpenSSL notice
 

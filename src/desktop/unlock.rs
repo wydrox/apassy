@@ -42,7 +42,11 @@ pub const UNLOCK_REASON: &str = "unlock the Apassy vault";
 pub const KEYCHAIN_UNAVAILABLE_NOTE: &str = "Touch ID can confirm actions, but cannot unlock the vault until the app has a provisioning profile. Unlock with the passphrase.";
 
 /// The owner text after a fingerprint change.
-pub const BIOMETRY_CHANGED_NOTE: &str = "The fingerprints on this Mac changed after you turned on Touch ID unlock. Apassy removed the old unlock key. Unlock with the passphrase, then turn on Touch ID unlock again.";
+pub const BIOMETRY_CHANGED_NOTE: &str = concat!(
+    "The fingerprints on this ",
+    crate::computer!(),
+    " changed after you turned on Touch ID unlock. Apassy removed the old unlock key. Unlock with the passphrase, then turn on Touch ID unlock again."
+);
 
 /// The owner text when this build has no keychain helper.
 pub const HELPER_MISSING_NOTE: &str = "Touch ID unlock works only in Apassy.app. This build has no keychain helper. Unlock with the passphrase.";
@@ -157,9 +161,38 @@ pub fn read_unlock_key(
     helper: &NativeHelper,
     vault_path: &Path,
 ) -> Result<Zeroizing<String>, TouchIdUnlockError> {
+    read_unlock_key_with(helper, vault_path, None).map(|(key, _)| key)
+}
+
+/// The vault's unlock key, and the Apassy Connect key when the same Touch ID read it.
+pub type UnlockKeys = (Zeroizing<String>, Option<Zeroizing<Vec<u8>>>);
+
+/// [`read_unlock_key`] that also reads the Keychain item `also` under the same Touch ID:
+/// the Apassy Connect key of this Mac, which the unlock opens with the vault (plan s7
+/// unit M5b). The second item is `Some` only when the helper read it without a second
+/// prompt; otherwise the account session reads it on its own.
+pub fn read_unlock_key_with(
+    helper: &NativeHelper,
+    vault_path: &Path,
+    also: Option<&str>,
+) -> Result<UnlockKeys, TouchIdUnlockError> {
     let account = vault_unlock_account(vault_path);
-    let secret = match helper.keychain_read_titled(&account, UNLOCK_REASON, "Unlock Apassy") {
-        Ok(secret) => secret,
+    let read = match also {
+        Some(also) => helper
+            .keychain_read_with_also(&account, UNLOCK_REASON, "Unlock Apassy", also)
+            .map(|(secret, item)| match item {
+                crate::native::AlsoItem::Read(key) => {
+                    let key = Zeroizing::new(key.expose().to_vec());
+                    (secret, Some(key))
+                }
+                _ => (secret, None),
+            }),
+        None => helper
+            .keychain_read_titled(&account, UNLOCK_REASON, "Unlock Apassy")
+            .map(|secret| (secret, None)),
+    };
+    let (secret, also_key) = match read {
+        Ok(read) => read,
         Err(err) => {
             return Err(match err.code() {
                 Some(HelperErrorCode::BiometryChanged) => {
@@ -193,7 +226,7 @@ pub fn read_unlock_key(
     let text = Zeroizing::new(secret.expose().to_vec());
     drop(secret);
     match std::str::from_utf8(&text) {
-        Ok(passphrase) => Ok(Zeroizing::new(passphrase.to_owned())),
+        Ok(passphrase) => Ok((Zeroizing::new(passphrase.to_owned()), also_key)),
         Err(_) => {
             let _ = helper.keychain_delete(&account);
             Err(TouchIdUnlockError::StaleKey)

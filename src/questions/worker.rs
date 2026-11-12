@@ -67,7 +67,9 @@ use crate::broker::approvals::{
     OwnerCheck, OwnerGate, OwnerProof, PendingRun, RunEnd, StricterAnswer, verify_remote_answer,
 };
 use crate::companion::digest::question_digest_v2_hex;
-use crate::relay::membership::{questions_membership, this_device, this_device_removed};
+use crate::relay::membership::{
+    FREE_RELAY_PATHS_END_VERSION, PathEnded, questions_membership, this_device, this_device_removed,
+};
 use crate::sync::decode_b64u;
 use crate::sync::relay_http::Cancel;
 use crate::vault::ItemEventKind;
@@ -93,27 +95,74 @@ pub const ACTIVITY_OPERATION: &str = "answer through the relay";
 const LIST_PAGE: usize = 100;
 /// Bound encrypted cards retained while their key or trusted-device row catches up.
 const MAX_PENDING: usize = LIST_PAGE;
-const RECEIVE_NETWORK: &str =
-    "Requests from other Macs could not be refreshed. Apassy will try again.";
-const RECEIVE_SYNC: &str = "Sync this vault to read a request from another Mac.";
-const RECEIVE_UNREADABLE: &str =
-    "A request from another Mac could not be read. Sync this vault or update Apassy.";
+const RECEIVE_NETWORK: &str = concat!(
+    "Requests from other ",
+    crate::computers!(),
+    " could not be refreshed. Apassy will try again."
+);
+const RECEIVE_SYNC: &str = concat!(
+    "Sync this vault to read a request from another ",
+    crate::computer!(),
+    "."
+);
+const RECEIVE_UNREADABLE: &str = concat!(
+    "A request from another ",
+    crate::computer!(),
+    " could not be read. Sync this vault or update Apassy."
+);
 /// The owner removed this Mac from the questions (its key is in a removed row).
 pub const REMOVED: &str = "This device was removed from questions. To answer and ask through the relay again, turn “Send questions through the relay” on again: it needs your confirmation and a new key.";
 /// The vault has a questions membership on this Mac but no row of this Mac.
-pub const NOT_REGISTERED: &str = "This Mac is not a device of the questions of this vault. Turn “Send questions through the relay” off and on again.";
+pub const NOT_REGISTERED: &str = concat!(
+    "This ",
+    crate::computer!(),
+    " is not a device of the questions of this vault. Turn “Send questions through the relay” off and on again."
+);
 /// `POST /v1/questions` or `GET /v1/questions` answered `404`: the relay predates the
 /// questions (contract section 10).
 pub const UNSUPPORTED: &str = "The relay does not support questions yet — update the relay.";
 /// After a `404` of the questions routes, the loops ask the relay again this much later.
 const UNSUPPORTED_WAIT: Duration = Duration::from_secs(5 * 60);
+
+/// What Settings and Activity say once the hosted relay ended the questions of the team
+/// for good (`410`, plan s7 unit M5). The questions wait on this Mac, as before the
+/// questions were on; the window offers the choices of the notice.
+pub fn ended_text(why: PathEnded) -> String {
+    match why {
+        PathEnded::FreeEnded => format!(
+            concat!(
+                "Free approvals through apassy-relay.wyderka.cc ended with Apassy {}. Questions wait on this ",
+                crate::computer!(),
+                ". Keep them free over Tailscale with this ",
+                crate::computer!(),
+                " as the node, or use Apassy Connect."
+            ),
+            FREE_RELAY_PATHS_END_VERSION
+        ),
+        PathEnded::Retired => concat!(
+            "apassy-relay.wyderka.cc no longer carries these approvals. Questions wait on this ",
+            crate::computer!(),
+            ". Keep them free over Tailscale with this ",
+            crate::computer!(),
+            " as the node, or use Apassy Connect."
+        )
+        .to_owned(),
+    }
+}
 /// What the answering device shows after the relay took its answer: the protocol has no
 /// receipts yet, so a refusal shows only as a run that does not go on.
-pub const SENT: &str = "Sent. The Mac checks it; if the run does not continue within a minute, the answer was refused.";
+pub const SENT: &str = concat!(
+    "Sent. The ",
+    crate::computer!(),
+    " checks it; if the run does not continue within a minute, the answer was refused."
+);
 /// The local note of a production question about a team credential (integrator
 /// decision 1).
-pub const TEAM_PRODUCTION: &str =
-    "Remote answers for team production come with shared vaults; answer on this Mac.";
+pub const TEAM_PRODUCTION: &str = concat!(
+    "Remote answers for team production come with shared vaults; answer on this ",
+    crate::computer!(),
+    "."
+);
 
 pub(super) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -127,7 +176,7 @@ pub(crate) fn answered_on_label(device: &TrustedDevice) -> String {
         TrustedDeviceKind::Iphone => "iPhone".to_owned(),
         TrustedDeviceKind::Watch => "Apple Watch".to_owned(),
         TrustedDeviceKind::Mac => match crate::vault::usage::clean(&device.name, 64) {
-            name if name.is_empty() => "another Mac".to_owned(),
+            name if name.is_empty() => concat!("another ", crate::computer!()).to_owned(),
             name => name,
         },
     }
@@ -252,6 +301,13 @@ pub struct QuestionsView {
     pub connect_posted: BTreeMap<String, String>,
     /// The connect requests that stay on this Mac, with the reason.
     pub connect_local_only: BTreeMap<String, String>,
+    /// The hosted relay ended the questions of the team of the vault for good (`410
+    /// free_connect_ended` or `410 hosted_retired`): the waiter asks it nothing more
+    /// until the questions go another way ([`ended_text`]).
+    pub ended: Option<PathEnded>,
+    /// The team and the Unix time of the last answer through the relay that took effect:
+    /// the first round trip of "Move Approvals to Connect" (plan s7 unit M5).
+    pub last_answer: Option<(String, u64)>,
 }
 
 /// A question of another device of the vault, opened and checked (section 13): it shows
@@ -579,6 +635,9 @@ pub(super) struct State {
     unsupported_until: Option<Instant>,
     /// The Activity line of [`UNSUPPORTED`] was written for this team.
     unsupported_logged: Option<String>,
+    /// The hosted relay ended the questions of this team for good (`410`): no call to it
+    /// while the vault asks through it.
+    ended: Option<(String, PathEnded)>,
 }
 
 pub(super) struct Shared {
@@ -975,6 +1034,26 @@ impl Shared {
                 return None;
             }
         };
+        let ended = lock(&self.state)
+            .ended
+            .as_ref()
+            .filter(|(team, _)| *team == membership.team_id)
+            .map(|(_, why)| *why);
+        if let Some(why) = ended {
+            // The hosted relay ended this path: nothing goes to it, and the questions
+            // wait on this Mac. Another team (a move) asks again.
+            if lock(&self.state).active.is_some() {
+                self.forget();
+            }
+            let mut view = lock(&self.view);
+            if view.ended != Some(why) {
+                view.ended = Some(why);
+                view.problem = Some(ended_text(why));
+                drop(view);
+                self.changed();
+            }
+            return None;
+        }
         let mut state = lock(&self.state);
         state.checked_at = Some(Instant::now());
         if let Some(active) = &mut state.active
@@ -1011,6 +1090,7 @@ impl Shared {
         view.problem = None;
         view.removed = false;
         view.unsupported = false;
+        view.ended = None;
         drop(view);
         self.changed();
         Some(active)
@@ -1234,7 +1314,11 @@ impl Shared {
                 self.keep_local(
                     active,
                     run,
-                    "This question is too long for your other devices. Answer it on this Mac.",
+                    concat!(
+                        "This question is too long for your other devices. Answer it on this ",
+                        crate::computer!(),
+                        "."
+                    ),
                 );
                 return;
             }
@@ -1318,13 +1402,25 @@ impl Shared {
             self.mark_unsupported(active, &agent);
             return;
         }
+        if let Some(why) = error.path_ended() {
+            state.asked.remove(&run_id);
+            drop(state);
+            self.mark_ended(active, &agent, why);
+            return;
+        }
         if error.can_pass() {
             let wait = RETRY_WAITS[asked.tries.min(RETRY_WAITS.len() - 1)];
             asked.tries += 1;
             asked.next_try = Instant::now() + Duration::from_secs(wait);
             drop(state);
-            lock(&self.view).problem =
-                Some("The relay does not answer. Questions wait on this Mac.".to_owned());
+            lock(&self.view).problem = Some(
+                concat!(
+                    "The relay does not answer. Questions wait on this ",
+                    crate::computer!(),
+                    "."
+                )
+                .to_owned(),
+            );
             return;
         }
         state.asked.remove(&run_id);
@@ -1332,15 +1428,35 @@ impl Shared {
             // The relay counts the open questions of the team, of this Mac, and of the
             // member, and the questions of the last hour; its message names the limit.
             Some("too_many_questions") => {
-                "The relay has too many open questions of this Mac or this vault. Answer it on this Mac."
+                concat!(
+                    "The relay has too many open questions of this ",
+                    crate::computer!(),
+                    " or this vault. Answer it on this ",
+                    crate::computer!(),
+                    "."
+                )
             }
             Some("payload_too_large") => {
-                "This question is too long for your other devices. Answer it on this Mac."
+                concat!(
+                    "This question is too long for your other devices. Answer it on this ",
+                    crate::computer!(),
+                    "."
+                )
             }
             _ if matches!(error, QuestionsError::Removed) => {
-                "The relay refused this Mac. Answer the question on this Mac."
+                concat!(
+                    "The relay refused this ",
+                    crate::computer!(),
+                    ". Answer the question on this ",
+                    crate::computer!(),
+                    "."
+                )
             }
-            _ => "The relay did not take this question. Answer it on this Mac.",
+            _ => concat!(
+                "The relay did not take this question. Answer it on this ",
+                crate::computer!(),
+                "."
+            ),
         };
         state.local_only.insert(run_id, why.to_owned());
         drop(state);
@@ -1373,6 +1489,33 @@ impl Shared {
         if first {
             self.activity(active, agent, UNSUPPORTED);
         }
+        self.changed();
+    }
+
+    /// The hosted relay answered `410 free_connect_ended` or `410 hosted_retired`: the
+    /// path of this team ended for good. The session goes (no call is in a loop after
+    /// it), the questions stay on this Mac, Settings shows [`ended_text`], and Activity
+    /// says it once. The vault keeps its membership: nothing local is lost, and a move
+    /// to the node or to Connect starts from it.
+    pub(super) fn mark_ended(&self, active: &Active, agent: &str, why: PathEnded) {
+        let first = {
+            let mut state = lock(&self.state);
+            let first = state
+                .ended
+                .as_ref()
+                .is_none_or(|(team, _)| *team != active.team_id);
+            state.ended = Some((active.team_id.clone(), why));
+            first
+        };
+        {
+            let mut view = lock(&self.view);
+            view.ended = Some(why);
+            view.problem = Some(ended_text(why));
+        }
+        if first {
+            self.activity(active, agent, &ended_text(why));
+        }
+        self.forget();
         self.changed();
     }
 
@@ -1541,6 +1684,12 @@ impl Shared {
                 }
                 return;
             }
+            Err(error) if error.path_ended().is_some() => {
+                if let Some(why) = error.path_ended() {
+                    self.mark_ended(active, &reading.agent, why);
+                }
+                return;
+            }
             Err(error) => {
                 if !matches!(error, QuestionsError::Closed) && !self.stop.load(Ordering::SeqCst) {
                     self.sleep(Duration::from_secs(2));
@@ -1637,6 +1786,7 @@ impl Shared {
                     },
                 );
                 view.posted.remove(&reading.run_id);
+                view.last_answer = Some((active.team_id.clone(), unix_now()));
                 drop(view);
                 self.changed();
                 true
@@ -2153,6 +2303,12 @@ impl Shared {
         let fetched = active.client.list(since, wait);
         if matches!(&fetched, Err(error) if error.status() == Some(404)) {
             self.mark_unsupported(&active, "Apassy");
+            return;
+        }
+        if let Err(error) = &fetched
+            && let Some(why) = error.path_ended()
+        {
+            self.mark_ended(&active, "Apassy", why);
             return;
         }
         if matches!(&fetched, Err(QuestionsError::Closed)) || self.stop.load(Ordering::SeqCst) {

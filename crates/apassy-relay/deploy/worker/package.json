@@ -1,6 +1,6 @@
 {
   "name": "apassy-relay-edge",
-  "version": "0.5.19",
+  "version": "0.5.20",
   "private": true,
   "type": "module",
   "description": "The edge Worker of apassy-relay: forwards to the relay and adds the edge secret.",
@@ -8,7 +8,7 @@
   "scripts": {
     "test": "node --test 'test/*.test.ts'",
     "typecheck": "tsc -p tsconfig.json",
-    "preflight": "node scripts/verify-assets.mjs",
+    "preflight": "node scripts/verify-assets.mjs && node scripts/check-relay-mode.mjs",
     "deploy": "wrangler deploy"
   },
   "devDependencies": {

@@ -49,7 +49,8 @@ use crate::server::hub::Hub;
 use crate::server::questions::{self, Qid};
 use crate::server::sync::{PushRequest, SyncError};
 use crate::server::{
-    Core, admin, approvals, connect, decide, devices, host, joins, mcp, oauth, push, sync,
+    Core, account, admin, approvals, billing_store, connect, decide, devices, host, joins, mcp,
+    oauth, push, sync, tunnel_routes,
 };
 use crate::session::SessionSource;
 
@@ -82,6 +83,19 @@ pub const AGENT_SHARED_FAILURES_MAX: u32 = 600;
 /// The source addresses whose failures one listener keeps. A failure of a further
 /// source counts in the shared window until a window of the table ends.
 pub const AUTH_SOURCES_MAX: usize = 4096;
+/// Bad bearer tokens and session keys that one `device` stream of the Connect tunnel
+/// takes in one window (`TunnelDeviceFailures`). One more request on that stream in the
+/// window gets 429 `rate_limited`; a new stream (a new dial) has its own count.
+pub const TUNNEL_STREAM_FAILURES_MAX: u32 = 10;
+/// Bad bearer tokens and session keys that all `device` streams of the Connect tunnel
+/// on one listener take together in one window. Connect names no dialing account to the
+/// node (connect-tunnel-v1 section 5), so this is the count of the node: above what the
+/// dials of one account can bring in a window at Connect's dial rate (60 a minute, times
+/// `TUNNEL_STREAM_FAILURES_MAX`), so one account alone never holds the others at 429.
+pub const TUNNEL_DEVICE_FAILURES_MAX: u32 = 1200;
+// One account at Connect's default dial rate (60 dials a minute) cannot reach the count of
+// the node alone.
+const _: () = assert!(60 * TUNNEL_STREAM_FAILURES_MAX < TUNNEL_DEVICE_FAILURES_MAX);
 
 /// What a listener serves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -382,6 +396,63 @@ impl AgentAuthFailures {
     }
 }
 
+/// The failed authentications of the `device` streams of the Connect tunnel on one
+/// listener: a window for each stream (`TUNNEL_STREAM_FAILURES_MAX`), keyed by the serial
+/// that the node's front gives the stream in process (`apassy::net::front_peers`), and
+/// one window for all of them together (`TUNNEL_DEVICE_FAILURES_MAX`). The node cannot
+/// tell the dialing account (Connect names none in the stream's `open`), so a stream is
+/// the finest key and the node the coarsest. A stream that the full table
+/// (`AUTH_SOURCES_MAX`) cannot take counts in the shared window only. In memory only.
+#[derive(Debug, Default)]
+pub struct TunnelDeviceFailures {
+    state: Mutex<TunnelFailureState>,
+}
+
+#[derive(Debug, Default)]
+struct TunnelFailureState {
+    streams: HashMap<u64, Window>,
+    node: Window,
+}
+
+/// Which window of a tunnel `device` stream is at its limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TunnelLimit {
+    /// The stream's own window.
+    Stream,
+    /// The window of every `device` stream of the listener.
+    Node,
+}
+
+impl TunnelDeviceFailures {
+    /// The window at its limit for a request on stream `serial`, if any.
+    pub fn limited(&self, serial: u64, now: u64) -> Option<TunnelLimit> {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.node.count(now) >= TUNNEL_DEVICE_FAILURES_MAX {
+            return Some(TunnelLimit::Node);
+        }
+        let stream = state.streams.get_mut(&serial)?;
+        if stream.ended(now) {
+            state.streams.remove(&serial);
+            return None;
+        }
+        (stream.count >= TUNNEL_STREAM_FAILURES_MAX).then_some(TunnelLimit::Stream)
+    }
+
+    /// Counts one bad bearer token or session key on stream `serial`: in its window and
+    /// in the window of every `device` stream.
+    pub fn record(&self, serial: u64, now: u64) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.node.record(now);
+        if !state.streams.contains_key(&serial) && state.streams.len() >= AUTH_SOURCES_MAX {
+            state.streams.retain(|_, window| !window.ended(now));
+            if state.streams.len() >= AUTH_SOURCES_MAX {
+                return;
+            }
+        }
+        state.streams.entry(serial).or_default().record(now);
+    }
+}
+
 /// Which failed-auth count a request is in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Counted {
@@ -391,6 +462,18 @@ enum Counted {
     Agent(Option<Source>),
     /// Every path of the tailnet listener: the count of the tailnet peer (N8-1).
     Peer(IpAddr),
+    /// A request through a `public` stream of the Connect tunnel (the front names it in
+    /// process, `apassy::net::front_peers`), on a listener other than the tailnet one: in
+    /// no count of the listener, so a stranger's bad tokens through Connect never put a
+    /// cloud agent with a good token at 429, and no header of the client is read. Connect
+    /// bounds the streams of a node (docs/SPEC.md section 35.4), and each carries one
+    /// request (the deadline transport): that bounds the tries.
+    Tunnel,
+    /// A request through a `device` stream of the Connect tunnel (on the tailnet
+    /// listener), with the stream's serial: the count of that stream and the count of
+    /// every `device` stream of the listener (`TunnelDeviceFailures`). Never the count of
+    /// a tailnet peer, and no header of the client is read.
+    TunnelDevice(u64),
 }
 
 impl Counted {
@@ -411,9 +494,19 @@ impl Counted {
             Self::Agent(Some(_)) => "source",
             Self::Agent(None) => "shared",
             Self::Peer(_) => "peer",
+            Self::Tunnel => "tunnel",
+            Self::TunnelDevice(_) => "tunnel_stream",
         }
     }
 }
+
+/// Routes of the tailnet scope that a stream of the Connect tunnel never reaches (404,
+/// as an unknown path): a team code (`POST /v1/teams`), an invite, and a join with an
+/// invite. A device of the node's account, a device of an account with a grant, and
+/// Connect itself can open a `device` stream; none of them needs these through Connect
+/// (docs/SPEC.md section 35.3). Device links (`/v1/devices/link`, pairing through
+/// Connect) and every route that needs a device token stay.
+const TUNNEL_DEVICE_REFUSED: [&str; 3] = [paths::TEAMS, paths::INVITES, paths::JOIN];
 
 /// One listener: what it serves, and its failed-auth counts (`None` when
 /// `RelayConfig::auth_limiter` is off). The MCP authorization flow is in neither: it
@@ -422,9 +515,13 @@ pub struct Listener {
     pub scope: Scope,
     pub failures: Option<AuthFailures>,
     pub agent_failures: Option<AgentAuthFailures>,
+    /// The counts of the `device` streams of the Connect tunnel (the tailnet listener).
+    pub tunnel_failures: Option<TunnelDeviceFailures>,
     pub keys: FailureKeys,
     /// The tailnet scope on the Mac's own local route (`Serving::local_route`).
     pub local_route: bool,
+    /// The bound address, to find the streams of the Connect tunnel (`front_peers`).
+    pub listen: Option<SocketAddr>,
 }
 
 impl Listener {
@@ -434,17 +531,45 @@ impl Listener {
             scope,
             failures: limiter.then(AuthFailures::default),
             agent_failures: limiter.then(AgentAuthFailures::default),
+            tunnel_failures: limiter.then(TunnelDeviceFailures::default),
             keys,
             local_route,
+            listen: None,
         }
     }
 
     fn counts(&self) -> bool {
-        self.failures.is_some() || self.agent_failures.is_some()
+        self.failures.is_some() || self.agent_failures.is_some() || self.tunnel_failures.is_some()
+    }
+
+    /// The serial of the Connect tunnel stream that `request` came through, when the
+    /// front of this process pumps it.
+    fn tunnel_serial(&self, request: &Request) -> Option<u64> {
+        match (request.remote_addr(), self.listen) {
+            (Some(remote), Some(listen)) => {
+                apassy::net::front_peers::tunnel_stream(*remote, listen).map(|stream| stream.serial)
+            }
+            _ => None,
+        }
+    }
+
+    /// True when `request` came through a stream of the Connect tunnel that the front of
+    /// this process pumps.
+    fn via_tunnel(&self, request: &Request) -> bool {
+        self.tunnel_serial(request).is_some()
     }
 
     /// The failed-auth count of `request` to `path`.
     fn counted(&self, request: &Request, path: &str) -> Counted {
+        if let Some(serial) = self.tunnel_serial(request) {
+            // A `device` stream reaches the tailnet listener; a `public` stream the public
+            // listener (docs/SPEC.md section 35.3).
+            return if matches!(self.scope, Scope::Tailnet { .. }) {
+                Counted::TunnelDevice(serial)
+            } else {
+                Counted::Tunnel
+            };
+        }
         let FailureKeys::PerPeer(listen) = self.keys else {
             let forwarded = header_value(request, "X-Forwarded-For");
             return Counted::of(path, forwarded.as_deref());
@@ -474,6 +599,12 @@ impl Listener {
                     failures.record(source, now);
                 }
             }
+            Counted::Tunnel => {}
+            Counted::TunnelDevice(serial) => {
+                if let Some(failures) = &self.tunnel_failures {
+                    failures.record(serial, now);
+                }
+            }
         }
     }
 
@@ -491,7 +622,20 @@ impl Listener {
                 .agent_failures
                 .as_ref()
                 .is_some_and(|failures| failures.limited(source, now)),
+            Counted::Tunnel => false,
+            Counted::TunnelDevice(serial) => self
+                .tunnel_failures
+                .as_ref()
+                .is_some_and(|failures| failures.limited(serial, now).is_some()),
         }
+    }
+
+    /// The window of a tunnel `device` stream that holds `counted` at 429, for the audit.
+    fn tunnel_limit(&self, counted: Counted, now: u64) -> Option<TunnelLimit> {
+        let Counted::TunnelDevice(serial) = counted else {
+            return None;
+        };
+        self.tunnel_failures.as_ref()?.limited(serial, now)
     }
 
     /// The kind of the audit row of a listener (or one of its peers) at its limit.
@@ -616,6 +760,94 @@ impl Endpoint {
                 | GrantCreate
                 | AgentCreate
         )
+    }
+}
+
+impl Endpoint {
+    /// The routes of the free questions-only Connect path of ADR 0032 that a free Connect
+    /// team loses with `APASSY_RELAY_FREE_CONNECT=0`: questions and their answers, the feed
+    /// and its actions, and the push token and handle.
+    pub fn is_free_connect_use(&self) -> bool {
+        use Endpoint::*;
+        matches!(
+            self,
+            QuestionPost
+                | QuestionList
+                | AnswerPost(_)
+                | AnswerList(_)
+                | Settle(_)
+                | PushTokenPut
+                | PushTokenDelete
+                | PushHandlePut
+                | PushHandleDelete
+                | FeedPut
+                | FeedList
+                | FeedDelete
+                | FeedActionPost
+                | FeedActionList
+                | FeedActionGet(_)
+                | FeedActionSettle(_)
+        )
+    }
+
+    /// The team routes that `connect` mode serves (docs/SPEC.md section 37): relay-sync-v1
+    /// of a vault store, its sign-in, `GET /v1/me`, and the device list. Every other team
+    /// route is 410 `hosted_retired` there.
+    pub fn serves_in_connect_mode(&self) -> bool {
+        use Endpoint::*;
+        matches!(
+            self,
+            Me | Challenge
+                | Token
+                | DeviceList
+                | SyncHead
+                | SyncSnapshot
+                | SyncPush
+                | SyncReceipt
+                | SyncDelete
+        )
+    }
+}
+
+/// The answer of `connect` mode to a route that Connect does not serve.
+fn hosted_retired() -> RelayError {
+    RelayError::new(
+        codes::HOSTED_RETIRED,
+        "This route is retired: this relay serves Apassy Connect only (accounts, vault stores, billing, groups, and the tunnel). Approvals and teams run on your own Apassy node (ADR 0037).",
+    )
+}
+
+/// The answer to the free Connect path after `APASSY_RELAY_FREE_CONNECT=0`.
+fn free_connect_ended() -> RelayError {
+    RelayError::new(
+        codes::FREE_CONNECT_ENDED,
+        "Free approvals through this relay have ended. Use this Mac as your node over Tailscale (free), or Apassy Connect.",
+    )
+}
+
+/// True when `connect` mode answers `method path` with 410 `hosted_retired` (docs/SPEC.md
+/// section 37): `/mcp`, `/p/` and below, and every path of the route table whose routes
+/// are not relay sync of a vault store (`Endpoint::serves_in_connect_mode`), whatever the
+/// method. The paths of accounts, billing, groups, and the tunnel are served, and a path
+/// that the relay never had stays 404.
+pub fn retired_in_connect_mode(method: &str, path: &str) -> bool {
+    if account::is_account_path(path)
+        || billing_store::is_billing_path(path)
+        || tunnel_routes::is_tunnel_path(path)
+    {
+        return false;
+    }
+    if path == paths::MCP || path.starts_with(paths::PROXY_PREFIX) {
+        return true;
+    }
+    match route(method, path) {
+        Ok((_, endpoint)) => !endpoint.serves_in_connect_mode(),
+        // Another method of a known path: retired unless one of its methods is served.
+        Err(error) if error.code == codes::METHOD_NOT_ALLOWED => ["GET", "POST", "PUT", "DELETE"]
+            .iter()
+            .filter_map(|other| route(other, path).ok())
+            .all(|(_, endpoint)| !endpoint.serves_in_connect_mode()),
+        Err(_) => false,
     }
 }
 
@@ -814,7 +1046,8 @@ pub fn route(method: &str, path: &str) -> RelayResult<Routed> {
 /// What the accept loop needs.
 pub struct Serving {
     pub hub: Arc<Hub>,
-    pub proxy: Arc<Proxy>,
+    /// The proxy of `/p/`; `None` in `connect` mode (docs/SPEC.md section 37).
+    pub proxy: Option<Arc<Proxy>>,
     pub server: tiny_http::Server,
     pub stop: Arc<AtomicBool>,
     /// What this listener serves. Only the `Node` listener runs the maintenance.
@@ -1025,12 +1258,10 @@ pub fn serve(serving: Serving) -> RelayResult<()> {
         (Scope::Tailnet { .. }, Some(addr)) if !local_route => FailureKeys::PerPeer(addr),
         _ => FailureKeys::Whole,
     };
-    let listener = Arc::new(Listener::new(
-        scope,
-        hub.config.auth_limiter,
-        keys,
-        local_route,
-    ));
+    let listener = Arc::new(Listener {
+        listen,
+        ..Listener::new(scope, hub.config.auth_limiter, keys, local_route)
+    });
     let agent_max = limits.max_active.saturating_sub(limits.member_reserve);
     let slots = Arc::new(Slots {
         all: AtomicUsize::new(0),
@@ -1041,7 +1272,8 @@ pub fn serve(serving: Serving) -> RelayResult<()> {
         rejected: AtomicUsize::new(0),
     });
     // The maintenance of every team runs on its own thread, so many teams never slow the
-    // accept loop. One for the relay: the public listener has none.
+    // accept loop. One for the relay: the public listener has none. The billing part has
+    // a thread of its own: its Stripe calls never hold the teams' pass.
     let maintenance = (scope == Scope::Node).then(|| {
         let (hub, stop) = (hub.clone(), stop.clone());
         std::thread::Builder::new()
@@ -1052,13 +1284,32 @@ pub fn serve(serving: Serving) -> RelayResult<()> {
                     std::thread::sleep(Duration::from_millis(200));
                     if last.elapsed() >= Duration::from_secs(MAINTENANCE_SECS) {
                         last = Instant::now();
-                        maintain(&hub, now_unix());
+                        maintain_teams(&hub, now_unix());
                     }
                 }
             })
     });
     if maintenance.as_ref().is_some_and(Result::is_err) {
         eprintln!("apassy-relay: the maintenance thread cannot start");
+    }
+    let billing_maintenance = (scope == Scope::Node && hub.billing.is_some()).then(|| {
+        let (hub, stop) = (hub.clone(), stop.clone());
+        std::thread::Builder::new()
+            .name("relay-billing".to_string())
+            .spawn(move || {
+                let mut last = Instant::now();
+                while !stop.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(200));
+                    if last.elapsed() >= Duration::from_secs(MAINTENANCE_SECS) {
+                        last = Instant::now();
+                        // The pass stops between accounts when the relay stops.
+                        maintain_billing_until(&hub, now_unix(), &|| stop.load(Ordering::Relaxed));
+                    }
+                }
+            })
+    });
+    if billing_maintenance.as_ref().is_some_and(Result::is_err) {
+        eprintln!("apassy-relay: the billing maintenance thread cannot start");
     }
     let mut probed = Instant::now();
     let mut failed_probes = 0;
@@ -1162,7 +1413,7 @@ pub fn serve(serving: Serving) -> RelayResult<()> {
                         .name("relay-request".to_string())
                         .spawn(move || {
                             let _guard = guard;
-                            handle(&hub, &proxy, &listener, request, hold);
+                            handle(&hub, proxy.as_deref(), &listener, request, hold);
                         });
                 }
             }
@@ -1184,6 +1435,9 @@ pub fn serve(serving: Serving) -> RelayResult<()> {
     if let Some(Ok(handle)) = maintenance {
         let _ = handle.join();
     }
+    if let Some(Ok(handle)) = billing_maintenance {
+        let _ = handle.join();
+    }
     outcome
 }
 
@@ -1193,11 +1447,18 @@ pub fn serve(serving: Serving) -> RelayResult<()> {
 /// since its last pass is passed over until `IDLE_MAINTENANCE_SECS` went by: its expiries
 /// are read at request time too, so the pass only writes them down.
 pub fn maintain(hub: &Hub, now: u64) {
+    maintain_teams(hub, now);
+    maintain_billing(hub, now);
+}
+
+/// The teams and accounts part of `maintain`: the relay's maintenance thread runs it,
+/// and the billing part runs on a thread of its own, so a slow Stripe never holds it.
+pub fn maintain_teams(hub: &Hub, now: u64) {
     for core in hub.all() {
         let last_pass = core.maintained_at.load(Ordering::Relaxed);
         let idle = core.last_request.load(Ordering::Relaxed) < last_pass
             && now < last_pass.saturating_add(IDLE_MAINTENANCE_SECS);
-        if core.kind == TeamKind::Connect && idle {
+        if core.hosted() && idle {
             continue;
         }
         core.maintained_at.store(now, Ordering::Relaxed);
@@ -1221,6 +1482,30 @@ pub fn maintain(hub: &Hub, now: u64) {
                 "apassy-relay: the maintenance sweep of team {} failed",
                 core.team
             );
+        }
+    }
+    // Connect accounts: the removals that wait for a vault store, old links, and old
+    // account audit rows (docs/SPEC.md section 33).
+    if hub.config.connect.accounts {
+        account::maintain(hub, now);
+    }
+}
+
+/// Connect billing: event ids older than 30 days, the reads of Stripe, and the stores of
+/// plans at their deletion day (docs/SPEC.md section 34.6), at most once an hour.
+pub fn maintain_billing(hub: &Hub, now: u64) {
+    maintain_billing_until(hub, now, &|| false);
+}
+
+/// `maintain_billing` that stops between accounts once `stop` answers true.
+pub fn maintain_billing_until(hub: &Hub, now: u64, stop: &dyn Fn() -> bool) {
+    if let Some(billing) = hub.billing.as_deref() {
+        let last = hub.billing_maintained_at.load(Ordering::Relaxed);
+        if last == 0 || now >= last.saturating_add(billing_store::MAINTENANCE_SECS) {
+            hub.billing_maintained_at.store(now, Ordering::Relaxed);
+            if billing_store::maintain_until(hub, billing, now, stop).is_err() {
+                eprintln!("apassy-relay: the billing maintenance pass failed");
+            }
         }
     }
 }
@@ -1325,6 +1610,9 @@ fn respond_auth_limited(
     if let Counted::Peer(peer) = counted {
         detail["peer"] = json!(peer.to_string());
     }
+    if listener.tunnel_limit(counted, now) == Some(TunnelLimit::Node) {
+        detail["bucket"] = json!("tunnel_node");
+    }
     if listener.local_route {
         detail["listener"] = json!("local_route");
     }
@@ -1349,7 +1637,7 @@ fn respond_auth_limited(
 }
 
 /// Handles one request. `hold`: a question or feed long poll may wait (its own lane).
-fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, hold: bool) {
+fn handle(hub: &Hub, proxy: Option<&Proxy>, listener: &Listener, mut request: Request, hold: bool) {
     let now = now_unix();
     let method = request.method().as_str().to_string();
     let url = request.url().to_string();
@@ -1357,6 +1645,20 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
         Some((path, query)) => (path.to_string(), query.to_string()),
         None => (url.clone(), String::new()),
     };
+    // Only the two tunnel routes take an `Upgrade` (docs/SPEC.md section 35.6). Every
+    // other request that asks for one is 400 before any handler sees it or a body is read,
+    // on every listener. (The transport refuses an upgrade with a body or of another
+    // method itself.)
+    if wants_upgrade(&request) && !upgrade_allowed(hub, listener.scope, &method, &path) {
+        request.abort_input();
+        respond_json(
+            request,
+            400,
+            &RelayError::invalid("This route does not upgrade the connection.").to_envelope(),
+            true,
+        );
+        return;
+    }
     // The MCP authorization flow, on a relay that has it (an embedded node), and never on
     // its tailnet listener.
     let oauth_route = hub
@@ -1371,6 +1673,22 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
         respond_error(request, &RelayError::new(codes::NOT_FOUND, "No such path."));
         return;
     }
+    if matches!(listener.scope, Scope::Tailnet { .. })
+        && TUNNEL_DEVICE_REFUSED.contains(&path.as_str())
+        && listener.via_tunnel(&request)
+    {
+        request.abort_input();
+        respond_error(request, &RelayError::new(codes::NOT_FOUND, "No such path."));
+        return;
+    }
+    // The public origin of this request (docs/SPEC.md section 31.1), from the listener and
+    // the tunnel stream, never from a header. A tunnel stream whose server name is no
+    // origin of the node is not served.
+    let Some(arrival) = arrival_origin(&hub.config, listener, &request) else {
+        request.abort_input();
+        respond_error(request, &RelayError::new(codes::NOT_FOUND, "No such path."));
+        return;
+    };
     if method == "GET" && path == paths::HEALTH {
         // Health has no request body. Do not let destructor draining occupy its
         // reserved seats; guarded connections cannot have a pipelined successor.
@@ -1382,10 +1700,22 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
             option_env!("APASSY_RELEASE_COMMIT").unwrap_or("unknown"),
         )
         .expect("the build commit is a valid header");
+        // The mode beside the version and the commit: the read-back of the cutover
+        // (docs/operations/connect.md) checks `connect` here.
+        let mode = Header::from_bytes(
+            "x-apassy-relay-mode",
+            if hub.config.connect.plain_files() {
+                "connect"
+            } else {
+                "relay"
+            },
+        )
+        .expect("the mode is a valid header");
         let _ = request.respond(
             Response::from_string("ok\n")
                 .with_header(version)
-                .with_header(commit),
+                .with_header(commit)
+                .with_header(mode),
         );
         return;
     }
@@ -1408,10 +1738,20 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
         );
         return;
     }
+    // `connect` mode (docs/SPEC.md section 37): every route of the relay that Connect does
+    // not serve is 410 before its body is read, before a token is checked, and before it
+    // could reach the proxy (none exists) or MCP.
+    if hub.config.connect.plain_files() && retired_in_connect_mode(&method, &path) {
+        respond_error(request, &hosted_retired());
+        return;
+    }
     // The flow has its own count for each client (31.5): a stranger's bad tokens on
     // `/mcp` never hold the owner's client away from its metadata, page, or refresh.
     if let Some(route) = oauth_route {
-        respond_oauth(hub, request, route, &method, &path, &query, now);
+        let via_tunnel = listener.via_tunnel(&request);
+        respond_oauth(
+            hub, request, route, &method, &path, &query, arrival, via_tunnel, now,
+        );
         return;
     }
     let counted = listener.counted(&request, &path);
@@ -1419,11 +1759,32 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
         respond_auth_limited(hub, listener, counted, request, now);
         return;
     }
+    // Apassy Connect accounts (connect-account-v1): only with the account routes on, else
+    // the paths fall through to the route table and are 404.
+    if hub.config.connect.accounts && account::is_account_path(&path) {
+        respond_account(hub, listener, counted, request, &method, &path, now);
+        return;
+    }
+    // Connect billing (connect-billing-v1): the public plans and Stripe's webhook, only
+    // with the account routes on.
+    if hub.config.connect.accounts && billing_store::is_billing_path(&path) {
+        respond_billing(hub, request, &method, &path, now);
+        return;
+    }
+    // The Connect tunnel (connect-tunnel-v1): with the account routes only, as they.
+    if hub.config.connect.accounts && tunnel_routes::is_tunnel_path(&path) {
+        respond_tunnel(hub, listener, counted, request, &method, &path, now);
+        return;
+    }
     if path.starts_with(paths::PROXY_PREFIX) && !hub.config.team_vaults {
         respond_error(request, &team_vaults_retired());
         return;
     }
     if path.starts_with(paths::PROXY_PREFIX) {
+        let Some(proxy) = proxy else {
+            respond_error(request, &hosted_retired());
+            return;
+        };
         let key = path
             .strip_prefix(paths::PROXY_PREFIX)
             .and_then(|rest| rest.split('/').next());
@@ -1438,6 +1799,17 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
             .filter(|parsed| parsed.kind == TokenKind::Session)
             .and_then(|parsed| parsed.team)
             .and_then(|team| hub.team(&team));
+        // A session works only on the origin that it was made for: on another origin of the
+        // node its key is answered as one that names no session.
+        if let (Some(core), Some(key)) = (&core, key)
+            && core
+                .sessions
+                .origin_of(key)
+                .is_some_and(|origin| origin != arrival)
+        {
+            proxy.refuse_unknown_session(request, now);
+            return;
+        }
         let _guard = if let Some(core) = core {
             match TeamSlotGuard::take(&core, now, false) {
                 Some(guard) => Some(guard),
@@ -1459,6 +1831,14 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
             return;
         }
     };
+    // The end of the free Connect path (`APASSY_RELAY_FREE_CONNECT=0`): no new free Connect
+    // team and no recovery of one, before the body is read.
+    if !hub.config.free_connect
+        && matches!(endpoint, Endpoint::Connect | Endpoint::ConnectChallenge)
+    {
+        respond_error(request, &free_connect_ended());
+        return;
+    }
     // A relay-wide setting, the same for every caller: refuse before any token check.
     if !hub.config.team_vaults && endpoint.is_team_vault_use() {
         respond_error(request, &team_vaults_retired());
@@ -1598,6 +1978,7 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
             request,
             &RelayError::unauthenticated(),
             token.is_some(),
+            arrival,
         );
         return;
     };
@@ -1615,10 +1996,37 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
                     &json!({"code": error.code, "path_kind": endpoint_kind(endpoint)}),
                 );
             }
-            respond_auth_error(hub, listener.scope, endpoint, request, &error, true);
+            respond_auth_error(
+                hub,
+                listener.scope,
+                endpoint,
+                request,
+                &error,
+                true,
+                arrival,
+            );
             return;
         }
     };
+    // A vault store of an account (connect-account-v1 section 8) serves relay sync only:
+    // its devices come from their account, never from an invite or a device link, and it
+    // has no items, agents, questions, feed, or push. Pushes need an entitled plan of the
+    // account that made it, pulls a plan that still allows them.
+    if core.kind == TeamKind::Account
+        && let Err(error) = vault_store_allows(hub, &core, endpoint, principal.as_ref(), now)
+    {
+        respond_error(request, &error);
+        return;
+    }
+    // A free Connect team after the end of the free path (`APASSY_RELAY_FREE_CONNECT=0`):
+    // no questions, feed, or push, before the body is read. Its devices, its sign-in,
+    // its leaving, and its relay sync stay (the sync has its own gate, `Core::sync_bytes`),
+    // so the app can move its approvals and its vault and delete the membership.
+    if core.kind == TeamKind::Connect && !hub.config.free_connect && endpoint.is_free_connect_use()
+    {
+        respond_error(request, &free_connect_ended());
+        return;
+    }
     // A Connect team has a request rate (section 26); an operator team has none.
     if let Err((error, wait)) = core.take_request(now) {
         respond_json_with(
@@ -1673,7 +2081,15 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
         match authenticate(&core, need, token, after_body) {
             Ok(principal) => principal,
             Err(error) => {
-                respond_auth_error(hub, listener.scope, endpoint, request, &error, true);
+                respond_auth_error(
+                    hub,
+                    listener.scope,
+                    endpoint,
+                    request,
+                    &error,
+                    true,
+                    arrival,
+                );
                 return;
             }
         }
@@ -1698,7 +2114,15 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
         now
     };
     if endpoint == Endpoint::Mcp {
-        respond_mcp(hub, listener.scope, &core, request, principal, &body);
+        respond_mcp(
+            hub,
+            listener.scope,
+            &core,
+            request,
+            principal,
+            &body,
+            arrival,
+        );
         return;
     }
     match dispatch(
@@ -1711,6 +2135,439 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
         hold,
         now,
     ) {
+        Ok(result) => respond_ok(request, result),
+        Err(error) => respond_error(request, &error),
+    }
+}
+
+/// What a vault store serves (connect-account-v1 section 8): `GET /v1/me`, the device
+/// list, and relay sync. Every other team route is 403 `forbidden`. A push and a receipt
+/// need an entitled plan of the store's account (403 `plan_required`, the place of the
+/// `sync_bytes` check of relay-sync-v1 section 4), and a push by a device of another
+/// account (a shared store, section 16) an entitled plan of that account too: a member
+/// beyond the paid seats, or one whose plan is read-only, pulls and does not push. A pull
+/// or a download needs a plan of the store's account that allows pulls
+/// (`PlanView::can_pull`); `DELETE /v1/sync` always works.
+fn vault_store_allows(
+    hub: &Hub,
+    core: &Core,
+    endpoint: Endpoint,
+    principal: Option<&Principal>,
+    now: u64,
+) -> RelayResult<()> {
+    let plan_required = || {
+        RelayError::new(
+            codes::PLAN_REQUIRED,
+            "This account is not on Apassy Connect.",
+        )
+    };
+    let owner = |hub: &Hub| -> RelayResult<String> {
+        hub.account_of_team(&core.team)?
+            .ok_or_else(|| RelayError::internal("A vault store has no account."))
+    };
+    let plan_of = |account: &str| {
+        hub.accounts
+            .plans()
+            .plan(&hub.directory.store, account, now)
+    };
+    let plan = |hub: &Hub| -> RelayResult<api::PlanView> { plan_of(&owner(hub)?) };
+    match endpoint {
+        Endpoint::Me | Endpoint::DeviceList | Endpoint::SyncDelete => Ok(()),
+        Endpoint::SyncPush => {
+            let owner = owner(hub)?;
+            if !plan_of(&owner)?.entitled {
+                return Err(plan_required());
+            }
+            let pusher = store_device_account(hub, core, principal)?;
+            if pusher.as_deref() == Some(owner.as_str()) {
+                return Ok(());
+            }
+            match pusher {
+                Some(account) if plan_of(&account)?.entitled => Ok(()),
+                _ => Err(RelayError::new(
+                    codes::PLAN_REQUIRED,
+                    "Your account cannot change this shared vault: its plan is read-only or has no seat. It still gets the changes of the others.",
+                )),
+            }
+        }
+        Endpoint::SyncReceipt => {
+            if plan(hub)?.entitled {
+                Ok(())
+            } else {
+                Err(plan_required())
+            }
+        }
+        Endpoint::SyncHead | Endpoint::SyncSnapshot => {
+            if plan(hub)?.can_pull() {
+                Ok(())
+            } else {
+                Err(plan_required())
+            }
+        }
+        _ => Err(RelayError::forbidden(
+            "A vault store of Apassy Connect serves relay sync only; its devices come from the account.",
+        )),
+    }
+}
+
+/// The account of the store device of `principal` in the vault store of `core`
+/// (`account_store_device`), or `None` for a caller without a store device row.
+fn store_device_account(
+    hub: &Hub,
+    core: &Core,
+    principal: Option<&Principal>,
+) -> RelayResult<Option<String>> {
+    let Some(device) = principal.and_then(|principal| match principal {
+        Principal::Member(member) => member.device.as_ref().map(|device| device.id.0),
+        Principal::Agent(_) => None,
+    }) else {
+        return Ok(None);
+    };
+    use rusqlite::OptionalExtension;
+    hub.directory.store.with(|conn| {
+        conn.query_row(
+            "SELECT account_id FROM account_store_device WHERE team_id = ?1 AND store_device = ?2",
+            rusqlite::params![core.team.as_str(), crate::server::store::to_i(device)],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(crate::server::store::db)
+    })
+}
+
+/// One request of an account route (connect-account-v1): the route (404, 405), then for
+/// an edge route no `Authorization` (400) and the body; for the others the account token
+/// (401, or 403 `account_required` for a team token) before the body, and again after it.
+/// A 401 counts in the listener's failed-auth limiter. Bodies are at most 64 KiB.
+#[allow(clippy::too_many_arguments)]
+fn respond_account(
+    hub: &Hub,
+    listener: &Listener,
+    counted: Counted,
+    mut request: Request,
+    method: &str,
+    path: &str,
+    now: u64,
+) {
+    let (need, endpoint) = match account::route(method, path) {
+        Ok(routed) => routed,
+        Err(error) => {
+            respond_error(request, &error);
+            return;
+        }
+    };
+    // DELETE /v1/account carries `{}`: read it as a POST body.
+    let body_method = if method == "DELETE" { "POST" } else { method };
+    let authorization = header_value(&request, "Authorization");
+    if need == Need::Edge {
+        if authorization.is_some() {
+            respond_error(
+                request,
+                &RelayError::invalid("An edge route of Apassy Connect takes no Authorization."),
+            );
+            return;
+        }
+        let body = match read_body(&mut request, body_method) {
+            Ok(body) => body,
+            Err(error) => {
+                respond_error(request, &error);
+                return;
+            }
+        };
+        // A new account and a recovery count for the client prefix that the Worker proved,
+        // as `POST /v1/connect` does; any other call, or one without the proof, has none.
+        let prefix = matches!(
+            endpoint,
+            account::AccountEndpoint::Create | account::AccountEndpoint::Recover
+        )
+        .then(|| {
+            (
+                header_value(&request, CLIENT_PREFIX_HEADER),
+                header_value(&request, CLIENT_PREFIX_MAC_HEADER),
+            )
+        });
+        let prefix = match (&prefix, hub.config.edge.secret()) {
+            (Some((prefix, mac)), Some(secret)) => {
+                connect::verified_prefix(secret.expose(), prefix.as_deref(), mac.as_deref())
+            }
+            _ => None,
+        };
+        let created = endpoint == account::AccountEndpoint::Create;
+        match account::dispatch_edge(hub, &endpoint, &body, prefix, now) {
+            Ok(result) => respond_ok(request, result),
+            Err(error)
+                if error.code == codes::RATE_LIMITED || (created && error.code == codes::BUSY) =>
+            {
+                respond_json_with(
+                    request,
+                    error.status(),
+                    &error.to_envelope(),
+                    false,
+                    Header::from_bytes(&b"Retry-After"[..], b"3600")
+                        .ok()
+                        .into_iter()
+                        .collect(),
+                )
+            }
+            Err(error) => respond_error(request, &error),
+        }
+        return;
+    }
+    let token = auth::bearer(authorization.as_deref());
+    let refused = |error: &RelayError| {
+        if error.code == codes::UNAUTHENTICATED {
+            listener.record_failure(counted, now);
+            hub.refusal(
+                now,
+                "account_token",
+                "auth_failed",
+                &json!({"code": error.code, "path_kind": "account"}),
+            );
+        }
+    };
+    let caller = match account::authenticate(hub, token, now) {
+        Ok(caller) => caller,
+        Err(error) => {
+            refused(&error);
+            respond_error(request, &error);
+            return;
+        }
+    };
+    // The routes of section 16 count for the calling device before the body is read: the
+    // reads of other accounts' lists in a budget of their own, the others in the budget
+    // of the ceremony.
+    if let account::AccountEndpoint::Peers(peers) = &endpoint
+        && let Err(refusal) = if peers.is_read() {
+            hub.accounts.peer_reads()
+        } else {
+            hub.accounts.peer_calls()
+        }
+        .take(&caller.device, now)
+    {
+        respond_json_with(
+            request,
+            refusal.error.status(),
+            &refusal.error.to_envelope(),
+            false,
+            Header::from_bytes(
+                &b"Retry-After"[..],
+                refusal.retry_after.to_string().as_bytes(),
+            )
+            .ok()
+            .into_iter()
+            .collect(),
+        );
+        return;
+    }
+    let body = match read_body(&mut request, body_method) {
+        Ok(body) => body,
+        Err(error) => {
+            respond_error(request, &error);
+            return;
+        }
+    };
+    // Read the caller again after the body: a device revoked while the body arrived does
+    // not act.
+    let now = now_unix();
+    let caller = match account::authenticate(hub, token, now) {
+        Ok(caller) => caller,
+        Err(error) => {
+            refused(&error);
+            respond_error(request, &error);
+            return;
+        }
+    };
+    match account::dispatch(hub, &caller, &endpoint, &body, now) {
+        Ok(result) => respond_ok(request, result),
+        Err(error) => respond_error(request, &error),
+    }
+}
+
+/// `GET /v1/plans` (public: no `Authorization`, 400 with one) and `POST
+/// /v1/stripe/webhook` (connect-billing-v1 sections 2 and 7). The webhook takes the raw
+/// body: at most 256 KiB, read with one byte more to see a longer one (413 before the
+/// signature), then the `Stripe-Signature` check, the event, and the effect. Without
+/// Stripe set up both answer 503 `busy`.
+fn respond_billing(hub: &Hub, mut request: Request, method: &str, path: &str, now: u64) {
+    let wanted = if path == billing_store::PLANS_PATH {
+        "GET"
+    } else {
+        "POST"
+    };
+    if method != wanted {
+        respond_error(
+            request,
+            &RelayError::new(
+                codes::METHOD_NOT_ALLOWED,
+                "This path does not allow this method.",
+            ),
+        );
+        return;
+    }
+    let billing = match account::billing(hub) {
+        Ok(billing) => billing,
+        Err(error) => {
+            respond_error(request, &error);
+            return;
+        }
+    };
+    if path == billing_store::PLANS_PATH {
+        if header_value(&request, "Authorization").is_some() {
+            respond_error(
+                request,
+                &RelayError::invalid("GET /v1/plans takes no Authorization."),
+            );
+            return;
+        }
+        match billing.plans(now).and_then(|view| {
+            serde_json::to_value(view)
+                .map_err(|_| RelayError::internal("The plans cannot be written."))
+        }) {
+            Ok(result) => respond_ok(request, result),
+            Err(error) => respond_error(request, &error),
+        }
+        return;
+    }
+    let signature = header_value(&request, crate::server::stripe::SIGNATURE_HEADER);
+    // The declared size, then the signature header and its time, before a byte of the
+    // body is read: a refusal here reads and drains nothing.
+    let declared = request.body_length();
+    let early = if declared.is_some_and(|len| len > crate::server::stripe::MAX_WEBHOOK_BODY) {
+        Some(RelayError::new(
+            codes::PAYLOAD_TOO_LARGE,
+            "The webhook body is larger than 256 KiB.",
+        ))
+    } else {
+        billing.webhook_precheck(signature.as_deref(), now).err()
+    };
+    if let Some(error) = early {
+        request.abort_input();
+        respond_error(request, &error);
+        return;
+    }
+    let body = match read_body_max(
+        &mut request,
+        "POST",
+        crate::server::stripe::MAX_WEBHOOK_BODY,
+    ) {
+        Ok(body) => body,
+        Err(error) => {
+            respond_error(request, &error);
+            return;
+        }
+    };
+    match billing.webhook(signature.as_deref(), &body, now) {
+        Ok(outcome) => {
+            billing_store::after_webhook(hub, billing, &outcome.effect, now);
+            match serde_json::to_value(&outcome.answer) {
+                Ok(result) => respond_ok(request, result),
+                Err(_) => respond_error(
+                    request,
+                    &RelayError::internal("The answer cannot be written."),
+                ),
+            }
+        }
+        Err(error) => respond_error(request, &error),
+    }
+}
+
+/// A request that asks to upgrade its connection: the one rule of the vendored HTTP
+/// server (`tiny_http::asks_upgrade`: an `Upgrade` header, or the token `upgrade` in any
+/// `Connection` header), which also picks the transport's raw reader.
+fn wants_upgrade(request: &Request) -> bool {
+    tiny_http::asks_upgrade(request.headers())
+}
+
+/// An upgrade may go on: one of the two tunnel routes, on the node listener of a relay
+/// with the account routes.
+fn upgrade_allowed(hub: &Hub, scope: Scope, method: &str, path: &str) -> bool {
+    hub.config.connect.accounts
+        && scope == Scope::Node
+        && tunnel_routes::is_upgrade_route(method, path)
+}
+
+/// The tunnel routes (connect-tunnel-v1 sections 3 and 6). The two WebSocket routes go to
+/// the broker, which checks them in the contract's order and answers `101` or an error;
+/// the JSON routes read the caller, the body, and the caller again, as the account routes.
+fn respond_tunnel(
+    hub: &Hub,
+    listener: &Listener,
+    counted: Counted,
+    mut request: Request,
+    method: &str,
+    path: &str,
+    now: u64,
+) {
+    let endpoint = match tunnel_routes::route(method, path) {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            respond_error(request, &error);
+            return;
+        }
+    };
+    let Some(broker) = hub.tunnel() else {
+        respond_error(request, &RelayError::new(codes::NOT_FOUND, "No such path."));
+        return;
+    };
+    let upgrade_refused = |error: Option<crate::server::tunnel::TunnelError>| {
+        // A bad token on an upgrade route counts as on the JSON routes.
+        if error.is_some_and(|error| error.code == codes::UNAUTHENTICATED) {
+            listener.record_failure(counted, now);
+            hub.refusal(
+                now,
+                "account_token",
+                "auth_failed",
+                &json!({"code": codes::UNAUTHENTICATED, "path_kind": "tunnel"}),
+            );
+        }
+    };
+    match &endpoint {
+        tunnel_routes::TunnelEndpoint::NodeSocket => {
+            upgrade_refused(broker.serve_node(request));
+            return;
+        }
+        tunnel_routes::TunnelEndpoint::Dial(node_id) => {
+            upgrade_refused(broker.serve_dial(request, node_id));
+            return;
+        }
+        _ => {}
+    }
+    let body_method = if method == "DELETE" { "POST" } else { method };
+    let authorization = header_value(&request, "Authorization");
+    let token = auth::bearer(authorization.as_deref());
+    let refused = |error: &RelayError| {
+        if error.code == codes::UNAUTHENTICATED {
+            listener.record_failure(counted, now);
+            hub.refusal(
+                now,
+                "account_token",
+                "auth_failed",
+                &json!({"code": error.code, "path_kind": "tunnel"}),
+            );
+        }
+    };
+    if let Err(error) = account::authenticate(hub, token, now) {
+        refused(&error);
+        respond_error(request, &error);
+        return;
+    }
+    let body = match read_body(&mut request, body_method) {
+        Ok(body) => body,
+        Err(error) => {
+            respond_error(request, &error);
+            return;
+        }
+    };
+    let now = now_unix();
+    let caller = match account::authenticate(hub, token, now) {
+        Ok(caller) => caller,
+        Err(error) => {
+            refused(&error);
+            respond_error(request, &error);
+            return;
+        }
+    };
+    match tunnel_routes::dispatch(hub, broker, &caller, &endpoint, &body, now) {
         Ok(result) => respond_ok(request, result),
         Err(error) => respond_error(request, &error),
     }
@@ -2011,6 +2868,41 @@ fn feed_length(request: &Request) -> RelayResult<()> {
     }
 }
 
+/// The public origin that `request` arrived on (docs/SPEC.md section 31.1), one of
+/// `RelayConfig::public_origins`. On the public listener, a stream of the Connect tunnel
+/// has the origin whose host is the TLS server name that the node's public certificate
+/// answered: the front writes it down in process (`apassy::net::front_peers`), keyed by
+/// the loopback addresses of its connection to this listener. Every other connection
+/// (Funnel's from `tailscaled`, a program of this Mac) and every other listener has the
+/// first origin, `public_url`. `None`: a tunnel stream whose server name is no origin of
+/// the node, or that has none; the request is refused, never given a guessed origin. No
+/// header of the request (`Host`, `X-Forwarded-*`, `Forwarded`) is read.
+fn arrival_origin<'a>(
+    config: &'a crate::config::RelayConfig,
+    listener: &Listener,
+    request: &Request,
+) -> Option<&'a str> {
+    let first = config.public_url.as_str();
+    if listener.scope != Scope::Public {
+        return Some(first);
+    }
+    let (Some(remote), Some(listen)) = (request.remote_addr(), listener.listen) else {
+        return Some(first);
+    };
+    match apassy::net::front_peers::tunnel_stream(*remote, listen) {
+        None => Some(first),
+        Some(stream) => stream
+            .server_name
+            .as_deref()
+            .and_then(|name| config.public_origin_named(name)),
+    }
+}
+
+/// `POST /mcp` of an authenticated caller. `arrival` is the public origin of the request
+/// (`arrival_origin`): a browser's `Origin` must be it, and an access token of the MCP
+/// authorization flow works only on the origin that its client registered at
+/// (`oauth::agent_origin`); elsewhere it is 401 with the challenge of this origin, so the
+/// client can connect here.
 fn respond_mcp(
     hub: &Hub,
     scope: Scope,
@@ -2018,10 +2910,11 @@ fn respond_mcp(
     request: Request,
     principal: Option<Principal>,
     body: &[u8],
+    arrival: &str,
 ) {
     let origin = header_value(&request, "Origin");
     if let Some(origin) = origin
-        && origin.trim_end_matches('/') != core.config.public_url
+        && origin.trim_end_matches('/') != arrival
     {
         respond_error(
             request,
@@ -2037,9 +2930,29 @@ fn respond_mcp(
             request,
             &RelayError::unauthenticated(),
             true,
+            arrival,
         );
         return;
     };
+    match oauth::agent_origin(hub, &core.team, agent.id) {
+        Ok(Some(bound)) if bound != arrival => {
+            respond_auth_error(
+                hub,
+                scope,
+                Endpoint::Mcp,
+                request,
+                &RelayError::unauthenticated(),
+                true,
+                arrival,
+            );
+            return;
+        }
+        Ok(_) => {}
+        Err(error) => {
+            respond_error(request, &error);
+            return;
+        }
+    }
     match mcp::handle(core, &agent, body) {
         mcp::Reply::Accepted => {
             let response = Response::empty(202).with_header(no_store_header());
@@ -2067,9 +2980,10 @@ fn respond_auth_error(
     request: Request,
     error: &RelayError,
     token_sent: bool,
+    arrival: &str,
 ) {
     let challenge = (endpoint == Endpoint::Mcp && error.status() == 401 && scope.serves_oauth())
-        .then(|| oauth::www_authenticate(&hub.config, token_sent))
+        .then(|| oauth::www_authenticate(&hub.config, arrival, token_sent))
         .flatten()
         .and_then(|value| Header::from_bytes(&b"WWW-Authenticate"[..], value.as_bytes()).ok());
     respond_json_with(
@@ -2083,7 +2997,8 @@ fn respond_auth_error(
 
 /// One request of the MCP authorization flow (`oauth::handle`): its body (at most
 /// `oauth::MAX_BODY`) and its answer. A bad code or refresh token counts for its client
-/// (`oauth::ClientFailures`), not in the listener's failed-auth limiter.
+/// (`oauth::ClientFailures`), not in the listener's failed-auth limiter; through a `public`
+/// stream of the Connect tunnel (`via_tunnel`), for no client.
 #[allow(clippy::too_many_arguments)]
 fn respond_oauth(
     hub: &Hub,
@@ -2092,6 +3007,8 @@ fn respond_oauth(
     method: &str,
     path: &str,
     query: &str,
+    arrival: &str,
+    via_tunnel: bool,
     now: u64,
 ) {
     let body = if oauth::has_body(route) {
@@ -2114,7 +3031,17 @@ fn respond_oauth(
     let content_type = header_value(&request, "Content-Type");
     // A bad code or refresh token counts for its client only (`oauth::ClientFailures`),
     // never in the listener's limiter: one stranger must not lock every client out.
-    let reply = oauth::handle(hub, route, path, query, &body, content_type.as_deref(), now);
+    let reply = oauth::handle(
+        hub,
+        route,
+        path,
+        query,
+        &body,
+        content_type.as_deref(),
+        arrival,
+        via_tunnel,
+        now,
+    );
     write_oauth(request, reply, false);
 }
 
@@ -3079,6 +4006,58 @@ mod tests {
     }
 
     #[test]
+    fn a_tunnel_device_stream_counts_alone_and_with_every_stream_of_the_node() {
+        let failures = TunnelDeviceFailures::default();
+        let start = 20_000;
+        for n in 0..TUNNEL_STREAM_FAILURES_MAX {
+            assert_eq!(failures.limited(1, start), None, "{n}");
+            failures.record(1, start);
+        }
+        // Stream 1 is held; stream 2 (another dial) is not.
+        assert_eq!(failures.limited(1, start + 1), Some(TunnelLimit::Stream));
+        assert_eq!(failures.limited(2, start + 1), None);
+        // The window of a stream ends like every window.
+        assert_eq!(failures.limited(1, start + AUTH_FAILURE_WINDOW_SECS), None);
+        // Every stream together: at the node's count every stream is held, also a new one.
+        let failures = TunnelDeviceFailures::default();
+        let streams = u64::from(TUNNEL_DEVICE_FAILURES_MAX / TUNNEL_STREAM_FAILURES_MAX);
+        for serial in 0..streams {
+            for _ in 0..TUNNEL_STREAM_FAILURES_MAX {
+                failures.record(serial + 100, start);
+            }
+        }
+        assert_eq!(failures.limited(99_999, start + 1), Some(TunnelLimit::Node));
+        assert_eq!(
+            failures.limited(99_999, start + AUTH_FAILURE_WINDOW_SECS),
+            None
+        );
+    }
+
+    #[test]
+    fn a_full_stream_table_still_counts_for_the_node() {
+        let failures = TunnelDeviceFailures::default();
+        let start = 30_000;
+        for serial in 0..AUTH_SOURCES_MAX as u64 {
+            failures.record(serial, start);
+        }
+        // A further stream has no window of its own, but its failures count for the node.
+        let late = AUTH_SOURCES_MAX as u64 + 1;
+        for _ in 0..TUNNEL_STREAM_FAILURES_MAX {
+            failures.record(late, start);
+        }
+        assert!(!failures.state.lock().unwrap().streams.contains_key(&late));
+        assert_eq!(
+            failures.state.lock().unwrap().node.count,
+            AUTH_SOURCES_MAX as u32 + TUNNEL_STREAM_FAILURES_MAX
+        );
+        // That many failures are far above the node's count: every stream is held.
+        assert_eq!(failures.limited(late, start), Some(TunnelLimit::Node));
+        // When the windows of the table end, the late stream gets one.
+        failures.record(late, start + AUTH_FAILURE_WINDOW_SECS);
+        assert!(failures.state.lock().unwrap().streams.contains_key(&late));
+    }
+
+    #[test]
     fn only_mcp_and_the_proxy_count_by_source() {
         let forwarded = Some("203.0.113.9");
         let source = Source::from_forwarded(forwarded);
@@ -3093,6 +4072,7 @@ mod tests {
         assert_eq!(Counted::Agent(source).bucket(), "source");
         assert_eq!(Counted::Listener.bucket(), "listener");
         assert_eq!(Counted::Peer(WHOLE_LISTENER).bucket(), "peer");
+        assert_eq!(Counted::TunnelDevice(7).bucket(), "tunnel_stream");
     }
 
     /// N8-1: the keys of the tailnet listener (its peers) have windows of their own, and

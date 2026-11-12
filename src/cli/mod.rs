@@ -15,7 +15,7 @@ mod help;
 pub mod import;
 pub mod print;
 mod setup;
-pub mod terminal;
+pub use crate::owner::terminal;
 
 use std::path::PathBuf;
 
@@ -114,7 +114,9 @@ pub fn print_json<T: serde::Serialize>(value: &T) {
 
 /// Tell the owner to look at the window. Commands that need an owner check call this.
 pub fn expect_owner_check() {
-    terminal::tell("Confirm in the Apassy window (Touch ID or your passphrase)…");
+    terminal::tell(
+        "Confirm in the Apassy window with your passphrase or available system authentication…",
+    );
 }
 
 /// Run the command line with the session in `APASSY_SESSION`. Returns the exit code.
@@ -273,7 +275,7 @@ Usage:
 
 Session (the window must run):
   status                      The vault, the broker, and the session.
-  login                       Open a session after Touch ID or the passphrase in the window.
+  login                       Open a session after owner confirmation in the window.
                               Use it as: eval \"$(apassy login)\"
   logout                      End the session.
   lock                        Lock the vault. Every session ends.
@@ -290,7 +292,7 @@ Credentials:
 Agents and access:
   agent list|show|add|revoke|rotate|see-all|lifetime
   setup claude|codex          Register an agent and write the MCP server and the prompt hook.
-  setup browser               Connect the browser extension. Each fill asks for Touch ID.
+  setup browser               Connect the browser extension. Each fill requires owner confirmation.
   grant set|remove|rule|operation
   request list|grant|deny     Notes of agents from apassy_request_access.
   runs list|approve|deny      Runs that wait for you.
@@ -313,6 +315,6 @@ Options:
 
 Only code shows a current one-time code. Stored secrets never print or go in arguments; it
 asks on the terminal with the echo off, or reads stdin or a file. Grants, approvals,
-new tokens, and agent settings ask for Touch ID or the passphrase in the window for each
+new tokens, and agent settings require owner confirmation in the window for each
 change, as the window does.
 ";

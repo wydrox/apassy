@@ -1,6 +1,6 @@
 [package]
 name = "apassy"
-version = "0.5.19"
+version = "0.5.20"
 edition = "2024"
 rust-version = "1.97"
 publish = false
@@ -20,9 +20,12 @@ default-members = ["."]
 # Apple Watch core (ADR 0039 section 4), because openssl-src cannot configure OpenSSL for watchOS.
 default = ["openssl"]
 openssl = ["rusqlite?/bundled-sqlcipher-vendored-openssl"]
-desktop = ["dep:eframe", "dep:rfd", "dep:qrcode", "dep:arboard", "dep:toml_edit", "dep:muda", "time?/local-offset"]
+desktop = ["dep:eframe", "dep:rfd", "dep:qrcode", "dep:arboard", "dep:toml_edit", "dep:muda", "dep:x11rb", "dep:wayland-client", "dep:wayland-protocols", "dep:wayland-protocols-wlr", "time?/local-offset", "session-bus"]
+# Linux: screen lock, sleep and session observation over D-Bus (src/native/linux/session_bus.rs).
+# The desktop turns it on; a headless owner service may name it. No effect on macOS.
+session-bus = ["dep:zbus"]
 storage-probe = ["dep:rusqlite", "dep:tempfile"]
-vault = ["dep:rusqlite", "dep:tempfile", "dep:getrandom", "dep:rustls", "dep:rustls-platform-verifier", "dep:rcgen", "dep:time", "dep:ring", "dep:p256", "dep:flate2", "dep:ciborium"]
+vault = ["dep:rusqlite", "dep:tempfile", "dep:getrandom", "dep:rustls", "dep:rustls-platform-verifier", "dep:rcgen", "dep:time", "dep:ring", "dep:p256", "dep:flate2", "dep:ciborium", "dep:base64"]
 # Tests only (docs/operations/checks.md, "Test vault KDF"): in a debug build, a vault
 # file in a `tempfile` directory uses 2 PBKDF2 iterations. CI tests with --all-features.
 # The release builds name their features, and a release build keeps 256,000 also
@@ -35,12 +38,12 @@ toml_edit = { version = "=0.25.15", optional = true, default-features = false, f
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 zeroize = "=1.9.0"
-eframe = { version = "=0.36.2", optional = true, default-features = false, features = ["accesskit", "default_fonts", "glow"] }
+eframe = { version = "=0.36.2", optional = true, default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
 # A guarded, concealed clipboard copy for one-time codes.
 arboard = { version = "=3.6.1", optional = true, default-features = false }
 # Native open/save panels. The async API keeps the desktop event loop free.
 rfd = { version = "=0.17.2", optional = true, default-features = false, features = ["xdg-portal"] }
-rusqlite = { version = "=0.40.2", optional = true, default-features = false, features = ["bundled-sqlcipher"] }
+rusqlite = { version = "=0.42.0", optional = true, default-features = false, features = ["bundled-sqlcipher"] }
 tempfile = { version = "=3.27.0", optional = true }
 getrandom = { version = "=0.4.3", optional = true }
 # ADR 0005: TLS for connector destinations. ring backend, macOS trust store.
@@ -51,6 +54,11 @@ rcgen = { version = "=0.14.10", optional = true, default-features = false, featu
 # ADR 0020: ECDSA P-256 verification, HMAC-SHA256, and SHA-256 for the iPhone companion.
 # The version and the features are the ones that rustls and rcgen already build.
 ring = { version = "=0.17.14", optional = true, default-features = false, features = ["alloc"] }
+# The Connect tunnel of the node (plan s7 unit M4): the core compiles the relay crate's own
+# WebSocket code (`crates/apassy-relay/src/server/tunnel/ws.rs`, through `#[path]` in
+# `src/node/tunnel.rs`), which uses this crate for the handshake keys. The relay's pin: the
+# app binary links it already.
+base64 = { version = "=0.23.1", optional = true }
 # Passkeys (schema 17): the CBOR of the attestation object and the COSE public key.
 ciborium = { version = "=0.2.2", optional = true, default-features = false, features = ["std"] }
 # WebAuthn RP validation includes ICANN and private public suffixes.
@@ -69,12 +77,26 @@ flate2 = { version = "=1.1.10", optional = true, default-features = false, featu
 # secret calls it, so the dependency is not optional). The same version is already in
 # Cargo.lock through tempfile. `termios`: the owner command line turns off the echo
 # when it reads a secret (ADR 0017). `fs`: the open flags of each target (`O_NOFOLLOW`
-# differs by architecture), not written numbers.
-rustix = { version = "=1.1.4", default-features = false, features = ["std", "fs", "process", "termios", "time"] }
+# differs by architecture), not written numbers. `event`: `poll` in the Linux clipboard
+# thread (src/desktop/clipboard/wayland.rs).
+rustix = { version = "=1.1.4", default-features = false, features = ["std", "fs", "process", "termios", "time", "net", "event"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Main-process native menus through a safe API; no application framework or GTK.
 muda = { version = "=0.21.2", optional = true, default-features = false }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# The Linux clipboard with exact ownership (src/desktop/clipboard/x11.rs, wayland.rs).
+# No new crates: the versions that arboard (x11rb) and winit/smithay-clipboard
+# (wayland-*) already put in Cargo.lock. x11rb without default features is the pure-Rust
+# connection (no libxcb, no unsafe); "staging" has ext-data-control-v1.
+x11rb = { version = "=0.13.2", optional = true, default-features = false }
+wayland-client = { version = "=0.31.15", optional = true, default-features = false }
+wayland-protocols = { version = "=0.32.13", optional = true, default-features = false, features = ["client", "staging"] }
+wayland-protocols-wlr = { version = "=0.3.12", optional = true, default-features = false, features = ["client"] }
+# systemd-logind and screen saver signals. The D-Bus client that the Linux desktop already
+# builds (AccessKit's AT-SPI bridge: zbus 5.19 with async-io); `blocking-api` adds no crate.
+zbus = { version = "=5.19.0", optional = true, default-features = false, features = ["async-io", "blocking-api"] }
 
 # The owner command line and the window without the Mac's own node. The app bundle
 # ships `apassy-app` (crates/apassy-app) under this name; this target stays for the

@@ -86,7 +86,7 @@ function renderState(reply) {
     "not_running",
   ].includes(reply.state)
     ? "Not connected"
-    : "Connected to your Mac";
+    : "Connected to Apassy";
   switch (reply.state) {
     case "host_missing": {
       const command = element("code", "command", "apassy setup browser");
@@ -136,7 +136,7 @@ function renderState(reply) {
           "",
           reply.state === "vault_locked"
             ? "Your vault is locked"
-            : "Open Apassy on your Mac",
+            : "Open Apassy",
         ),
         note(reply.message),
         button,
@@ -244,7 +244,7 @@ function renderList(message, isError) {
     search,
     count,
     list,
-    element("p", "hint", "Choose an account, then approve on your Mac."),
+    element("p", "hint", "Choose an account, then approve in Apassy."),
     actions(),
   );
   const first = list.querySelector("button");
@@ -298,7 +298,7 @@ async function ownerAction(event, message, login) {
   const open = element("button", "secondary", "Show Apassy");
   open.addEventListener("click", () => send({ type: "show" }));
   show(
-    element("h2", "", "Check Touch ID on your Mac"),
+    element("h2", "", "Confirm in Apassy"),
     accountContext(login),
     note("Approve in Apassy, or use your vault passphrase if asked."),
     element("p", "hint", "Nothing has been filled yet."),
@@ -511,7 +511,7 @@ function renderSave(page, values, message, isError) {
   drawForm({
     id: "save-form",
     fields: [title.wrap, username.wrap],
-    hint: "Approve saving on your Mac. The password comes from the selected form on this page.",
+    hint: "Approve saving in Apassy. The password comes from the selected form on this page.",
     submit,
     message,
     isError,
@@ -644,7 +644,7 @@ function renderNew(page, values, message, isError) {
   drawForm({
     id: "new-form",
     fields: [title.wrap, username.wrap, row],
-    hint: "Approve on your Mac. Apassy saves the password before filling this page.",
+    hint: "Approve in Apassy. Apassy saves the password before filling this page.",
     submit,
     message,
     isError,
@@ -710,7 +710,7 @@ function drawPasskeys(reply) {
     reply && reply.ok === false
       ? reply.message
       : on
-        ? "Sites ask Apassy for passkeys. Each use asks for Touch ID or your passphrase."
+        ? "Sites ask Apassy for passkeys. Each use asks for confirmation in Apassy."
         : "Off: sites use the passkeys of the browser.";
   passkeysNote.classList.toggle("error", Boolean(reply && reply.ok === false));
 }
@@ -766,7 +766,7 @@ async function drawSuggestions() {
   suggestionsBox.disabled = false;
   suggestionsRow.hidden = false;
   suggestionsNote.textContent = reply.on
-    ? "Account metadata appears on sites with access. Every fill and save needs approval on your Mac."
+    ? "Account metadata appears on sites with access. Every fill and save needs approval in Apassy."
     : "Off. Use the Apassy toolbar to fill a login.";
   document.getElementById("access-prompt").hidden = reply.broad || !reply.on;
   const siteToggle = document.getElementById("site-toggle");

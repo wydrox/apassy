@@ -21,8 +21,8 @@
 //!   [`OwnerRequest::CopyCode`]. The desktop owns the copy and the clipboard. It clears
 //!   the clipboard after [`MIN_CLEAR`] to [`MAX_CLEAR`] if the clipboard still holds the
 //!   code.
-//! - Both checks are the usual owner check: Touch ID or the passphrase, inside the window
-//!   of "How often to ask". Only while a code is visible, the note under the group says
+//! - Both checks are the usual owner check (macOS: Touch ID or the passphrase; Linux: the
+//!   passphrase or system authentication), inside the window of "How often to ask". Only while a code is visible, the note under the group says
 //!   how long it stays visible and when the clipboard clears.
 //! - A visible custom detail that looks like a setup key is not drawn. The page says that
 //!   it is hidden for safety (`exposes_setup_key`).
@@ -358,14 +358,20 @@ fn show_code(ui: &mut egui::Ui, code: &Code) {
         .request_repaint_after(until_next_second(SystemTime::now()));
 }
 
-/// The hover text of "Show" on a code row. The check is the usual owner check, as for
-/// the Password row.
-const SHOW_HOVER: &str = "Confirm with Touch ID or passphrase. The code is visible for 30 seconds.";
+/// The hover text of "Show" on a code row. The check is the usual owner check of this
+/// platform, as for the Password row.
+pub(super) fn show_hover() -> String {
+    format!(
+        "{} The code is visible for 30 seconds.",
+        crate::desktop::clipboard::CONFIRM_HINT
+    )
+}
 
 /// The hover text of "Copy" on a code row.
 fn copy_hover() -> String {
     format!(
-        "Confirm with Touch ID or passphrase. Clipboard clears after {} to {} seconds if unchanged.",
+        "{} Clipboard clears after {} to {} seconds if unchanged.",
+        crate::desktop::clipboard::CONFIRM_HINT,
         MIN_CLEAR.as_secs(),
         MAX_CLEAR.as_secs()
     )
@@ -373,7 +379,7 @@ fn copy_hover() -> String {
 
 fn show_button(ui: &mut egui::Ui, label: &str) -> bool {
     rows::pill_button(ui, "Show", &format!("Show the code of {label}"))
-        .on_hover_text(SHOW_HOVER)
+        .on_hover_text(show_hover())
         .clicked()
 }
 
@@ -384,6 +390,11 @@ fn hide_button(ui: &mut egui::Ui, label: &str) -> bool {
 }
 
 fn copy_button(ui: &mut egui::Ui, label: &str) -> bool {
+    if !crate::desktop::clipboard::supported() {
+        ui.add_enabled(false, egui::Button::new("Copy"))
+            .on_disabled_hover_text(crate::desktop::clipboard::unsupported_note());
+        return false;
+    }
     rows::pill_button(ui, "Copy", &format!("Copy the code of {label}"))
         .on_hover_text(copy_hover())
         .clicked()

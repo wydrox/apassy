@@ -18,11 +18,11 @@ use apassy::node::backend::{
     CatalogItem, ConnectDecision, NewCloudAgent, NodeAgentId, NodeTeamId, PendingConnect,
     RunningNode, TokenIssue,
 };
-use apassy_relay::config::{EmbeddedOptions, OAuthConfig, RelayConfig, UpstreamOptions};
+use apassy_relay::config::{EmbeddedOptions, HOST_WORD, OAuthConfig, RelayConfig, UpstreamOptions};
 use apassy_relay::embedded::EmbeddedNode;
 use apassy_relay::hostkeys;
 use apassy_relay::secret::SecretString;
-use apassy_relay::server::directory::Directory;
+use apassy_relay::server::directory::{DIRECTORY_VERSION, Directory};
 use apassy_relay::server::oauth::{decode_form, percent_encode};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -595,7 +595,10 @@ fn register_authorize_wait_allow_token_and_mcp() {
             .contains(&format!("Grok Bot wants to connect to {MAC}"))
     );
     assert!(page.text.contains(&request.code));
-    assert!(page.text.contains("Approve on your Mac or iPhone."));
+    assert!(
+        page.text
+            .contains(&format!("Approve on your {HOST_WORD} or iPhone."))
+    );
     // Allowed: the next refresh sends the browser back with the code, once.
     let agent = node.allow(&request);
     assert!(node.node().pending_connects().unwrap().is_empty());
@@ -1113,9 +1116,9 @@ fn open_connect_requests_are_limited_per_node() {
     assert_eq!(answer.status, 429);
     assert!(answer.text.contains("Too many connection requests wait."));
     assert!(
-        answer
-            .text
-            .contains("Deny requests on your Mac that you did not start, then connect again."),
+        answer.text.contains(&format!(
+            "Deny requests on your {HOST_WORD} that you did not start, then connect again."
+        )),
         "{}",
         answer.text
     );
@@ -1156,8 +1159,9 @@ fn a_new_authorize_of_the_same_client_ends_the_waiting_request_and_shows_its_own
     assert_eq!(page.status, 200, "{}", page.text);
     assert!(page.text.contains(&request.code), "{}", page.text);
     assert!(
-        page.text
-            .contains("Deny requests on your Mac that you did not start, then connect again."),
+        page.text.contains(&format!(
+            "Deny requests on your {HOST_WORD} that you did not start, then connect again."
+        )),
         "{}",
         page.text
     );
@@ -1507,16 +1511,16 @@ fn the_directory_goes_back_to_1003_and_up_to_1004_again() {
         conn.query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap()
     };
-    assert_eq!(version(&node.config.directory_path()), 1005);
+    assert_eq!(version(&node.config.directory_path()), DIRECTORY_VERSION);
     assert_eq!(
-        Directory::downgrade_to_1003(&node.config).unwrap(),
-        (1005, 1003)
+        Directory::downgrade_to_1003(&node.config, false).unwrap(),
+        (DIRECTORY_VERSION, 1003)
     );
     assert_eq!(version(&node.config.directory_path()), 1003);
-    // The image of 1005 moves it up again; the OAuth state is gone.
+    // The current image moves it up again; the OAuth state is gone.
     let started = EmbeddedNode::start(node.config.clone()).unwrap();
     node.node = Some(started);
-    assert_eq!(version(&node.config.directory_path()), 1005);
+    assert_eq!(version(&node.config.directory_path()), DIRECTORY_VERSION);
     assert!(node.node().has_team(&node.team));
     let answer = node.token_refresh(&connected.client_id, &connected.refresh);
     assert_eq!(answer.json()["error"], "invalid_grant");

@@ -16,7 +16,7 @@ use apassy::node::backend::{
     CatalogItem, NewCloudAgent, NodeAgentId, NodeBackend, NodeConfig, NodeRunId, NodeSecret,
     NodeTeamId, RunStatus, RunningNode, SyncReport, TokenIssue,
 };
-use apassy_relay::config::{EmbeddedOptions, RelayConfig};
+use apassy_relay::config::{EMBEDDED_MAC_NAME, EmbeddedOptions, RelayConfig};
 use apassy_relay::embedded::{EmbeddedNode, EmbeddedRelay};
 use apassy_relay::error::codes;
 use apassy_relay::hostkeys;
@@ -41,6 +41,7 @@ fn node_config(dir: &Path) -> NodeConfig {
         data_dir: dir.join("node"),
         master_key: NodeSecret::new(MASTER_KEY.to_string()),
         public_url: PUBLIC_URL.to_string(),
+        public_origins: Vec::new(),
         public_listen: Some(loopback()),
     }
 }
@@ -988,7 +989,9 @@ fn the_connect_page_of_a_node_of_the_app_says_your_mac_not_the_computer_name() {
     let (status, page) = call_raw(&public, None, "GET", &wait, None, &[], None);
     assert_eq!(status, 200, "{page}");
     assert!(
-        page.contains("<h1>Grok Bot wants to connect to your Mac</h1>"),
+        page.contains(&format!(
+            "<h1>Grok Bot wants to connect to {EMBEDDED_MAC_NAME}</h1>"
+        )),
         "{page}"
     );
     node.stop();

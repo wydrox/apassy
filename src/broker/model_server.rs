@@ -675,8 +675,10 @@ struct Inner {
     /// A run already waited [`Timing::first_start_wait`] for the start in progress,
     /// which downloads the base weights. Later runs do not wait for it.
     first_start_waited: bool,
-    /// Grows with each stop and each change of the mode. A start in progress for an
-    /// older generation stops.
+    /// Grows with each stop and each change of the mode, except a change between the
+    /// two modes that Apassy manages: there a start in progress continues. A start in
+    /// progress for an older generation stops, and the answer of a check for an older
+    /// generation does not count.
     generation: u64,
     quit: bool,
     /// The LaunchAgents that run `start.sh`, from the last scan.
@@ -1029,7 +1031,9 @@ impl ModelServer {
     }
 
     /// Save and apply new settings. A change to "Managed outside Apassy" or "Off" stops a
-    /// server that Apassy started. The stop runs on its own thread.
+    /// server that Apassy started. The stop runs on its own thread. A change from one of
+    /// them to a mode that Apassy manages ends a check in progress: its answer does not
+    /// count.
     pub fn set_settings(&self, settings: BouncerSettings) -> io::Result<()> {
         if let Some(path) = &self.settings_path {
             settings.save(path)?;
@@ -1056,6 +1060,13 @@ impl ModelServer {
                 return Ok(());
             }
             let child = if mode.managed() {
+                if !old.managed() {
+                    // A check of "Managed outside Apassy" in progress stops counting.
+                    // Its late answer must not replace the state of the new mode: in
+                    // "When a run needs it" a failed check would hide "Cannot start".
+                    inner.generation += 1;
+                    inner.last_probe = None;
+                }
                 None
             } else {
                 let child = Self::take_for_stop(&mut inner);
@@ -2643,7 +2654,10 @@ mod tests {
         assert_eq!(server.ensure_running(Duration::from_secs(2)), Ok(()));
         assert_eq!(server.before_model(), Ok(()));
         thread::sleep(Duration::from_millis(500));
-        assert!(!pids.is_file(), "no server process on this Mac");
+        assert!(
+            !pids.is_file(),
+            concat!("no server process on this ", crate::computer!())
+        );
         assert!(!server.status().owned);
 
         // A remote host that is down: the run is unavailable at once, and still no
@@ -2668,7 +2682,10 @@ mod tests {
             "no wait, no retry"
         );
         thread::sleep(Duration::from_millis(300));
-        assert!(!pids.is_file(), "no server process on this Mac");
+        assert!(
+            !pids.is_file(),
+            concat!("no server process on this ", crate::computer!())
+        );
 
         // Back on this Mac: the run starts the local server again.
         server.set_remote(None);
@@ -3085,7 +3102,7 @@ mod tests {
     #[ignore = "needs the Laya environment and loads the model"]
     fn live_start_answer_and_stop() {
         let layout = Layout::discover();
-        preflight(&layout).expect("the Laya environment of this Mac");
+        preflight(&layout).expect(concat!("the Laya environment of this ", crate::computer!()));
         let server = ModelServer::start_with(
             None,
             BouncerSettings {
@@ -4073,6 +4090,66 @@ mod tests {
         }
     }
 
+    /// A check of "Managed outside Apassy" that ends after the change to "When a run
+    /// needs it" does not count. The state stays "Stopped", so Settings can say "Cannot
+    /// start" while the preflight fails, and not "Not running" from the failed check of
+    /// the old mode.
+    #[test]
+    fn a_check_of_the_external_mode_does_not_count_after_the_change_to_when_needed() {
+        let dir = TempDir::new().expect("temp dir");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let url = format!("http://{}", listener.local_addr().expect("addr"));
+        let settings = |start| BouncerSettings {
+            start,
+            idle_minutes: 10,
+            url: Some(url.clone()),
+        };
+        let server = ModelServer::start_timed(
+            None,
+            settings(StartMode::External),
+            layout_without_script(dir.path()),
+            Host::none(),
+            fast_timing(None),
+        );
+        // The endpoint keeps the check of "Managed outside Apassy" waiting for an answer.
+        listener.set_nonblocking(true).expect("nonblocking");
+        let mut held = None;
+        wait_until(Duration::from_secs(5), "the check connects", || {
+            held = listener.accept().ok().map(|(stream, _)| stream);
+            held.is_some()
+        });
+        let mut check = held.expect("the check");
+        check.set_nonblocking(false).expect("blocking");
+        check
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+
+        server
+            .set_settings(settings(StartMode::WhenNeeded))
+            .expect("settings");
+        assert_eq!(server.state(), ServerState::Stopped);
+        // Now the check ends: the endpoint closes without an answer, so it is no
+        // bouncer brain. The read ends when the check has closed its side.
+        check
+            .shutdown(std::net::Shutdown::Write)
+            .expect("end the check");
+        check
+            .read_to_end(&mut Vec::new())
+            .expect("the check closes the connection");
+        // The monitor refreshes the preflight at its next turn, after the check.
+        let marker = || Err(Problem::Spawn("marker".to_owned()));
+        server.lock().preflight = marker();
+        server.wake.notify_all();
+        wait_until(
+            Duration::from_secs(5),
+            "the next turn of the monitor",
+            || server.lock().preflight != marker(),
+        );
+        assert_eq!(server.state(), ServerState::Stopped);
+        assert_eq!(server.status().preflight, Err(Problem::NoScript));
+        server.shutdown();
+    }
+
     #[test]
     fn with_apassy_waits_for_successful_startup_inference() {
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -4593,7 +4670,7 @@ mod tests {
         .into_iter()
         .map(Path::new)
         .find(|path| path.is_file()) else {
-            eprintln!("skipped: no python3 on this Mac");
+            eprintln!(concat!("skipped: no python3 on this ", crate::computer!()));
             return;
         };
         let run = |args: &[&OsStr], home: &Path, pythonpath: &Path| {

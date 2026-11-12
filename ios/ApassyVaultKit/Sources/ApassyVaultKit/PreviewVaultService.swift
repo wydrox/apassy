@@ -46,6 +46,8 @@ public actor PreviewVaultService: VaultService {
     var organizeState = PreviewOrganize()
     /// The agents of the Macs (`PreviewVaultService+Feed.swift`).
     var feedState = PreviewFeed()
+    /// Apassy Connect (`PreviewVaultService+Connect.swift`).
+    var connectState = PreviewConnect()
     /// Test support: answers that the next `passkeyImport` calls give without importing (for
     /// example the core's "exists" for an attach target that got a passkey meanwhile).
     var scriptedPasskeyImports: [PasskeyImportResult] = []

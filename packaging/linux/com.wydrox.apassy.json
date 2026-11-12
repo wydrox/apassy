@@ -1,0 +1,7 @@
+{
+  "name": "com.wydrox.apassy",
+  "description": "Apassy browser host",
+  "path": "/usr/lib/apassy/apassy-browser-host",
+  "type": "stdio",
+  "allowed_origins": ["chrome-extension://bbnpgnjnfjlbgggmpnhejpmfjhmmhiih/"]
+}

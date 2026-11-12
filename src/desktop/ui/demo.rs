@@ -1509,7 +1509,8 @@ fn bouncer_events(now: u64, waiting: bool) -> Vec<super::bouncer::LogEvent> {
 
 /// The frame of the Devices mockup that Settings > Devices shows in the demo build. The
 /// menu at the top of the section picks it, and `APASSY_DEMO_DEVICES` (1, 2a, 2b, 2c, 3a,
-/// 3b, 3c, 3d, 3f, 3g, 3h, 4, 4b, 4c, 4d, 4d+, 5a, 5b, 5c, 6a, 6b, 6d, 7, R) sets it at
+/// 3b, 3c, 3d, 3f, 3g, 3h, 4, 4b, 4c, 4d, 4d+, 5a, 5b, 5c, 6a, 6b, 6d, 7, 9a, 9b, 9c, 9d,
+/// 9d+, 9e, R) sets it at
 /// start and opens the section, for screenshots. 3e and 6c are frame 1 with the ⓘ of the switch or of Wi-Fi Pairing open.
 /// Frames 2a–2c and 4b–4d are the steps of the add and move sheets, drawn by the same
 /// functions as the vault build (`devices::link_step` and the others); "4d+" is frame 1
@@ -1566,10 +1567,22 @@ pub(crate) enum DevicesFrame {
     /// Frame 1 with the Relay group: the questions through the relay, the feed, the
     /// other Macs, and the end of the free approvals.
     Relay,
+    /// 9a: the approvals through Apassy relay, both moves offered.
+    ConnectBoth,
+    /// 9b: the node on Apassy Connect without the tailnet route.
+    ConnectOnly,
+    /// 9c: the move to Apassy Connect waits for its first approval.
+    ConnectPending,
+    /// 9d: the hosted relay ended the free approvals (`410 free_connect_ended`).
+    RelayEnded,
+    /// 9d+: the hosted relay serves Apassy Connect only (`410 hosted_retired`).
+    RelayRetired,
+    /// 9e: a device that reaches this Mac through Apassy Connect.
+    ViaConnect,
 }
 
 impl DevicesFrame {
-    const ALL: [Self; 24] = [
+    const ALL: [Self; 30] = [
         Self::TailnetOn,
         Self::AddLink,
         Self::AddWords,
@@ -1594,6 +1607,12 @@ impl DevicesFrame {
         Self::NextVersion,
         Self::FirstRun,
         Self::Relay,
+        Self::ConnectBoth,
+        Self::ConnectOnly,
+        Self::ConnectPending,
+        Self::RelayEnded,
+        Self::RelayRetired,
+        Self::ViaConnect,
     ];
 
     fn label(self) -> &'static str {
@@ -1622,6 +1641,12 @@ impl DevicesFrame {
             Self::NextVersion => "Frame 6d: Next Version",
             Self::FirstRun => "Frame 7: First Run",
             Self::Relay => "Frame R: Relay Group",
+            Self::ConnectBoth => "Frame 9a: Both Moves",
+            Self::ConnectOnly => "Frame 9b: Connect Without Tailscale",
+            Self::ConnectPending => "Frame 9c: Waits for the First Approval",
+            Self::RelayEnded => "Frame 9d: Free Approvals Ended",
+            Self::RelayRetired => "Frame 9d+: Hosted Relay Retired",
+            Self::ViaConnect => "Frame 9e: A Device Through Connect",
         }
     }
 
@@ -1688,15 +1713,33 @@ pub(crate) fn devices_view(frame: DevicesFrame) -> super::devices::DevicesView {
         port: 8444,
         words: Some("harbor lemon quartz otter cedar mango".to_owned()),
     };
-    let moving = matches!(frame, DevicesFrame::Move | DevicesFrame::MoveSheet);
+    let moving = matches!(
+        frame,
+        DevicesFrame::Move
+            | DevicesFrame::MoveSheet
+            | DevicesFrame::ConnectBoth
+            | DevicesFrame::ConnectOnly
+            | DevicesFrame::ConnectPending
+            | DevicesFrame::RelayEnded
+            | DevicesFrame::RelayRetired
+    );
     let first_run = frame == DevicesFrame::FirstRun;
     let (approvals, phone_route) = if moving {
         ("Asks for approvals", Route::Relay)
+    } else if frame == DevicesFrame::ViaConnect {
+        ("Hosts approvals", Route::Connect)
     } else {
         ("Hosts approvals", Route::Mac)
     };
+    // This computer: a Mac mini on macOS, a Linux desktop on Linux (its kind reads
+    // "Computer" there). The other Macs of the fixture are Macs on both.
+    let this_name = if cfg!(target_os = "linux") {
+        "Linux desktop"
+    } else {
+        "Mac mini (office)"
+    };
     let this_mac = demo_device(
-        "Mac mini (office)",
+        this_name,
         Kind::Mac,
         if first_run {
             "Asks for approvals"
@@ -1718,7 +1761,7 @@ pub(crate) fn devices_view(frame: DevicesFrame) -> super::devices::DevicesView {
     if !first_run {
         devices.extend([
             demo_device(
-                "Rafal's iPhone",
+                "Alex's iPhone",
                 Kind::Iphone,
                 "Approves runs",
                 Some(phone_route),
@@ -1726,7 +1769,7 @@ pub(crate) fn devices_view(frame: DevicesFrame) -> super::devices::DevicesView {
                 phone_target(2, "iphone"),
             ),
             demo_device(
-                "Rafal's Apple Watch",
+                "Alex's Apple Watch",
                 Kind::Watch,
                 "Sees requests",
                 Some(phone_route),
@@ -1779,7 +1822,9 @@ pub(crate) fn devices_view(frame: DevicesFrame) -> super::devices::DevicesView {
     let (node, problem) = match frame {
         DevicesFrame::NoTailscale | DevicesFrame::FirstRun => (NodeState::Missing, None),
         DevicesFrame::NotConnected => (NodeState::NotConnected, None),
-        DevicesFrame::RouteOff | DevicesFrame::NoticeRelay => (NodeState::Off, None),
+        DevicesFrame::RouteOff | DevicesFrame::NoticeRelay | DevicesFrame::ConnectOnly => {
+            (NodeState::Off, None)
+        }
         DevicesFrame::Starting => (NodeState::On { address: None }, None),
         DevicesFrame::Locked => (NodeState::Locked, None),
         DevicesFrame::PortTaken => (
@@ -1808,7 +1853,7 @@ pub(crate) fn devices_view(frame: DevicesFrame) -> super::devices::DevicesView {
         failed: None,
         devices: vec![WifiDevice {
             id: "wifi-phone".to_owned(),
-            name: "Rafal's iPhone".to_owned(),
+            name: "Alex's iPhone".to_owned(),
             paired_at: WIFI_PAIRED,
             last_seen_at: Some(DEVICES_NOW - 3 * 3_600),
         }],
@@ -1818,20 +1863,48 @@ pub(crate) fn devices_view(frame: DevicesFrame) -> super::devices::DevicesView {
             WifiEnd::TwoVersions
         },
     });
-    let relay = (frame == DevicesFrame::Relay).then(|| RelayView {
-        questions: Questions::On,
-        feed_shown: true,
+    let ended = match frame {
+        DevicesFrame::RelayEnded => Some((super::devices::Ended::Free, "0.5.20".to_owned())),
+        DevicesFrame::RelayRetired => Some((super::devices::Ended::Retired, "0.5.20".to_owned())),
+        _ => None,
+    };
+    let relay = (frame == DevicesFrame::Relay || ended.is_some()).then(|| RelayView {
+        questions: if ended.is_some() {
+            Questions::Ended
+        } else {
+            Questions::On
+        },
+        feed_shown: ended.is_none(),
         other_macs: Some(OtherMacsRow {
             words: "Through the Apassy relay".to_owned(),
             relay: true,
         }),
-        free_end: Some("0.5.20".to_owned()),
+        free_end: ended.is_none().then(|| "0.5.20".to_owned()),
+        can_move: ended.is_some(),
+        can_move_connect: ended.is_some(),
+        ended,
     });
     DevicesView {
         node,
         problem,
         locked: frame == DevicesFrame::Locked,
-        can_move: moving,
+        // As the vault build: the same choices for this group and the Relay group.
+        can_move: matches!(
+            frame,
+            DevicesFrame::Move
+                | DevicesFrame::MoveSheet
+                | DevicesFrame::ConnectBoth
+                | DevicesFrame::RelayEnded
+                | DevicesFrame::RelayRetired
+        ),
+        can_move_connect: matches!(
+            frame,
+            DevicesFrame::ConnectBoth
+                | DevicesFrame::ConnectOnly
+                | DevicesFrame::RelayEnded
+                | DevicesFrame::RelayRetired
+        ),
+        connect_pending: frame == DevicesFrame::ConnectPending,
         devices,
         notes: Vec::new(),
         wifi,
@@ -1904,17 +1977,17 @@ fn demo_step_sheet(ctx: &egui::Context, frame: DevicesFrame) -> Option<DevicesFr
             }
             DevicesFrame::AddWords => devices::join_step(
                 ui,
-                "Rafal's iPhone",
+                "Alex's iPhone",
                 Kind::Iphone,
                 "amber falcon",
                 Route::Mac,
                 true,
                 |_| {},
             ),
-            DevicesFrame::Added => devices::added_step(ui, "Rafal's iPhone", false, true, |_| {}),
+            DevicesFrame::Added => devices::added_step(ui, "Alex's iPhone", false, true, |_| {}),
             DevicesFrame::MoveSheet => devices::move_step(
                 ui,
-                "Rafal's iPhone",
+                "Alex's iPhone",
                 MovePhase::Scan,
                 Some(&demo_link_step()),
                 |ui| demo_qr(ui, 140.0),
@@ -1922,9 +1995,9 @@ fn demo_step_sheet(ctx: &egui::Context, frame: DevicesFrame) -> Option<DevicesFr
             ),
             DevicesFrame::Moved => devices::moved_step(
                 ui,
-                &["Rafal's iPhone".to_owned()],
+                &["Alex's iPhone".to_owned()],
                 true,
-                &["Rafal's Apple Watch".to_owned()],
+                &["Alex's Apple Watch".to_owned()],
             ),
             DevicesFrame::OldEntry => devices::old_entry_step(ui, false),
             _ => None,
@@ -1981,7 +2054,7 @@ fn select_devices_frame(app: &mut DesktopApp, frame: DevicesFrame) {
         _ => None,
     };
     if frame == DevicesFrame::AfterRevoke {
-        app.set_ok("Rafal's iPhone revoked");
+        app.set_ok("Alex's iPhone revoked");
     }
 }
 
@@ -2115,6 +2188,7 @@ fn demo_access(frame: BouncerFrame) -> super::agents_page::AccessView {
         problem,
         no_remote_agents: frame == BouncerFrame::NoRemoteAgentYet,
         reading: false,
+        connect: None,
     }
 }
 

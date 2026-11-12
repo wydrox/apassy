@@ -27,7 +27,9 @@
 //! client needs: only clients allowed at least once count toward `MAX_CLIENTS` and the
 //! registration window, a full table drops the oldest client that was never allowed, and
 //! such a client is pruned an hour after its registration. Bad codes and refresh tokens
-//! count for their client only (`ClientFailures`), never for the whole listener.
+//! count for their client only (`ClientFailures`), never for the whole listener, and
+//! through a `public` stream of the Connect tunnel for no client: every caller there has
+//! the node's public name, and Connect bounds the streams of a node.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
@@ -37,7 +39,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::config::{OAuthConfig, RelayConfig};
+use crate::config::{OAuthConfig, RelayConfig, host_word};
 use crate::error::{RelayError, RelayResult, codes};
 use crate::ids::{AgentId, TeamId};
 use crate::secret::{SecretString, TokenKind, new_token, parse_token, same_bytes, token_hash};
@@ -256,12 +258,12 @@ impl Reply {
 }
 
 /// The value of `WWW-Authenticate` on a 401 of `POST /mcp` when the relay has OAuth.
+/// `origin`: the public origin that the request arrived on (`RelayConfig::public_origins`).
 /// `token_sent`: the request had a bearer token, which the node refused.
-pub fn www_authenticate(config: &RelayConfig, token_sent: bool) -> Option<String> {
+pub fn www_authenticate(config: &RelayConfig, origin: &str, token_sent: bool) -> Option<String> {
     config.oauth.as_ref()?;
     let mut value = format!(
-        "Bearer resource_metadata=\"{}{}\", scope=\"{SCOPE}\"",
-        config.public_url,
+        "Bearer resource_metadata=\"{origin}{}\", scope=\"{SCOPE}\"",
         paths::PROTECTED_RESOURCE_MCP
     );
     if token_sent {
@@ -271,7 +273,15 @@ pub fn www_authenticate(config: &RelayConfig, token_sent: bool) -> Option<String
 }
 
 /// Answers one request of the flow. `path` and `query` are the request's, `body` is read
-/// (at most `MAX_BODY`), and `content_type` is its header.
+/// (at most `MAX_BODY`), and `content_type` is its header. `origin` is the public origin
+/// that the request arrived on, one of `RelayConfig::public_origins` (`http.rs` decides it
+/// from the listener and the tunnel stream, never from a header): the metadata, the
+/// pages, and `iss` name it, and a client, its codes, and its tokens work only on the
+/// origin it registered at (`client_origin`). `via_tunnel`: the request came through a
+/// `public` stream of the Connect tunnel (`http.rs` knows it from the front, never from a
+/// header); its bad codes and refresh tokens count in no client's window, and no window
+/// refuses it (`ClientFailures`).
+#[allow(clippy::too_many_arguments)]
 pub fn handle(
     hub: &Hub,
     route: Route,
@@ -279,6 +289,8 @@ pub fn handle(
     query: &str,
     body: &[u8],
     content_type: Option<&str>,
+    origin: &str,
+    via_tunnel: bool,
     now: u64,
 ) -> Reply {
     let Some(oauth) = hub.config.oauth.clone() else {
@@ -287,7 +299,9 @@ pub fn handle(
     let flow = Flow {
         hub,
         oauth: &oauth,
-        origin: &hub.config.public_url,
+        origin,
+        origins: hub.config.public_origins(),
+        counted: !via_tunnel,
         now,
     };
     let answer = match route {
@@ -347,7 +361,11 @@ fn params_of(body: &[u8], content_type: Option<&str>) -> Option<HashMap<String, 
 /// first failure. With `CLIENT_FAILURES_MAX` of them, every token request of that client
 /// is 429 `rate_limited` until the window ends; no other client and no other endpoint is
 /// refused. Codes and refresh tokens are 256 random bits: this only slows a client that
-/// sends bad ones in a loop. In memory only, in the hub.
+/// sends bad ones in a loop. In memory only, in the hub. A request through a `public`
+/// stream of the Connect tunnel is neither counted nor refused here: every caller there
+/// arrives from the loopback with the node's public name, so no window tells one caller
+/// from another; Connect bounds the new streams of a node (docs/SPEC.md section 35.4), and
+/// each carries one request, as for the listener's limiter (30.5).
 #[derive(Debug, Default)]
 pub struct ClientFailures {
     /// For each client: the start of its window and the failures in it.
@@ -610,13 +628,113 @@ fn random<const N: usize>() -> RelayResult<[u8; N]> {
 }
 
 fn random_hex<const N: usize>() -> RelayResult<String> {
+    Ok(hex_of(&random::<N>()?))
+}
+
+fn hex_of(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(N * 2);
-    for byte in random::<N>()? {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
         out.push(char::from(HEX[usize::from(byte >> 4)]));
         out.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }
-    Ok(out)
+    out
+}
+
+// ---- The origin of a client ----
+
+/// The random bytes at the start of a client id.
+const CLIENT_RANDOM_BYTES: usize = 10;
+/// The bytes of the origin tag at the end of a client id.
+const CLIENT_TAG_BYTES: usize = 6;
+
+/// The tag of `origin` for the random part of a client id: the first `CLIENT_TAG_BYTES`
+/// of SHA-256 over a fixed label, the origin, and the random part.
+fn origin_tag(origin: &str, random: &[u8]) -> [u8; CLIENT_TAG_BYTES] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"apassy-oauth-client-origin-v1\0");
+    hasher.update(origin.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(random);
+    let digest = hasher.finalize();
+    let mut tag = [0u8; CLIENT_TAG_BYTES];
+    tag.copy_from_slice(&digest[..CLIENT_TAG_BYTES]);
+    tag
+}
+
+/// The random part and the tag of a client id `c_<32 hex>`, or `None`.
+fn client_parts(client_id: &str) -> Option<(Vec<u8>, Vec<u8>)> {
+    let hex = client_id.strip_prefix("c_")?;
+    if hex.len() != 2 * (CLIENT_RANDOM_BYTES + CLIENT_TAG_BYTES) {
+        return None;
+    }
+    let bytes = (0..hex.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(hex.get(at..at + 2)?, 16).ok())
+        .collect::<Option<Vec<u8>>>()?;
+    let (random, tag) = bytes.split_at(CLIENT_RANDOM_BYTES);
+    Some((random.to_vec(), tag.to_vec()))
+}
+
+/// A new client id for a client that registers at `origin`, one of `origins`: `c_` and
+/// 32 hex characters, 10 random bytes and the 6 bytes of the origin's tag. The tag of no
+/// other origin of the set matches it.
+fn new_client_id(origin: &str, origins: &[&str]) -> RelayResult<String> {
+    loop {
+        let random = random::<CLIENT_RANDOM_BYTES>()?;
+        let tag = origin_tag(origin, &random);
+        let clash = origins
+            .iter()
+            .any(|other| *other != origin && origin_tag(other, &random) == tag);
+        if !clash {
+            return Ok(format!("c_{}{}", hex_of(&random), hex_of(&tag)));
+        }
+    }
+}
+
+/// The origin of `origins` (the first is `RelayConfig::public_url`) that the client id
+/// was registered at: the one whose tag it carries. A client id with the tag of no origin
+/// of the set (one registered before the tag, when the node had one origin, or at an
+/// origin that is gone) belongs to the first, as every client did with one origin.
+pub fn client_origin<'a>(client_id: &str, origins: &[&'a str]) -> &'a str {
+    let first = origins.first().copied().unwrap_or("");
+    if origins.len() < 2 {
+        return first;
+    }
+    let Some((random, tag)) = client_parts(client_id) else {
+        return first;
+    };
+    origins
+        .iter()
+        .copied()
+        .find(|origin| origin_tag(origin, &random).as_slice() == tag.as_slice())
+        .unwrap_or(first)
+}
+
+/// The origin that the access token of an agent of the flow works on: the origin of the
+/// client of its latest refresh token (`client_origin`). `None` on a node with one public
+/// origin, and for an agent that has no connection of the flow (the bearer token of
+/// `TokenIssue::Now`, which works on every origin).
+pub fn agent_origin<'a>(
+    hub: &'a Hub,
+    team: &TeamId,
+    agent: AgentId,
+) -> RelayResult<Option<&'a str>> {
+    let origins = hub.config.public_origins();
+    if origins.len() < 2 {
+        return Ok(None);
+    }
+    let client: Option<String> = hub.directory.store.with(|conn| {
+        conn.query_row(
+            "SELECT client_id FROM oauth_refresh WHERE team_id = ?1 AND agent_id = ?2 \
+             ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            params![team.as_str(), to_i(agent.0)],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(db)
+    })?;
+    Ok(client.map(|client| client_origin(&client, &origins)))
 }
 
 /// A code or a refresh token: 256 random bits as base64url. Only its hash is stored.
@@ -663,8 +781,11 @@ fn request_id_ok(id: &str) -> bool {
 
 /// The line of the waiting and the busy page: requests that someone else started can wait
 /// on the Mac, and only the owner can end them.
-pub const DENY_OTHERS: &str =
-    "Deny requests on your Mac that you did not start, then connect again.";
+pub const DENY_OTHERS: &str = concat!(
+    "Deny requests on your ",
+    host_word!(),
+    " that you did not start, then connect again."
+);
 
 /// The text of the connect page. Every field is plain text, escaped when written.
 struct Page {
@@ -681,9 +802,15 @@ impl Page {
             title: format!("{client} wants to connect to {mac}"),
             code: Some(code.to_string()),
             lines: vec![
-                "Approve on your Mac or iPhone.".to_string(),
+                concat!("Approve on your ", host_word!(), " or iPhone.").to_string(),
                 format!(
-                    "Check that the app shows the same code. Apassy must be open and unlocked on the Mac. The request ends in {minutes} {unit}."
+                    concat!(
+                        "Check that the app shows the same code. Apassy must be open and unlocked on the ",
+                        host_word!(),
+                        ". The request ends in {minutes} {unit}."
+                    ),
+                    minutes = minutes,
+                    unit = unit
                 ),
                 DENY_OTHERS.to_string(),
             ],
@@ -732,7 +859,7 @@ impl Page {
 
     fn broken() -> Self {
         Self {
-            title: "The Mac could not answer.".to_string(),
+            title: concat!("The ", host_word!(), " could not answer.").to_string(),
             code: None,
             lines: vec!["Try again in a moment.".to_string()],
         }
@@ -1004,7 +1131,13 @@ fn wake_hosts(hub: &Hub) {
 struct Flow<'a> {
     hub: &'a Hub,
     oauth: &'a OAuthConfig,
+    /// The origin that the request arrived on.
     origin: &'a str,
+    /// Every public origin of the node, `public_url` first.
+    origins: Vec<&'a str>,
+    /// Bad codes and refresh tokens count, and a client at its limit is refused
+    /// (`ClientFailures`): false for a `public` stream of the Connect tunnel.
+    counted: bool,
     now: u64,
 }
 
@@ -1025,6 +1158,11 @@ enum Redeemed {
 impl Flow<'_> {
     fn resource(&self) -> String {
         format!("{}/mcp", self.origin)
+    }
+
+    /// True when `client_id` registered at the origin of this request.
+    fn here(&self, client_id: &str) -> bool {
+        client_origin(client_id, &self.origins) == self.origin
     }
 
     fn resource_metadata(&self) -> Value {
@@ -1101,7 +1239,7 @@ impl Flow<'_> {
                 ));
             }
         };
-        let client_id = format!("c_{}", random_hex::<16>()?);
+        let client_id = new_client_id(self.origin, &self.origins)?;
         let now = self.now;
         // `None`: at a limit. `Some(woke)`: registered; `woke` when a dropped client had
         // a waiting request, so the host loops look again.
@@ -1189,7 +1327,11 @@ impl Flow<'_> {
         match registered {
             None => {
                 return Ok(Reply::limited(
-                    "Too many clients registered on this Mac. Try again later.",
+                    concat!(
+                        "Too many clients registered on this ",
+                        host_word!(),
+                        ". Try again later."
+                    ),
                     REGISTRATION_WINDOW_SECS,
                 ));
             }
@@ -1224,12 +1366,16 @@ impl Flow<'_> {
         let Some(client_id) = get("client_id") else {
             return Ok(Reply::page(400, Page::invalid()));
         };
-        let Some(client) = self
-            .hub
-            .directory
-            .store
-            .with(|conn| load_client(conn, client_id))?
-        else {
+        // A client of another origin of this node is not known here.
+        let client = if self.here(client_id) {
+            self.hub
+                .directory
+                .store
+                .with(|conn| load_client(conn, client_id))?
+        } else {
+            None
+        };
+        let Some(client) = client else {
             return Ok(Reply::page(400, Page::invalid()));
         };
         let redirect_uri = match get("redirect_uri") {
@@ -1281,7 +1427,11 @@ impl Flow<'_> {
         if get("resource").is_some_and(|resource| resource != self.resource()) {
             return Ok(back(
                 "invalid_target",
-                "The resource is the MCP address of this Mac.",
+                concat!(
+                    "The resource is the MCP address of this ",
+                    host_word!(),
+                    "."
+                ),
             ));
         }
         if state.is_some_and(|state| state.len() > MAX_STATE) {
@@ -1431,6 +1581,10 @@ impl Flow<'_> {
             else {
                 return Ok(Reply::page(404, Page::ended()));
             };
+            // The page of a request of another origin of this node is not here.
+            if !self.here(&client_id) {
+                return Ok(Reply::page(404, Page::ended()));
+            }
             Ok(match status.as_str() {
                 "pending" => {
                     let name = load_client(tx, &client_id)?.and_then(|client| client.name);
@@ -1488,7 +1642,11 @@ impl Flow<'_> {
             return Ok(Reply::error(
                 400,
                 "invalid_target",
-                "The resource is the MCP address of this Mac.",
+                concat!(
+                    "The resource is the MCP address of this ",
+                    host_word!(),
+                    "."
+                ),
             ));
         }
         let Some(client_id) = get("client_id").filter(|id| !id.is_empty()) else {
@@ -1498,14 +1656,26 @@ impl Flow<'_> {
                 "client_id is required.",
             ));
         };
+        // A client of another origin of this node: its code or refresh token stays as it
+        // is, and the client can register here.
+        if !self.here(client_id) {
+            return Ok(Reply::error(
+                400,
+                "invalid_client",
+                "The client is not registered at this address.",
+            ));
+        }
         let failures = &self.hub.oauth_failures;
-        if failures.limited(client_id, self.now) {
+        if self.counted && failures.limited(client_id, self.now) {
             return Ok(Reply::limited(
                 "Too many bad codes or refresh tokens from this client. Try again later.",
                 CLIENT_FAILURE_WINDOW_SECS,
             ));
         }
         let reply = self.grant_of(form, client_id)?;
+        if !self.counted {
+            return Ok(reply);
+        }
         if let Reply::Json {
             auth_failed: true, ..
         } = reply
@@ -1829,14 +1999,18 @@ impl Flow<'_> {
         let now = self.now;
         let directory = &self.hub.directory;
         let drop = directory.store.tx(|tx| {
-            let family: Option<String> = tx
+            let found: Option<(String, String)> = tx
                 .query_row(
-                    "SELECT family FROM oauth_refresh WHERE token_hash = ?1",
+                    "SELECT family, client_id FROM oauth_refresh WHERE token_hash = ?1",
                     params![hash_of(token)],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()
                 .map_err(db)?;
+            // A refresh token of another origin of this node changes nothing here.
+            let family = found
+                .filter(|(_, client)| self.here(client))
+                .map(|(family, _)| family);
             match family {
                 Some(family) => {
                     let drop = revoke_family(tx, &family, now)?;
@@ -1877,6 +2051,12 @@ impl Flow<'_> {
         let Some(agent) = agent.map(to_u) else {
             return Ok(());
         };
+        // An access token of another origin of this node changes nothing here.
+        if agent_origin(self.hub, &core.team, AgentId(agent))?
+            .is_some_and(|bound| bound != self.origin)
+        {
+            return Ok(());
+        }
         let team = core.team.as_str().to_string();
         let had = directory.store.tx(|tx| {
             let changed = tx
@@ -2262,6 +2442,56 @@ mod tests {
     }
 
     #[test]
+    fn a_client_id_carries_the_origin_it_registered_at() {
+        let funnel = "https://mac.example.ts.net:8443";
+        let connect = "https://k7m2q4x3ca.node.example.test";
+        let both = [funnel, connect];
+        for _ in 0..64 {
+            for origin in both {
+                let id = new_client_id(origin, &both).unwrap();
+                // The form of before: `c_` and 32 lowercase hex characters.
+                assert_eq!(id.len(), 34, "{id}");
+                assert!(id.starts_with("c_"));
+                assert!(
+                    id[2..]
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+                    "{id}"
+                );
+                assert_eq!(client_origin(&id, &both), origin, "{id}");
+                // With one origin, every client is of that origin, as before.
+                assert_eq!(client_origin(&id, &[funnel]), funnel);
+                assert_eq!(client_origin(&id, &[connect]), connect);
+            }
+        }
+        // The same random part with another origin's tag: the other origin.
+        let id = new_client_id(connect, &both).unwrap();
+        let (random, _) = client_parts(&id).unwrap();
+        let forged = format!(
+            "c_{}{}",
+            hex_of(&random),
+            hex_of(&origin_tag(funnel, &random))
+        );
+        assert_eq!(client_origin(&forged, &both), funnel);
+        // A client of before the tag, an origin that is gone, or no id form: the first.
+        let legacy = format!("c_{}", random_hex::<16>().unwrap());
+        assert_eq!(client_origin(&legacy, &both), funnel);
+        assert_eq!(client_origin(&legacy, &[connect, funnel]), connect);
+        let gone = new_client_id("https://old.example.ts.net:8443", &both).unwrap();
+        assert_eq!(client_origin(&gone, &both), funnel);
+        for odd in [
+            "",
+            "c_",
+            "c_xyz",
+            "d_0123456789abcdef0123456789abcdef",
+            "c_0123",
+        ] {
+            assert_eq!(client_origin(odd, &both), funnel, "{odd}");
+        }
+        assert_eq!(client_origin(&id, &[]), "");
+    }
+
+    #[test]
     fn bad_grants_limit_their_client_only_and_the_window_ends() {
         let failures = ClientFailures::default();
         let start = 1_000;
@@ -2326,11 +2556,26 @@ mod tests {
         assert!(html.contains("K7Q-4MD"));
         assert!(html.contains("ends in 5 minutes"));
         // The waiting and the busy page tell the owner to deny what they did not start.
-        let line = "Deny requests on your Mac that you did not start, then connect again.";
+        let line = format!(
+            "Deny requests on your {} that you did not start, then connect again.",
+            crate::config::HOST_WORD
+        );
         assert_eq!(DENY_OTHERS, line);
-        assert!(html.contains(line), "{html}");
+        assert_eq!(
+            crate::config::HOST_WORD,
+            if cfg!(target_os = "linux") {
+                "computer"
+            } else {
+                "Mac"
+            }
+        );
+        assert!(html.contains(&format!(
+            "Approve on your {} or iPhone.",
+            crate::config::HOST_WORD
+        )));
+        assert!(html.contains(&line), "{html}");
         let busy = Page::busy().html();
         assert!(busy.contains("Too many connection requests wait."));
-        assert!(busy.contains(line), "{busy}");
+        assert!(busy.contains(&line), "{busy}");
     }
 }

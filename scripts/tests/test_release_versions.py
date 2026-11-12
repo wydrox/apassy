@@ -28,6 +28,9 @@ class ReleaseVersionsTests(unittest.TestCase):
             "ios/ApassyCompanion/project.yml", "extension/manifest.json", "CHANGELOG.md",
             "site/src/lib/site.ts", f"{RELAY}/Cargo.toml", f"{RELAY}/deploy/worker/package.json",
             f"{RELAY}/deploy/push-gateway/package.json", f"{APP}/Cargo.toml", "packaging/linux/build.sh", "packaging/linux/deb/control.in",
+            "packaging/linux/build-vault.sh", "packaging/linux/build-vault-release.sh",
+            ".github/workflows/relay-image.yml", f"{RELAY}/deploy/worker/scripts/verify-assets.mjs",
+            f"{RELAY}/deploy/worker/scripts/check-public-assets.py", f"{RELAY}/deploy/worker/public/install.sh",
         ):
             destination = self.root / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -69,7 +72,7 @@ class ReleaseVersionsTests(unittest.TestCase):
     def test_the_linux_node_package_is_checked(self):
         for relative, old, new in (
             (f"{APP}/Cargo.toml", "\nnode = []", "\nnode-less = []"),
-            (f"{APP}/Cargo.toml", 'default = ["window", "node"]', 'default = ["window"]'),
+            (f"{APP}/Cargo.toml", 'default = ["window", "node", "owner"]', 'default = ["window", "owner"]'),
             (f"{APP}/Cargo.toml", 'name = "apassy-app"', 'name = "apassy-other"'),
             ("packaging/linux/deb/control.in", "Version: @VERSION@", f"Version: {self.version}"),
             ("packaging/linux/build.sh", "crates/apassy-relay/Cargo.toml", "Cargo.toml"),
@@ -80,6 +83,26 @@ class ReleaseVersionsTests(unittest.TestCase):
                 self.assertIn(old, original)
                 path.write_text(original.replace(old, new))
                 self.assertTrue(MODULE.check(self.root)[1])
+                path.write_text(original)
+
+    def test_the_linux_vault_release_path_is_checked(self):
+        for relative, old, new in (
+            ("packaging/linux/build-vault.sh", "release-versions.json", "Cargo.toml"),
+            ("packaging/linux/build-vault.sh", "Version: $version", f"Version: {self.version}"),
+            ("packaging/linux/build-vault-release.sh", "cargo build --release --locked", "cargo build --locked"),
+            ("packaging/linux/build-vault-release.sh", "baseline=2.31", "baseline=2.39"),
+            (".github/workflows/relay-image.yml", "packaging/linux/build-vault-release.sh", "packaging/linux/build-vault.sh"),
+            (".github/workflows/relay-image.yml", "> SHA256SUMS-vault\n", "> SHA256SUMS-other\n"),
+            (f"{RELAY}/deploy/worker/scripts/verify-assets.mjs", "apassy-vault_", "apassy-other_"),
+            (f"{RELAY}/deploy/worker/scripts/check-public-assets.py", "apassy-vault_", "apassy-other_"),
+            (f"{RELAY}/deploy/worker/public/install.sh", "apassy-vault_", "apassy-other_"),
+        ):
+            with self.subTest(file=relative, old=old):
+                path = self.root / relative
+                original = path.read_text()
+                self.assertIn(old, original)
+                path.write_text(original.replace(old, new))
+                self.assertIn("vault", " ".join(MODULE.check(self.root)[1]))
                 path.write_text(original)
 
     def test_old_relay_checkout_flag_fails_clearly(self):

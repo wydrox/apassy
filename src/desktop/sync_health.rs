@@ -68,6 +68,8 @@ pub(crate) fn sync_log_path(data_dir: &Path) -> PathBuf {
 pub(crate) enum SyncKind {
     Folder,
     Relay,
+    /// A vault store of Apassy Connect (plan s7 unit M3).
+    Connect,
 }
 
 impl SyncKind {
@@ -75,6 +77,7 @@ impl SyncKind {
         match self {
             Self::Folder => "folder",
             Self::Relay => "relay",
+            Self::Connect => "connect",
         }
     }
 }
@@ -382,7 +385,12 @@ mod tests {
         assert_eq!(
             lines(&log)[0],
             format!(
-                "2026-10-17T18:41:05Z sync-failed vault={ID} kind=folder error=NotDownloaded text=\"the synced file is not on this Mac yet; wait for the download\" file=NotDownloaded hash=abababababab last=cdcdcdcdcdcd"
+                concat!(
+                    "2026-10-17T18:41:05Z sync-failed vault={ID} kind=folder error=NotDownloaded text=\"the synced file is not on this ",
+                    crate::computer!(),
+                    " yet; wait for the download\" file=NotDownloaded hash=abababababab last=cdcdcdcdcdcd"
+                ),
+                ID = ID
             )
         );
         // 10 minutes after the first line: one line with the 19 repeats since it.

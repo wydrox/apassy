@@ -29,7 +29,11 @@ use crate::vault::{
 };
 
 /// The refusal while this build has no Connect sign-in (plan 0035 unit C3).
-pub const CONNECT_UNAVAILABLE: &str = "Apassy Connect hosting needs the Connect sign-in, which this version does not have yet. The bouncer brain runs on this Mac.";
+pub const CONNECT_UNAVAILABLE: &str = concat!(
+    "Apassy Connect hosting needs the Connect sign-in, which this version does not have yet. The bouncer brain runs on this ",
+    crate::computer!(),
+    "."
+);
 
 /// The action that the proof of `change` for `role` must name.
 pub fn owner_action(role: BouncerHostRole, change: &BouncerHostChange) -> OwnerAction {

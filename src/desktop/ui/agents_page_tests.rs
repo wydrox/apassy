@@ -174,13 +174,18 @@ fn a_project_without_agents_has_one_empty_block() {
         problem: None,
         no_remote_agents: false,
         reading: false,
+        connect: None,
     };
     let view = AgentsView::of(&frame_2(), &scope, Some(access.clone()), NOW, 0);
     assert_eq!(
         view.empty,
         Some(SectionEmpty::NoneInProject("billing-v2".to_owned()))
     );
-    assert_eq!(view.sections.len(), 1, "this Mac, for remote access");
+    assert_eq!(
+        view.sections.len(),
+        1,
+        concat!("this ", crate::computer!(), ", for remote access")
+    );
     assert!(view.sections[0].this_mac);
     assert_eq!(view.sections[0].empty, None);
     let view = AgentsView::of(&frame_2(), &scope, None, NOW, 0);
@@ -247,7 +252,11 @@ fn a_new_vault_a_new_mac_and_a_mac_that_never_reported_have_their_empty_states()
         ("No agents yet", "Connect agents on Mac mini (lab)."),
         (
             "No report yet",
-            "Turn on Show agents on my other devices on that Mac.",
+            concat!(
+                "Turn on Show agents on my other devices on that ",
+                crate::computer!(),
+                "."
+            ),
         ),
         ("Choose what it can see", "It sees no credentials yet."),
     ] {
@@ -255,10 +264,18 @@ fn a_new_vault_a_new_mac_and_a_mac_that_never_reported_have_their_empty_states()
     }
     // A long Mac name keeps the line within 12 words.
     let long = fit_line(
-        "Connect agents on the very long name of a Mac in the back office.".to_owned(),
-        "Connect agents on that Mac.",
+        concat!(
+            "Connect agents on the very long name of a ",
+            crate::computer!(),
+            " in the back office."
+        )
+        .to_owned(),
+        concat!("Connect agents on that ", crate::computer!(), "."),
     );
-    assert_eq!(long, "Connect agents on that Mac.");
+    assert_eq!(
+        long,
+        concat!("Connect agents on that ", crate::computer!(), ".")
+    );
 }
 
 fn access(on: bool, problem: Option<AccessProblem>) -> AccessView {
@@ -268,6 +285,7 @@ fn access(on: bool, problem: Option<AccessProblem>) -> AccessView {
         problem,
         no_remote_agents: false,
         reading: false,
+        connect: None,
     }
 }
 
@@ -451,7 +469,7 @@ fn the_page_of_a_remote_agent_has_four_tiles_its_runs_and_what_it_sees() {
     assert!(
         page.help
             .iter()
-            .any(|line| line.ends_with("with Touch ID."))
+            .any(|line| line.ends_with(concat!("with ", crate::touch_id!(), ".")))
     );
     assert!(
         page.help.iter().all(|line| !line.contains("9999")),

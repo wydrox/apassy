@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>L4 one-time code</title><link rel="stylesheet" href="/style.css"></head>
+<body><main>
+<h1>L4 one-time code</h1>
+<p class="note">Synthetic account synthetic.otp@example.test. The code is checked by this local server.</p>
+<form id="otp" autocomplete="on">
+  <label>Code <input id="code" name="code" inputmode="numeric" autocomplete="one-time-code"></label>
+  <button type="submit" id="submit">Verify</button>
+</form>
+<p id="status" role="status" data-state="idle">Ready.</p>
+</main><script src="/otp.js" type="module"></script></body></html>

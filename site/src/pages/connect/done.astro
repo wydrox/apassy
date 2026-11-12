@@ -2,30 +2,23 @@
 // The success page of a Connect checkout (implementation plan s7, decision 3):
 // Stripe returns here with ?session_id={CHECKOUT_SESSION_ID}. The page holds no
 // secret and calls no API. The plan comes to the Mac from the Stripe webhook, not
-// from this page. "Return to Apassy" opens the app with the session id, if the
-// app registers the apassy:// scheme; the app also polls on its own.
+// from this page: Apassy on the Mac asks Apassy Connect every few seconds while
+// it waits. The Mac app registers no URL scheme, so there is no link back to it.
 import Notice from "../../components/connect/Notice.astro";
 ---
 <Notice
   title="Payment received · Apassy Connect"
-  description="Return to Apassy on your Mac."
+  description="Apassy on your Mac shows your plan in a moment."
   heading="Thank you. Your plan is on its way."
 >
   <p>Apassy on your Mac shows your plan in a moment. You can close this page.</p>
-  <a class="btn btn-primary" href="apassy://connect/done" data-return>Return to Apassy</a>
   <p class="small">
-    If Apassy does not open, open it yourself: <kbd>Settings</kbd> › <kbd>Connect</kbd>. Stripe sends the receipt
-    by e-mail.
+    Your plan is in Apassy on your Mac: <kbd>Settings</kbd> › <kbd>Connect</kbd>. Stripe sends the receipt by
+    e-mail.
   </p>
 </Notice>
 
 <script>
-  // Only a Checkout Session id of Stripe goes into the app link.
-  const link = document.querySelector<HTMLAnchorElement>("[data-return]");
-  const id = new URLSearchParams(window.location.search).get("session_id") ?? "";
-  if (link && /^cs_(test|live)_[A-Za-z0-9]{1,250}$/.test(id)) {
-    link.href = `apassy://connect/done?session=${encodeURIComponent(id)}`;
-  }
-  // The id is not a secret, but it need not stay in the address bar or the history.
+  // The session id is not a secret, but it need not stay in the address bar or the history.
   if (window.location.search) window.history.replaceState(null, "", window.location.pathname);
 </script>

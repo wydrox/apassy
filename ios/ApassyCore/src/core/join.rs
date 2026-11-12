@@ -189,8 +189,17 @@ impl Core {
         let paired = PendingJoin::parse_paired(link, DEFAULT_RELAY_URL)?;
         let url = paired.url()?;
         let team_id = link_code_team(&paired.code).unwrap_or_default().to_owned();
-        let pending = PendingJoin::request(link, DEFAULT_RELAY_URL, device_name)
-            .map_err(|error| join_error(error.into()))?;
+        // The join, and the download after it, reach a node through its Connect route
+        // when the tailnet does not answer (the transport of this core).
+        let key = apassy::sync::DeviceKey::generate().map_err(|error| join_error(error.into()))?;
+        let pending = PendingJoin::request_via(
+            link,
+            DEFAULT_RELAY_URL,
+            device_name,
+            key,
+            self.transport.dialer(),
+        )
+        .map_err(|error| join_error(error.into()))?;
         let joining = Joining {
             url,
             node_name: paired.name.clone(),
@@ -298,13 +307,15 @@ impl Core {
         let temp_state_file = sync_dir.join(format!("{temp_state}.json"));
         // A node: the pin and the alternatives of the link stay with the sync of the vault.
         let relay = RelaySync::new(
-            RelayConfig::in_data_dir(
-                &self.paths.data_dir,
-                &temp_file,
-                joining.url.as_str(),
-                &temp_state,
-            )
-            .with_url_trust(&joining.url),
+            self.transport.config(
+                RelayConfig::in_data_dir(
+                    &self.paths.data_dir,
+                    &temp_file,
+                    joining.url.as_str(),
+                    &temp_state,
+                )
+                .with_url_trust(&joining.url),
+            ),
         );
         let (vault, report) = relay.adopt(joined, download, passphrase)?;
         let id = report.identity.vault_id.clone();

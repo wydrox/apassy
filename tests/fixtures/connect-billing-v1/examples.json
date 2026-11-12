@@ -162,6 +162,14 @@
         [
           "cancel_url",
           "https://apassy.wyderka.cc/connect/cancel"
+        ],
+        [
+          "customer",
+          "cus_SynthAcc0001"
+        ],
+        [
+          "customer_update[address]",
+          "auto"
         ]
       ]
     },
@@ -416,7 +424,7 @@
     },
     {
       "name": "error_not_in_group",
-      "route": "GET /v1/account/group",
+      "route": "POST /v1/account/group/invites",
       "part": "error",
       "status": 403,
       "body": {
@@ -426,7 +434,7 @@
     },
     {
       "name": "error_plan_required",
-      "route": "GET /v1/account/plan",
+      "route": "POST /v1/account/group/seats",
       "part": "error",
       "status": 403,
       "body": {

@@ -14,21 +14,45 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::ConnectError;
-use crate::sync::relay::{ApiError, call, json_request};
+use super::trust::ListEntry;
+use crate::sync::relay::{ApiError, call, call_in_scope, call_without_busy_retries, json_request};
 use crate::sync::relay_http::Request;
 use crate::sync::{RelayUrl, SyncError};
 
 /// The deadline of one call.
 const CALL_DEADLINE: Duration = Duration::from_secs(30);
 
-/// The Connect origin of this build: `APASSY_CONNECT_URL` when it is set (a sandbox
-/// Connect), else [`super::DEFAULT_CONNECT_URL`]. An account keeps the origin it was made
-/// at in its account file, so this only chooses where a new account or join goes.
+/// The Connect origin that the host of this process set ([`set_configured_origin`]).
+static PROCESS_ORIGIN: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+/// The Connect origin of this build: the one that the host of this process set
+/// ([`set_configured_origin`], the iPhone core from its config), else
+/// `APASSY_CONNECT_URL` when it is set (a sandbox Connect), else
+/// [`super::DEFAULT_CONNECT_URL`]. An account keeps the origin it was made at in its
+/// account file, so this only chooses where a new account or join goes, and which
+/// Connect host a pairing code may name (node-pairing-v1 section 7a).
 pub fn configured_origin() -> String {
+    if let Some(origin) = PROCESS_ORIGIN
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+    {
+        return origin;
+    }
     std::env::var("APASSY_CONNECT_URL")
         .ok()
         .filter(|text| !text.trim().is_empty())
         .unwrap_or_else(|| super::DEFAULT_CONNECT_URL.to_owned())
+}
+
+/// Set the Connect origin of this process (without a trailing slash): the iPhone core
+/// does it at its start with the origin of its config, as it sets the device name, so
+/// the pairing codes that it reads name the same Connect host. The last call wins.
+pub fn set_configured_origin(origin: &str) {
+    *PROCESS_ORIGIN
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+        Some(origin.trim_end_matches('/').to_owned());
 }
 
 /// The error of a failed call.
@@ -44,6 +68,9 @@ pub(super) fn connect_error(error: ApiError) -> ConnectError {
             retry_after,
         } => match (status, code.as_str()) {
             (401, _) => ConnectError::Unauthenticated,
+            // `403 device_removed` is a removal only as the answer of the token call to a
+            // signature of this device ([`ConnectClient::token`]): from any other route it is
+            // a refusal like any other.
             (403, "join_pending") => ConnectError::JoinPending,
             (403, "join_refused") => ConnectError::JoinRefused,
             (403, "plan_required") => ConnectError::PlanRequired,
@@ -53,6 +80,8 @@ pub(super) fn connect_error(error: ApiError) -> ConnectError {
             (403, "forbidden") => ConnectError::Forbidden,
             (404 | 405, _) => ConnectError::NotFound,
             (409, "conflict") => ConnectError::Conflict,
+            (409, "account_id_taken") => ConnectError::AccountIdTaken,
+            (409, "seat_limit") => ConnectError::SeatLimit,
             (429, _) => ConnectError::RateLimited(retry_after.unwrap_or(60).max(1)),
             _ => ConnectError::Refused { status, code },
         },
@@ -61,14 +90,41 @@ pub(super) fn connect_error(error: ApiError) -> ConnectError {
 
 // ---- Bodies of the requests (section 6 to 10). ----
 
+/// The body of `POST /v1/tunnel/nodes` (connect-tunnel-v1 section 3.1).
+#[derive(Serialize)]
+struct RegisterNode<'a> {
+    name: &'a str,
+    pin: &'a str,
+}
+
+/// A node as Connect answers it (`NodeView`, connect-tunnel-v1 section 3.1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TunnelNodeView {
+    pub node_id: String,
+    pub account_id: String,
+    pub device_id: String,
+    pub name: String,
+    pub pin: String,
+    pub public_name: String,
+    pub online: bool,
+    pub created_at: u64,
+}
+
 #[derive(Serialize)]
 pub(super) struct CreateAccount<'a> {
+    /// The id of the new account, made by this device: the root entry names it.
+    pub account_id: &'a str,
     pub name: &'a str,
     pub device_name: &'a str,
     pub platform: &'a str,
     pub public_key: &'a str,
-    pub recovery_hash: &'a str,
+    /// b64u of the Ed25519 public key of the recovery code.
+    pub recovery_key: &'a str,
     pub signature: &'a str,
+    /// The root entry of the device list (version 1), signed by the new device key over
+    /// its name.
+    pub statement: &'a str,
 }
 
 #[derive(Serialize)]
@@ -90,9 +146,21 @@ struct LinkRequest<'a> {
     link_hash: &'a str,
 }
 
+/// `POST …/pending/{join_id}/confirm`: the key that this device adds, and its statement.
 #[derive(Serialize)]
-struct KeyRequest<'a> {
+struct ConfirmRequest<'a> {
     public_key: &'a str,
+    /// The version of the `add` entry of the device list.
+    version: u64,
+    statement: &'a str,
+}
+
+/// The body of `DELETE /v1/account/devices/{device_id}`: the `remove` entry of the device
+/// list.
+#[derive(Serialize)]
+struct RevokeRequest<'a> {
+    version: u64,
+    statement: &'a str,
 }
 
 #[derive(Serialize)]
@@ -106,32 +174,88 @@ pub(super) struct JoinBody<'a> {
 }
 
 #[derive(Serialize)]
-struct JoinCancel<'a> {
-    account_id: &'a str,
-    link_hash: &'a str,
-    public_key: &'a str,
+pub(super) struct JoinCancel<'a> {
+    pub account_id: &'a str,
+    pub link_hash: &'a str,
+    pub public_key: &'a str,
+    pub signature: &'a str,
 }
 
 #[derive(Serialize)]
-struct VaultCreate<'a> {
-    vault_id: &'a str,
-    name: &'a str,
+pub(super) struct VaultCreate<'a> {
+    pub vault_id: &'a str,
+    pub name: &'a str,
+    /// The id of the new store, made by this device.
+    pub team_id: &'a str,
+    /// The `store` entry for it at the version after the head (section 8).
+    pub version: u64,
+    pub statement: &'a str,
 }
 
+/// The device to add to a store and the key that this device verified for it.
 #[derive(Serialize)]
 struct StoreDeviceRequest<'a> {
     device_id: &'a str,
+    public_key: &'a str,
 }
 
 #[derive(Serialize)]
 pub(super) struct RecoverBody<'a> {
     pub account_id: &'a str,
-    pub recovery: &'a str,
     pub device_name: &'a str,
     pub platform: &'a str,
     pub public_key: &'a str,
-    pub recovery_hash: &'a str,
+    /// b64u of the Ed25519 public key of the new recovery code.
+    pub recovery_key: &'a str,
+    /// The new device's signature over the `apassy-connect recover v1` message.
     pub signature: &'a str,
+    /// The old recovery key's Ed25519 signature over the same message.
+    pub recovery_signature: &'a str,
+    /// The root entry of the new device list (version 1), signed by the new device key
+    /// over its name.
+    pub statement: &'a str,
+}
+
+/// `POST /v1/account/checkout` (connect-billing-v1 section 4): `people` only for Family,
+/// `seats` only for Team; the other is left out of the body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CheckoutRequest {
+    /// `personal`, `family`, or `team`.
+    pub plan: String,
+    /// `month` or `year`.
+    pub interval: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub people: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seats: Option<u64>,
+}
+
+impl CheckoutRequest {
+    /// The body for `count` units of `plan`: people for Family, seats for Team, nothing
+    /// for Personal.
+    pub fn new(plan: &str, interval: &str, count: u64) -> Self {
+        Self {
+            plan: plan.to_owned(),
+            interval: interval.to_owned(),
+            people: (plan == "family").then_some(count),
+            seats: (plan == "team").then_some(count),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct InviteRequest<'a> {
+    role: &'a str,
+}
+
+#[derive(Serialize)]
+struct GroupJoinRequest<'a> {
+    code: &'a str,
+}
+
+#[derive(Serialize)]
+struct SeatsRequest {
+    quantity: u64,
 }
 
 /// The empty JSON object of `DELETE /v1/account` and the refusal of a join.
@@ -207,6 +331,27 @@ pub struct DeviceView {
     /// Rounded down to the hour, or `None`.
     #[serde(default)]
     pub last_seen_at: Option<u64>,
+    /// Set by this device, never by Connect: the key is a device of the signed device list
+    /// that this device verified ([`super::ConnectAccount::view`]). An unverified device is
+    /// not an account device for any decision.
+    #[serde(skip)]
+    pub verified: bool,
+    /// Set by this device for a verified device: the name that the signed device list
+    /// holds for its key (the name that its `root` or `add` signed). Show it, not
+    /// [`Self::name`], wherever the owner decides about the device.
+    #[serde(skip)]
+    pub signed_name: Option<String>,
+    /// Set by this device: the short fingerprint of [`Self::public_key`]
+    /// (`super::key_fingerprint`), empty for a key that is not a point.
+    #[serde(skip)]
+    pub fingerprint: String,
+}
+
+impl DeviceView {
+    /// The name to show: the signed name of a verified device, else the name of Connect.
+    pub fn shown_name(&self) -> &str {
+        self.signed_name.as_deref().unwrap_or(&self.name)
+    }
 }
 
 /// The group of the account (connect-billing-v1).
@@ -234,6 +379,46 @@ pub struct AccountView {
     pub devices: Vec<DeviceView>,
     #[serde(default)]
     pub group: Option<GroupView>,
+    /// The signed device list, from version 1 ([`super::trust`]).
+    #[serde(default)]
+    pub device_list: Vec<ListEntry>,
+    /// b64u of the public recovery key that Connect stores (section 9.1): the `previous`
+    /// of a new recovery code.
+    #[serde(default)]
+    pub recovery_key: Option<String>,
+    /// When a device of the account last made a new recovery code; `None` while the key
+    /// is the one of the creation or of the last recovery.
+    #[serde(default)]
+    pub recovery_rotated_at: Option<u64>,
+    /// The device id of the device that made it.
+    #[serde(default)]
+    pub recovery_rotated_by: Option<String>,
+    /// Set by this device, never by Connect: `device_list` verified from the pinned root and
+    /// went on from the pinned version. When it is false, no device of the view is
+    /// verified, and the trust store keeps what it had.
+    #[serde(skip)]
+    pub list_verified: bool,
+    /// Set by this device, never by Connect: the recovery key of the account is not the
+    /// one that this device saw last (another device made a new recovery code). Settings ›
+    /// Connect says so until the owner takes note of it
+    /// (`ConnectAccount::recovery_change_seen`).
+    #[serde(skip)]
+    pub recovery_changed: Option<RecoveryChange>,
+}
+
+/// The recovery key of an account changed since this device saw it last (section 9.1):
+/// another device of the account made a new recovery code, so the code that this device
+/// knew of no longer works.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryChange {
+    /// b64u of the recovery key that Connect holds now: "OK" pins it.
+    pub recovery_key: String,
+    /// When the device made it, by the clock of Connect.
+    pub at: Option<u64>,
+    /// The device that made it, when Connect names one.
+    pub device_id: Option<String>,
+    /// The name that the verified device list signed for that device, when it holds it.
+    pub device_name: Option<String>,
 }
 
 /// `DELETE /v1/account`.
@@ -259,6 +444,10 @@ pub(super) struct PendingView {
     pub device_name: String,
     pub platform: String,
     pub public_key: String,
+    /// The joining key's signature over the `apassy-connect join v1` message, which names
+    /// `device_name`. A join whose signature does not verify is not offered.
+    #[serde(default)]
+    pub signature: String,
     pub created_at: u64,
     pub expires_at: u64,
 }
@@ -278,6 +467,9 @@ pub(super) struct JoinAnswer {
     pub account_id: String,
     pub confirmer: Confirmer,
     pub expires_at: u64,
+    /// The signed device list of the account, from version 1.
+    #[serde(default)]
+    pub device_list: Vec<ListEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -306,14 +498,44 @@ pub struct VaultStoreView {
     pub team_id: String,
     pub vault_id: String,
     pub name: String,
+    /// The account that made the store, as Connect has it (empty from a Connect without
+    /// it: then no `store` entry is signed by itself for it).
+    #[serde(default)]
+    pub account_id: String,
     pub created_at: u64,
     pub shared: bool,
     pub devices: Vec<StoreDevice>,
+    /// The accounts whose active `share` of this store Connect counts as void (section 16):
+    /// the owner's device ends those shares; nothing starts from it.
+    #[serde(default)]
+    pub void: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub(super) struct VaultDeleted {
     pub team_id: String,
+}
+
+/// `POST /v1/account/recovery` (section 9.1).
+#[derive(Serialize, Debug)]
+pub(super) struct RecoveryRotate<'a> {
+    /// b64u of the recovery key that Connect stores now.
+    pub previous: &'a str,
+    /// b64u of the Ed25519 public key of the new recovery code.
+    pub recovery_key: &'a str,
+    /// The device's signature over the `apassy-connect recovery-rotate v1` message.
+    pub signature: &'a str,
+}
+
+/// The answer of `POST /v1/account/recovery`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct RecoveryRotated {
+    pub account_id: String,
+    pub rotated_at: u64,
+    /// b64u of the recovery key that Connect holds after the call: the client takes the
+    /// rotation only when it is the key that it sent.
+    #[serde(default)]
+    pub recovery_key: Option<String>,
 }
 
 /// `POST /v1/account/recover`.
@@ -391,6 +613,108 @@ pub struct PlansView {
     pub plans: Vec<PlanOffer>,
 }
 
+impl PlanOffer {
+    /// The price of `interval`, if Connect has one.
+    pub fn price(&self, interval: &str) -> Option<&PlanPrice> {
+        self.prices.iter().find(|price| price.interval == interval)
+    }
+
+    /// The total in cents for `count` units (people or seats; Personal 1) of `interval`
+    /// (connect-billing-v1 section 2): `amount + max(0, count − included) × extra`, for
+    /// `1 ≤ count ≤ max`. `None` outside that range, or without that price.
+    pub fn total(&self, interval: &str, count: u64) -> Option<u64> {
+        if count == 0 || count > self.max {
+            return None;
+        }
+        let price = self.price(interval)?;
+        let further = count.saturating_sub(self.included);
+        if further == 0 {
+            return Some(price.amount);
+        }
+        price
+            .extra?
+            .checked_mul(further)
+            .and_then(|extra| extra.checked_add(price.amount))
+    }
+}
+
+/// `POST /v1/account/checkout`: the Stripe Checkout page that the Mac opens in the
+/// default browser.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct CheckoutAnswer {
+    pub url: String,
+    pub session_id: String,
+    pub expires_at: u64,
+}
+
+/// `POST /v1/account/portal`: the Stripe Customer Portal page.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PortalAnswer {
+    pub url: String,
+}
+
+/// A member of a family or team (connect-billing-v1 section 6).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct GroupMember {
+    pub account_id: String,
+    pub name: String,
+    /// `owner`, `admin`, or `member`.
+    pub role: String,
+    /// `pending` or `active`.
+    pub state: String,
+    #[serde(default)]
+    pub joined_at: Option<u64>,
+}
+
+/// `GET /v1/account/group`: the `GroupView` of connect-billing-v1 section 6, with the
+/// members. (The short group of `GET /v1/account` is [`GroupView`].)
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct GroupDetail {
+    pub group_id: String,
+    /// `family` or `team`.
+    pub kind: String,
+    /// The role of this account: `owner`, `admin`, or `member`.
+    pub role: String,
+    pub owner_account: String,
+    pub included: u64,
+    /// The subscription quantity: people or seats.
+    pub quantity: u64,
+    pub members: Vec<GroupMember>,
+}
+
+/// `POST /v1/account/group/invites`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct InviteAnswer {
+    pub invite_id: u64,
+    /// `https://<site>/connect/join#apassy_gin_<group id>_<64 hex>`.
+    pub url: String,
+    pub expires_at: u64,
+}
+
+/// `POST /v1/account/group/join`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct GroupJoined {
+    pub group_id: String,
+    pub kind: String,
+    /// `pending` until the owner or an admin confirms.
+    pub state: String,
+    pub owner_name: String,
+}
+
+/// `DELETE /v1/account/group/members/{account_id}`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct MemberRemoved {
+    pub account_id: String,
+    pub removed_from_stores: u64,
+}
+
+/// `POST /v1/account/group/seats`: the new quantity applies when Stripe confirms it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct SeatsAnswer {
+    pub quantity: u64,
+    pub pending: bool,
+}
+
 /// The `result` of an envelope that [`ConnectClient::get_document`] read, or its error.
 fn call_answer<T: DeserializeOwned>(
     value: serde_json::Value,
@@ -443,6 +767,33 @@ impl ConnectClient {
         call(&self.url, &request).map_err(connect_error)
     }
 
+    /// `method path` with a JSON body on a route of the budget `scope` of section 16
+    /// (`super::share`, its only caller): a `429` of it holds back only that budget.
+    pub(super) fn send_json_in_scope<T: DeserializeOwned>(
+        &self,
+        method: &'static str,
+        path: &str,
+        bearer: Option<&str>,
+        body: &impl Serialize,
+        scope: &str,
+    ) -> Result<T, ConnectError> {
+        let mut request = json_request(method, path, bearer, body);
+        request.deadline = Some(Instant::now() + CALL_DEADLINE);
+        call_in_scope(&self.url, &request, scope).map_err(connect_error)
+    }
+
+    /// `GET path` on a route of the budget `scope` of section 16.
+    pub(super) fn get_json_in_scope<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        bearer: Option<&str>,
+        scope: &str,
+    ) -> Result<T, ConnectError> {
+        let mut request = Request::new("GET", path.to_owned(), bearer);
+        request.deadline = Some(Instant::now() + CALL_DEADLINE);
+        call_in_scope(&self.url, &request, scope).map_err(connect_error)
+    }
+
     fn post<T: DeserializeOwned>(
         &self,
         path: &str,
@@ -473,29 +824,27 @@ impl ConnectClient {
         self.post("/v1/account/challenge", None, body)
     }
 
+    /// The token call never repeats a body after `503 busy`: the nonce of a refused body
+    /// stays unused, and the sign-in takes a fresh challenge instead. It is the only call
+    /// whose `403 device_removed` is [`ConnectError::Revoked`]: Connect gives it to a valid
+    /// signature of this device.
     pub(super) fn token(&self, body: &TokenRequest<'_>) -> Result<TokenAnswer, ConnectError> {
-        self.post("/v1/account/token", None, body)
+        let mut request = json_request("POST", "/v1/account/token", None, body);
+        request.deadline = Some(Instant::now() + CALL_DEADLINE);
+        call_without_busy_retries(&self.url, &request).map_err(|error| match error {
+            ApiError::Relay {
+                status: 403, code, ..
+            } if code == "device_removed" => ConnectError::Revoked,
+            other => connect_error(other),
+        })
     }
 
     pub(super) fn join(&self, body: &JoinBody<'_>) -> Result<JoinAnswer, ConnectError> {
         self.post("/v1/account/devices/join", None, body)
     }
 
-    pub(super) fn cancel_join(
-        &self,
-        account_id: &str,
-        link_hash: &str,
-        public_key: &str,
-    ) -> Result<JoinId, ConnectError> {
-        self.post(
-            "/v1/account/devices/join/cancel",
-            None,
-            &JoinCancel {
-                account_id,
-                link_hash,
-                public_key,
-            },
-        )
+    pub(super) fn cancel_join(&self, body: &JoinCancel<'_>) -> Result<JoinId, ConnectError> {
+        self.post("/v1/account/devices/join/cancel", None, body)
     }
 
     pub(super) fn recover(&self, body: &RecoverBody<'_>) -> Result<RecoverAnswer, ConnectError> {
@@ -568,12 +917,25 @@ impl ConnectClient {
         token: &str,
         join_id: u64,
         public_key: &str,
+        (version, statement): (u64, &str),
     ) -> Result<DeviceView, ConnectError> {
         self.post(
             &format!("/v1/account/devices/pending/{join_id}/confirm"),
             Some(token),
-            &KeyRequest { public_key },
+            &ConfirmRequest {
+                public_key,
+                version,
+                statement,
+            },
         )
+    }
+
+    pub(super) fn rotate_recovery(
+        &self,
+        token: &str,
+        body: &RecoveryRotate<'_>,
+    ) -> Result<RecoveryRotated, ConnectError> {
+        self.post("/v1/account/recovery", Some(token), body)
     }
 
     pub(super) fn refuse(&self, token: &str, join_id: u64) -> Result<JoinId, ConnectError> {
@@ -588,28 +950,25 @@ impl ConnectClient {
         &self,
         token: &str,
         device_id: &str,
+        (version, statement): (u64, &str),
     ) -> Result<RevokeAnswer, ConnectError> {
         if !super::words::valid_device_id(device_id) {
             return Err(ConnectError::Invalid);
         }
-        self.send(Request::new(
+        self.send(json_request(
             "DELETE",
-            format!("/v1/account/devices/{device_id}"),
+            &format!("/v1/account/devices/{device_id}"),
             Some(token),
+            &RevokeRequest { version, statement },
         ))
     }
 
     pub(super) fn create_vault_store(
         &self,
         token: &str,
-        vault_id: &str,
-        name: &str,
+        body: &VaultCreate<'_>,
     ) -> Result<VaultStoreView, ConnectError> {
-        self.post(
-            "/v1/account/vaults",
-            Some(token),
-            &VaultCreate { vault_id, name },
-        )
+        self.post("/v1/account/vaults", Some(token), body)
     }
 
     pub(super) fn vault_stores(&self, token: &str) -> Result<Vec<VaultStoreView>, ConnectError> {
@@ -621,6 +980,7 @@ impl ConnectClient {
         token: &str,
         team_id: &str,
         device_id: &str,
+        public_key: &str,
     ) -> Result<StoreDevice, ConnectError> {
         if !crate::sync::relay_crypto::valid_team_id(team_id)
             || !super::words::valid_device_id(device_id)
@@ -630,7 +990,10 @@ impl ConnectClient {
         self.post(
             &format!("/v1/account/vaults/{team_id}/devices"),
             Some(token),
-            &StoreDeviceRequest { device_id },
+            &StoreDeviceRequest {
+                device_id,
+                public_key,
+            },
         )
     }
 
@@ -651,5 +1014,97 @@ impl ConnectClient {
 
     pub(super) fn entitlement(&self, token: &str) -> Result<EntitlementAnswer, ConnectError> {
         self.get("/v1/account/entitlement", Some(token))
+    }
+
+    /// `POST /v1/tunnel/nodes` (connect-tunnel-v1 section 3.1): register the node of the
+    /// calling device with its display name and the pin of its node certificate, or
+    /// update both. The node's tunnel (`crate::node::tunnel`, plan s7 unit M4) calls it
+    /// before it opens its WebSocket.
+    pub fn register_node(
+        &self,
+        token: &str,
+        name: &str,
+        pin: &str,
+    ) -> Result<TunnelNodeView, ConnectError> {
+        self.post("/v1/tunnel/nodes", Some(token), &RegisterNode { name, pin })
+    }
+    // ---- Billing and groups (connect-billing-v1 sections 4 to 6, 8). ----
+
+    pub(super) fn checkout(
+        &self,
+        token: &str,
+        body: &CheckoutRequest,
+    ) -> Result<CheckoutAnswer, ConnectError> {
+        self.post("/v1/account/checkout", Some(token), body)
+    }
+
+    pub(super) fn portal(&self, token: &str) -> Result<PortalAnswer, ConnectError> {
+        self.post("/v1/account/portal", Some(token), &Empty {})
+    }
+
+    pub(super) fn plan(&self, token: &str) -> Result<PlanView, ConnectError> {
+        self.get("/v1/account/plan", Some(token))
+    }
+
+    pub(super) fn group(&self, token: &str) -> Result<GroupDetail, ConnectError> {
+        self.get("/v1/account/group", Some(token))
+    }
+
+    pub(super) fn invite(&self, token: &str, role: &str) -> Result<InviteAnswer, ConnectError> {
+        self.post(
+            "/v1/account/group/invites",
+            Some(token),
+            &InviteRequest { role },
+        )
+    }
+
+    pub(super) fn join_group(&self, token: &str, code: &str) -> Result<GroupJoined, ConnectError> {
+        self.post(
+            "/v1/account/group/join",
+            Some(token),
+            &GroupJoinRequest { code },
+        )
+    }
+
+    pub(super) fn confirm_member(
+        &self,
+        token: &str,
+        account_id: &str,
+    ) -> Result<GroupMember, ConnectError> {
+        if !super::words::valid_account_id(account_id) {
+            return Err(ConnectError::Invalid);
+        }
+        self.post(
+            &format!("/v1/account/group/members/{account_id}/confirm"),
+            Some(token),
+            &Empty {},
+        )
+    }
+
+    pub(super) fn remove_member(
+        &self,
+        token: &str,
+        account_id: &str,
+    ) -> Result<MemberRemoved, ConnectError> {
+        if !super::words::valid_account_id(account_id) {
+            return Err(ConnectError::Invalid);
+        }
+        self.send(Request::new(
+            "DELETE",
+            format!("/v1/account/group/members/{account_id}"),
+            Some(token),
+        ))
+    }
+
+    pub(super) fn set_seats(
+        &self,
+        token: &str,
+        quantity: u64,
+    ) -> Result<SeatsAnswer, ConnectError> {
+        self.post(
+            "/v1/account/group/seats",
+            Some(token),
+            &SeatsRequest { quantity },
+        )
     }
 }

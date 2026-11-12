@@ -5,7 +5,7 @@ import type { AddressInfo } from "node:net";
 import { after, before, describe, it } from "node:test";
 
 import worker, { type RelayService } from "../src/index.ts";
-import { MAX_FEED_LENGTH, MAX_JSON_LENGTH, MAX_PROXY_LENGTH, MAX_SNAPSHOT_LENGTH } from "../src/limits.ts";
+import { MAX_FEED_LENGTH, MAX_JSON_LENGTH, MAX_PROXY_LENGTH, MAX_SNAPSHOT_LENGTH, MAX_STRIPE_WEBHOOK_LENGTH } from "../src/limits.ts";
 
 const SECRET = "edge-secret-synthetic-0123456789abcdef0123";
 const PUBLIC = "https://apassy-relay.wyderka.cc";
@@ -283,6 +283,102 @@ describe("sign-in rate limit", () => {
       assert.equal(seen.length, 0);
     });
   }
+});
+
+describe("shared vault rate limit", () => {
+  const routes: [string, string][] = [
+    ["POST", "/v1/account/list"],
+    ["POST", "/v1/account/peers/link"],
+    ["POST", "/v1/account/peers/join"],
+    ["GET", "/v1/account/peers/pending"],
+    ["GET", "/v1/account/peers/join/4"],
+    ["DELETE", "/v1/account/peers/join/4"],
+  ];
+  // The reads of other accounts' lists: a budget of their own.
+  const reads: [string, string][] = [
+    ["POST", "/v1/account/peers/lists"],
+    ["GET", "/v1/account/peers/acc_k7m2q4x3ca"],
+  ];
+  const limiter = (used: string[], name: string, success: boolean) => ({
+    async limit({ key }: { key: string }) {
+      used.push(`${name}:${key}`);
+      return { success };
+    },
+  });
+  for (const [method, path] of routes) {
+    it(`uses AUTH_LIMITER in a budget of its own for ${method} ${path}`, async () => {
+      const used: string[] = [];
+      const body = method === "GET" ? undefined : "{}";
+      const refused = await call(path, { method, body, headers: { "cf-connecting-ip": "2001:db8:1:2:3:4:5:6" } }, {
+        AUTH_LIMITER: limiter(used, "auth", false),
+        CREATE_LIMITER: limiter(used, "create", true),
+        ACCOUNT_LIMITER: limiter(used, "account", true),
+      });
+      assert.equal(refused.status, 429);
+      assert.equal(refused.headers.get("retry-after"), "60");
+      assert.equal((await envelope(refused)).error.code, "rate_limited");
+      assert.equal(seen.length, 0);
+      assert.deepEqual(used, ["auth:peers:2001:db8:1:2::/64"]);
+      used.length = 0;
+      const passed = await call(path, { method, body, headers: { "cf-connecting-ip": "192.0.2.7" } }, {
+        AUTH_LIMITER: limiter(used, "auth", true),
+      });
+      assert.equal(passed.status, 201);
+      assert.equal(seen.length, 1);
+      assert.deepEqual(used, ["auth:peers:192.0.2.7"]);
+    });
+  }
+
+  for (const [method, path] of reads) {
+    it(`uses AUTH_LIMITER in a read budget of its own for ${method} ${path}`, async () => {
+      const used: string[] = [];
+      const body = method === "GET" ? undefined : "{}";
+      const refused = await call(path, { method, body, headers: { "cf-connecting-ip": "2001:db8:1:2:3:4:5:6" } }, {
+        AUTH_LIMITER: limiter(used, "auth", false),
+      });
+      assert.equal(refused.status, 429);
+      assert.equal(refused.headers.get("retry-after"), "60");
+      assert.equal((await envelope(refused)).error.code, "rate_limited");
+      assert.equal(seen.length, 0);
+      assert.deepEqual(used, ["auth:peer-reads:2001:db8:1:2::/64"]);
+      used.length = 0;
+      const passed = await call(path, { method, body, headers: { "cf-connecting-ip": "192.0.2.7" } }, {
+        AUTH_LIMITER: limiter(used, "auth", true),
+      });
+      assert.equal(passed.status, 201);
+      assert.equal(seen.length, 1);
+      assert.deepEqual(used, ["auth:peer-reads:192.0.2.7"]);
+    });
+  }
+
+  it("keeps the ceremony budget for another method or another path below /peers/", async () => {
+    for (const [method, path] of [
+      ["GET", "/v1/account/peers/lists"],
+      ["POST", "/v1/account/peers/acc_k7m2q4x3ca"],
+      ["GET", "/v1/account/peers/acc_k7m2q4x3ca/x"],
+    ]) {
+      const used: string[] = [];
+      const body = method === "GET" ? undefined : "{}";
+      await call(path!, { method: method!, body, headers: { "cf-connecting-ip": "192.0.2.7" } }, {
+        AUTH_LIMITER: limiter(used, "auth", true),
+      });
+      assert.deepEqual(used, ["auth:peers:192.0.2.7"], `${method} ${path}`);
+    }
+  });
+
+  it("passes when AUTH_LIMITER is missing or fails, and leaves the other account routes alone", async () => {
+    for (const AUTH_LIMITER of [undefined, { async limit() { throw new Error("limiter unavailable"); } }]) {
+      const response = await call("/v1/account/peers/pending", { method: "GET" }, { AUTH_LIMITER });
+      assert.equal(response.status, 201);
+      assert.equal(seen.length, 1);
+    }
+    const used: string[] = [];
+    for (const [method, path] of [["GET", "/v1/account"], ["GET", "/v1/account/vaults"], ["GET", "/v1/account/peers"]]) {
+      const response = await call(path!, { method }, { AUTH_LIMITER: limiter(used, "auth", false) });
+      assert.equal(response.status, 201, path);
+    }
+    assert.deepEqual(used, []);
+  });
 });
 
 /** A relay that records the headers it is sent and does not read the body. */
@@ -1189,5 +1285,582 @@ describe("main module", () => {
   it("exports only the handler, because workerd refuses any other value there", async () => {
     const main = await import("../src/index.ts");
     assert.deepEqual(Object.keys(main), ["default"]);
+  });
+});
+
+/** Every limiter of the Worker, recording `<name>:<key>`; each answers `success`. */
+function everyLimiter(success: boolean) {
+  const used: string[] = [];
+  const limiter = (name: string) => ({
+    async limit({ key }: { key: string }) {
+      used.push(`${name}:${key}`);
+      return { success };
+    },
+  });
+  return {
+    used,
+    env: {
+      CREATE_LIMITER: limiter("create"),
+      AUTH_LIMITER: limiter("auth"),
+      SYNC_LIMITER: limiter("sync"),
+      CONNECT_LIMITER: limiter("connect"),
+      CONNECT_PREFIX_LIMITER: limiter("prefix"),
+      ACCOUNT_LIMITER: limiter("account"),
+      TUNNEL_LIMITER: limiter("tunnel"),
+      TUNNEL_NODE_LIMITER: limiter("node"),
+    },
+  };
+}
+
+describe("stripe webhook", () => {
+  const PATH = "/v1/stripe/webhook";
+  // The edge checks the form and the time of the header; the relay checks the HMAC.
+  const SIGNATURE = `t=${Math.floor(Date.now() / 1000)},v1=7557b67a768cdcbc112d10a1bfd4c9fc92476773765b4939b15f8484a8d66336`;
+
+  it("has the 256 KiB cap of the contract", () => {
+    assert.equal(MAX_STRIPE_WEBHOOK_LENGTH, 262144);
+    assert.ok(MAX_STRIPE_WEBHOOK_LENGTH > MAX_JSON_LENGTH);
+  });
+
+  it("passes a body of 256 KiB with its exact bytes and signature, without any limiter", async () => {
+    const limits = everyLimiter(false);
+    const head = Buffer.from('{"id":"evt_1","pad":"');
+    const tail = Buffer.from('"}');
+    const body = Buffer.concat([head, Buffer.alloc(MAX_STRIPE_WEBHOOK_LENGTH - head.length - tail.length, 0x61), tail]);
+    assert.equal(body.length, MAX_STRIPE_WEBHOOK_LENGTH);
+    const response = await call(PATH, {
+      method: "POST",
+      body,
+      headers: {
+        "content-length": String(body.length),
+        "content-type": "application/json; charset=utf-8",
+        "stripe-signature": SIGNATURE,
+        "cf-connecting-ip": "3.18.12.63",
+      },
+    }, { ...limits.env, RELAY: vpc() });
+    assert.equal(response.status, 201);
+    assert.deepEqual(limits.used, []);
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0]!.method, "POST");
+    assert.equal(seen[0]!.url, PATH);
+    assert.equal(Buffer.compare(seen[0]!.body, body), 0, "the signed bytes reach the relay unchanged");
+    assert.deepEqual(values(seen[0]!, "stripe-signature"), [SIGNATURE]);
+    assert.deepEqual(values(seen[0]!, "x-apassy-edge"), [SECRET]);
+  });
+
+  it("does not limit many events from one Stripe address", async () => {
+    const limits = everyLimiter(false);
+    for (let i = 0; i < 20; i++) {
+      const response = await call(PATH, {
+        method: "POST",
+        body: "{}",
+        headers: { "content-length": "2", "stripe-signature": SIGNATURE, "cf-connecting-ip": "3.18.12.63" },
+      }, limits.env);
+      assert.equal(response.status, 201, String(i));
+    }
+    assert.deepEqual(limits.used, []);
+  });
+
+  it("refuses a declared length above 256 KiB before the relay", async () => {
+    const { forwarded, relay } = recordingRelay();
+    for (const declared of [String(MAX_STRIPE_WEBHOOK_LENGTH + 1), String(MAX_FEED_LENGTH), "99999999"]) {
+      const response = await call(PATH, { method: "POST", body: "x", headers: { "content-length": declared } }, { RELAY: relay });
+      assert.equal(response.status, 413, declared);
+      assert.equal(response.headers.get("cache-control"), "no-store", declared);
+      assert.equal((await envelope(response)).error.code, "payload_too_large", declared);
+    }
+    assert.deepEqual(forwarded, []);
+  });
+
+  it("refuses a missing, malformed, or chunked length", async () => {
+    const { forwarded, relay } = recordingRelay();
+    for (const headers of [
+      {},
+      { "content-length": "" },
+      { "content-length": "abc" },
+      { "content-length": "3, 3" },
+      { "content-length": "3", "transfer-encoding": "chunked" },
+    ] as Record<string, string>[]) {
+      const label = JSON.stringify(headers);
+      const response = await call(PATH, { method: "POST", body: "abc", headers }, { RELAY: relay });
+      assert.equal(response.status, 400, label);
+      assert.equal((await envelope(response)).error.code, "invalid_request", label);
+    }
+    assert.deepEqual(forwarded, []);
+  });
+
+  it("refuses a missing, malformed, or stale signature header before the relay", async () => {
+    const { forwarded, relay } = recordingRelay();
+    const now = Math.floor(Date.now() / 1000);
+    for (const signature of [
+      undefined,
+      "",
+      "v1=00",
+      `t=${now}`,
+      `t=${now},t=${now},v1=00`,
+      `t=abc,v1=00`,
+      `t=${now - 301},v1=00`,
+      `t=${now + 301},v1=00`,
+      `t=${now},v1=${"0".repeat(4100)}`,
+    ]) {
+      const headers: Record<string, string> = { "content-length": "2" };
+      if (signature !== undefined) headers["stripe-signature"] = signature;
+      const response = await call(PATH, { method: "POST", body: "{}", headers }, { RELAY: relay });
+      assert.equal(response.status, 400, String(signature));
+      assert.equal((await envelope(response)).error.code, "invalid_request", String(signature));
+    }
+    assert.deepEqual(forwarded, []);
+    // A `t` within 300 s and any `v1` go on to the relay, which checks the HMAC.
+    const response = await call(
+      PATH,
+      { method: "POST", body: "{}", headers: { "content-length": "2", "stripe-signature": `t=${now - 299},v0=1,v1=00` } },
+      { RELAY: relay },
+    );
+    assert.notEqual(response.status, 400);
+    assert.equal(forwarded.length, 1);
+  });
+
+  it("keeps the 64 KiB cap on every other path and method near the webhook", async () => {
+    const { forwarded, relay } = recordingRelay();
+    const declared = String(MAX_JSON_LENGTH + 1);
+    for (const [method, path] of [
+      ["POST", "/v1/stripe/webhook/"],
+      ["POST", "/v1/stripe/webhooks"],
+      ["POST", "/v1/stripe"],
+      ["PUT", PATH],
+      ["PATCH", PATH],
+    ]) {
+      const response = await call(path!, { method, body: "x", headers: { "content-length": declared } }, { RELAY: relay });
+      assert.equal(response.status, 413, `${method} ${path}`);
+    }
+    assert.deepEqual(forwarded, []);
+  });
+});
+
+describe("account rate limit", () => {
+  it("uses ACCOUNT_LIMITER, and no other, for POST /v1/account, keyed by the address or the /64", async () => {
+    for (const [address, key] of [
+      ["198.51.100.7", "198.51.100.7"],
+      ["2001:db8:1:2:3:4:5:6", "2001:db8:1:2::/64"],
+    ]) {
+      const refused = everyLimiter(false);
+      const response = await call("/v1/account", {
+        method: "POST",
+        body: "{}",
+        headers: { "cf-connecting-ip": address! },
+      }, { ...refused.env, RELAY: vpc() });
+      assert.equal(response.status, 429, address);
+      assert.equal(response.headers.get("retry-after"), "60");
+      assert.equal((await envelope(response)).error.code, "rate_limited");
+      assert.deepEqual(refused.used, [`account:${key}`], address);
+      assert.equal(seen.length, 0);
+      assert.equal(vpcTargets.length, 0);
+    }
+    const allowed = everyLimiter(true);
+    const passed = await call("/v1/account", { method: "POST", body: '{"v":1}' }, allowed.env);
+    assert.equal(passed.status, 201);
+    assert.equal(await passed.text(), 'echo:{"v":1}');
+    assert.deepEqual(allowed.used, ["account:unknown"]);
+  });
+
+  it("uses ACCOUNT_LIMITER for POST /v1/account/recover too, keyed by the /64", async () => {
+    const refused = everyLimiter(false);
+    const response = await call("/v1/account/recover", {
+      method: "POST",
+      body: "{}",
+      headers: { "cf-connecting-ip": "2001:db8:1:2:3:4:5:6" },
+    }, { ...refused.env, RELAY: vpc() });
+    assert.equal(response.status, 429);
+    assert.equal(response.headers.get("retry-after"), "60");
+    assert.deepEqual(refused.used, ["account:2001:db8:1:2::/64"]);
+    assert.equal(seen.length, 0);
+    const allowed = everyLimiter(true);
+    const passed = await call("/v1/account/recover", { method: "POST", body: "{}" }, allowed.env);
+    assert.equal(passed.status, 201);
+    assert.deepEqual(allowed.used, ["account:unknown"]);
+  });
+
+  it("sends the client prefix and its MAC on POST /v1/account and /v1/account/recover, over any client copy", async () => {
+    // The vector of "198.51.100.0/24" under SECRET, as for POST /v1/connect.
+    const mac = "554af02c577b0770299175aff6f2a86f7082585a1abab1dcabcce44a54549490";
+    for (const path of ["/v1/account", "/v1/account/recover"]) {
+      for (const forged of [undefined, "203.0.113.0/24"]) {
+        const headers: Record<string, string> = { "cf-connecting-ip": "198.51.100.42" };
+        if (forged) {
+          headers["X-Apassy-Client-Prefix"] = forged;
+          headers["X-Apassy-Client-Prefix-Mac"] = "ffff";
+        }
+        const response = await call(path, { method: "POST", body: "{}", headers }, everyLimiter(true).env);
+        assert.equal(response.status, 201, `${path} ${forged}`);
+        assert.equal(seen.length, 1);
+        assert.deepEqual(values(seen[0]!, "x-apassy-client-prefix"), ["198.51.100.0/24"], `${path} ${forged}`);
+        assert.deepEqual(values(seen[0]!, "x-apassy-client-prefix-mac"), [mac], `${path} ${forged}`);
+      }
+    }
+    // Every other account route gets neither, also when the client sends them.
+    for (const [method, path] of [
+      ["GET", "/v1/account"],
+      ["DELETE", "/v1/account"],
+      ["POST", "/v1/account/challenge"],
+      ["POST", "/v1/account/token"],
+      ["POST", "/v1/account/devices/join"],
+      ["POST", "/v1/account/recover/"],
+    ]) {
+      const response = await call(path!, {
+        method,
+        headers: {
+          "cf-connecting-ip": "198.51.100.42",
+          "X-Apassy-Client-Prefix": "198.51.100.0/24",
+          "X-Apassy-Client-Prefix-Mac": mac,
+        },
+        ...(method === "POST" ? { body: "{}" } : {}),
+      }, everyLimiter(true).env);
+      assert.equal(response.status, 201, `${method} ${path}`);
+      assert.deepEqual(values(seen[0]!, "x-apassy-client-prefix"), [], `${method} ${path}`);
+      assert.deepEqual(values(seen[0]!, "x-apassy-client-prefix-mac"), [], `${method} ${path}`);
+    }
+  });
+
+  for (const path of [
+    "/v1/account/challenge",
+    "/v1/account/token",
+    "/v1/account/devices/join",
+    "/v1/account/devices/join/cancel",
+  ]) {
+    it(`uses AUTH_LIMITER, and no other, for POST ${path}`, async () => {
+      const refused = everyLimiter(false);
+      const response = await call(path, {
+        method: "POST",
+        body: "{}",
+        headers: { "cf-connecting-ip": "203.0.113.9" },
+      }, refused.env);
+      assert.equal(response.status, 429);
+      assert.equal((await envelope(response)).error.code, "rate_limited");
+      assert.deepEqual(refused.used, ["auth:203.0.113.9"]);
+      assert.equal(seen.length, 0);
+      const allowed = everyLimiter(true);
+      const passed = await call(path, { method: "POST", body: "{}" }, allowed.env);
+      assert.equal(passed.status, 201);
+      assert.deepEqual(allowed.used, ["auth:unknown"]);
+    });
+  }
+
+  it("passes POST /v1/account when the limiter is missing or fails", async () => {
+    for (const ACCOUNT_LIMITER of [undefined, { async limit() { throw new Error("limiter unavailable"); } }]) {
+      const response = await call("/v1/account", { method: "POST", body: "{}" }, { ACCOUNT_LIMITER });
+      assert.equal(response.status, 201);
+    }
+  });
+
+  it("does not limit other account routes or methods", async () => {
+    const refused = everyLimiter(false);
+    for (const [method, path] of [
+      ["GET", "/v1/account"],
+      ["DELETE", "/v1/account"],
+      ["POST", "/v1/account/checkout"],
+      ["POST", "/v1/account/portal"],
+      ["GET", "/v1/account/plan"],
+      ["GET", "/v1/plans"],
+    ]) {
+      const response = await call(path!, { method, ...(method === "POST" ? { body: "{}" } : {}) }, refused.env);
+      assert.equal(response.status, 201, `${method} ${path}`);
+    }
+    assert.deepEqual(refused.used, []);
+  });
+});
+
+describe("tunnel", () => {
+  const UPGRADE = {
+    connection: "Upgrade",
+    upgrade: "websocket",
+    "sec-websocket-version": "13",
+    "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==",
+    "sec-websocket-protocol": "apassy-tunnel-v1",
+    authorization: "Bearer apassy_act_acc_k7m2q4x3ca_00",
+  };
+
+  /** A relay that answers the upgrade: one response object, to check it comes back as it is. */
+  function upgradingRelay() {
+    const forwarded: { target: string; method: string; headers: Headers; body: unknown }[] = [];
+    const answer = new Response(null, { status: 200, headers: { "x-switching": "yes" } });
+    const relay: RelayService = {
+      async fetch(input, init) {
+        forwarded.push({ target: input, method: init?.method ?? "", headers: new Headers(init?.headers), body: init?.body });
+        return answer;
+      },
+    };
+    return { forwarded, relay, answer };
+  }
+
+  it("passes a WebSocket upgrade on the two tunnel routes to the relay unchanged and returns its answer", async () => {
+    for (const path of ["/v1/tunnel/node", "/v1/tunnel/dial/node_k7m2q4x3ca"]) {
+      const { forwarded, relay, answer } = upgradingRelay();
+      const response = await call(path, { headers: { ...UPGRADE, "x-apassy-edge": "attacker", "cf-connecting-ip": "198.51.100.7" } }, { RELAY: relay });
+      assert.equal(response, answer, `${path}: the relay's answer is returned as it is`);
+      assert.equal(forwarded.length, 1, path);
+      assert.equal(forwarded[0]!.target, "http://relay" + path);
+      assert.equal(forwarded[0]!.method, "GET");
+      assert.equal(forwarded[0]!.body, undefined);
+      const headers = forwarded[0]!.headers;
+      for (const [name, value] of Object.entries(UPGRADE)) {
+        assert.equal(headers.get(name), value, `${path}: ${name}`);
+      }
+      assert.equal(headers.get("x-apassy-edge"), SECRET);
+      assert.equal(headers.get("content-length"), null);
+    }
+  });
+
+  it("refuses an upgrade on every other path or method before the relay", async () => {
+    const { forwarded, relay } = upgradingRelay();
+    const cases: [string, string][] = [
+      ["GET", "/v1/me"],
+      ["GET", "/mcp"],
+      ["POST", "/mcp"],
+      ["GET", "/p/apassy_ses_x/api.example.com/socket"],
+      ["GET", "/v1/account"],
+      ["GET", "/v1/questions"],
+      ["GET", "/v1/feed"],
+      ["GET", "/v1/tunnel"],
+      ["POST", "/v1/tunnel/nodes"],
+      ["DELETE", "/v1/tunnel/nodes/node_k7m2q4x3ca"],
+      ["GET", "/v1/tunnel/../me"],
+      ["GET", "/install.sh"],
+      ["GET", "/dl/apassy-team"],
+      ["GET", "/"],
+    ];
+    for (const headers of [UPGRADE, { upgrade: "h2c" }, { connection: "keep-alive, Upgrade" }] as Record<string, string>[]) {
+      for (const [method, path] of cases) {
+        const label = `${method} ${path} ${JSON.stringify(headers)}`;
+        const response = await call(path, { method, headers, ...(method === "POST" ? { body: "{}" } : {}) }, { RELAY: relay, ASSETS: { async fetch() { return new Response("asset"); } } });
+        assert.equal(response.status, 400, label);
+        assert.equal((await envelope(response)).error.code, "invalid_request", label);
+      }
+    }
+    assert.deepEqual(forwarded, []);
+  });
+
+  it("forwards the JSON tunnel routes as any other route", async () => {
+    const response = await call("/v1/tunnel/nodes", { method: "POST", body: '{"name":"Mac"}' });
+    assert.equal(response.status, 201);
+    assert.equal(await response.text(), 'echo:{"name":"Mac"}');
+    assert.equal(seen[0]!.url, "/v1/tunnel/nodes");
+    assert.deepEqual(values(seen[0]!, "x-apassy-edge"), [SECRET]);
+  });
+
+  it("uses TUNNEL_LIMITER for GET /v1/tunnel/dial/* and TUNNEL_NODE_LIMITER for GET /v1/tunnel/node, and no other, keyed by the address or the /64", async () => {
+    for (const [path, name] of [
+      ["/v1/tunnel/dial/node_k7m2q4x3ca", "tunnel"],
+      ["/v1/tunnel/node", "node"],
+    ]) {
+      for (const [address, key] of [
+        ["198.51.100.7", "198.51.100.7"],
+        ["2001:db8:1:2:3:4:5:6", "2001:db8:1:2::/64"],
+      ]) {
+        const label = `${path} ${address}`;
+        const refused = everyLimiter(false);
+        const { forwarded, relay } = upgradingRelay();
+        const response = await call(path!, { headers: { ...UPGRADE, "cf-connecting-ip": address! } }, { ...refused.env, RELAY: relay });
+        assert.equal(response.status, 429, label);
+        assert.equal(response.headers.get("retry-after"), "60", label);
+        assert.equal((await envelope(response)).error.code, "rate_limited", label);
+        assert.deepEqual(refused.used, [`${name}:${key}`], label);
+        assert.deepEqual(forwarded, [], label);
+      }
+      const allowed = everyLimiter(true);
+      const passed = await call(path!, {}, allowed.env);
+      assert.equal(passed.status, 201, path);
+      assert.deepEqual(allowed.used, [`${name}:unknown`], path);
+    }
+  });
+
+  it("keeps the node's WebSocket out of the dial budget of its address, and the dials out of the node's", async () => {
+    const used: string[] = [];
+    const counting = (name: string, limit: number) => {
+      const seen = new Map<string, number>();
+      return {
+        async limit({ key }: { key: string }) {
+          const count = (seen.get(key) ?? 0) + 1;
+          seen.set(key, count);
+          used.push(`${name}:${key}`);
+          return { success: count <= limit };
+        },
+      };
+    };
+    const env = { TUNNEL_LIMITER: counting("tunnel", 60), TUNNEL_NODE_LIMITER: counting("node", 60) };
+    const headers = { "cf-connecting-ip": "198.51.100.7" };
+    // Sixty dials from the address (phones behind the node's NAT) spend the dial budget.
+    for (let n = 0; n < 60; n++) {
+      assert.equal((await call("/v1/tunnel/dial/node_k7m2q4x3ca", { headers }, env)).status, 201);
+    }
+    assert.equal((await call("/v1/tunnel/dial/node_k7m2q4x3ca", { headers }, env)).status, 429);
+    // The node's WebSocket from the same address still passes.
+    assert.equal((await call("/v1/tunnel/node", { headers }, env)).status, 201);
+    assert.equal(used.filter((entry) => entry === "node:198.51.100.7").length, 1);
+    assert.equal(used.filter((entry) => entry === "tunnel:198.51.100.7").length, 61);
+  });
+
+  it("does not limit the other tunnel routes, and passes a dial or a node when the limiter is missing or fails", async () => {
+    const refused = everyLimiter(false);
+    for (const [method, path] of [
+      ["GET", "/v1/tunnel/nodes"],
+      ["GET", "/v1/tunnel/node/extra"],
+      ["POST", "/v1/tunnel/node"],
+      ["POST", "/v1/tunnel/nodes"],
+      ["POST", "/v1/tunnel/grants"],
+      ["GET", "/v1/tunnel/grants"],
+      ["DELETE", "/v1/tunnel/grants/tgr_w2x4y6z3ab"],
+      ["POST", "/v1/tunnel/dial/node_k7m2q4x3ca"],
+    ]) {
+      const response = await call(path!, { method, ...(method === "POST" ? { body: "{}" } : {}) }, refused.env);
+      assert.equal(response.status, 201, `${method} ${path}`);
+    }
+    assert.deepEqual(refused.used, []);
+    for (const path of ["/v1/tunnel/dial/node_k7m2q4x3ca", "/v1/tunnel/node"]) {
+      for (const limiter of [undefined, { async limit() { throw new Error("limiter unavailable"); } }]) {
+        const response = await call(path, {}, { TUNNEL_LIMITER: limiter, TUNNEL_NODE_LIMITER: limiter });
+        assert.equal(response.status, 201, path);
+      }
+    }
+  });
+});
+
+describe("relay mode (one build for the hosted relay and Connect)", () => {
+  const PUSH_SECRET = "push-secret-synthetic-0123456789abcdef";
+  /** A call of the Worker's own push route with the right secret and a body it refuses. */
+  function internalPush(env: Record<string, unknown>) {
+    return call("/internal/push", {
+      method: "POST",
+      body: "{}",
+      headers: { "x-apassy-push": PUSH_SECRET, "content-type": "application/json" },
+    }, { PUSH_SECRET, ...env });
+  }
+
+  for (const mode of [undefined, "relay", " relay "]) {
+    it(`keeps /internal/push and the free Connect guards with RELAY_MODE ${JSON.stringify(mode)}`, async () => {
+      // The push route reads the body: 400 for one that is not a push, never forwarded.
+      const pushed = await internalPush(mode === undefined ? {} : { RELAY_MODE: mode });
+      assert.equal(pushed.status, 400);
+      assert.equal(seen.length, 0);
+      const limits = everyLimiter(true);
+      const created = await call("/v1/connect", {
+        method: "POST",
+        body: '{"v":1}',
+        headers: { "cf-connecting-ip": "198.51.100.42" },
+      }, { ...limits.env, ...(mode === undefined ? {} : { RELAY_MODE: mode }) });
+      assert.equal(created.status, 201);
+      assert.deepEqual(limits.used, ["connect:198.51.100.42", "prefix:198.51.100.0/24"]);
+      assert.deepEqual(values(seen[0]!, "x-apassy-client-prefix"), ["198.51.100.0/24"]);
+      assert.equal(values(seen[0]!, "x-apassy-client-prefix-mac").length, 1);
+    });
+  }
+
+  it("turns /internal/push off in connect mode, before the APNs sender reads anything", async () => {
+    for (const path of ["/internal/push", "/internal/x", "/./internal/push"]) {
+      const response = await call(path, {
+        method: "POST",
+        body: "{}",
+        headers: { "x-apassy-push": PUSH_SECRET },
+      }, { PUSH_SECRET, RELAY_MODE: "connect", RELAY: vpc() });
+      assert.equal(response.status, 404, path);
+      assert.equal(await response.text(), "not found");
+    }
+    assert.equal(seen.length, 0);
+    assert.equal(vpcTargets.length, 0);
+  });
+
+  it("answers the free Connect routes with 410 at the edge in connect mode, without a guard or the relay", async () => {
+    for (const [method, path] of [
+      ["POST", "/v1/connect"],
+      ["GET", "/v1/connect"],
+      ["POST", "/v1/connect/challenge"],
+      ["POST", "/v1/./connect"],
+    ]) {
+      const limits = everyLimiter(false);
+      const response = await call(path!, {
+        method,
+        ...(method === "POST" ? { body: '{"v":1}' } : {}),
+        headers: {
+          "cf-connecting-ip": "198.51.100.42",
+          "x-apassy-client-prefix": "203.0.113.0/24",
+          "x-apassy-client-prefix-mac": "00",
+        },
+      }, { ...limits.env, RELAY_MODE: "connect", RELAY: vpc() });
+      assert.equal(response.status, 410, `${method} ${path}`);
+      const answer = await response.json() as { ok: boolean; error: { code: string } };
+      assert.equal(answer.ok, false);
+      assert.equal(answer.error.code, "hosted_retired");
+      assert.equal(response.headers.get("cache-control"), "no-store");
+      // No guard is asked (none can be flooded), and nothing reaches the relay.
+      assert.deepEqual(limits.used, []);
+      assert.equal(seen.length, 0);
+      assert.equal(vpcTargets.length, 0);
+    }
+    // The guards of Connect stay: a new account and a dial are limited as before.
+    const account = everyLimiter(false);
+    const refused = await call("/v1/account", {
+      method: "POST",
+      body: "{}",
+      headers: { "cf-connecting-ip": "198.51.100.42" },
+    }, { ...account.env, RELAY_MODE: "connect" });
+    assert.equal(refused.status, 429);
+    assert.deepEqual(account.used, ["account:198.51.100.42"]);
+    const dial = everyLimiter(false);
+    const dialed = await call("/v1/tunnel/dial/node_abc", {
+      headers: { "cf-connecting-ip": "198.51.100.42" },
+    }, { ...dial.env, RELAY_MODE: "connect" });
+    assert.equal(dialed.status, 429);
+    assert.deepEqual(dial.used, ["tunnel:198.51.100.42"]);
+  });
+
+  it("gives /p/ the JSON cap in connect mode and the proxy cap otherwise", async () => {
+    const declared = String(MAX_JSON_LENGTH + 1);
+    const body = new Uint8Array(MAX_JSON_LENGTH + 1);
+    const connect = await call("/p/apassy_ses_x/v1/upload", {
+      method: "POST",
+      body,
+      headers: { "content-length": declared },
+    }, { RELAY_MODE: "connect" });
+    assert.equal(connect.status, 413);
+    assert.match(await connect.text(), /64 KiB/);
+    assert.equal(seen.length, 0);
+    const relay = await call("/p/apassy_ses_x/v1/upload", {
+      method: "POST",
+      body,
+      headers: { "content-length": declared },
+    }, { RELAY_MODE: "relay" });
+    assert.equal(relay.status, 201);
+    assert.ok(MAX_PROXY_LENGTH > MAX_JSON_LENGTH);
+  });
+
+  it("serves /dl, /guide, and /install.sh in both modes", async () => {
+    for (const mode of ["relay", "connect"]) {
+      for (const path of ["/install.sh", "/guide", "/dl/apassy.tar.gz"]) {
+        const fixture = assets(() => new Response("asset body"));
+        const response = await call(path, {}, { ASSETS: fixture.binding, RELAY_MODE: mode });
+        assert.equal(response.status, 200, `${mode} ${path}`);
+        assert.equal(await response.text(), "asset body");
+        assert.equal(seen.length, 0);
+      }
+    }
+  });
+
+  it("answers 503 for a bad RELAY_MODE on the relay routes, keeps the files, and keeps push off", async () => {
+    const response = await call("/v1/me", {}, { RELAY_MODE: "conect" });
+    assert.equal(response.status, 503);
+    assert.equal(await response.text(), "relay not configured");
+    assert.equal(seen.length, 0);
+    const pushed = await internalPush({ RELAY_MODE: "conect" });
+    assert.equal(pushed.status, 404);
+    const fixture = assets(() => new Response("asset body"));
+    const file = await call("/install.sh", {}, { ASSETS: fixture.binding, RELAY_MODE: "conect" });
+    assert.equal(file.status, 200);
+  });
+
+  it("forwards the routes of Connect in connect mode as before", async () => {
+    for (const [method, path] of [["GET", "/v1/account"], ["GET", "/v1/sync/head"], ["GET", "/healthz"]]) {
+      const response = await call(path!, { method }, { RELAY_MODE: "connect" });
+      assert.equal(response.status, 201, `${method} ${path}`);
+      assert.deepEqual(values(seen[0]!, "x-apassy-edge"), [SECRET]);
+    }
   });
 });

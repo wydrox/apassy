@@ -15,6 +15,38 @@ pub mod fake_connect;
 #[cfg(feature = "vault")]
 pub mod fake_relay;
 
+/// The fake relay keeps the vault stores of the fake Connect (plan s7 unit M3).
+#[cfg(feature = "vault")]
+impl fake_connect::StoreRelay for fake_relay::FakeRelay {
+    fn url(&self) -> String {
+        self.url.clone()
+    }
+    fn set_origin(&self, origin: &str) {
+        fake_relay::FakeRelay::set_origin(self, origin);
+    }
+    fn add_store_team(
+        &self,
+        team_id: &str,
+        name: &str,
+        device_name: &str,
+        public_key: &[u8],
+    ) -> u64 {
+        fake_relay::FakeRelay::add_store_team(self, team_id, name, device_name, public_key)
+    }
+    fn add_store_device(&self, team_id: &str, device_name: &str, public_key: &[u8]) -> u64 {
+        fake_relay::FakeRelay::add_store_device(self, team_id, device_name, public_key)
+    }
+    fn remove_team(&self, team_id: &str) {
+        fake_relay::FakeRelay::remove_team(self, team_id);
+    }
+    fn set_team_sync_bytes(&self, team_id: &str, bytes: u64) {
+        fake_relay::FakeRelay::set_team_sync_bytes(self, team_id, bytes);
+    }
+    fn set_store_guard(&self, guard: fake_connect::StoreGuard) {
+        fake_relay::FakeRelay::set_store_guard(self, guard);
+    }
+}
+
 /// A fake Jev-compatible bouncer (contract v2). By default it answers a clean,
 /// matching, read-only command: `task_match` 0.95 and every other fact 0.02.
 /// `overrides` sets other probabilities. It keeps each request body.

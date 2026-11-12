@@ -81,7 +81,7 @@ pub(super) fn run(shared: &Shared) {
                 // or the original expiry releases that reservation.
                 if attempts.values().filter(|a| a.slot_held).count() >= MAX_ACCESS_IN_FLIGHT {
                     lock(&shared.view).access_local_only.insert(r.id,
-                        "Review on this Mac. Relay capacity is reserved for execution questions and iPhone connection.".into());
+                        concat!("Review on this ", crate::computer!(), ". Relay capacity is reserved for execution questions and iPhone connection.").into());
                     continue;
                 }
                 let sealed = if let Some(bytes) = &r.envelope {
@@ -108,7 +108,15 @@ pub(super) fn run(shared: &Shared) {
                     })()
                 };
                 let Some(sealed) = sealed else {
-                    lock(&shared.view).access_local_only.insert(r.id,"Review this access request on this Mac. It could not be sent to your other devices.".into());
+                    lock(&shared.view).access_local_only.insert(
+                        r.id,
+                        concat!(
+                            "Review this access request on this ",
+                            crate::computer!(),
+                            ". It could not be sent to your other devices."
+                        )
+                        .into(),
+                    );
                     continue;
                 };
                 let reserved = (|| {
@@ -123,7 +131,7 @@ pub(super) fn run(shared: &Shared) {
                 .is_some();
                 if !reserved {
                     lock(&shared.view).access_local_only.insert(r.id,
-                        "Review on this Mac. A prior relay publication still reserves the access slot until settlement or expiry.".into());
+                        concat!("Review on this ", crate::computer!(), ". A prior relay publication still reserves the access slot until settlement or expiry.").into());
                     continue;
                 }
                 attempts.insert(
@@ -158,7 +166,17 @@ pub(super) fn run(shared: &Shared) {
                     }
                     Err(e) if e.status() == Some(409) => a.posted = true,
                     Err(e) => {
-                        lock(&shared.view).access_local_only.insert(r.id,format!("Review this access request on this Mac. Remote publication failed: {e:?}"));
+                        lock(&shared.view).access_local_only.insert(
+                            r.id,
+                            format!(
+                                concat!(
+                                    "Review this access request on this ",
+                                    crate::computer!(),
+                                    ". Remote publication failed: {e:?}"
+                                ),
+                                e = e
+                            ),
+                        );
                         if !e.can_pass() {
                             a.next = Instant::now() + Duration::from_secs(300);
                             continue;

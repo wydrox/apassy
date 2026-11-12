@@ -25,10 +25,16 @@ use crate::server::audit::Audit;
 use crate::server::store::{Store, db, to_i, to_u};
 
 /// `PRAGMA user_version` of the directory. Far from the team versions, so one file is
-/// never taken for the other.
-pub const DIRECTORY_VERSION: i64 = 1005;
+/// never taken for the other. Since 1006 it holds the accounts of Apassy Connect
+/// (`MIGRATE_ACCOUNTS`). The step of the accounts is this one constant: a parallel plan
+/// that lands a directory step first renumbers it to the next free version.
+pub const DIRECTORY_VERSION: i64 = 1006;
+/// The version before the accounts step.
+pub const BEFORE_ACCOUNTS_VERSION: i64 = DIRECTORY_VERSION - 1;
 
-const SCHEMA: &str = "
+/// The schema of version 1005, without its version line: a new file runs it and then
+/// `MIGRATE_ACCOUNTS`, so a new file and a migrated one have the same schema text.
+const SCHEMA_1005: &str = "
 CREATE TABLE team (
   id TEXT PRIMARY KEY, name TEXT NOT NULL, file_key TEXT NOT NULL,
   state TEXT NOT NULL CHECK (state IN ('active','suspended')),
@@ -64,6 +70,255 @@ CREATE TABLE oauth_refresh (
 CREATE INDEX oauth_refresh_family ON oauth_refresh(family);
 CREATE INDEX oauth_refresh_agent ON oauth_refresh(team_id, agent_id);
 ALTER TABLE team_code ADD COLUMN kind TEXT NOT NULL DEFAULT 'operator' CHECK (kind IN ('operator','node'));
+";
+
+/// Version 1005 to `DIRECTORY_VERSION` (docs/SPEC.md section 33, connect-account-v1
+/// section 12, plan s7 decision 1): Apassy Connect, additive for every row of 1005, in one
+/// transaction. Every table of stage 7 is here, so billing (C2), groups (C3), and the
+/// tunnel (C4) need no step of their own:
+///
+/// - `team` gains the kind `account` (a vault store, one relay-sync team for each vault)
+///   and `account_id`, `vault_id`. SQLite cannot widen a CHECK in place, so the table is
+///   rebuilt with the same rows; the index `team_legacy` is made again.
+/// - `account` (with the public recovery key, the last recovery, for its retry, and the
+///   time and the device of the last new recovery code from a device,
+///   `recovery_rotated_at` and `recovery_rotated_by`),
+///   `account_id_used` (every account id that an account ever had, written with the
+///   account and never deleted: an id is used once, so no later account meets the
+///   billing, tunnel, or key rows of an earlier one),
+///   `account_device` (with the device that added it, `added_by`; none for a root),
+///   `account_list` (`ACCOUNT_LIST`: the signed device list of each account, one row for
+///   each entry, from the root at version 1, with the device name it signs and its
+///   signature; a recovery starts it again), `account_key` (the SHA-256
+///   of every key that was ever
+///   a device of an account, and that account: one key makes at most one account, also
+///   after a deletion), `account_link`, `account_join`, `account_store_device` (which
+///   account device is which device of which store), `account_store_removal` (removals
+///   from a store file that wait for its open or a retry), `brain_event` (the I-4 outbox
+///   of the bouncer brain).
+/// - `account_list` also holds the entries that name another account (section 16: `peer`
+///   with the pinned root, `share` and `join` with the store, and their ends), and
+///   `account_peer_link`, `account_peer_join` hold the hashes of share codes and their
+///   answers (pruned a day after they end).
+/// - `"group"`, `group_member`, `group_invite` (C3); `stripe_customer`,
+///   `stripe_subscription`, `stripe_event`, `billing_problem` (Stripe objects Connect
+///   could not apply, for the operator), `billing_clock` (the clock of the deletion
+///   pass) (C2); `tunnel_node`, `tunnel_grant`,
+///   `tunnel_usage` (C4); `entitlement_key` (kids and public keys only).
+///
+/// Nothing here is secret: public keys, names, ids, hashes, and Stripe ids. Tokens, link
+/// codes, recovery codes, and the signing key are never stored.
+const MIGRATE_ACCOUNTS: &str = "
+CREATE TABLE team_accounts (
+  id TEXT PRIMARY KEY, name TEXT NOT NULL, file_key TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('active','suspended')),
+  legacy INTEGER NOT NULL DEFAULT 0 CHECK (legacy IN (0, 1)),
+  created_at INTEGER NOT NULL, suspended_at INTEGER, limits TEXT,
+  kind TEXT NOT NULL DEFAULT 'operator' CHECK (kind IN ('operator','connect','account')),
+  suspend_reason TEXT, account_id TEXT, vault_id TEXT,
+  CHECK ((kind = 'account') = (account_id IS NOT NULL AND vault_id IS NOT NULL)));
+INSERT INTO team_accounts (id, name, file_key, state, legacy, created_at, suspended_at, limits, kind, suspend_reason)
+  SELECT id, name, file_key, state, legacy, created_at, suspended_at, limits, kind, suspend_reason FROM team;
+DROP TABLE team;
+ALTER TABLE team_accounts RENAME TO team;
+CREATE UNIQUE INDEX team_legacy ON team(legacy) WHERE legacy = 1;
+CREATE UNIQUE INDEX team_vault ON team(account_id, vault_id) WHERE kind = 'account';
+CREATE TABLE account (
+  id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL,
+  recovery_key BLOB NOT NULL, create_hash BLOB NOT NULL, email TEXT, group_id TEXT,
+  recover_hash BLOB, recovered_at INTEGER, recover_device TEXT, recover_deleted INTEGER,
+  recovery_rotated_at INTEGER, recovery_rotated_by TEXT);
+CREATE INDEX account_created ON account(created_at);
+CREATE TABLE account_id_used (id TEXT PRIMARY KEY, created_at INTEGER NOT NULL);
+CREATE TABLE account_device (
+  id TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+  name TEXT NOT NULL, platform TEXT NOT NULL CHECK (platform IN ('mac','iphone','linux')),
+  public_key BLOB NOT NULL UNIQUE, created_at INTEGER NOT NULL, last_seen_at INTEGER,
+  revoked_at INTEGER, added_by TEXT);
+CREATE INDEX account_device_account ON account_device(account_id);
+CREATE TABLE account_key (
+  key_hash BLOB PRIMARY KEY, created_at INTEGER NOT NULL, account_id TEXT);
+CREATE TABLE account_store_removal (
+  team_id TEXT NOT NULL, store_device INTEGER NOT NULL, device_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL,
+  PRIMARY KEY (team_id, store_device));
+CREATE INDEX account_store_removal_next ON account_store_removal(next_at);
+CREATE TABLE account_link (
+  id INTEGER PRIMARY KEY, account_id TEXT NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+  device_id TEXT NOT NULL REFERENCES account_device(id) ON DELETE CASCADE,
+  link_hash TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+  used_at INTEGER);
+CREATE INDEX account_link_device ON account_link(device_id);
+CREATE TABLE account_join (
+  id INTEGER PRIMARY KEY, link_id INTEGER NOT NULL REFERENCES account_link(id) ON DELETE CASCADE,
+  account_id TEXT NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+  name TEXT NOT NULL, platform TEXT NOT NULL CHECK (platform IN ('mac','iphone','linux')),
+  public_key BLOB NOT NULL, signature BLOB NOT NULL, body_hash BLOB NOT NULL UNIQUE,
+  state TEXT NOT NULL CHECK (state IN ('pending','confirmed','refused','cancelled','expired')),
+  created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, decided_at INTEGER,
+  device_id TEXT);
+CREATE INDEX account_join_key ON account_join(public_key);
+CREATE TABLE account_store_device (
+  team_id TEXT NOT NULL, device_id TEXT NOT NULL, account_id TEXT NOT NULL,
+  store_device INTEGER NOT NULL, added_at INTEGER NOT NULL, PRIMARY KEY (team_id, device_id));
+CREATE INDEX account_store_device_device ON account_store_device(device_id);
+CREATE INDEX account_store_device_account ON account_store_device(account_id);
+CREATE TABLE brain_event (
+  id INTEGER PRIMARY KEY, kind TEXT NOT NULL CHECK (kind IN ('revoke','forget')),
+  subject TEXT NOT NULL, created_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+  next_at INTEGER NOT NULL, done_at INTEGER);
+CREATE INDEX brain_event_next ON brain_event(next_at) WHERE done_at IS NULL;
+CREATE TABLE \"group\" (
+  id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK (kind IN ('family','team')),
+  owner_account TEXT NOT NULL, subscription_id TEXT, created_at INTEGER NOT NULL);
+CREATE TABLE group_member (
+  group_id TEXT NOT NULL, account_id TEXT NOT NULL UNIQUE,
+  role TEXT NOT NULL CHECK (role IN ('owner','admin','member')),
+  state TEXT NOT NULL CHECK (state IN ('pending','active')),
+  created_at INTEGER NOT NULL, joined_at INTEGER, PRIMARY KEY (group_id, account_id));
+CREATE TABLE group_invite (
+  id INTEGER PRIMARY KEY, group_id TEXT NOT NULL, code_hash BLOB NOT NULL UNIQUE,
+  role TEXT NOT NULL CHECK (role IN ('admin','member')), created_by TEXT NOT NULL,
+  created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, used_at INTEGER, used_by TEXT);
+CREATE TABLE stripe_customer (
+  customer_id TEXT PRIMARY KEY, account_id TEXT NOT NULL UNIQUE, email TEXT,
+  created_at INTEGER NOT NULL, checkout_session TEXT, checkout_request TEXT,
+  checkout_expires_at INTEGER);
+CREATE TABLE stripe_subscription (
+  subscription_id TEXT PRIMARY KEY, customer_id TEXT NOT NULL, item_id TEXT,
+  account_id TEXT, group_id TEXT, lookup_key TEXT, quantity INTEGER, status TEXT NOT NULL,
+  current_period_end INTEGER, cancel_at_period_end INTEGER NOT NULL DEFAULT 0,
+  first_failure_at INTEGER, ended_at INTEGER, event_created INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL, last_invoice_created INTEGER NOT NULL DEFAULT 0,
+  stores_deleted_at INTEGER, requested_quantity INTEGER, requested_at INTEGER,
+  kind_left_at INTEGER, checked_at INTEGER);
+CREATE INDEX stripe_subscription_account ON stripe_subscription(account_id);
+CREATE INDEX stripe_subscription_group ON stripe_subscription(group_id);
+CREATE TABLE stripe_event (
+  id TEXT PRIMARY KEY, type TEXT NOT NULL, received_at INTEGER NOT NULL);
+CREATE INDEX stripe_event_received ON stripe_event(received_at);
+CREATE TABLE billing_problem (
+  id INTEGER PRIMARY KEY, object_id TEXT NOT NULL UNIQUE, account_id TEXT, customer_id TEXT,
+  event_id TEXT, reason TEXT NOT NULL, first_at INTEGER NOT NULL, last_at INTEGER NOT NULL,
+  events INTEGER NOT NULL DEFAULT 1, resolved_at INTEGER);
+CREATE TABLE billing_clock (
+  id INTEGER PRIMARY KEY CHECK (id = 1), last_pass_at INTEGER, stripe_time INTEGER,
+  held_since INTEGER);
+CREATE TABLE tunnel_node (
+  id TEXT PRIMARY KEY, account_id TEXT NOT NULL, device_id TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL, pin TEXT NOT NULL, created_at INTEGER NOT NULL);
+CREATE INDEX tunnel_node_account ON tunnel_node(account_id);
+CREATE TABLE tunnel_grant (
+  id TEXT PRIMARY KEY, node_id TEXT NOT NULL, account_id TEXT NOT NULL,
+  granted_by TEXT NOT NULL, created_at INTEGER NOT NULL, UNIQUE (node_id, account_id));
+CREATE INDEX tunnel_grant_account ON tunnel_grant(account_id);
+CREATE TABLE tunnel_usage (
+  account_id TEXT NOT NULL, month TEXT NOT NULL, dials INTEGER NOT NULL DEFAULT 0,
+  streams INTEGER NOT NULL DEFAULT 0, bytes INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (account_id, month));
+CREATE TABLE entitlement_key (
+  kid TEXT PRIMARY KEY, public_key BLOB NOT NULL, created_at INTEGER NOT NULL,
+  last_signed_at INTEGER);
+CREATE TABLE account_peer_link (
+  id INTEGER PRIMARY KEY, account_id TEXT NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+  device_id TEXT NOT NULL REFERENCES account_device(id) ON DELETE CASCADE,
+  peer_account TEXT NOT NULL, link_hash TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL, used_at INTEGER);
+CREATE INDEX account_peer_link_device ON account_peer_link(device_id);
+CREATE TABLE account_peer_join (
+  id INTEGER PRIMARY KEY, link_id INTEGER NOT NULL REFERENCES account_peer_link(id) ON DELETE CASCADE,
+  account_id TEXT NOT NULL, device_id TEXT NOT NULL, public_key BLOB NOT NULL,
+  signature BLOB NOT NULL, body_hash BLOB NOT NULL UNIQUE,
+  state TEXT NOT NULL CHECK (state IN ('pending','confirmed','refused','cancelled','expired')),
+  created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, decided_at INTEGER);
+CREATE INDEX account_peer_join_account ON account_peer_join(account_id);
+";
+
+/// The signed device lists of the accounts step (`account_list`, with its two indexes):
+/// one row for each entry, from the root at version 1, with the device name it signs and
+/// its signature; a recovery starts it again. The entries of section 16 name another
+/// account (`peer` with the pinned root, `share` and `join` with the store, and their
+/// ends; a `join` keeps the list hash of the `share` it answers in `peer_root`), and a
+/// `store` names a vault store of the account and no other account. A file of 1006 whose
+/// `op` CHECK has no `store` (a build before it) gets the table rebuilt at open with the
+/// same rows (`add_store_op`).
+const ACCOUNT_LIST: &str = "
+CREATE TABLE account_list (
+  account_id TEXT NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+  version INTEGER NOT NULL,
+  op TEXT NOT NULL CHECK (op IN ('root','add','remove','peer','unpeer','share','unshare','join','leave','store')),
+  key BLOB, link_hash TEXT, name TEXT, by_key BLOB NOT NULL, signature BLOB NOT NULL,
+  hash TEXT NOT NULL, created_at INTEGER NOT NULL, peer_account TEXT, peer_root BLOB, team_id TEXT,
+  PRIMARY KEY (account_id, version),
+  CHECK ((op IN ('root','add','remove')) = (key IS NOT NULL AND peer_account IS NULL)));
+CREATE INDEX account_list_peer ON account_list(account_id, peer_account) WHERE peer_account IS NOT NULL;
+CREATE INDEX account_list_team ON account_list(team_id) WHERE team_id IS NOT NULL;
+";
+
+/// The columns of `account_list`, in their order (the rebuild of `add_store_op`).
+const ACCOUNT_LIST_COLUMNS: &str = "account_id, version, op, key, link_hash, name, by_key, \
+     signature, hash, created_at, peer_account, peer_root, team_id";
+
+/// The marks of the share condition of section 16 (docs/SPEC.md section 33.13), part of
+/// the accounts step, each with its name: `account_share_void` (the version of an owner's
+/// list at the last group removal of a member or of the owner: a share of that owner
+/// naming that member counts only from a later version), `account_join_share` (the
+/// version of the owner's `share` that the member's last `join` of a store answered: the
+/// member's devices sign in to the store only while that share is the active one), and
+/// the index `account_list_named` of the entries by the account they name, and
+/// `account_list_reset` (the last device list of an account before its last recovery, kept
+/// while a vault store names the account: connect-account-v1 section 16.4). A file of 1006
+/// without one of them (a build before it) gets it at open (additive, `add_share_marks`).
+const SHARE_MARKS: [(&str, &str); 4] = [
+    (
+        "account_share_void",
+        "CREATE TABLE account_share_void (
+  account_id TEXT NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+  peer_account TEXT NOT NULL, version INTEGER NOT NULL, created_at INTEGER NOT NULL,
+  PRIMARY KEY (account_id, peer_account));",
+    ),
+    (
+        "account_join_share",
+        "CREATE TABLE account_join_share (
+  account_id TEXT NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+  team_id TEXT NOT NULL, share_version INTEGER NOT NULL, created_at INTEGER NOT NULL,
+  PRIMARY KEY (account_id, team_id));",
+    ),
+    (
+        "account_list_named",
+        "CREATE INDEX account_list_named ON account_list(peer_account) WHERE peer_account IS NOT NULL;",
+    ),
+    (
+        "account_list_reset",
+        "CREATE TABLE account_list_reset (
+  account_id TEXT NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+  version INTEGER NOT NULL, op TEXT NOT NULL, key BLOB, link_hash TEXT, name TEXT,
+  by_key BLOB NOT NULL, signature BLOB NOT NULL, hash TEXT NOT NULL, created_at INTEGER NOT NULL,
+  peer_account TEXT, peer_root BLOB, team_id TEXT,
+  PRIMARY KEY (account_id, version));",
+    ),
+];
+
+/// The SQL of a new directory: `SCHEMA_1005`, then `MIGRATE_ACCOUNTS`, `ACCOUNT_LIST`,
+/// and `SHARE_MARKS`, then the version.
+fn schema() -> String {
+    let marks: String = SHARE_MARKS
+        .iter()
+        .map(|(_, sql)| format!("{sql}\n"))
+        .collect();
+    format!(
+        "{SCHEMA_1005}{MIGRATE_ACCOUNTS}{ACCOUNT_LIST}{marks}PRAGMA user_version = {DIRECTORY_VERSION};"
+    )
+}
+
+/// `DIRECTORY_VERSION` back to 1005 (`downgrade_to_1005`, docs/OPERATIONS.md section 26.3):
+/// the vault stores go from `team` (an image of 1005 cannot read the kind `account`); the
+/// caller deletes their files after the commit. Every other table and column stays: the
+/// image of 1005 never reads them, and the next open of this version keeps them.
+const DOWNGRADE_1005: &str = "
+DELETE FROM account_store_device;
+DELETE FROM account_store_removal;
+DELETE FROM team WHERE kind = 'account';
 PRAGMA user_version = 1005;
 ";
 
@@ -172,8 +427,164 @@ fn migrate_1005(conn: &Connection) -> RelayResult<()> {
     if !crate::server::store::has_column(conn, "team_code", "kind")? {
         conn.execute_batch(KIND_1005).map_err(db)?;
     }
+    conn.pragma_update(None, "user_version", 1005).map_err(db)
+}
+
+/// The accounts step on a transaction: `MIGRATE_ACCOUNTS`, `ACCOUNT_LIST`, and
+/// `SHARE_MARKS` when `team` has no `account_id` yet, and the version. A file that
+/// `downgrade_to_1005` took back has every table of the step already (it removed only the
+/// vault store rows): they stay, with the additive steps of `finish_accounts_step`.
+fn migrate_accounts(conn: &Connection) -> RelayResult<()> {
+    if crate::server::store::has_column(conn, "team", "account_id")? {
+        finish_accounts_step(conn)?;
+    } else {
+        conn.execute_batch(MIGRATE_ACCOUNTS).map_err(db)?;
+        conn.execute_batch(ACCOUNT_LIST).map_err(db)?;
+        add_share_marks(conn)?;
+    }
     conn.pragma_update(None, "user_version", DIRECTORY_VERSION)
         .map_err(db)
+}
+
+/// The accounts step of a file that has its tables, on a transaction: the refusal of an
+/// earlier build of it (`refuse_earlier_accounts_step`), then the additive steps of the
+/// builds since: the `store` op of `account_list` (`add_store_op`), the share marks
+/// (`add_share_marks`), and the device of the last recovery key (`add_rotation_device`).
+fn finish_accounts_step(conn: &Connection) -> RelayResult<()> {
+    refuse_earlier_accounts_step(conn)?;
+    add_store_op(conn)?;
+    add_share_marks(conn)?;
+    add_rotation_device(conn)
+}
+
+/// The SQL that `sqlite_master` holds for the table or index `name`, or `None`.
+fn schema_sql(conn: &Connection, name: &str) -> RelayResult<Option<String>> {
+    conn.query_row(
+        "SELECT sql FROM sqlite_master WHERE name = ?1",
+        params![name],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(db)
+}
+
+/// `account_list` rebuilt with the `op` CHECK of `ACCOUNT_LIST` (it takes `store`), on a
+/// transaction, when its CHECK does not take `store` (a file of 1006 from a build before
+/// it): SQLite cannot widen a CHECK in place, so the rows are copied into a new table of
+/// the same columns, and its indexes are made again (`account_list_named` by
+/// `add_share_marks`, which runs after it).
+fn add_store_op(conn: &Connection) -> RelayResult<()> {
+    let sql = schema_sql(conn, "account_list")?.unwrap_or_default();
+    if sql.contains("'store'") {
+        return Ok(());
+    }
+    conn.execute_batch(&format!(
+        "DROP INDEX IF EXISTS account_list_named; DROP INDEX IF EXISTS account_list_peer; \
+         DROP INDEX IF EXISTS account_list_team; ALTER TABLE account_list RENAME TO account_list_before_store; \
+         {ACCOUNT_LIST} INSERT INTO account_list ({ACCOUNT_LIST_COLUMNS}) \
+         SELECT {ACCOUNT_LIST_COLUMNS} FROM account_list_before_store; DROP TABLE account_list_before_store;"
+    ))
+    .map_err(db)
+}
+
+/// Each of `SHARE_MARKS` that the file does not have, on a transaction (a file of 1006
+/// from a build before some of them).
+fn add_share_marks(conn: &Connection) -> RelayResult<()> {
+    for (name, sql) in SHARE_MARKS {
+        if schema_sql(conn, name)?.is_none() {
+            conn.execute_batch(sql).map_err(db)?;
+        }
+    }
+    Ok(())
+}
+
+/// The device that set the recovery key last (`account.recovery_rotated_by`, section 9.1),
+/// when the file has no such column yet (a file of 1006 from a build before it): additive,
+/// and `NULL` for every key set before.
+fn add_rotation_device(conn: &Connection) -> RelayResult<()> {
+    if !crate::server::store::has_column(conn, "account", "recovery_rotated_by")? {
+        conn.execute_batch("ALTER TABLE account ADD COLUMN recovery_rotated_by TEXT;")
+            .map_err(db)?;
+    }
+    Ok(())
+}
+
+/// The tables of the accounts step from an earlier, unreleased build of it (no
+/// `account_list.name`: the device lists whose entries sign no device name; no
+/// `account_list.team_id`: the lists without the entries of section 16; no
+/// `account_id_used`; no `account_join.signature`; no `account.recovery_rotated_at`):
+/// this build does not read them, and does not change them.
+fn refuse_earlier_accounts_step(conn: &Connection) -> RelayResult<()> {
+    let used: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'account_id_used')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(db)?;
+    if used
+        && crate::server::store::has_column(conn, "account_list", "name")?
+        && crate::server::store::has_column(conn, "account_list", "team_id")?
+        && crate::server::store::has_column(conn, "account_join", "signature")?
+        && crate::server::store::has_column(conn, "account", "recovery_rotated_at")?
+    {
+        return Ok(());
+    }
+    Err(RelayError::internal(
+        "relay.db holds the accounts tables of an earlier, unreleased build of directory 1006 (no account_list.name, account_list.team_id, account_id_used, account_join.signature, or account.recovery_rotated_at). This build cannot open it: restore relay.db from the backup taken before that build, or start that build's image again.",
+    ))
+}
+
+/// Opens `relay.db` as `Directory::open` does: a plain file in `connect` mode
+/// (`Store::open_plain`), else keyed with the master key. The downgrade commands use it too.
+fn open_directory_file(config: &RelayConfig) -> RelayResult<Store> {
+    if config.connect.plain_files() {
+        Store::open_plain(&config.directory_path(), config)
+    } else {
+        Store::open_at(&config.directory_path(), &config.master_key)
+    }
+}
+
+/// The downgrades below directory 1006 delete the vault stores of the accounts (paid
+/// stores of Apassy Connect, with their snapshots). They do it only when the operator
+/// says so (`--delete-vault-stores`); otherwise a directory with vault stores is refused
+/// and nothing changes.
+fn refuse_vault_stores(store: &Store, delete_vault_stores: bool) -> RelayResult<()> {
+    if delete_vault_stores {
+        return Ok(());
+    }
+    let stores: i64 = store.with(|conn| {
+        conn.query_row(
+            "SELECT count(*) FROM team WHERE kind = 'account'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(db)
+    })?;
+    if stores > 0 {
+        return Err(RelayError::new(
+            codes::CONFLICT,
+            format!(
+                "relay.db holds {stores} vault stores of Apassy Connect accounts, and this downgrade deletes them with their snapshots. Run it again with --delete-vault-stores to delete them. Nothing was changed."
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Removes the vault stores from `team` inside a downgrade's transaction and returns
+/// their ids; the caller deletes their files after the commit.
+fn drop_vault_store_rows(conn: &Connection) -> RelayResult<Vec<TeamId>> {
+    let mut statement = conn
+        .prepare("SELECT id FROM team WHERE kind = 'account' ORDER BY id")
+        .map_err(db)?;
+    let ids = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(db)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(db)?;
+    conn.execute_batch(DOWNGRADE_1005).map_err(db)?;
+    Ok(ids.iter().filter_map(|id| TeamId::parse(id)).collect())
 }
 
 /// The effective resource limits of one team.
@@ -359,6 +770,17 @@ impl TeamLimits {
     pub fn file_bytes(&self, kind: TeamKind) -> Option<u64> {
         match kind {
             TeamKind::Operator => None,
+            // A vault store holds devices, heads, receipts, and its audit; the snapshots
+            // are files of their own.
+            TeamKind::Account => Some(
+                CONNECT_FILE_SLACK
+                    .saturating_add(CONNECT_SYNC_FILE_BYTES)
+                    .saturating_add(
+                        self.members
+                            .saturating_sub(1)
+                            .saturating_mul(MEMBER_FILE_BYTES),
+                    ),
+            ),
             TeamKind::Connect => Some(
                 self.question_bytes
                     .saturating_add(self.feed_bytes)
@@ -383,6 +805,25 @@ impl TeamLimits {
         match kind {
             TeamKind::Operator => Self::default(),
             TeamKind::Connect => Self::connect(),
+            TeamKind::Account => Self::account(1),
+        }
+    }
+
+    /// The limits of a vault store (connect-account-v1 section 8) for `members` accounts:
+    /// 64 MiB snapshots, `ACCOUNT_SYNC_PUSHES_PER_HOUR`, no items, no agents (so no runs
+    /// and no proxy), and the smallest question and feed budgets (a store serves no
+    /// questions and no feed: `http` refuses those routes for it). Devices are 10 for
+    /// each member, as in every team. A shared store (C3) gets more members.
+    pub fn account(members: u64) -> Self {
+        Self {
+            members: members.clamp(1, 1_000_000),
+            items: 0,
+            agents: 0,
+            sync_bytes: crate::sync_head::MAX_SNAPSHOT_BYTES,
+            sync_pushes_per_hour: ACCOUNT_SYNC_PUSHES_PER_HOUR,
+            question_bytes: MIN_QUESTION_BYTES,
+            feed_bytes: MIN_FEED_BYTES,
+            ..Self::default()
         }
     }
 
@@ -550,6 +991,9 @@ pub const ITEM_FILE_BYTES: u64 = 16 * 1024;
 /// receipts, and the audit rows of the pushes. The snapshots are files in
 /// `teams/<team id>.sync/`, at most two of `sync_bytes` each.
 pub const CONNECT_SYNC_FILE_BYTES: u64 = 16 * 1_048_576;
+/// `sync_pushes_per_hour` of a vault store: 120, a push every 30 seconds from the devices
+/// of a vault together.
+pub const ACCOUNT_SYNC_PUSHES_PER_HOUR: u64 = 120;
 /// `sync_pushes_per_hour` of a new Connect team: 30, a push every two minutes, which a
 /// vault that one person changes does not reach (docs/SPEC.md section 26.4).
 pub const CONNECT_SYNC_PUSHES_PER_HOUR: u64 = 30;
@@ -560,7 +1004,7 @@ pub const CONNECT_SYNC_PUSHES_PER_HOUR: u64 = 30;
 pub const CONNECT_SYNC_BYTES_PER_HOUR: u64 = 512 * 1_048_576;
 pub const MEMBER_FILE_BYTES: u64 = 1_048_576;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TeamState {
     Active,
@@ -591,6 +1035,9 @@ pub struct TeamRow {
     pub kind: TeamKind,
     /// `IDLE_REASON` when `admin connect-sweep` suspended the team.
     pub suspend_reason: Option<String>,
+    /// A vault store (`TeamKind::Account`): the account that made it, and its vault id.
+    pub account_id: Option<String>,
+    pub vault_id: Option<String>,
 }
 
 /// Every team of the directory on `conn`, oldest first.
@@ -611,6 +1058,7 @@ fn team_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamRow> {
     let kind = match row.get::<_, String>(8)?.as_str() {
         "operator" => TeamKind::Operator,
         "connect" => TeamKind::Connect,
+        "account" => TeamKind::Account,
         _ => return Err(rusqlite::Error::InvalidQuery),
     };
     let limits =
@@ -633,11 +1081,12 @@ fn team_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamRow> {
         limits,
         kind,
         suspend_reason: row.get(9)?,
+        account_id: row.get(10)?,
+        vault_id: row.get(11)?,
     })
 }
 
-const TEAM_COLUMNS: &str =
-    "id, name, file_key, state, legacy, created_at, suspended_at, limits, kind, suspend_reason";
+const TEAM_COLUMNS: &str = "id, name, file_key, state, legacy, created_at, suspended_at, limits, kind, suspend_reason, account_id, vault_id";
 
 /// The directory: its file, and the audit writer of the relay.
 pub struct Directory {
@@ -648,35 +1097,36 @@ pub struct Directory {
 impl Directory {
     /// Creates `relay.db`. Refuses when it exists.
     pub fn create(config: &RelayConfig) -> RelayResult<Self> {
+        if config.connect.plain_files() {
+            // `connect` mode: a plain file, nothing in it is secret (ADR 0037 stage 7).
+            let store = Store::create_plain(&config.directory_path(), config, &schema())
+                .map_err(already_exists)?;
+            return Ok(Self {
+                store: Arc::new(store),
+                audit: Audit::new(),
+            });
+        }
         Self::create_at(&config.directory_path(), &config.master_key)
     }
 
     /// Creates a directory file at `path` (`migrate` writes it under another name and
     /// renames it last). Refuses when it exists.
     pub fn create_at(path: &std::path::Path, master_key: &SecretString) -> RelayResult<Self> {
-        let store = Store::create_at(path, master_key, SCHEMA).map_err(|error| {
-            if error.code == codes::CONFLICT {
-                RelayError::new(
-                    codes::CONFLICT,
-                    "The relay already exists. Refusing to create it again.",
-                )
-            } else {
-                error
-            }
-        })?;
+        let store = Store::create_at(path, master_key, &schema()).map_err(already_exists)?;
         Ok(Self {
             store: Arc::new(store),
             audit: Audit::new(),
         })
     }
 
-    /// Opens `relay.db` and checks its version. 1001 to 1004 move to 1005 in one
-    /// transaction; a failure leaves the file at its version.
+    /// Opens `relay.db` and checks its version. 1001 to 1005 move to `DIRECTORY_VERSION`
+    /// in one transaction; a failure leaves the file at its version. In `connect` mode the
+    /// file is plain (`Store::open_plain`).
     pub fn open(config: &RelayConfig) -> RelayResult<Self> {
-        let store = Store::open_at(&config.directory_path(), &config.master_key)?;
+        let store = open_directory_file(config)?;
         match store.user_version()? {
-            DIRECTORY_VERSION => {}
-            version @ (1001..=1004) => store.tx(|tx| {
+            DIRECTORY_VERSION => store.tx(|tx| finish_accounts_step(tx))?,
+            version @ (1001..=BEFORE_ACCOUNTS_VERSION) => store.tx(|tx| {
                 if version == 1001 {
                     tx.execute_batch("ALTER TABLE team ADD COLUMN limits TEXT;")
                         .map_err(db)?;
@@ -687,7 +1137,10 @@ impl Directory {
                 if version <= 1003 {
                     tx.execute_batch(MIGRATE_1004).map_err(db)?;
                 }
-                migrate_1005(tx)
+                if version <= 1004 {
+                    migrate_1005(tx)?;
+                }
+                migrate_accounts(tx)
             })?,
             _ => {
                 return Err(RelayError::internal(
@@ -709,23 +1162,43 @@ impl Directory {
     /// team file until it ends (at most `oauth::ACCESS_TOKEN_SECS`), and no client can
     /// refresh it. A file of version 1003 is left as it is. Returns the version before and
     /// after.
-    pub fn downgrade_to_1003(config: &RelayConfig) -> RelayResult<(i64, i64)> {
+    /// A directory of `DIRECTORY_VERSION` with vault stores is refused, with no change, unless
+    /// `delete_vault_stores` (`--delete-vault-stores`): the step deletes them.
+    pub fn downgrade_to_1003(
+        config: &RelayConfig,
+        delete_vault_stores: bool,
+    ) -> RelayResult<(i64, i64)> {
+        config.refuse_connect_mode("`apassy-relay downgrade-directory-1003`")?;
         let _lock = crate::server::hub::lock_data_dir(config)?;
-        let store = Store::open_at(&config.directory_path(), &config.master_key)?;
+        let store = open_directory_file(config)?;
         let from = store.user_version()?;
-        match from {
+        if from == DIRECTORY_VERSION {
+            refuse_vault_stores(&store, delete_vault_stores)?;
+        }
+        let stores = match from {
+            DIRECTORY_VERSION => store.tx(|tx| {
+                let stores = drop_vault_store_rows(tx)?;
+                tx.execute_batch(DOWNGRADE_1004).map_err(db)?;
+                tx.execute_batch(DOWNGRADE_1003).map_err(db)?;
+                Ok(stores)
+            })?,
             1005 => store.tx(|tx| {
                 tx.execute_batch(DOWNGRADE_1004).map_err(db)?;
-                tx.execute_batch(DOWNGRADE_1003).map_err(db)
+                tx.execute_batch(DOWNGRADE_1003).map_err(db)?;
+                Ok(Vec::new())
             })?,
-            1004 => store.tx(|tx| tx.execute_batch(DOWNGRADE_1003).map_err(db))?,
-            1003 => {}
+            1004 => store.tx(|tx| {
+                tx.execute_batch(DOWNGRADE_1003).map_err(db)?;
+                Ok(Vec::new())
+            })?,
+            1003 => Vec::new(),
             _ => {
-                return Err(RelayError::internal(
-                    "relay.db is not a directory of version 1003, 1004, or 1005.",
-                ));
+                return Err(RelayError::internal(format!(
+                    "relay.db is not a directory of version 1003 to {DIRECTORY_VERSION}."
+                )));
             }
-        }
+        };
+        remove_vault_store_files(config, &stores);
         Ok((from, store.user_version()?))
     }
 
@@ -735,20 +1208,72 @@ impl Directory {
     /// image of 1004 would take one for an operator code); used ones stay as history, and
     /// the `kind` column stays: that image never reads it, and the next open of 1005 keeps
     /// it. A file of version 1004 is left as it is. Returns the version before and after.
-    pub fn downgrade_to_1004(config: &RelayConfig) -> RelayResult<(i64, i64)> {
+    /// A directory of `DIRECTORY_VERSION` with vault stores is refused, with no change, unless
+    /// `delete_vault_stores` (`--delete-vault-stores`): the step deletes them.
+    pub fn downgrade_to_1004(
+        config: &RelayConfig,
+        delete_vault_stores: bool,
+    ) -> RelayResult<(i64, i64)> {
+        config.refuse_connect_mode("`apassy-relay downgrade-directory-1004`")?;
         let _lock = crate::server::hub::lock_data_dir(config)?;
-        let store = Store::open_at(&config.directory_path(), &config.master_key)?;
+        let store = open_directory_file(config)?;
         let from = store.user_version()?;
-        match from {
-            1005 => store.tx(|tx| tx.execute_batch(DOWNGRADE_1004).map_err(db))?,
-            1004 => {}
-            _ => {
-                return Err(RelayError::internal(
-                    "relay.db is not a directory of version 1004 or 1005.",
-                ));
-            }
+        if from == DIRECTORY_VERSION {
+            refuse_vault_stores(&store, delete_vault_stores)?;
         }
+        let stores = match from {
+            DIRECTORY_VERSION => store.tx(|tx| {
+                let stores = drop_vault_store_rows(tx)?;
+                tx.execute_batch(DOWNGRADE_1004).map_err(db)?;
+                Ok(stores)
+            })?,
+            1005 => store.tx(|tx| {
+                tx.execute_batch(DOWNGRADE_1004).map_err(db)?;
+                Ok(Vec::new())
+            })?,
+            1004 => Vec::new(),
+            _ => {
+                return Err(RelayError::internal(format!(
+                    "relay.db is not a directory of version 1004 to {DIRECTORY_VERSION}."
+                )));
+            }
+        };
+        remove_vault_store_files(config, &stores);
         Ok((from, store.user_version()?))
+    }
+
+    /// `apassy-relay downgrade-directory-1005` (docs/OPERATIONS.md section 26.3): with the
+    /// relay stopped (it takes `relay.lock`), a directory of `DIRECTORY_VERSION` goes back
+    /// to 1005 in place, for the image before Apassy Connect accounts. The vault stores go
+    /// (their rows and their files: snapshots, heads, and receipts; each Mac pushes its
+    /// vault again after the next upgrade, M3); the accounts, their devices, and every other
+    /// table of the step stay, unread by that image, and the next open of this version keeps
+    /// them. A file of version 1005 is left as it is. Returns the version before and after,
+    /// and the vault stores removed. The only complete way back is the backup of the deploy.
+    /// A directory of `DIRECTORY_VERSION` with vault stores is refused, with no change, unless
+    /// `delete_vault_stores` (`--delete-vault-stores`): the step deletes them.
+    pub fn downgrade_to_1005(
+        config: &RelayConfig,
+        delete_vault_stores: bool,
+    ) -> RelayResult<(i64, i64, usize)> {
+        config.refuse_connect_mode("`apassy-relay downgrade-directory-1005`")?;
+        let _lock = crate::server::hub::lock_data_dir(config)?;
+        let store = open_directory_file(config)?;
+        let from = store.user_version()?;
+        if from == DIRECTORY_VERSION {
+            refuse_vault_stores(&store, delete_vault_stores)?;
+        }
+        let stores = match from {
+            DIRECTORY_VERSION => store.tx(|tx| drop_vault_store_rows(tx))?,
+            1005 => Vec::new(),
+            _ => {
+                return Err(RelayError::internal(format!(
+                    "relay.db is not a directory of version 1005 or {DIRECTORY_VERSION}."
+                )));
+            }
+        };
+        remove_vault_store_files(config, &stores);
+        Ok((from, store.user_version()?, stores.len()))
     }
 
     /// Every team, oldest first.
@@ -900,6 +1425,29 @@ impl Directory {
     }
 }
 
+/// The error of a directory file that exists already.
+fn already_exists(error: RelayError) -> RelayError {
+    if error.code == codes::CONFLICT {
+        RelayError::new(
+            codes::CONFLICT,
+            "The relay already exists. Refusing to create it again.",
+        )
+    } else {
+        error
+    }
+}
+
+/// Deletes the files of the vault stores that a downgrade removed from `team`. A file
+/// that cannot be deleted is logged: without its row no key opens it, and the next start
+/// of the old image removes it as an orphan (`hub::sweep_orphans`).
+fn remove_vault_store_files(config: &RelayConfig, stores: &[TeamId]) {
+    for id in stores {
+        if crate::server::hub::remove_team_file(config, id).is_err() {
+            eprintln!("apassy-relay: the file of vault store {id} could not be deleted");
+        }
+    }
+}
+
 /// One team by id, on a connection.
 pub fn team_by_id(conn: &Connection, id: &TeamId) -> RelayResult<Option<TeamRow>> {
     conn.query_row(
@@ -985,6 +1533,29 @@ pub fn insert_connect_team(
     conn.execute(
         "INSERT INTO team (id, name, file_key, state, legacy, created_at, limits, kind) VALUES (?1, ?2, ?3, 'active', 0, ?4, ?5, 'connect')",
         params![id.as_str(), name, file_key.expose(), to_i(now), limits],
+    )
+    .map_err(db)?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+/// Adds the row of a new vault store (kind `account`) of `account` for `vault_id`, inside
+/// a transaction.
+pub fn insert_vault_store(
+    conn: &Connection,
+    id: &TeamId,
+    name: &str,
+    file_key: &SecretString,
+    limits: &TeamLimits,
+    account: &str,
+    vault_id: &str,
+    now: u64,
+) -> RelayResult<()> {
+    let limits = limits.stored_json(TeamKind::Account)?;
+    conn.execute(
+        "INSERT INTO team (id, name, file_key, state, legacy, created_at, limits, kind, account_id, vault_id) \
+         VALUES (?1, ?2, ?3, 'active', 0, ?4, ?5, 'account', ?6, ?7)",
+        params![id.as_str(), name, file_key.expose(), to_i(now), limits, account, vault_id],
     )
     .map_err(db)?;
     Ok(())
@@ -1541,7 +2112,7 @@ PRAGMA user_version = 1002;
         drop(store);
 
         let directory = Directory::open(&config).unwrap();
-        assert_eq!(directory.store.user_version().unwrap(), 1005);
+        assert_eq!(directory.store.user_version().unwrap(), DIRECTORY_VERSION);
         let rows = directory.teams().unwrap();
         assert_eq!(rows.len(), 2);
         let first_row = directory.team(&first).unwrap().unwrap();
@@ -1685,10 +2256,10 @@ PRAGMA user_version = 1002;
         let config = config(dir.path());
         let directory = Directory::create(&config).unwrap();
         assert_eq!(directory.store.user_version().unwrap(), DIRECTORY_VERSION);
-        assert_eq!(DIRECTORY_VERSION, 1005);
+        assert_eq!(DIRECTORY_VERSION, 1006);
         directory
             .store
-            .with(|conn| conn.pragma_update(None, "user_version", 1006).map_err(db))
+            .with(|conn| conn.pragma_update(None, "user_version", 1007).map_err(db))
             .unwrap();
         drop(directory);
         assert!(Directory::open(&config).is_err());
@@ -1697,7 +2268,7 @@ PRAGMA user_version = 1002;
                 .unwrap()
                 .user_version()
                 .unwrap(),
-            1006
+            1007
         );
     }
 
@@ -1747,8 +2318,14 @@ PRAGMA user_version = 1002;
             })
             .unwrap();
         // Down: the OAuth tables go, the team stays, and a second run changes nothing.
-        assert_eq!(Directory::downgrade_to_1003(&config).unwrap(), (1005, 1003));
-        assert_eq!(Directory::downgrade_to_1003(&config).unwrap(), (1003, 1003));
+        assert_eq!(
+            Directory::downgrade_to_1003(&config, false).unwrap(),
+            (DIRECTORY_VERSION, 1003)
+        );
+        assert_eq!(
+            Directory::downgrade_to_1003(&config, false).unwrap(),
+            (1003, 1003)
+        );
         let down = schema_of(&config);
         assert!(
             down.iter().all(
@@ -1758,7 +2335,7 @@ PRAGMA user_version = 1002;
         assert!(down.iter().any(|(name, _)| name == "connect_key"));
         // Up again at the next open, with the schema of a new file.
         let directory = Directory::open(&config).unwrap();
-        assert_eq!(directory.store.user_version().unwrap(), 1005);
+        assert_eq!(directory.store.user_version().unwrap(), DIRECTORY_VERSION);
         assert_eq!(directory.teams().unwrap().len(), 1);
         drop(directory);
         assert_eq!(schema_of(&config), fresh);
@@ -1767,7 +2344,7 @@ PRAGMA user_version = 1002;
             .unwrap()
             .with(|conn| conn.pragma_update(None, "user_version", 1002).map_err(db))
             .unwrap();
-        assert!(Directory::downgrade_to_1003(&config).is_err());
+        assert!(Directory::downgrade_to_1003(&config, false).is_err());
     }
 
     #[test]
@@ -1865,8 +2442,14 @@ PRAGMA user_version = 1002;
         );
         drop(directory);
         // Down: the unused node code goes; the operator code and the used node code stay.
-        assert_eq!(Directory::downgrade_to_1004(&config).unwrap(), (1005, 1004));
-        assert_eq!(Directory::downgrade_to_1004(&config).unwrap(), (1004, 1004));
+        assert_eq!(
+            Directory::downgrade_to_1004(&config, false).unwrap(),
+            (DIRECTORY_VERSION, 1004)
+        );
+        assert_eq!(
+            Directory::downgrade_to_1004(&config, false).unwrap(),
+            (1004, 1004)
+        );
         let kinds: Vec<(String, bool)> =
             Store::open_at(&config.directory_path(), &config.master_key)
                 .unwrap()
@@ -1886,7 +2469,7 @@ PRAGMA user_version = 1002;
         );
         // Up again at the next open, with the schema of a new file.
         let directory = Directory::open(&config).unwrap();
-        assert_eq!(directory.store.user_version().unwrap(), 1005);
+        assert_eq!(directory.store.user_version().unwrap(), DIRECTORY_VERSION);
         drop(directory);
         assert_eq!(schema_of(&config), fresh);
         // A file of another version is refused by the step to 1004, and stays.
@@ -1894,7 +2477,154 @@ PRAGMA user_version = 1002;
             .unwrap()
             .with(|conn| conn.pragma_update(None, "user_version", 1003).map_err(db))
             .unwrap();
-        assert!(Directory::downgrade_to_1004(&config).is_err());
+        assert!(Directory::downgrade_to_1004(&config, false).is_err());
+    }
+
+    #[test]
+    fn directory_moves_from_1005_to_the_accounts_step_and_back() {
+        let fresh_dir = tempfile::tempdir().unwrap();
+        let fresh = {
+            let config = config(fresh_dir.path());
+            Directory::create(&config).unwrap();
+            schema_of(&config)
+        };
+        for table in [
+            "account",
+            "account_device",
+            "account_list",
+            "account_key",
+            "account_link",
+            "account_join",
+            "account_store_device",
+            "account_share_void",
+            "account_join_share",
+            "account_list_named",
+            "account_list_reset",
+            "brain_event",
+            "group",
+            "group_member",
+            "group_invite",
+            "stripe_customer",
+            "stripe_subscription",
+            "stripe_event",
+            "tunnel_node",
+            "tunnel_grant",
+            "tunnel_usage",
+            "entitlement_key",
+            "team_vault",
+            "team_legacy",
+        ] {
+            assert!(fresh.iter().any(|(name, _)| name == table), "{table}");
+        }
+        // A file of 1005, as the image before made it, with an operator and a Connect team.
+        let dir = tempfile::tempdir().unwrap();
+        let config = config(dir.path());
+        let key = SecretString::new("test-team-file-key".to_string());
+        let operator = TeamId::parse("t_abcdefgh23").unwrap();
+        let connect = TeamId::parse("t_bcdefgh234").unwrap();
+        let store = Store::create_at(
+            &config.directory_path(),
+            &config.master_key,
+            &format!("{SCHEMA_1005}PRAGMA user_version = 1005;"),
+        )
+        .unwrap();
+        store
+            .with(|conn| {
+                insert_team(conn, &operator, "First", &key, true, 42)?;
+                insert_connect_team(conn, &connect, "Second", &key, &TeamLimits::connect(), 43)
+            })
+            .unwrap();
+        drop(store);
+        let directory = Directory::open(&config).unwrap();
+        assert_eq!(directory.store.user_version().unwrap(), DIRECTORY_VERSION);
+        let rows = directory.teams().unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|row| (row.id.clone(), row.kind, row.legacy, row.file_key.clone()))
+                .collect::<Vec<_>>(),
+            [
+                (operator.clone(), TeamKind::Operator, true, key.clone()),
+                (connect.clone(), TeamKind::Connect, false, key.clone())
+            ]
+        );
+        assert_eq!(rows[1].limits, TeamLimits::connect());
+        // A vault store row, and the CHECK of its account and vault ids.
+        let store_id = TeamId::parse("t_cdefgh2345").unwrap();
+        directory
+            .store
+            .with(|conn| {
+                insert_vault_store(
+                    conn,
+                    &store_id,
+                    "Personal",
+                    &key,
+                    &TeamLimits::account(1),
+                    "acc_k7m2q4x3ca",
+                    "0f3c2a10-5b7e-4d9a-8c21-6f0e4b1d9a77",
+                    44,
+                )
+            })
+            .unwrap();
+        let row = directory.team(&store_id).unwrap().unwrap();
+        assert_eq!(
+            (row.kind, row.account_id.as_deref(), row.limits),
+            (
+                TeamKind::Account,
+                Some("acc_k7m2q4x3ca"),
+                TeamLimits::account(1)
+            )
+        );
+        assert!(
+            directory
+                .store
+                .with(|conn| conn
+                    .execute(
+                        "UPDATE team SET account_id = NULL WHERE id = ?1",
+                        params![store_id.as_str()]
+                    )
+                    .map_err(db))
+                .is_err()
+        );
+        drop(directory);
+        assert_eq!(schema_of(&config), fresh);
+        // Without `--delete-vault-stores` the vault store stays and nothing changes.
+        let refused = Directory::downgrade_to_1005(&config, false).unwrap_err();
+        assert!(
+            refused.message.contains("--delete-vault-stores"),
+            "{refused:?}"
+        );
+        assert_eq!(schema_of(&config), fresh);
+        // Down: the vault store goes, the other teams stay; a second run changes nothing.
+        assert_eq!(
+            Directory::downgrade_to_1005(&config, true).unwrap(),
+            (DIRECTORY_VERSION, 1005, 1)
+        );
+        assert_eq!(
+            Directory::downgrade_to_1005(&config, false).unwrap(),
+            (1005, 1005, 0)
+        );
+        let left: Vec<String> = Store::open_at(&config.directory_path(), &config.master_key)
+            .unwrap()
+            .with(|conn| {
+                let mut statement = conn
+                    .prepare("SELECT id FROM team ORDER BY id")
+                    .map_err(db)?;
+                let rows = statement.query_map([], |row| row.get(0)).map_err(db)?;
+                rows.collect::<Result<Vec<_>, _>>().map_err(db)
+            })
+            .unwrap();
+        assert_eq!(left, [operator.to_string(), connect.to_string()]);
+        // Up again at the next open, with the schema of a new file.
+        let directory = Directory::open(&config).unwrap();
+        assert_eq!(directory.store.user_version().unwrap(), DIRECTORY_VERSION);
+        drop(directory);
+        assert_eq!(schema_of(&config), fresh);
+        // Another version is refused by the step to 1005, and stays.
+        Store::open_at(&config.directory_path(), &config.master_key)
+            .unwrap()
+            .with(|conn| conn.pragma_update(None, "user_version", 1004).map_err(db))
+            .unwrap();
+        assert!(Directory::downgrade_to_1005(&config, false).is_err());
     }
 
     #[test]

@@ -21,7 +21,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::{OwnerSession, OwnerSummary, fail, map_err};
 use crate::broker::approvals::{ApprovalQueue, OwnerAction, OwnerProof, StricterAnswer};
-use crate::desktop::model::ModelResult;
+use crate::owner::model::ModelResult;
 use crate::vault::agent_items::{
     Correction, CorrectionAnswer, CorrectionKind, CorrectionState, CredentialRequest,
     CredentialRequestState, RAISED_FROM_FACT, RequestOutcome,
@@ -482,7 +482,11 @@ impl OwnerSession {
         if !checked && answer_needs_check(&vault, correction_id, answer, chosen) {
             return Err(fail(
                 "owner_check_required",
-                "This answer makes the bouncer less careful. It needs Touch ID or the passphrase.",
+                concat!(
+                    "This answer makes the bouncer less careful. It needs ",
+                    crate::owner_check!(),
+                    "."
+                ),
             ));
         }
         vault

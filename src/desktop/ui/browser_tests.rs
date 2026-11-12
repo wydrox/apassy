@@ -789,7 +789,9 @@ fn settings_show_the_browser_extension_and_the_last_request() {
         text.contains(super::browser_settings::SOURCE_BUILD_NOTE),
         "{text}"
     );
-    assert!(!text.contains("Connect\n"), "{text}");
+    // The Settings list has a "Connect" row of its own: look at the extension group only.
+    let extension = &text[text.find("Browser extension").expect("the extension group")..];
+    assert!(!extension.contains("Connect\n"), "{text}");
     assert!(app.browser.last_seen.is_none());
     let _ = now(&ask(&mut app, &ctx, Command::Status));
     assert!(app.browser.last_seen.is_some(), "a request counts as seen");

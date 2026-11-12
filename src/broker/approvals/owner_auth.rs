@@ -55,7 +55,7 @@
 
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::PoisonError;
+use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use zeroize::Zeroizing;
@@ -465,22 +465,60 @@ pub enum OwnerAction {
         words: String,
     },
     /// Revoke a device of the Apassy Connect account (section 7.4), also this Mac
-    /// itself ("Forget this device"). The proof names the account and the device.
+    /// itself ("Forget this device"). The proof names the account, the device, the name
+    /// that the signed device list holds for its key, and the short fingerprint of that
+    /// key (`crate::connect::key_fingerprint`): the key that the signed removal names.
     RevokeConnectDevice {
         account_id: String,
         device_id: String,
         device_name: String,
+        fingerprint: String,
     },
     /// Delete the Apassy Connect account (section 6): its vault stores, devices, and
     /// subscription end.
     DeleteConnectAccount {
         account_id: String,
     },
+    /// Make a new recovery code for the Apassy Connect account (connect-account-v1 section
+    /// 9.1): the recovery key at Connect is replaced, and the old code stops working.
+    NewRecoveryCode {
+        account_id: String,
+    },
+    /// Recover the Apassy Connect account `account_id` with its recovery code
+    /// (connect-account-v1 section 9): this device becomes its first device, every vault
+    /// store of the account is deleted at Connect, and a new recovery code replaces the old
+    /// one.
+    RecoverConnectAccount {
+        account_id: String,
+    },
+    /// Forget an account file of an earlier version of Apassy on this Mac, with the account
+    /// key: the device joins its account again after it. Connect is not asked.
+    ForgetOldConnectAccount,
     /// Delete a vault store of the Apassy Connect account (connect-account-v1 section 8):
     /// the relay copy of one vault and its snapshots go at Connect. The proof names the
     /// store by its relay team.
     DeleteVaultStore {
         team_id: String,
+    },
+    /// End the wait of a vault store of the Apassy Connect account on the head `head`
+    /// (version `version`) that a device that left the account pushed last
+    /// (connect-account-v1 section 7.5): take exactly that copy once (`replace` false), or
+    /// replace it with this device's vault (`replace` true). The proof names the store, the
+    /// head, and the choice.
+    TakeDepartedCopy {
+        team_id: String,
+        version: u64,
+        head: String,
+        replace: bool,
+    },
+    /// "Use the relay copy…" of a vault store of the Apassy Connect account that this device
+    /// refuses (an older copy, or a history without its last change; connect-account-v1
+    /// section 7.5): take exactly the current head `head` (version `version`), forget what
+    /// this device had merged, and merge that copy. The proof names the store and the head.
+    UseRelayCopy {
+        team_id: String,
+        version: u64,
+        head: String,
     },
     /// Add a device of the Apassy Connect account, or of its group, to a vault store
     /// (section 8): the device can then read and write the relay copy of that vault. The
@@ -496,6 +534,110 @@ pub enum OwnerAction {
         account_id: String,
         group_id: String,
         change: ConnectGroupChange,
+    },
+    /// Share the vault store `team_id` ("`vault_name`", its name on this device) with
+    /// another account of the family or team (connect-account-v1 section 16): this device
+    /// signs `peer` for that account's root (when the people compared the six `words`;
+    /// empty for an account whose root this account pinned already) and `share` of the
+    /// store. The proof names the account, the person by the name that its verified list
+    /// signed (`peer_name`, with its name at Connect `peer_hint` beside it), the short
+    /// fingerprint of the root that the `peer` pins, the store, and the words.
+    ShareConnectVault {
+        account_id: String,
+        peer_account: String,
+        peer_name: String,
+        peer_hint: String,
+        fingerprint: String,
+        team_id: String,
+        vault_name: String,
+        words: String,
+        /// The entries that the step signs, in their order: `peer` (unless the pair is
+        /// pinned), `store` (unless the list holds it), `share` (unless it is active).
+        entries: Vec<ShareEntry>,
+    },
+    /// "The Words Match" on the device of the account that a share code was sent to: this
+    /// device signs `peer` for the root of the inviting account (section 16.2).
+    AcceptConnectShare {
+        account_id: String,
+        peer_account: String,
+        peer_name: String,
+        peer_hint: String,
+        fingerprint: String,
+        words: String,
+        /// The entries that the step signs: the `peer`, or none for a root pinned already.
+        entries: Vec<ShareEntry>,
+    },
+    /// A new pin of an account that was reset (section 16.7), after new words: this device
+    /// signs the ends of the old root first (`unshare` and `leave` of the stores `ends`
+    /// names, then `unpeer`), then `peer` for the new root, and `share` of the store
+    /// `team_id` when one is named. The proof names both root fingerprints and what ends.
+    RepinConnectPeer {
+        account_id: String,
+        peer_account: String,
+        peer_name: String,
+        peer_hint: String,
+        old_fingerprint: String,
+        fingerprint: String,
+        words: String,
+        ends: Vec<String>,
+        team_id: Option<String>,
+        vault_name: Option<String>,
+        /// The entries that the step signs, in their order (the ends, `unpeer`, `peer`,
+        /// and `store` and `share` of the store when one is named).
+        entries: Vec<ShareEntry>,
+    },
+    /// "Join" of a store that another account shares with this one: this device signs
+    /// `join` of the store (section 16.2 step 5). `vault_name` is the name of a vault of
+    /// this computer that syncs the store (empty when there is none: the prompt says "a
+    /// vault shared by" the person), `vault_hint` the name that Connect gives the store (a
+    /// hint only: the other account chose it).
+    JoinConnectShare {
+        account_id: String,
+        peer_account: String,
+        peer_name: String,
+        peer_hint: String,
+        fingerprint: String,
+        team_id: String,
+        vault_name: String,
+        /// The entry that the step signs: the `join`.
+        entries: Vec<ShareEntry>,
+        vault_hint: String,
+    },
+    /// End a vault shared between accounts: the owner's `unshare` ("Stop Sharing with
+    /// <name>…", `leave` false) or a member's `leave` ("Leave This Shared Vault…").
+    EndConnectShare {
+        account_id: String,
+        peer_account: String,
+        peer_name: String,
+        peer_hint: String,
+        fingerprint: String,
+        team_id: String,
+        vault_name: String,
+        leave: bool,
+        /// The entry that the step signs: the `unshare` or the `leave`.
+        entries: Vec<ShareEntry>,
+    },
+    /// The `store` entry of a vault store that this account made before the entry existed,
+    /// whose device list holds shares of it already (connect-account-v1 section 16): those
+    /// shares, with `people` (their verified names), count again. The proof names the store
+    /// and the entry.
+    ClaimConnectStore {
+        account_id: String,
+        team_id: String,
+        vault_name: String,
+        people: Vec<String>,
+        /// The entry that the step signs: the `store`.
+        entries: Vec<ShareEntry>,
+    },
+    /// "Take This Copy Without Its Earlier History…" at the first download of a vault store
+    /// of the Apassy Connect account (connect-account-v1 section 16.6): the head `head`
+    /// (version `version`), signed by a device that a verified list holds, while an earlier
+    /// entry of its history is by a key that no list verifies. The proof names the store and
+    /// the head.
+    TakeCopyWithoutHistory {
+        team_id: String,
+        version: u64,
+        head: String,
     },
     /// Turn the tailnet route of this Mac's node on or off (plan S2–S3, unit N7): the
     /// iPhone and the other Macs reach the approvals of this Mac directly, or no longer.
@@ -533,6 +675,28 @@ pub enum OwnerAction {
     TurnOnRemoteAccess,
 }
 
+/// One entry of the signed device list that an owner check of a shared vault covers
+/// (connect-account-v1 section 16): its op, the other account (none for a `store`), and
+/// the store (none for a `peer` or an `unpeer`). The step signs exactly the entries of its
+/// check, in their order, or nothing more.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShareEntry {
+    pub op: String,
+    pub account: Option<String>,
+    pub team: Option<String>,
+}
+
+impl ShareEntry {
+    /// The entry `op` for `account` and `team`.
+    pub fn new(op: &str, account: Option<&str>, team: Option<&str>) -> Self {
+        Self {
+            op: op.to_owned(),
+            account: account.map(str::to_owned),
+            team: team.map(str::to_owned),
+        }
+    }
+}
+
 /// A change of a Connect group that needs the owner check (connect-billing-v1 section 6).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectGroupChange {
@@ -562,7 +726,9 @@ fn delivery_words(kind: crate::vault::ShortLivedKind) -> &'static str {
 /// shows it.
 fn host_words(kind: crate::vault::BouncerHostKind, url: &str) -> String {
     match kind {
-        crate::vault::BouncerHostKind::ThisMac => "on this Mac".to_owned(),
+        crate::vault::BouncerHostKind::ThisMac => {
+            concat!("on this ", crate::computer!()).to_owned()
+        }
         crate::vault::BouncerHostKind::OwnServer => format!("on your server {}", host_name(url)),
         crate::vault::BouncerHostKind::Connect => format!("at Apassy Connect {}", host_name(url)),
     }
@@ -722,10 +888,28 @@ impl OwnerAction {
             Self::ConfirmConnectDevice { .. } => "Add a device to Apassy Connect",
             Self::RevokeConnectDevice { .. } => "Remove a device from Apassy Connect",
             Self::DeleteConnectAccount { .. } => "Delete the Apassy Connect account",
+            Self::NewRecoveryCode { .. } => "Make a new recovery code",
+            Self::RecoverConnectAccount { .. } => "Recover the Apassy Connect account",
+            Self::ForgetOldConnectAccount => "Forget the Apassy Connect account here",
             Self::DeleteVaultStore { .. } => "Delete a relay copy at Apassy Connect",
+            Self::TakeDepartedCopy { replace: false, .. } => "Use the copy of a device that left",
+            Self::TakeDepartedCopy { replace: true, .. } => {
+                "Replace the copy of a device that left"
+            }
+            Self::UseRelayCopy { .. } => "Use the relay copy of a vault",
             Self::AddStoreDevice { .. } => "Add a device to a relay copy",
             Self::ChangeConnectGroup { .. } => "Change your family or team",
-            Self::SetTailnetRoute { on: true } => "Reach this Mac on your tailnet",
+            Self::ShareConnectVault { .. } => "Share a vault",
+            Self::AcceptConnectShare { .. } => "Accept a shared vault",
+            Self::RepinConnectPeer { .. } => "Verify a reset account",
+            Self::JoinConnectShare { .. } => "Join a shared vault",
+            Self::EndConnectShare { leave: false, .. } => "Stop sharing a vault",
+            Self::EndConnectShare { leave: true, .. } => "Leave a shared vault",
+            Self::ClaimConnectStore { .. } => "Count the shares of a vault",
+            Self::TakeCopyWithoutHistory { .. } => "Take a copy without its history",
+            Self::SetTailnetRoute { on: true } => {
+                concat!("Reach this ", crate::computer!(), " on your tailnet")
+            }
             Self::SetTailnetRoute { on: false } => "Stop the tailnet route",
             Self::RevokeNodeDevice { .. } => "Revoke a device",
             _ => "Confirm with Touch ID",
@@ -750,7 +934,7 @@ impl OwnerAction {
                 "connect an agent and share the credential catalog without values".to_owned()
             }
             Self::ChangeOwnerFrequency { .. } => {
-                "change how often Apassy asks for Touch ID".to_owned()
+                concat!("change how often Apassy asks for ", crate::touch_id!()).to_owned()
             }
             Self::Reveal { .. } => "show the secret values of an item".to_owned(),
             Self::CliCode { copy, .. } => if *copy {
@@ -934,15 +1118,47 @@ impl OwnerAction {
                     .take(80)
                     .collect::<String>()
             ),
-            Self::RevokeConnectDevice { device_name, .. } => format!(
-                "remove the device \"{}\" from your Apassy Connect account",
-                short_device_name(device_name)
+            Self::RevokeConnectDevice {
+                device_name,
+                fingerprint,
+                ..
+            } => format!(
+                "remove the device \"{}\" (key {}) from your Apassy Connect account",
+                short_device_name(device_name),
+                fingerprint
+                    .chars()
+                    .filter(|c| c.is_ascii_hexdigit() || *c == ' ')
+                    .take(14)
+                    .collect::<String>()
             ),
             Self::DeleteConnectAccount { .. } => {
                 "delete your Apassy Connect account, its vault stores, and its plan".to_owned()
             }
+            Self::NewRecoveryCode { .. } => {
+                "make a new recovery code for your Apassy Connect account; the old code stops working".to_owned()
+            }
+            Self::RecoverConnectAccount { account_id } => format!(
+                "recover the Apassy Connect account {}; its vault copies at Connect are deleted",
+                account_id
+                    .chars()
+                    .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .take(14)
+                    .collect::<String>()
+            ),
+            Self::ForgetOldConnectAccount => {
+                "forget the Apassy Connect account on this device".to_owned()
+            }
             Self::DeleteVaultStore { .. } => {
                 "delete the relay copy of this vault and its snapshots at Apassy Connect".to_owned()
+            }
+            Self::TakeDepartedCopy { replace: false, .. } => {
+                "merge the relay copy that a device that left your Apassy Connect account saved last".to_owned()
+            }
+            Self::TakeDepartedCopy { replace: true, .. } => {
+                "replace the relay copy that a device that left your Apassy Connect account saved last".to_owned()
+            }
+            Self::UseRelayCopy { .. } => {
+                "take the relay copy of this vault at Apassy Connect as it is now, and merge it".to_owned()
             }
             Self::AddStoreDevice { .. } => {
                 "let another device sync the relay copy of this vault at Apassy Connect".to_owned()
@@ -960,12 +1176,99 @@ impl OwnerAction {
                     format!("change your Apassy Connect plan to {quantity} people or seats")
                 }
             },
-            Self::SetTailnetRoute { on: true } => {
-                "let your iPhone and Macs reach this Mac directly on your tailnet".to_owned()
+            Self::ShareConnectVault {
+                peer_name,
+                vault_name,
+                words,
+                ..
+            } if words.is_empty() => format!(
+                "share \"{}\" with \"{}\" through Apassy Connect",
+                short_device_name(vault_name),
+                short_device_name(peer_name)
+            ),
+            Self::ShareConnectVault {
+                peer_name,
+                vault_name,
+                words,
+                ..
+            } => format!(
+                "share \"{}\" with \"{}\" through Apassy Connect; both show: {}",
+                short_device_name(vault_name),
+                short_device_name(peer_name),
+                safe_words(words)
+            ),
+            Self::AcceptConnectShare {
+                peer_name, words, ..
+            } => format!(
+                "accept the vaults that \"{}\" shares through Apassy Connect; both show: {}",
+                short_device_name(peer_name),
+                safe_words(words)
+            ),
+            Self::RepinConnectPeer {
+                peer_name, words, ..
+            } => format!(
+                "verify the reset account of \"{}\" through Apassy Connect; both show: {}",
+                short_device_name(peer_name),
+                safe_words(words)
+            ),
+            Self::JoinConnectShare {
+                peer_name,
+                vault_name,
+                ..
+            } if vault_name.is_empty() => format!(
+                "join a vault shared by \"{}\" through Apassy Connect",
+                short_device_name(peer_name)
+            ),
+            Self::JoinConnectShare {
+                peer_name,
+                vault_name,
+                ..
+            } => format!(
+                "join \"{}\", shared by \"{}\" through Apassy Connect",
+                short_device_name(vault_name),
+                short_device_name(peer_name)
+            ),
+            Self::EndConnectShare {
+                peer_name,
+                vault_name,
+                leave: false,
+                ..
+            } => format!(
+                "stop sharing \"{}\" with \"{}\" through Apassy Connect",
+                short_device_name(vault_name),
+                short_device_name(peer_name)
+            ),
+            Self::EndConnectShare {
+                peer_name,
+                vault_name,
+                leave: true,
+                ..
+            } => format!(
+                "leave \"{}\", shared by \"{}\" through Apassy Connect",
+                short_device_name(vault_name),
+                short_device_name(peer_name)
+            ),
+            Self::ClaimConnectStore { vault_name, .. } => format!(
+                "count the earlier shares of \"{}\" through Apassy Connect again",
+                short_device_name(vault_name)
+            ),
+            Self::TakeCopyWithoutHistory { .. } => {
+                "take the relay copy of this vault at Apassy Connect without its earlier history".to_owned()
             }
-            Self::SetTailnetRoute { on: false } => {
-                "stop the tailnet route of this Mac; approvals go through Apassy relay".to_owned()
-            }
+            Self::SetTailnetRoute { on: true } => concat!(
+                "let your iPhone and ",
+                crate::computers!(),
+                " reach this ",
+                crate::computer!(),
+                " directly on your tailnet"
+            )
+            .to_owned(),
+            Self::SetTailnetRoute { on: false } => concat!(
+                "stop the tailnet route of this ",
+                crate::computer!(),
+                "; approvals go through Apassy relay"
+            )
+            .to_owned(),
             Self::RevokeNodeDevice { device_name, .. } => format!(
                 "revoke the device \"{}\"; it can no longer see or answer questions",
                 short_device_name(device_name)
@@ -984,17 +1287,24 @@ impl OwnerAction {
                     short_device_name(redirect_host)
                 };
                 format!(
-                    "connect \"{}\", which returns to {back}, to this Mac",
-                    short_device_name(client_name)
+                    concat!(
+                        "connect \"{}\", which returns to {back}, to this ",
+                        crate::computer!()
+                    ),
+                    short_device_name(client_name),
+                    back = back
                 )
             }
             Self::AddRemoteAgent { name, .. } => format!(
                 "add the remote agent \"{}\" and issue its token",
                 short_device_name(name)
             ),
-            Self::TurnOnRemoteAccess => {
-                "let remote agents reach this Mac through Tailscale Funnel".to_owned()
-            }
+            Self::TurnOnRemoteAccess => concat!(
+                "let remote agents reach this ",
+                crate::computer!(),
+                " through Tailscale Funnel"
+            )
+            .to_owned(),
         }
     }
 
@@ -1009,6 +1319,16 @@ impl OwnerAction {
     /// `AddRemoteAgent` mints a bearer token that works from the internet and goes back
     /// to the caller of the command line, whose session proves no owner at the Mac
     /// (owner-cli-v1 §4, review 0.5.16).
+    /// Whether the start screen may confirm this action while no vault is unlocked (the
+    /// owner takes the copy that a removed device left on a vault store, connect-account-v1
+    /// section 7.5). Every other action needs an unlocked vault.
+    pub fn allowed_without_vault(&self) -> bool {
+        matches!(
+            self,
+            Self::TakeDepartedCopy { replace: false, .. } | Self::TakeCopyWithoutHistory { .. }
+        )
+    }
+
     pub fn needs_fresh_local_check(&self) -> bool {
         matches!(
             self,
@@ -1020,9 +1340,21 @@ impl OwnerAction {
                 | Self::ConfirmConnectDevice { .. }
                 | Self::RevokeConnectDevice { .. }
                 | Self::DeleteConnectAccount { .. }
+                | Self::NewRecoveryCode { .. }
+                | Self::RecoverConnectAccount { .. }
+                | Self::ForgetOldConnectAccount
                 | Self::DeleteVaultStore { .. }
+                | Self::TakeDepartedCopy { .. }
+                | Self::UseRelayCopy { .. }
                 | Self::AddStoreDevice { .. }
                 | Self::ChangeConnectGroup { .. }
+                | Self::ShareConnectVault { .. }
+                | Self::AcceptConnectShare { .. }
+                | Self::RepinConnectPeer { .. }
+                | Self::JoinConnectShare { .. }
+                | Self::EndConnectShare { .. }
+                | Self::ClaimConnectStore { .. }
+                | Self::TakeCopyWithoutHistory { .. }
         )
     }
 
@@ -1167,6 +1499,16 @@ fn short_site(origin: &str) -> String {
     }
 }
 
+/// The six safety words as an owner check shows them: lowercase letters and spaces only,
+/// at most 80 characters.
+fn safe_words(words: &str) -> String {
+    words
+        .chars()
+        .filter(|c| c.is_ascii_lowercase() || *c == ' ')
+        .take(80)
+        .collect()
+}
+
 /// Device name or login title for the prompt: printable characters only, at most 40
 /// characters.
 fn short_device_name(name: &str) -> String {
@@ -1186,6 +1528,8 @@ fn short_device_name(name: &str) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckMethod {
     TouchId,
+    /// Linux polkit auth_self authentication, never reported as biometrics.
+    Polkit,
     Passphrase,
     /// Face ID on a paired iPhone, as a signature of the approval key.
     Companion,
@@ -1208,6 +1552,9 @@ pub enum OwnerCheck {
     },
     /// Touch ID through the native helper.
     TouchId,
+    /// Linux system authentication for this exact pending action.
+    #[cfg(target_os = "linux")]
+    Polkit,
     /// The master passphrase. The buffer is erased on drop.
     Passphrase(Zeroizing<String>),
     /// The approval signature of a paired iPhone (ADR 0020). `time` is the Unix time in
@@ -1252,6 +1599,8 @@ impl OwnerCheck {
     pub fn method(&self) -> CheckMethod {
         match self {
             Self::TouchId => CheckMethod::TouchId,
+            #[cfg(target_os = "linux")]
+            Self::Polkit => CheckMethod::Polkit,
             Self::Passphrase(_) => CheckMethod::Passphrase,
             Self::Companion { .. } => CheckMethod::Companion,
             Self::Remote { .. } | Self::RemoteChoice { .. } | Self::RemoteAction { .. } => {
@@ -1265,6 +1614,8 @@ impl fmt::Debug for OwnerCheck {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::TouchId => f.write_str("OwnerCheck::TouchId"),
+            #[cfg(target_os = "linux")]
+            Self::Polkit => f.write_str("OwnerCheck::Polkit"),
             Self::RemoteChoice { .. } => f.write_str("OwnerCheck::RemoteChoice([redacted])"),
             Self::Passphrase(_) => f.write_str("OwnerCheck::Passphrase([redacted])"),
             Self::Companion {
@@ -1392,11 +1743,19 @@ impl OwnerAuthError {
 pub fn touch_id_detail(code: HelperErrorCode) -> &'static str {
     match code {
         HelperErrorCode::NotAvailable => {
-            "the Touch ID keyboard is not connected or not paired, or this Mac has no Touch ID sensor."
+            concat!(
+                "the Touch ID keyboard is not connected or not paired, or this ",
+                crate::computer!(),
+                " has no Touch ID sensor."
+            )
         }
         HelperErrorCode::NotEnrolled => "no fingerprint is enrolled in System Settings.",
         HelperErrorCode::LockedOut => {
-            "Touch ID is locked after failed attempts. Unlock the Mac with its password to reset it."
+            concat!(
+                "Touch ID is locked after failed attempts. Unlock the ",
+                crate::computer!(),
+                " with its password to reset it."
+            )
         }
         _ => "the Touch ID check did not start.",
     }
@@ -1537,13 +1896,38 @@ impl OwnerProof {
     }
 }
 
+/// The epoch of the session of a step that runs while no vault is unlocked (the start
+/// screen's Apassy Connect path), now; `None` while there is none.
+pub type StartEpoch = Arc<dyn Fn() -> Option<[u8; 32]> + Send + Sync>;
+
+/// Why a check without an unlocked vault cannot use the passphrase.
+#[cfg(not(target_os = "linux"))]
+const NO_VAULT_TO_CONFIRM: &str = "No vault is unlocked on this Mac, so its passphrase cannot confirm this. Confirm with Touch ID, or ask on another device of the account instead.";
+/// Why a check without an unlocked vault cannot use the passphrase.
+#[cfg(target_os = "linux")]
+const NO_VAULT_TO_CONFIRM: &str = "No vault is unlocked on this computer, so its passphrase cannot confirm this. Confirm with system authentication, or ask on another device of the account instead.";
+
 /// The owner-authorization gate. It holds the shared vault and, when the app has one,
 /// the native helper for Touch ID.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OwnerGate {
     vault: SharedVault,
     touch_id: Option<NativeHelper>,
     window: super::owner_window::OwnerWindow,
+    /// The session of the start screen's Connect path, for the few actions that it may
+    /// confirm while no vault is unlocked ([`OwnerAction::allowed_without_vault`]).
+    start: Option<StartEpoch>,
+}
+
+impl std::fmt::Debug for OwnerGate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OwnerGate")
+            .field("vault", &self.vault)
+            .field("touch_id", &self.touch_id)
+            .field("window", &self.window)
+            .field("start", &self.start.is_some())
+            .finish()
+    }
 }
 
 impl OwnerGate {
@@ -1554,10 +1938,18 @@ impl OwnerGate {
             vault,
             touch_id,
             window: Default::default(),
+            start: None,
         }
     }
 
-    #[cfg(feature = "desktop")]
+    /// The gate with `start`, the epoch of the start screen's Connect session: while no
+    /// vault is unlocked, an action of [`OwnerAction::allowed_without_vault`] is confirmed
+    /// with Touch ID or system authentication and bound to that session.
+    pub fn with_start_session(mut self, start: StartEpoch) -> Self {
+        self.start = Some(start);
+        self
+    }
+
     pub(crate) fn with_window(mut self, window: super::owner_window::OwnerWindow) -> Self {
         self.window = window;
         self
@@ -1629,8 +2021,14 @@ impl OwnerGate {
         check: OwnerCheck,
         cancel: Option<&AuthCancel>,
     ) -> Result<OwnerProof, OwnerAuthError> {
+        if self.session().is_err() && action.allowed_without_vault() {
+            return self.authorize_without_vault(action, check, cancel);
+        }
         let generation = self.window.generation();
-        let local = matches!(check, OwnerCheck::TouchId | OwnerCheck::Passphrase(_));
+        let local = matches!(
+            check.method(),
+            CheckMethod::TouchId | CheckMethod::Passphrase | CheckMethod::Polkit
+        );
         let mut result = self.authorize_fresh(action.clone(), check, cancel);
         if local && result.is_ok() {
             if self.window.generation() != generation {
@@ -1702,6 +2100,15 @@ impl OwnerGate {
                     &signature,
                     now,
                 )?;
+            }
+            #[cfg(target_os = "linux")]
+            OwnerCheck::Polkit => {
+                crate::native::linux::authenticate(cancel).map_err(|_| {
+                    OwnerAuthError::Other(
+                        "System authentication did not succeed. Confirm with the passphrase."
+                            .into(),
+                    )
+                })?;
             }
             OwnerCheck::TouchId => {
                 let Some(helper) = &self.touch_id else {
@@ -1974,6 +2381,56 @@ impl OwnerGate {
     }
 
     /// The path and the epoch of the unlocked vault. The vault mutex is held only here.
+    /// The check of an action of [`OwnerAction::allowed_without_vault`] while no vault is
+    /// unlocked: Touch ID, or system authentication on Linux; no vault holds a passphrase
+    /// to check, and no other device answers it. The proof is bound to the epoch of the
+    /// start-screen session, which must be the same after the check, still with no vault.
+    /// It seeds no window of later checks.
+    fn authorize_without_vault(
+        &self,
+        action: OwnerAction,
+        check: OwnerCheck,
+        cancel: Option<&AuthCancel>,
+    ) -> Result<OwnerProof, OwnerAuthError> {
+        let cancelled = || cancel.is_some_and(AuthCancel::is_cancelled);
+        let start_epoch = || self.start.as_ref().and_then(|start| start());
+        let Some(epoch) = start_epoch() else {
+            return Err(OwnerAuthError::VaultLocked);
+        };
+        if cancelled() {
+            return Err(OwnerAuthError::Cancelled);
+        }
+        let method = check.method();
+        match check {
+            OwnerCheck::TouchId => {
+                let Some(helper) = &self.touch_id else {
+                    return Err(OwnerAuthError::TouchIdUnavailable {
+                        detail: "this build has no Touch ID helper.".to_owned(),
+                    });
+                };
+                helper
+                    .authenticate_titled(&action.reason(), action.touch_id_title(), cancel)
+                    .map_err(from_native)?;
+            }
+            #[cfg(target_os = "linux")]
+            OwnerCheck::Polkit => {
+                crate::native::linux::authenticate(cancel)
+                    .map_err(|_| OwnerAuthError::Other(NO_VAULT_TO_CONFIRM.to_owned()))?;
+            }
+            OwnerCheck::Passphrase(_) => {
+                return Err(OwnerAuthError::Other(NO_VAULT_TO_CONFIRM.to_owned()));
+            }
+            _ => return Err(OwnerAuthError::RemoteUnsupported),
+        }
+        if cancelled() {
+            return Err(OwnerAuthError::Cancelled);
+        }
+        if self.session().is_ok() || start_epoch() != Some(epoch) {
+            return Err(OwnerAuthError::SessionChanged);
+        }
+        Ok(OwnerProof::issue(action, method, epoch))
+    }
+
     fn session(&self) -> Result<(PathBuf, [u8; 32]), OwnerAuthError> {
         let guard = self.vault.lock().unwrap_or_else(PoisonError::into_inner);
         match guard.as_ref() {
@@ -2256,8 +2713,15 @@ mod evaluation_tests {
                 account_id: "acc_k7m2q4x3ca".into(),
                 device_id: "dev_p4n6r2t7bc".into(),
                 device_name: long.clone(),
+                fingerprint: "1a2b 3c4d 5e6f".into(),
             },
             OwnerAction::DeleteConnectAccount {
+                account_id: "acc_k7m2q4x3ca".into(),
+            },
+            OwnerAction::NewRecoveryCode {
+                account_id: "acc_k7m2q4x3ca".into(),
+            },
+            OwnerAction::RecoverConnectAccount {
                 account_id: "acc_k7m2q4x3ca".into(),
             },
             OwnerAction::ChangeConnectGroup {
@@ -2276,10 +2740,116 @@ mod evaluation_tests {
             OwnerAction::DeleteVaultStore {
                 team_id: "t".repeat(32),
             },
+            OwnerAction::TakeDepartedCopy {
+                team_id: "t".repeat(32),
+                version: 7,
+                head: "a".repeat(64),
+                replace: false,
+            },
+            OwnerAction::TakeDepartedCopy {
+                team_id: "t".repeat(32),
+                version: 7,
+                head: "a".repeat(64),
+                replace: true,
+            },
+            OwnerAction::UseRelayCopy {
+                team_id: "t".repeat(32),
+                version: 7,
+                head: "a".repeat(64),
+            },
             OwnerAction::AddStoreDevice {
                 team_id: "t".repeat(32),
                 device_id: "dev_p4n6r2t7bc".into(),
                 account_id: "acc_m3n5p7q2rb".into(),
+            },
+            OwnerAction::ShareConnectVault {
+                account_id: "acc_k7m2q4x3ca".into(),
+                peer_account: "acc_m3n5p7q2rb".into(),
+                peer_name: long.clone(),
+                peer_hint: "Ola".into(),
+                fingerprint: "1a2b 3c4d 5e6f".into(),
+                team_id: "t_7k2m5q4x3c".into(),
+                vault_name: long.clone(),
+                words: "blaze cable flute board seal tiger".into(),
+                entries: Vec::new(),
+            },
+            OwnerAction::ShareConnectVault {
+                account_id: "acc_k7m2q4x3ca".into(),
+                peer_account: "acc_m3n5p7q2rb".into(),
+                peer_name: long.clone(),
+                peer_hint: "Ola".into(),
+                fingerprint: "1a2b 3c4d 5e6f".into(),
+                team_id: "t_7k2m5q4x3c".into(),
+                vault_name: long.clone(),
+                words: String::new(),
+                entries: Vec::new(),
+            },
+            OwnerAction::AcceptConnectShare {
+                account_id: "acc_m3n5p7q2rb".into(),
+                peer_account: "acc_k7m2q4x3ca".into(),
+                peer_name: long.clone(),
+                peer_hint: "Rafal".into(),
+                fingerprint: "1a2b 3c4d 5e6f".into(),
+                words: "blaze cable flute board seal tiger".into(),
+                entries: Vec::new(),
+            },
+            OwnerAction::RepinConnectPeer {
+                account_id: "acc_k7m2q4x3ca".into(),
+                peer_account: "acc_m3n5p7q2rb".into(),
+                peer_name: long.clone(),
+                peer_hint: "Ola".into(),
+                old_fingerprint: "9a8b 7c6d 5e4f".into(),
+                fingerprint: "1a2b 3c4d 5e6f".into(),
+                words: "blaze cable flute board seal tiger".into(),
+                ends: vec![long.clone()],
+                team_id: Some("t_7k2m5q4x3c".into()),
+                vault_name: Some(long.clone()),
+                entries: Vec::new(),
+            },
+            OwnerAction::JoinConnectShare {
+                account_id: "acc_m3n5p7q2rb".into(),
+                peer_account: "acc_k7m2q4x3ca".into(),
+                peer_name: long.clone(),
+                peer_hint: "Rafal".into(),
+                fingerprint: "1a2b 3c4d 5e6f".into(),
+                team_id: "t_7k2m5q4x3c".into(),
+                vault_name: long.clone(),
+                entries: Vec::new(),
+                vault_hint: long.clone(),
+            },
+            OwnerAction::EndConnectShare {
+                account_id: "acc_k7m2q4x3ca".into(),
+                peer_account: "acc_m3n5p7q2rb".into(),
+                peer_name: long.clone(),
+                peer_hint: "Ola".into(),
+                fingerprint: "1a2b 3c4d 5e6f".into(),
+                team_id: "t_7k2m5q4x3c".into(),
+                vault_name: long.clone(),
+                leave: false,
+                entries: Vec::new(),
+            },
+            OwnerAction::EndConnectShare {
+                account_id: "acc_m3n5p7q2rb".into(),
+                peer_account: "acc_k7m2q4x3ca".into(),
+                peer_name: long.clone(),
+                peer_hint: "Rafal".into(),
+                fingerprint: "1a2b 3c4d 5e6f".into(),
+                team_id: "t_7k2m5q4x3c".into(),
+                vault_name: long.clone(),
+                leave: true,
+                entries: Vec::new(),
+            },
+            OwnerAction::ClaimConnectStore {
+                account_id: "acc_k7m2q4x3ca".into(),
+                team_id: "t_7k2m5q4x3c".into(),
+                vault_name: long.clone(),
+                people: vec![long.clone()],
+                entries: Vec::new(),
+            },
+            OwnerAction::TakeCopyWithoutHistory {
+                team_id: "t_7k2m5q4x3c".into(),
+                version: 7,
+                head: "a".repeat(64),
             },
         ] {
             assert!(action.needs_fresh_local_check(), "{action:?}");
@@ -2326,6 +2896,22 @@ mod evaluation_tests {
             confirm_with(4, vec![4; 65], "blaze cable flute board seal tile"),
         ] {
             assert_ne!(other, confirm);
+        }
+        // The copy of a device that left: another head, or the other choice, is another
+        // action.
+        let departed = |version: u64, head: &str, replace: bool| OwnerAction::TakeDepartedCopy {
+            team_id: "t_abcdefgh23".into(),
+            version,
+            head: head.into(),
+            replace,
+        };
+        let take = departed(7, "aa", false);
+        for other in [
+            departed(8, "aa", false),
+            departed(7, "ab", false),
+            departed(7, "aa", true),
+        ] {
+            assert_ne!(other, take);
         }
     }
 
@@ -2553,7 +3139,7 @@ mod evaluation_tests {
         );
         assert_eq!(
             hosting(BouncerHostKind::ThisMac, "").reason(),
-            "run the bouncer brain on this Mac"
+            concat!("run the bouncer brain on this ", crate::computer!())
         );
         let training = OwnerAction::ChangeBouncerTraining {
             kind: BouncerHostKind::Connect,
@@ -2756,12 +3342,18 @@ mod touch_id_title_tests {
         };
         assert_eq!(
             connect("grok.example").reason(),
-            "connect \"Grok Bot\", which returns to grok.example, to this Mac"
+            concat!(
+                "connect \"Grok Bot\", which returns to grok.example, to this ",
+                crate::computer!()
+            )
         );
         for host in ["127.0.0.1", "localhost", "[::1]", ""] {
             assert_eq!(
                 connect(host).reason(),
-                "connect \"Grok Bot\", which returns to localhost, to this Mac",
+                concat!(
+                    "connect \"Grok Bot\", which returns to localhost, to this ",
+                    crate::computer!()
+                ),
                 "{host}"
             );
         }

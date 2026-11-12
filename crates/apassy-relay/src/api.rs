@@ -143,6 +143,10 @@ pub enum TeamKind {
     Operator,
     /// Made without a code by the app of one device (`POST /v1/connect`).
     Connect,
+    /// A vault store of an Apassy Connect account (connect-account-v1 section 8): one
+    /// vault's relay sync, made by `POST /v1/account/vaults`. Its devices are added by
+    /// their account, never by an invite or a device link.
+    Account,
 }
 
 impl TeamKind {
@@ -150,6 +154,7 @@ impl TeamKind {
         match self {
             Self::Operator => "operator",
             Self::Connect => "connect",
+            Self::Account => "account",
         }
     }
 }
@@ -1038,6 +1043,11 @@ pub struct SyncHeadView {
     /// The version of the first chain entry. Absent when the chain is empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chain_from: Option<u64>,
+    /// The oldest version whose head the relay still keeps (it keeps the newest 10000): 1
+    /// until it drops older heads. A device without an anchor checks the chain from it
+    /// (relay-sync-v1 section 13). Absent with no head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kept_from: Option<u64>,
     pub receipts: Vec<SyncReceipt>,
     /// The devices that signed the current head and the chain entries.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1259,6 +1269,784 @@ pub struct ActionStatus {
     pub settle: Option<SealedView>,
 }
 
+// ---- Apassy Connect accounts (connect-account-v1, docs/SPEC.md "Connect accounts"). ----
+//
+// Every request body is strict: unknown, duplicate, and missing fields are refused with
+// 400 `invalid_request`. Results are what the contract lists, nothing more.
+
+/// A platform of an account device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Platform {
+    Mac,
+    Iphone,
+    Linux,
+}
+
+impl Platform {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Mac => "mac",
+            Self::Iphone => "iphone",
+            Self::Linux => "linux",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "mac" => Some(Self::Mac),
+            "iphone" => Some(Self::Iphone),
+            "linux" => Some(Self::Linux),
+            _ => None,
+        }
+    }
+}
+
+/// `POST /v1/account`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountCreate {
+    /// The id of the new account, made by the device (`acc_` and 10 of `a-z2-7`): the
+    /// root statement names it. An id that exists is 409 `conflict`.
+    pub account_id: String,
+    pub name: String,
+    pub device_name: String,
+    pub platform: Platform,
+    pub public_key: String,
+    /// The Ed25519 public key of the recovery code (b64u, 32 bytes): only it reaches
+    /// Connect (`device::RecoveryKey`).
+    pub recovery_key: String,
+    pub signature: String,
+    /// The root entry of the device list (version 1), signed by the new device key over
+    /// `device::account_list_message` with `device_name` (DER, b64u).
+    pub statement: String,
+}
+
+/// `POST /v1/account` answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountCreated {
+    pub account_id: String,
+    pub device_id: String,
+    pub created_at: u64,
+}
+
+/// `POST /v1/account/challenge`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountChallengeRequest {
+    pub account_id: String,
+    pub public_key: String,
+}
+
+/// `POST /v1/account/token`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountTokenRequest {
+    pub account_id: String,
+    pub public_key: String,
+    pub nonce: String,
+    pub signature: String,
+}
+
+/// `POST /v1/account/token` answer: the account token, 15 minutes, in memory only.
+#[derive(Debug, Clone, Serialize)]
+pub struct AccountTokenRef<'a> {
+    pub token: &'a str,
+    pub expires_at: u64,
+    pub account_id: &'a str,
+    pub device_id: &'a str,
+}
+
+/// A live device of an account. Whether it is a device of the account is the signed
+/// device list's to say ([`ListEntry`]), not this row's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountDevice {
+    pub device_id: String,
+    pub name: String,
+    pub platform: Platform,
+    pub public_key: String,
+    pub created_at: u64,
+    /// Rounded down to the hour, or `None`.
+    pub last_seen_at: Option<u64>,
+}
+
+/// What one entry of the signed device list does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ListOp {
+    /// Version 1: the account's root key (the first device, or the device of the last
+    /// recovery).
+    Root,
+    /// A device is added, through a link, by a device of the list.
+    Add,
+    /// A device of the list is removed by a device of the list (also itself).
+    Remove,
+    /// Section 16: the root of another account is pinned (after the six words).
+    Peer,
+    /// Section 16: the pin of another account ends (no share or join names it).
+    Unpeer,
+    /// Section 16: a vault store of this account syncs with the devices of a peer.
+    Share,
+    /// Section 16: a share ends; Connect removes the peer's devices from the store.
+    Unshare,
+    /// Section 16: this account syncs a store that a peer made and shares with it.
+    Join,
+    /// Section 16: a join ends; Connect removes this account's devices from the store.
+    Leave,
+    /// Section 16: this account made the vault store; it names no other account. Its
+    /// `share` entries count only while the list holds it.
+    Store,
+}
+
+impl ListOp {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Root => "root",
+            Self::Add => "add",
+            Self::Remove => "remove",
+            Self::Peer => "peer",
+            Self::Unpeer => "unpeer",
+            Self::Share => "share",
+            Self::Unshare => "unshare",
+            Self::Join => "join",
+            Self::Leave => "leave",
+            Self::Store => "store",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "root" => Some(Self::Root),
+            "add" => Some(Self::Add),
+            "remove" => Some(Self::Remove),
+            "peer" => Some(Self::Peer),
+            "unpeer" => Some(Self::Unpeer),
+            "share" => Some(Self::Share),
+            "unshare" => Some(Self::Unshare),
+            "join" => Some(Self::Join),
+            "leave" => Some(Self::Leave),
+            "store" => Some(Self::Store),
+            _ => None,
+        }
+    }
+
+    /// An entry of section 16: it names another account, not a device.
+    pub fn names_account(self) -> bool {
+        matches!(
+            self,
+            Self::Peer | Self::Unpeer | Self::Share | Self::Unshare | Self::Join | Self::Leave
+        )
+    }
+
+    /// An entry of section 16: signed over the `apassy-connect share-list v1` message (the
+    /// entries that name another account, and `store`).
+    pub fn of_section_16(self) -> bool {
+        self.names_account() || self == Self::Store
+    }
+
+    /// An entry that adds something (`add`, `peer`, `share`, `join`, `store`): it comes
+    /// only while the list has room to end every device, peer, share, and join (a `store`
+    /// needs no end).
+    pub fn adds(self) -> bool {
+        matches!(
+            self,
+            Self::Add | Self::Peer | Self::Share | Self::Join | Self::Store
+        )
+    }
+
+    /// An entry of section 16 that names a vault store.
+    pub fn names_store(self) -> bool {
+        matches!(
+            self,
+            Self::Share | Self::Unshare | Self::Join | Self::Leave | Self::Store
+        )
+    }
+}
+
+/// One entry of the signed device list of an account (connect-account-v1 sections 7.5 and
+/// 16): `by` signed the `apassy-connect device-list v1` message of `version`, the hash of
+/// the entry before, `op`, `key`, `link_hash`, and `name`; or, for an entry that names
+/// another account, the `apassy-connect share-list v1` message of `version`, the hash of
+/// the entry before, `op`, `account_id`, `root`, and `team_id`. The root entry (the
+/// first version) is signed by its own key; its authority is still the root that each
+/// device pinned itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListEntry {
+    pub version: u64,
+    pub op: ListOp,
+    /// b64u of the key that the entry adds or removes (the root key for `root`); `None`
+    /// for an entry of section 16.
+    pub key: Option<String>,
+    /// The link of an `add`, else `None`.
+    pub link_hash: Option<String>,
+    /// The device name of a `root` or an `add` that the entry signs, `None` for `remove`.
+    pub name: Option<String>,
+    /// b64u of the key that signed the entry (the root key for `root`).
+    pub by: String,
+    /// b64u of the DER signature of `by`: every entry has one, the root too.
+    pub signature: Option<String>,
+    /// Section 16: the other account, else `None`. A device entry carries none of the
+    /// three fields of section 16 on the wire (a client reads an absent one as `null`), so
+    /// its JSON is that of section 7.5.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+    /// Section 16: b64u of the root that a `peer` pins, or the list hash of the `share`
+    /// that a `join` answers (`None` for a `join` stored before joins named it); else
+    /// `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<String>,
+    /// Section 16: the vault store of a `share`, `unshare`, `join`, `leave`, or `store`,
+    /// else `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team_id: Option<String>,
+}
+
+/// `POST /v1/account/list` (section 16.3): an entry of the device list that names another
+/// account, signed by the calling device at the version after the head.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountListAppend {
+    pub version: u64,
+    pub op: ListOp,
+    /// The other account; `None` exactly for a `store`.
+    pub account_id: Option<String>,
+    /// The root of a `peer`, the list hash of the `share` that a `join` answers.
+    pub root: Option<String>,
+    pub team_id: Option<String>,
+    /// b64u of the caller's DER signature over the `apassy-connect share-list v1` message.
+    pub statement: String,
+}
+
+/// `POST /v1/account/list` answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountListAppended {
+    pub version: u64,
+    pub op: ListOp,
+}
+
+/// `POST /v1/account/peers/link` (section 16.2): the hash of a share code for the member
+/// `account_id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerLinkRequest {
+    pub link_hash: String,
+    pub account_id: String,
+}
+
+/// `POST /v1/account/peers/join`: the answer of a device of another account to a share
+/// code, signed over the `apassy-connect peer-join v1` message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerJoinRequest {
+    /// The account that made the code.
+    pub account_id: String,
+    pub link_hash: String,
+    pub signature: String,
+}
+
+/// The device that made a share code.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerInviter {
+    pub account_id: String,
+    pub device_id: String,
+    /// The person's name of that account.
+    pub name: String,
+    pub public_key: String,
+}
+
+/// `POST /v1/account/peers/join` answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerJoined {
+    pub join_id: u64,
+    pub inviter: PeerInviter,
+    pub expires_at: u64,
+    /// The signed device list of the inviting account, from version 1.
+    pub device_list: Vec<ListEntry>,
+}
+
+/// One answer to a share code that the calling device made.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerPending {
+    pub join_id: u64,
+    pub link_id: u64,
+    /// The answering account and its person's name.
+    pub account_id: String,
+    pub name: String,
+    /// The answering device and its signature over the `apassy-connect peer-join v1`
+    /// message.
+    pub public_key: String,
+    pub signature: String,
+    pub created_at: u64,
+    pub expires_at: u64,
+    /// The signed device list of the answering account, from version 1.
+    pub device_list: Vec<ListEntry>,
+}
+
+/// `GET` and `DELETE /v1/account/peers/join/{join_id}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerJoinView {
+    pub join_id: u64,
+    /// `pending`, `confirmed`, `refused`, `cancelled`, or `expired`.
+    pub state: String,
+    pub expires_at: u64,
+}
+
+/// A device of another account as `GET /v1/account/peers/{account_id}` lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerDevice {
+    pub device_id: String,
+    pub name: String,
+    pub platform: Platform,
+    pub public_key: String,
+}
+
+/// A `share` of a list that is active in the list and void at Connect (a removal from
+/// the group since it, `account_share_void`): the store and the account it names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VoidShare {
+    pub team_id: String,
+    pub account_id: String,
+}
+
+/// `GET /v1/account/peers/{account_id}`: another account whose list the caller may read
+/// (one group, or a vault store that both joined or that one made and the other joined).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerView {
+    pub account_id: String,
+    pub name: String,
+    pub devices: Vec<PeerDevice>,
+    pub device_list: Vec<ListEntry>,
+    /// The void shares of that list that name the caller.
+    pub void: Vec<VoidShare>,
+    /// The last list of that account before its last recovery, while a vault store names
+    /// the account (connect-account-v1 section 16.4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_list: Option<Vec<ListEntry>>,
+}
+
+/// The pin that a client holds of one list: its version and its list hash (`0` and `""`
+/// for none).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerListPin {
+    pub account_id: String,
+    pub version: u64,
+    pub head: String,
+}
+
+/// `POST /v1/account/peers/lists`: 1 to 64 other accounts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerListsRequest {
+    pub accounts: Vec<PeerListPin>,
+}
+
+/// One account of `POST /v1/account/peers/lists`: `state` is `newer` (with `name`,
+/// `device_list`, `void`, and `reset_list` when the account has one), `same` (with
+/// `void`), `refused`, or `later`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerListItem {
+    pub account_id: String,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_list: Option<Vec<ListEntry>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub void: Option<Vec<VoidShare>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_list: Option<Vec<ListEntry>>,
+}
+
+/// `POST /v1/account/peers/lists` answer, in the asked order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerLists {
+    pub accounts: Vec<PeerListItem>,
+}
+
+/// The plan of an account (connect-billing-v1 section 8). Billing (C2) fills it; without
+/// a subscription it is [`PlanView::none`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanView {
+    /// `personal`, `family`, `team`, or `None`.
+    pub plan: Option<String>,
+    /// `none`, `pending`, `active`, `trialing`, `past_due`, `read_only`, or `suspended`.
+    pub status: String,
+    pub entitled: bool,
+    pub interval: Option<String>,
+    pub quantity: Option<u64>,
+    pub renews_at: Option<u64>,
+    pub ends_at: Option<u64>,
+    pub grace_until: Option<u64>,
+    pub read_only_until: Option<u64>,
+    pub delete_at: Option<u64>,
+    pub group_id: Option<String>,
+}
+
+impl PlanView {
+    /// An account without a plan.
+    pub fn none() -> Self {
+        Self {
+            plan: None,
+            status: "none".to_string(),
+            entitled: false,
+            interval: None,
+            quantity: None,
+            renews_at: None,
+            ends_at: None,
+            grace_until: None,
+            read_only_until: None,
+            delete_at: None,
+            group_id: None,
+        }
+    }
+
+    /// Pulls and downloads of the vault stores work (section 8 of connect-billing-v1):
+    /// an entitled plan, or `read_only`.
+    pub fn can_pull(&self) -> bool {
+        self.entitled || self.status == "read_only"
+    }
+}
+
+/// The group of an account in `AccountView` (connect-billing-v1 section 6).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountGroup {
+    pub group_id: String,
+    /// `family` or `team`.
+    pub kind: String,
+    /// `owner`, `admin`, or `member`.
+    pub role: String,
+    /// `pending` or `active`.
+    pub state: String,
+}
+
+/// `GET /v1/account`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountView {
+    pub account_id: String,
+    pub name: String,
+    pub email: Option<String>,
+    pub created_at: u64,
+    pub plan: PlanView,
+    pub devices: Vec<AccountDevice>,
+    pub group: Option<AccountGroup>,
+    /// The signed device list, from version 1.
+    pub device_list: Vec<ListEntry>,
+    /// The account's stored public recovery key (b64u of 32 bytes): the `previous` of a
+    /// new recovery code (`POST /v1/account/recovery`).
+    pub recovery_key: String,
+    /// When a device of the account last made a new recovery code (`POST
+    /// /v1/account/recovery`); `None` while the key is the one of the creation or of the
+    /// last recovery. Set exactly when `recovery_rotated_by` is: a key of a directory file
+    /// from before that column has neither.
+    pub recovery_rotated_at: Option<u64>,
+    /// The device id of the device that made it, while it is set.
+    pub recovery_rotated_by: Option<String>,
+}
+
+/// An empty JSON object: `DELETE /v1/account`, a refusal of a join.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmptyRequest {}
+
+/// `DELETE /v1/account` answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountDeleted {
+    pub account_id: String,
+    pub deleted_stores: u64,
+    pub subscription_canceled: bool,
+}
+
+/// `POST /v1/account/devices/link`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountLinkRequest {
+    pub link_hash: String,
+}
+
+/// `POST /v1/account/devices/link` answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountLinkCreated {
+    pub link_id: u64,
+    pub expires_at: u64,
+}
+
+/// One pending join of a link that the calling device made.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountPendingJoin {
+    pub join_id: u64,
+    pub link_id: u64,
+    pub device_name: String,
+    pub platform: Platform,
+    pub public_key: String,
+    /// The joining key's signature over the `apassy-connect join v1` message, which names
+    /// the device name: the confirming device shows and signs that name only when it
+    /// verifies.
+    pub signature: String,
+    pub created_at: u64,
+    pub expires_at: u64,
+}
+
+/// `POST /v1/account/devices/pending/{join_id}/confirm`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountConfirm {
+    pub public_key: String,
+    /// The version of the new entry of the device list: the head's version and 1.
+    pub version: u64,
+    /// The `add` entry: b64u of the caller's DER signature over the
+    /// `apassy-connect device-list v1` message of `version`, the head's hash, this key,
+    /// and the join's link.
+    pub statement: String,
+}
+
+/// `DELETE /v1/account/devices/{device_id}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountRevoke {
+    /// The version of the new entry of the device list: the head's version and 1.
+    pub version: u64,
+    /// The `remove` entry: b64u of the caller's DER signature over the
+    /// `apassy-connect device-list v1` message of `version`, the head's hash, and the
+    /// removed device's key.
+    pub statement: String,
+}
+
+/// `POST /v1/account/devices/join`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountJoin {
+    pub account_id: String,
+    pub link_hash: String,
+    pub device_name: String,
+    pub platform: Platform,
+    pub public_key: String,
+    pub signature: String,
+}
+
+/// The device that confirms a join.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountConfirmer {
+    pub device_id: String,
+    pub name: String,
+    pub public_key: String,
+}
+
+/// `POST /v1/account/devices/join` answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountJoined {
+    pub join_id: u64,
+    pub account_id: String,
+    pub confirmer: AccountConfirmer,
+    pub expires_at: u64,
+    /// The signed device list of the account, from version 1: the new device checks that
+    /// the confirmer is a device of it.
+    pub device_list: Vec<ListEntry>,
+}
+
+/// `POST /v1/account/devices/join/cancel`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountJoinCancel {
+    pub account_id: String,
+    pub link_hash: String,
+    pub public_key: String,
+    /// The joining key's signature over `apassy-connect join-cancel v1`.
+    pub signature: String,
+}
+
+/// `{"join_id": …}`: a refusal or a cancel.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountJoinId {
+    pub join_id: u64,
+}
+
+/// `DELETE /v1/account/devices/{device_id}` answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountRevoked {
+    pub device_id: String,
+    pub removed_from_stores: u64,
+}
+
+/// `POST /v1/account/vaults`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VaultStoreCreate {
+    pub vault_id: String,
+    pub name: String,
+    /// The store id that the device made (`t_` and 10 of `a-z2-7`).
+    pub team_id: String,
+    /// The version of its `store` entry: the one after the head.
+    pub version: u64,
+    /// b64u of the caller's DER signature over the `store` entry's share-list message.
+    pub statement: String,
+}
+
+/// A device in a vault store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoreDevice {
+    pub store_device_id: u64,
+    pub device_id: String,
+    pub account_id: String,
+}
+
+/// A vault store: a relay-sync-v1 team of kind `account` for one vault.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VaultStoreView {
+    pub team_id: TeamId,
+    pub vault_id: String,
+    pub name: String,
+    /// The account that made the store.
+    pub account_id: String,
+    pub created_at: u64,
+    pub shared: bool,
+    pub devices: Vec<StoreDevice>,
+    /// The accounts whose active `share` of this store (in the owner's list) is void at
+    /// Connect (a removal from the group since it).
+    pub void: Vec<String>,
+}
+
+/// `POST /v1/account/vaults/{team_id}/devices`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoreDeviceAdd {
+    pub device_id: String,
+    /// The key of that device as the caller verified it: the device is added only when
+    /// it is this key.
+    pub public_key: String,
+}
+
+/// `DELETE /v1/account/vaults/{team_id}` answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VaultStoreDeleted {
+    pub team_id: TeamId,
+}
+
+/// `POST /v1/account/recover`. The recovery code never travels: the account's recovery
+/// key signs the request (`recovery_signature`), and `recovery_key` is the next one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountRecover {
+    pub account_id: String,
+    pub device_name: String,
+    pub platform: Platform,
+    pub public_key: String,
+    pub recovery_key: String,
+    /// The new device key's DER signature over the recover message.
+    pub signature: String,
+    /// The current recovery key's Ed25519 signature (64 bytes, b64u) over the same message.
+    pub recovery_signature: String,
+    /// The root entry of the new device list (version 1), signed by the new device key
+    /// over `device::account_list_message` with `device_name` (DER, b64u).
+    pub statement: String,
+}
+
+/// `POST /v1/account/recover` answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountRecovered {
+    pub account_id: String,
+    pub device_id: String,
+    pub deleted_stores: u64,
+}
+
+/// `POST /v1/account/recovery`: a live device replaces the account's recovery key with
+/// the key of a new recovery code. `signature` is the caller's DER signature over
+/// `device::account_recovery_rotate_message` with `previous` (the key that Connect holds
+/// now) and `recovery_key` (the new one).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountRecoveryRotate {
+    pub previous: String,
+    pub recovery_key: String,
+    pub signature: String,
+}
+
+/// `POST /v1/account/recovery` answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountRecoveryRotated {
+    pub account_id: String,
+    pub rotated_at: u64,
+    /// The recovery key that Connect holds after the call (b64u of 32 bytes): the key of
+    /// the request when it was taken.
+    pub recovery_key: String,
+}
+
+/// `GET /v1/account/entitlement` answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EntitlementAnswer {
+    pub token: String,
+    pub expires_at: u64,
+}
+
+/// A published key of `GET /.well-known/apassy-connect.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WellKnownKey {
+    pub kid: String,
+    pub alg: String,
+    pub public_key: String,
+}
+
+/// `GET /.well-known/apassy-connect.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WellKnown {
+    pub v: u8,
+    pub origin: String,
+    pub keys: Vec<WellKnownKey>,
+}
+
+// ---- The Connect tunnel (docs/contracts/connect-tunnel-v1.md sections 3 and 6). ----
+
+/// `POST /v1/tunnel/nodes`: the node of the calling device, its name and its pin.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TunnelNodeRegister {
+    pub name: String,
+    pub pin: String,
+}
+
+/// The `NodeView`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TunnelNodeView {
+    pub node_id: String,
+    pub account_id: String,
+    pub device_id: String,
+    pub name: String,
+    pub pin: String,
+    pub public_name: String,
+    pub online: bool,
+    pub created_at: u64,
+}
+
+/// `DELETE /v1/tunnel/nodes/{node_id}` answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TunnelNodeDeleted {
+    pub node_id: String,
+}
+
+/// `POST /v1/tunnel/grants`: the node of the caller's account and the grantee account.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TunnelGrantRequest {
+    pub node_id: String,
+    pub account_id: String,
+}
+
+/// The `GrantView`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TunnelGrantView {
+    pub grant_id: String,
+    pub node_id: String,
+    pub account_id: String,
+    pub created_at: u64,
+}
+
+/// `DELETE /v1/tunnel/grants/{grant_id}` answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TunnelGrantDeleted {
+    pub grant_id: String,
+    pub closed_streams: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1274,6 +2062,7 @@ mod tests {
             pushed_at: None,
             chain: vec![],
             chain_from: None,
+            kept_from: None,
             receipts: vec![],
             signers: vec![],
         };

@@ -1052,7 +1052,10 @@ fn build_guard(name: &str, flags: &[&str]) -> Option<PathBuf> {
     match status {
         Ok(status) if status.success() => Some(out),
         _ => {
-            eprintln!("skip: the Swift guard does not build on this Mac");
+            eprintln!(concat!(
+                "skip: the Swift guard does not build on this ",
+                apassy::computer!()
+            ));
             None
         }
     }
@@ -1813,4 +1816,134 @@ impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
+}
+
+/// Browser packets use the shared vault implementation on Linux and macOS. This
+/// bridges strict wire parsing and client-data validation to real synthetic keys;
+/// the relying party independently verifies the resulting assertion signature.
+#[cfg(feature = "vault")]
+#[test]
+fn synthetic_browser_create_get_verifies_signature_and_challenge_binding() {
+    use apassy::vault::{PasskeyCreate, PasskeyTarget, Vault};
+    use ring::{digest, signature};
+
+    let WireCommand::PasskeyCreate(create) = parse(&create_value().to_string()).unwrap() else {
+        panic!("create packet");
+    };
+    let client = webauthn::client_data(
+        &create.rid,
+        &create.origin,
+        &create.rp_id,
+        &create.client_data_json,
+        webauthn::TYPE_CREATE,
+    )
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut vault = Vault::create(
+        &dir.path().join("synthetic.db"),
+        "synthetic-only-passphrase",
+    )
+    .unwrap();
+    vault.unlock("synthetic-only-passphrase").unwrap();
+    let user_handle = decode_bytes(&create.user_handle, 1, 64).unwrap();
+    let created = vault
+        .create_passkey(PasskeyCreate {
+            rp_id: &client.rp_id,
+            user_handle: &user_handle,
+            user_name: &create.user_name,
+            user_display_name: &create.user_display_name,
+            client_data_hash: &client.client_data_hash,
+            algorithms: &create.algorithms,
+            exclude: &[],
+            target: PasskeyTarget::NewItem {
+                title: "Synthetic browser test".into(),
+            },
+        })
+        .unwrap();
+
+    // Extract the public EC point from the registration's COSE key, rather than
+    // asking the signer to provide a second verification key.
+    let auth = &created.authenticator_data;
+    assert_eq!(
+        auth[32], 0x5d,
+        "UP, UV, BE, BS and attested credential data"
+    );
+    assert_eq!(
+        &auth[..32],
+        digest::digest(&digest::SHA256, client.rp_id.as_bytes()).as_ref()
+    );
+    let credential_len = usize::from(u16::from_be_bytes([auth[53], auth[54]]));
+    assert_eq!(&auth[55..55 + credential_len], created.credential_id);
+    let cose: ciborium::value::Value =
+        ciborium::de::from_reader(&auth[55 + credential_len..]).unwrap();
+    let fields = cose.as_map().unwrap();
+    let coordinate = |label: i128| {
+        fields
+            .iter()
+            .find(|(key, _)| {
+                key.as_integer()
+                    .is_some_and(|integer| i128::from(integer) == label)
+            })
+            .unwrap()
+            .1
+            .as_bytes()
+            .unwrap()
+    };
+    let mut public = vec![4];
+    public.extend_from_slice(coordinate(-2));
+    public.extend_from_slice(coordinate(-3));
+
+    let origin = "https://login.example.com";
+    let json = client_json(webauthn::TYPE_GET, &[9; 32], origin);
+    let WireCommand::PasskeyGet(get) = parse(&get_packet(
+        origin,
+        &client.rp_id,
+        &json,
+        &[encode_bytes(&created.credential_id)],
+    ))
+    .unwrap() else {
+        panic!("get packet");
+    };
+    let client = webauthn::client_data(
+        &get.rid,
+        &get.origin,
+        &get.rp_id,
+        &get.client_data_json,
+        webauthn::TYPE_GET,
+    )
+    .unwrap();
+    let assertion = vault
+        .sign_passkey(
+            created.item_id,
+            &client.rp_id,
+            &created.credential_id,
+            &client.client_data_hash,
+        )
+        .unwrap();
+    assert_eq!(
+        assertion.authenticator_data[32], 0x1d,
+        "UP, UV and backup flags"
+    );
+    let verify = |hash: &[u8]| {
+        let mut signed = assertion.authenticator_data.clone();
+        signed.extend_from_slice(hash);
+        signature::UnparsedPublicKey::new(&signature::ECDSA_P256_SHA256_ASN1, &public)
+            .verify(&signed, &assertion.signature)
+            .is_ok()
+    };
+    assert!(verify(&client.client_data_hash));
+    let changed = client_json(webauthn::TYPE_GET, &[10; 32], origin);
+    assert!(!verify(
+        digest::digest(&digest::SHA256, changed.as_bytes()).as_ref()
+    ));
+    assert!(
+        vault
+            .sign_passkey(
+                created.item_id,
+                "other.example.com",
+                &created.credential_id,
+                &client.client_data_hash
+            )
+            .is_err()
+    );
 }

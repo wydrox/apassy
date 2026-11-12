@@ -1,15 +1,100 @@
 //! Explicit desktop copies with conditional expiration. Ordinary secret fields need a
 //! fresh item/field/revision owner proof; one-time codes keep their separate action.
 //!
-//! The native helper writes plain text with concealed, transient, and device-local
-//! markers. These are advisory: another local process can still read or retain it.
-//! Clears compare the exact write identity, never text equality, so a later copy of
-//! the same text survives. NSPasteboard has no cross-process compare-and-clear API;
-//! another app can still write during the final native check/clear interval.
+//! macOS: the native helper writes plain text with concealed, transient, and
+//! device-local markers. These are advisory: another local process can still read or
+//! retain it. Clears compare the exact write identity, never text equality, so a later
+//! copy of the same text survives. NSPasteboard has no cross-process compare-and-clear
+//! API; another app can still write during the final native check/clear interval.
+//!
+//! Linux ([`linux`]): Apassy owns the X11 or Wayland selection itself and serves the
+//! value to each paste with the `x-kde-passwordManagerHint` marker. It knows when
+//! another client takes the clipboard, and then never touches it. A clear replaces
+//! Apassy's own copy with an empty one. A session that cannot give this ownership has
+//! no Copy at all, never an unverifiable write.
 
 use std::time::{Duration, Instant};
 
 use zeroize::Zeroizing;
+
+#[cfg(any(target_os = "linux", test))]
+mod linux;
+// Also in test builds: its tests run against a headless compositor (sway in CI).
+#[cfg(target_os = "linux")]
+mod wayland;
+// Also in test builds: its tests run against a real X server (Xvfb in CI).
+#[cfg(target_os = "linux")]
+mod x11;
+
+/// The note on systems without any clipboard ownership adapter.
+#[cfg(any(test, not(any(target_os = "macos", target_os = "linux"))))]
+const OTHER_SYSTEM_NOTE: &str =
+    "Clipboard copy is unavailable on this system. Use Show or browser fill instead.";
+
+/// `Ok` when this session can copy with exact ownership, or the precise reason why not.
+/// Cheap: the UI asks at every frame.
+fn availability() -> Result<(), &'static str> {
+    #[cfg(test)]
+    {
+        test_session::availability()
+    }
+    #[cfg(all(not(test), target_os = "macos"))]
+    {
+        Ok(())
+    }
+    #[cfg(all(not(test), target_os = "linux"))]
+    {
+        linux::system::availability()
+    }
+    #[cfg(all(not(test), not(any(target_os = "macos", target_os = "linux"))))]
+    {
+        Err(OTHER_SYSTEM_NOTE)
+    }
+}
+
+/// True when Copy of a secret or code can be offered in this session.
+pub(crate) fn supported() -> bool {
+    availability().is_ok()
+}
+
+/// Why Copy is unavailable in this session, for the disabled button and the errors.
+pub(crate) fn unsupported_note() -> &'static str {
+    availability()
+        .err()
+        .unwrap_or("Clipboard copy is unavailable. Use Show or browser fill instead.")
+}
+
+/// How the owner confirms on this platform, for the hovers of Copy and Show. The Linux
+/// owner dialog offers the passphrase and "Use system authentication" (polkit).
+pub(crate) const CONFIRM_HINT: &str = crate::confirm_hint!();
+
+/// Tests choose the session of their thread; the default can copy (memory board).
+#[cfg(test)]
+pub(crate) mod test_session {
+    use std::cell::Cell;
+
+    thread_local! {
+        static UNAVAILABLE: Cell<Option<&'static str>> = const { Cell::new(None) };
+    }
+
+    pub(super) fn availability() -> Result<(), &'static str> {
+        UNAVAILABLE.with(Cell::get).map_or(Ok(()), Err)
+    }
+
+    /// Until the guard drops, this thread's session has no clipboard copy, for `note`.
+    pub(crate) fn unavailable(note: &'static str) -> Guard {
+        UNAVAILABLE.with(|cell| cell.set(Some(note)));
+        Guard
+    }
+
+    pub(crate) struct Guard;
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            UNAVAILABLE.with(|cell| cell.set(None));
+        }
+    }
+}
 
 /// The earliest clear after a copy. A code that changes sooner stays this long, so the
 /// owner has time to paste it.
@@ -23,7 +108,12 @@ pub(crate) struct PasteboardError;
 
 impl PasteboardError {
     pub(crate) fn message(&self) -> &'static str {
-        "Apassy could not confirm the copy. The clipboard may contain the value; replace its contents if needed."
+        match availability() {
+            Ok(()) => {
+                "Apassy could not confirm the copy. The clipboard may contain the value; replace its contents if needed."
+            }
+            Err(note) => note,
+        }
     }
 }
 
@@ -169,20 +259,34 @@ pub(crate) fn clear_delay(left: u64) -> Duration {
     Duration::from_secs(left).clamp(MIN_CLEAR, MAX_CLEAR)
 }
 
-#[cfg(not(test))]
+#[cfg(all(not(test), target_os = "macos"))]
 fn open_board() -> Result<Box<dyn Pasteboard>, PasteboardError> {
     Ok(Box::new(native::SystemPasteboard::open()?))
 }
 
-/// The tests never touch the system pasteboard.
+/// The session clipboard that the background check opened, or no copy at all.
+#[cfg(all(not(test), target_os = "linux"))]
+fn open_board() -> Result<Box<dyn Pasteboard>, PasteboardError> {
+    availability().map_err(|_| PasteboardError)?;
+    linux::system::open()
+}
+
+#[cfg(all(not(test), not(any(target_os = "macos", target_os = "linux"))))]
+fn open_board() -> Result<Box<dyn Pasteboard>, PasteboardError> {
+    Err(PasteboardError)
+}
+
+/// The tests never touch the system pasteboard. A test session without a clipboard
+/// copy opens nothing.
 #[cfg(test)]
 fn open_board() -> Result<Box<dyn Pasteboard>, PasteboardError> {
+    availability().map_err(|_| PasteboardError)?;
     Ok(Box::new(memory::MemoryBoard::default()))
 }
 
 /// The signed helper supplies NSPasteboard write identity and privacy markers, which
 /// the existing arboard API cannot expose. It receives the value only through stdin.
-#[cfg(not(test))]
+#[cfg(all(not(test), target_os = "macos"))]
 mod native {
     use super::{Pasteboard, PasteboardError, WriteIdentity};
     use crate::native::NativeHelper;
@@ -415,6 +519,37 @@ mod tests {
         );
         assert_eq!(board.text(), None);
         assert_eq!(board.with(|b| (b.writes, b.clears)), (2, 1));
+    }
+
+    #[test]
+    fn a_session_without_clipboard_ownership_refuses_with_its_reason() {
+        let note = "Clipboard copy is unavailable: synthetic session reason.";
+        let _session = test_session::unavailable(note);
+        assert!(!supported());
+        assert_eq!(unsupported_note(), note);
+        // A fresh clipboard opens no board, writes nothing and keeps nothing.
+        let mut clip = CodeClipboard::default();
+        let err = clip
+            .copy_secret(code("synthetic-secret"), EPOCH, Instant::now())
+            .unwrap_err();
+        assert_eq!(err.message(), note);
+        assert!(!clip.is_pending());
+        assert!(clip.board.is_none());
+        assert!(OTHER_SYSTEM_NOTE.contains("Use Show or browser fill instead."));
+    }
+
+    #[test]
+    fn the_test_session_can_copy_again_after_the_guard() {
+        drop(test_session::unavailable("synthetic"));
+        assert!(supported());
+        assert_eq!(
+            CONFIRM_HINT,
+            if cfg!(target_os = "linux") {
+                "Confirm with your vault passphrase or system authentication."
+            } else {
+                "Confirm with Touch ID or passphrase."
+            }
+        );
     }
 
     #[test]

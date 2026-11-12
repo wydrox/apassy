@@ -414,11 +414,23 @@ mod tests {
             label: "synthetic".to_owned(),
         };
         let id = vault
-            .remember_answer(item, &project, ActionKind::Read, "this Mac", &[])
+            .remember_answer(
+                item,
+                &project,
+                ActionKind::Read,
+                concat!("this ", crate::computer!()),
+                &[],
+            )
             .unwrap();
         assert_eq!(
             vault
-                .remember_answer(item, &project, ActionKind::Read, "this Mac", &[])
+                .remember_answer(
+                    item,
+                    &project,
+                    ActionKind::Read,
+                    concat!("this ", crate::computer!()),
+                    &[]
+                )
                 .unwrap(),
             id,
             "the same answer keeps its row"
@@ -440,7 +452,13 @@ mod tests {
             );
         }
         let production = vault
-            .allow_production(item, &project, ActionKind::Deploy, "this Mac", &[])
+            .allow_production(
+                item,
+                &project,
+                ActionKind::Deploy,
+                concat!("this ", crate::computer!()),
+                &[],
+            )
             .unwrap();
         assert_ne!(production, id);
         assert_eq!(vault.answers_for_item(item).unwrap().len(), 2);
@@ -448,7 +466,13 @@ mod tests {
         assert!(!vault.remove_answer(production).unwrap());
         assert_eq!(
             vault
-                .remember_answer(999, &project, ActionKind::Read, "this Mac", &[])
+                .remember_answer(
+                    999,
+                    &project,
+                    ActionKind::Read,
+                    concat!("this ", crate::computer!()),
+                    &[]
+                )
                 .unwrap_err()
                 .kind(),
             VaultErrorKind::NotFound
@@ -456,14 +480,20 @@ mod tests {
         // The hosts of each answer add up, in normal form.
         let hosts = vec!["API.Example.test:443".to_owned(), "bad host".to_owned()];
         vault
-            .remember_answer(item, &project, ActionKind::Read, "this Mac", &hosts)
+            .remember_answer(
+                item,
+                &project,
+                ActionKind::Read,
+                concat!("this ", crate::computer!()),
+                &hosts,
+            )
             .unwrap();
         vault
             .remember_answer(
                 item,
                 &project,
                 ActionKind::Read,
-                "this Mac",
+                concat!("this ", crate::computer!()),
                 &["db.example.test".to_owned()],
             )
             .unwrap();
@@ -478,7 +508,13 @@ mod tests {
         };
         assert_eq!(
             vault
-                .remember_answer(item, &empty, ActionKind::Read, "this Mac", &[])
+                .remember_answer(
+                    item,
+                    &empty,
+                    ActionKind::Read,
+                    concat!("this ", crate::computer!()),
+                    &[]
+                )
                 .unwrap_err()
                 .kind(),
             VaultErrorKind::InvalidInput

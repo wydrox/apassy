@@ -5,7 +5,10 @@
 //!   line (ADR 0017) and talks to the running window over the owner socket. It never
 //!   prints a secret value of an item. The window runs the Mac's own node for cloud
 //!   agents (ADR 0037): this binary passes the embedded relay of this workspace in.
-//! - Linux (feature `node`; the package builds `--no-default-features --features node`):
+//! - Linux desktop (features `window`, `node`, `owner`): the shared egui vault.
+//!   `apassy owner ...` provides interactive terminal vault operations; `node,owner`
+//!   also builds without the desktop.
+//! - Linux node-only (the package builds `--no-default-features --features node`):
 //!   the node without a window, `apassy serve`, `up`, `pair`, `status`, `doctor`, and
 //!   `team` (plan S2-S3, D8; `apassy_relay::node`).
 //!
@@ -24,6 +27,9 @@ use apassy::node::backend::NodeBackend;
 #[path = "../../../src/owner_diagnostics.rs"]
 mod owner_diagnostics;
 
+#[cfg(feature = "owner")]
+mod owner;
+
 /// True when `args` name a command of the node (`apassy_relay::node::main`).
 fn is_node_command(args: &[String]) -> bool {
     match args.first().map(String::as_str) {
@@ -39,6 +45,10 @@ fn main() {
     // vault memory; the hard limit is 0 too). First, before anything reads a secret.
     apassy::harden::harden_process_or_exit("apassy");
     let args: Vec<String> = std::env::args().skip(1).collect();
+    #[cfg(feature = "owner")]
+    if args.first().is_some_and(|arg| arg == "owner") {
+        std::process::exit(owner::run(&args[1..]));
+    }
     if is_node_command(&args) {
         std::process::exit(apassy_relay::node::main(args));
     }

@@ -174,10 +174,102 @@ pub fn parse_token(token: &str) -> Option<ParsedToken> {
     })
 }
 
+/// The prefix of an account token of Apassy Connect (connect-account-v1 section 2):
+/// `apassy_act_<account id>_<64 hex>`. It names an account, not a team, so it is not a
+/// [`TokenKind`]: a team route never takes it.
+pub const ACCOUNT_TOKEN_PREFIX: &str = "apassy_act_";
+/// The prefix of a recovery code on the wire: `apassy_rec_<32 hex>` (16 bytes).
+pub const RECOVERY_PREFIX: &str = "apassy_rec_";
+/// The prefix of a device link code of an account: `apassy_alk_<account id>_<64 hex>`.
+/// The code never reaches Connect; the prefix is here for the audit masks.
+pub const ACCOUNT_LINK_PREFIX: &str = "apassy_alk_";
+/// The length of an account id: `acc_` and 10 characters of `a-z2-7`.
+pub const ACCOUNT_ID_LEN: usize = 14;
+/// The bytes of a recovery code.
+pub const RECOVERY_BYTES: usize = 16;
+
+/// `<prefix>` and 10 characters of `a-z2-7`: an account id (`acc_`), an account device id
+/// (`dev_`), a group id (`grp_`), or a node id (`node_`).
+pub fn is_connect_id(text: &str, prefix: &str) -> bool {
+    text.strip_prefix(prefix).is_some_and(|rest| {
+        rest.len() == 10
+            && rest
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || (b'2'..=b'7').contains(&byte))
+    })
+}
+
+/// A new account token for `account` (an account id): 32 random bytes.
+pub fn new_account_token(account: &str) -> RelayResult<SecretString> {
+    if !is_connect_id(account, "acc_") {
+        return Err(RelayError::internal("Not an account id."));
+    }
+    let mut text =
+        String::with_capacity(ACCOUNT_TOKEN_PREFIX.len() + ACCOUNT_ID_LEN + 1 + TOKEN_HEX_LEN);
+    text.push_str(ACCOUNT_TOKEN_PREFIX);
+    text.push_str(account);
+    text.push('_');
+    random_hex(&mut text)?;
+    Ok(SecretString::new(text))
+}
+
+/// The account id of a well-formed account token, else `None`.
+pub fn parse_account_token(token: &str) -> Option<&str> {
+    let rest = token.strip_prefix(ACCOUNT_TOKEN_PREFIX)?;
+    let (account, hex) = rest.split_at_checked(ACCOUNT_ID_LEN)?;
+    let hex = hex.strip_prefix('_')?;
+    (is_connect_id(account, "acc_") && is_token_hex(hex)).then_some(account)
+}
+
+/// The 16 bytes of a recovery code on the wire (`apassy_rec_<32 lowercase hex>`).
+pub fn parse_recovery_code(text: &str) -> Option<Zeroizing<[u8; RECOVERY_BYTES]>> {
+    let hex = text.strip_prefix(RECOVERY_PREFIX)?;
+    if hex.len() != RECOVERY_BYTES * 2
+        || !hex
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return None;
+    }
+    let mut bytes = Zeroizing::new([0u8; RECOVERY_BYTES]);
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).ok()?;
+    }
+    Some(bytes)
+}
+
+/// The length of an account token, a link code, or a recovery code that starts `text`.
+fn connect_secret_len_at(text: &str) -> Option<usize> {
+    for prefix in [ACCOUNT_TOKEN_PREFIX, ACCOUNT_LINK_PREFIX] {
+        if let Some(rest) = text.strip_prefix(prefix)
+            && rest
+                .get(..ACCOUNT_ID_LEN)
+                .is_some_and(|account| is_connect_id(account, "acc_"))
+            && rest[ACCOUNT_ID_LEN..].starts_with('_')
+            && rest
+                .get(ACCOUNT_ID_LEN + 1..ACCOUNT_ID_LEN + 1 + TOKEN_HEX_LEN)
+                .is_some_and(is_token_hex)
+        {
+            return Some(prefix.len() + ACCOUNT_ID_LEN + 1 + TOKEN_HEX_LEN);
+        }
+    }
+    let rest = text.strip_prefix(RECOVERY_PREFIX)?;
+    rest.get(..RECOVERY_BYTES * 2)
+        .filter(|hex| {
+            hex.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        })
+        .map(|_| RECOVERY_PREFIX.len() + RECOVERY_BYTES * 2)
+}
+
 /// The length of the token that starts `text`, if one does. For the audit masks, so
 /// it takes every shape that a token of any kind had or has: a prefix, then the team id
-/// and `_` or nothing, then 64 hex. That is wider than `parse_token` accepts.
+/// and `_` or nothing, then 64 hex. That is wider than `parse_token` accepts. The account
+/// tokens, link codes, and recovery codes of Apassy Connect count too.
 pub fn token_len_at(text: &str) -> Option<usize> {
+    if let Some(len) = connect_secret_len_at(text) {
+        return Some(len);
+    }
     let prefixes = TokenKind::ALL
         .iter()
         .map(|kind| kind.prefix())
@@ -332,6 +424,31 @@ mod tests {
         assert_eq!(secret.expose(), "sk_test_canary_value");
         let shown = format!("{secret:?}");
         assert!(!shown.contains("canary"), "{shown}");
+    }
+
+    #[test]
+    fn account_tokens_and_recovery_codes_have_one_form() {
+        let token = new_account_token("acc_k7m2q4x3ca").unwrap();
+        assert_eq!(parse_account_token(token.expose()), Some("acc_k7m2q4x3ca"));
+        assert_eq!(token.len(), 11 + 14 + 1 + 64);
+        assert_eq!(token_len_at(&format!("{} tail", token.expose())), Some(90));
+        assert!(new_account_token("t_abcdefgh23").is_err());
+        assert_eq!(parse_account_token("apassy_act_acc_k7m2q4x3ca_12"), None);
+        // A token of an account never parses as a team token, and the reverse.
+        assert_eq!(parse_token(token.expose()), None);
+        let team_token = new_token(TokenKind::Access, &team()).unwrap();
+        assert_eq!(parse_account_token(team_token.expose()), None);
+        let code = parse_recovery_code("apassy_rec_101112131415161718191a1b1c1d1e1f").unwrap();
+        assert_eq!(code[0], 0x10);
+        assert_eq!(code[15], 0x1f);
+        assert!(parse_recovery_code("apassy_rec_101112131415161718191A1B1C1D1E1F").is_none());
+        assert!(parse_recovery_code("apassy_rec_1011").is_none());
+        assert_eq!(
+            token_len_at("apassy_rec_101112131415161718191a1b1c1d1e1f!"),
+            Some(43)
+        );
+        let link = format!("apassy_alk_acc_k7m2q4x3ca_{}", "cd".repeat(32));
+        assert_eq!(token_len_at(&link), Some(link.len()));
     }
 
     #[test]

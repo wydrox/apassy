@@ -5,8 +5,12 @@ Run from the repository root with OpenSSL 3 on PATH (or OPENSSL=/path/to/openssl
 
     python3 -I tests/fixtures/connect-account-v1/generate_vectors.py
 
-ECDSA signatures are randomized: a new run gives other signatures that still verify.
-The Ed25519 signatures of the entitlement tokens are deterministic. The word list is
+ECDSA signatures are randomized, so a run keeps the signature of the vectors.json it
+replaces for every message whose bytes did not change (checked with OpenSSL again), and
+signs only new or changed messages: the examples carry those signatures.
+The Ed25519 signatures (the entitlement tokens and the recovery signature) are
+deterministic. The recovery code is the seed of an Ed25519 key:
+SHA-256("apassy-connect recovery key v1" 0x00 <16 bytes>). The word list is
 read from docs/contracts/relay-sync-v1.md section 16.
 """
 
@@ -30,9 +34,21 @@ PRIV_A = "4f2d9c6e1b3a7d8f0c5e2a9b7f4d1c3e6a8b0d2f4c6e8a1b3d5f7a9c0e2b4d6f"
 # Device B: another synthetic scalar.
 PRIV_B = "1c9a5e3f7b2d4a6c8e0f1a3b5c7d9e2f4a6b8c0d1e3f5a7b9c2d4e6f8a1b3c5d"
 NONCE = bytes(range(32))
+# The secret part of the link code; the code ends with the fingerprint of the keys.
 LINK_CODE = "apassy_alk_" + ACCOUNT + "_" + "cd" * 32
 RECOVERY = bytes(range(16, 32))
+# The recovery code that a recovery puts in the place of RECOVERY.
+NEW_RECOVERY = bytes(range(64, 80))
+# The new recovery code that device A makes in the place of RECOVERY (section 9.1).
+ROTATED_RECOVERY = bytes(range(80, 96))
 ED_SEED = bytes(range(32, 64))
+# The device names that the device list signs: A's own name in the root, B's in the add.
+NAME_A = "MacBook Pro"
+NAME_B = "iPhone"
+# The name of device B when it recovers the account (the root of the new list).
+NAME_RECOVERED = "MacBook Air"
+# The account of a family member in the examples.
+MEMBER_ACCOUNT = "acc_m3n5p7q2rb"
 KID = "ek_test_1"
 
 
@@ -80,10 +96,14 @@ def ec_key(priv_hex: str, tmp: pathlib.Path, name: str):
     return pem, point
 
 
-def ecdsa(pem: pathlib.Path, message: bytes, point: bytes, tmp: pathlib.Path) -> bytes:
+# The signatures of the vectors.json that this run replaces, by message name and bytes.
+KEPT = {}
+
+
+def ecdsa(pem: pathlib.Path, message: bytes, point: bytes, tmp: pathlib.Path, kept=None) -> bytes:
     msg = tmp / "msg.bin"
     msg.write_bytes(message)
-    sig = openssl("dgst", "-sha256", "-sign", str(pem), str(msg))
+    sig = kept if kept is not None else openssl("dgst", "-sha256", "-sign", str(pem), str(msg))
     pub = tmp / "pub.pem"
     pub.write_bytes(openssl("ec", "-in", str(pem), "-pubout"))
     sig_path = tmp / "sig.der"
@@ -112,8 +132,34 @@ def token(claims: dict, tmp: pathlib.Path):
     return public, payload, b64u(sig), payload + "." + b64u(sig)
 
 
+def unb64u(text: str) -> bytes:
+    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+
+
+def message(name, tag, signer, data, pem, point, tmp):
+    kept = KEPT.get((name, signer, b64u(data)))
+    return {
+        "name": name,
+        "tag": tag,
+        "signer": signer,
+        "message_b64u": b64u(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "signature_b64u": b64u(ecdsa(pem, data, point, tmp, kept)),
+    }
+
+
+def recovery_key(code: bytes, tmp: pathlib.Path):
+    """The Ed25519 key of a recovery code: its public key and its seed."""
+    seed = hashlib.sha256(join("apassy-connect recovery key v1", code)).digest()
+    public, _ = ed25519(seed, b"probe", tmp)
+    return seed, public
+
+
 def main():
     wl = words()
+    if OUT.exists():
+        for m in json.loads(OUT.read_text())["messages"]:
+            KEPT[(m["name"], m["signer"], m["message_b64u"])] = unb64u(m["signature_b64u"])
     with tempfile.TemporaryDirectory() as tmp_name:
         tmp = pathlib.Path(tmp_name)
         pem_a, pub_a = ec_key(PRIV_A, tmp, "a")
@@ -121,17 +167,69 @@ def main():
         a64, b64 = b64u(pub_a), b64u(pub_b)
         nonce = b64u(NONCE)
 
-        create = join("apassy-connect account v1", ORIGIN, a64)
-        sign_in = join("apassy-connect sign-in v1", ORIGIN, ACCOUNT, a64, nonce)
-        link_hash = b64u(hashlib.sha256(join("apassy-connect link v1", LINK_CODE)).digest())
-        join_msg = join("apassy-connect join v1", ORIGIN, ACCOUNT, link_hash, b64)
+        # The link code of device A (the account root, which also confirms).
+        fingerprint = hashlib.sha256(join("apassy-connect link-keys v1", pub_a, pub_a)).digest()[:16].hex()
+        link_code = LINK_CODE + "_" + fingerprint
+        assert len(link_code) == 123
+        link_hash = b64u(hashlib.sha256(join("apassy-connect link v1", link_code)).digest())
         safety = hashlib.sha256(
-            join("apassy-connect safety v1", ACCOUNT, LINK_CODE, pub_a, pub_b)
+            join("apassy-connect safety v1", ACCOUNT, link_code, pub_a, pub_b)
         ).digest()
-        recovery_code = "apassy_rec_" + RECOVERY.hex()
-        recovery_hash = hashlib.sha256(join("apassy-connect recovery v1", RECOVERY)).hexdigest()
-        recover = join("apassy-connect recover v1", ORIGIN, ACCOUNT, b64)
+
+        seed, rec_public = recovery_key(RECOVERY, tmp)
+        new_seed, new_public = recovery_key(NEW_RECOVERY, tmp)
+        rec64, new64 = b64u(rec_public), b64u(new_public)
+        rotated_seed, rotated_public = recovery_key(ROTATED_RECOVERY, tmp)
+        rotated64 = b64u(rotated_public)
+
+        create = join("apassy-connect account v1", ORIGIN, a64, rec64)
+        sign_in = join("apassy-connect sign-in v1", ORIGIN, ACCOUNT, a64, nonce)
+        # The join signs the device name in its canonical form: the confirming device signs
+        # that name into the device list only when this signature verifies.
+        join_msg = join("apassy-connect join v1", ORIGIN, ACCOUNT, link_hash, b64, NAME_B)
+        cancel = join("apassy-connect join-cancel v1", ORIGIN, ACCOUNT, link_hash, b64)
+        # The signed device list: A is the root (version 1, signed by A over its own name),
+        # A adds B with B's name (2), A removes B (3). Each entry signs the device name of a
+        # `root` or an `add`, and `-` for a `remove`.
+        root = join("apassy-connect device-list v1", ORIGIN, ACCOUNT, "1", "-", "root", a64, "-", NAME_A, a64)
+        root_hash = b64u(hashlib.sha256(root).digest())
+        add = join("apassy-connect device-list v1", ORIGIN, ACCOUNT, "2", root_hash, "add", b64, link_hash, NAME_B, a64)
+        add_hash = b64u(hashlib.sha256(add).digest())
+        remove = join("apassy-connect device-list v1", ORIGIN, ACCOUNT, "3", add_hash, "remove", b64, "-", "-", a64)
+        remove_hash = b64u(hashlib.sha256(remove).digest())
+        recover = join("apassy-connect recover v1", ORIGIN, ACCOUNT, b64, new64)
+        # The recovering device B is the root of a new list: its own signed root entry.
+        # Device B as the first device of the family member's own account (the example
+        # `account_view_family_member`).
+        member_root = join(
+            "apassy-connect device-list v1", ORIGIN, MEMBER_ACCOUNT, "1", "-", "root", b64, "-", NAME_B, b64
+        )
+        recovery_root = join(
+            "apassy-connect device-list v1", ORIGIN, ACCOUNT, "1", "-", "root", b64, "-", NAME_RECOVERED, b64
+        )
         brain = join("apassy-bouncer sign-in v1", BRAIN_ORIGIN, ACCOUNT, a64, nonce)
+        # A live device (A) makes a new recovery code: it names the key that Connect holds
+        # now (of RECOVERY) and the new one (of ROTATED_RECOVERY).
+        rotate = join("apassy-connect recovery-rotate v1", ORIGIN, ACCOUNT, a64, rec64, rotated64)
+        _, recover_signature = ed25519(seed, recover, tmp)
+
+        messages = [
+            message("account", "apassy-connect account v1", "device_a", create, pem_a, pub_a, tmp),
+            message("sign_in", "apassy-connect sign-in v1", "device_a", sign_in, pem_a, pub_a, tmp),
+            message("join", "apassy-connect join v1", "device_b", join_msg, pem_b, pub_b, tmp),
+            message("join_cancel", "apassy-connect join-cancel v1", "device_b", cancel, pem_b, pub_b, tmp),
+            message("device_list_root", "apassy-connect device-list v1", "device_a", root, pem_a, pub_a, tmp),
+            message("device_list_add", "apassy-connect device-list v1", "device_a", add, pem_a, pub_a, tmp),
+            message("device_list_remove", "apassy-connect device-list v1", "device_a", remove, pem_a, pub_a, tmp),
+            message("recover", "apassy-connect recover v1", "device_b", recover, pem_b, pub_b, tmp),
+            message("device_list_member_root", "apassy-connect device-list v1", "device_b", member_root, pem_b, pub_b, tmp),
+            message("device_list_recovery_root", "apassy-connect device-list v1", "device_b", recovery_root, pem_b, pub_b, tmp),
+            message("brain_sign_in", "apassy-bouncer sign-in v1", "device_a", brain, pem_a, pub_a, tmp),
+            message("recovery_rotate", "apassy-connect recovery-rotate v1", "device_a", rotate, pem_a, pub_a, tmp),
+        ]
+        root_signature = next(m for m in messages if m["name"] == "device_list_root")["signature_b64u"]
+        add_signature = next(m for m in messages if m["name"] == "device_list_add")["signature_b64u"]
+        remove_signature = next(m for m in messages if m["name"] == "device_list_remove")["signature_b64u"]
 
         personal = {
             "v": 1,
@@ -143,7 +241,7 @@ def main():
             "iat": 1790000000,
             "exp": 1790086400,
         }
-        family = dict(personal, acc="acc_m3n5p7q2rb", plan="family", group="grp_f4m6n2p7qa")
+        family = dict(personal, acc=MEMBER_ACCOUNT, plan="family", group="grp_f4m6n2p7qa")
         ed_public, p_payload, p_sig, p_token = token(personal, tmp)
         _, f_payload, f_sig, f_token = token(family, tmp)
 
@@ -153,6 +251,7 @@ def main():
             "account_id": ACCOUNT,
             "device_a": {
                 "device_id": "dev_m2k7q3x4ab",
+                "name": NAME_A,
                 "private_hex": PRIV_A,
                 "public_hex": pub_a.hex(),
                 "public_b64u": a64,
@@ -160,57 +259,30 @@ def main():
             },
             "device_b": {
                 "device_id": "dev_p4n6r2t7bc",
+                "name": NAME_B,
                 "private_hex": PRIV_B,
                 "public_hex": pub_b.hex(),
                 "public_b64u": b64,
                 "public_key_sha256": hashlib.sha256(pub_b).hexdigest(),
             },
             "nonce_b64u": nonce,
-            "messages": [
-                {
-                    "name": "account",
-                    "tag": "apassy-connect account v1",
-                    "signer": "device_a",
-                    "message_b64u": b64u(create),
-                    "sha256": hashlib.sha256(create).hexdigest(),
-                    "signature_b64u": b64u(ecdsa(pem_a, create, pub_a, tmp)),
-                },
-                {
-                    "name": "sign_in",
-                    "tag": "apassy-connect sign-in v1",
-                    "signer": "device_a",
-                    "message_b64u": b64u(sign_in),
-                    "sha256": hashlib.sha256(sign_in).hexdigest(),
-                    "signature_b64u": b64u(ecdsa(pem_a, sign_in, pub_a, tmp)),
-                },
-                {
-                    "name": "join",
-                    "tag": "apassy-connect join v1",
-                    "signer": "device_b",
-                    "message_b64u": b64u(join_msg),
-                    "sha256": hashlib.sha256(join_msg).hexdigest(),
-                    "signature_b64u": b64u(ecdsa(pem_b, join_msg, pub_b, tmp)),
-                },
-                {
-                    "name": "recover",
-                    "tag": "apassy-connect recover v1",
-                    "signer": "device_b",
-                    "message_b64u": b64u(recover),
-                    "sha256": hashlib.sha256(recover).hexdigest(),
-                    "signature_b64u": b64u(ecdsa(pem_b, recover, pub_b, tmp)),
-                },
-                {
-                    "name": "brain_sign_in",
-                    "tag": "apassy-bouncer sign-in v1",
-                    "signer": "device_a",
-                    "message_b64u": b64u(brain),
-                    "sha256": hashlib.sha256(brain).hexdigest(),
-                    "signature_b64u": b64u(ecdsa(pem_a, brain, pub_a, tmp)),
-                },
-            ],
+            "messages": messages,
             "link": {
-                "code": LINK_CODE,
+                "code": link_code,
                 "link_hash": link_hash,
+                "root": "device_a",
+                "confirmer": "device_a",
+                "fingerprint": fingerprint,
+            },
+            "device_list": {
+                "root_message_b64u": b64u(root),
+                "entries": [
+                    {"version": 1, "op": "root", "key": a64, "link_hash": None, "name": NAME_A, "by": a64, "signature": root_signature},
+                    {"version": 2, "op": "add", "key": b64, "link_hash": link_hash, "name": NAME_B, "by": a64, "signature": add_signature},
+                    {"version": 3, "op": "remove", "key": b64, "link_hash": None, "name": None, "by": a64, "signature": remove_signature},
+                ],
+                "hashes": [root_hash, add_hash, remove_hash],
+                "live_at": {"1": ["device_a"], "2": ["device_a", "device_b"], "3": ["device_a"]},
             },
             "safety": {
                 "sha256": safety.hex(),
@@ -218,9 +290,21 @@ def main():
             },
             "recovery": {
                 "bytes_hex": RECOVERY.hex(),
-                "code": recovery_code,
+                "code": "apassy_rec_" + RECOVERY.hex(),
                 "words": " ".join(wl[b] for b in RECOVERY),
-                "recovery_hash": recovery_hash,
+                "seed_hex": seed.hex(),
+                "public_b64u": rec64,
+                "recover_signature_b64u": b64u(recover_signature),
+            },
+            "new_recovery": {
+                "bytes_hex": NEW_RECOVERY.hex(),
+                "seed_hex": new_seed.hex(),
+                "public_b64u": new64,
+            },
+            "rotated_recovery": {
+                "bytes_hex": ROTATED_RECOVERY.hex(),
+                "seed_hex": rotated_seed.hex(),
+                "public_b64u": rotated64,
             },
             "entitlement": {
                 "kid": KID,

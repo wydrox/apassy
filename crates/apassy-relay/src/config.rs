@@ -19,7 +19,42 @@
 //! | `APASSY_RELAY_CONNECT_TEAMS_PER_DAY` | Connect teams (`POST /v1/connect`) the whole relay makes in 24 hours, 0 to 100000; over it 503 `busy`; `0` turns Connect off | `50` |
 //! | `APASSY_RELAY_CONNECT_TEAMS_MAX` | Connect teams the relay holds at once (active or suspended), 0 to 1000000; at it `POST /v1/connect` is 503 `busy`; `0` turns Connect off | `100` |
 //! | `APASSY_RELAY_CONNECT_SYNC_BYTES` | The largest vault snapshot of a new Connect team (its `sync_bytes`): `0` (no relay sync; a push is 403 `plan_required`) or 1048576 to 67108864. Existing teams keep theirs (`admin limits --sync-bytes`). The hosted relay sets 67108864 until Apassy Connect starts | `0` |
+//! | `APASSY_RELAY_FREE_CONNECT` | `1`: the free Connect paths of ADR 0032 (`POST /v1/connect`, questions, feed, and push of free Connect teams); `0` (the transition before the cutover, ADR 0037 D14): `POST /v1/connect` and its challenge answer 410 `free_connect_ended`, and so do the questions, feed, and push routes of every free Connect team; with `APASSY_RELAY_CONNECT_SYNC_BYTES` 0 too, their pushes and receipts are 403 `plan_required` whatever their own `sync_bytes`. Operator teams and vault stores never change. Forced to `0` in `connect` mode | `1` |
 //! | `APASSY_RELAY_CONNECT_LONG_POLLS` | Long polls that all Connect teams hold at once, 0 to 1024; a poll over it answers at once; `0`: every Connect poll answers at once | `96` |
+//! | `APASSY_RELAY_CONNECT_ACCOUNTS` | `1`: the routes of Apassy Connect accounts (connect-account-v1) on this relay, beside every other route (the transition); `0`: every account route is 404 `not_found` | `0` |
+//! | `APASSY_RELAY_MODE` | `relay` (every route of the relay), or `connect`: Apassy Connect only (ADR 0037 stage 7). In `connect` mode the master key is refused (`APASSY_RELAY_KEY` and `_FILE` must not be set), `relay.db` and the vault stores are plain SQLite files (`Store::open_plain`), shared team vaults are off, the account routes are on, the push settings are refused, no proxy is built, and every other route of the relay answers 410 `hosted_retired` (docs/SPEC.md section 37) | `relay` |
+//! | `APASSY_CONNECT_SIGNING_KEY_FILE` | The Ed25519 signing key of the entitlement token: a PKCS#8 file (DER or PEM). Without it `GET /v1/account/entitlement` is 503 `busy` for an entitled account and the well-known document lists no key. A key that this relay did not have before signs one hour after its first start (it is published first), unless it is the relay's first key | none |
+//! | `APASSY_CONNECT_PUBLISHED_KEYS_FILE` | More Ed25519 public keys for the well-known document, a JSON file `{"keys":[{"kid","public_key"}]}` (`kid` is `entitlement::key_id` of the key): the next signing key before a rotation, the previous one for a day after it. The signing key and these are the only published keys | none |
+//! | `APASSY_RELAY_CONNECT_ACCOUNTS_PER_DAY` | New Connect accounts (`POST /v1/account`) of the whole relay in 24 hours, 0 to 100000; over it 503 `busy`; `0`: no new account | `1000` |
+//! | `APASSY_RELAY_CONNECT_ACCOUNTS_MAX` | Connect accounts the relay holds, 0 to 10000000; at it `POST /v1/account` is 503 `busy` | `100000` |
+//! | `APASSY_CONNECT_SITE_URL` | The `https://` origin of the site: the Stripe return pages and the group invites | `https://apassy.wyderka.cc` |
+//! | `STRIPE_SECRET_KEY_FILE` | With the account routes on: a file with the restricted Stripe key (`rk_live_…`; `rk_test_…` or `sk_test_…` in a sandbox; `sk_live_…` is refused). Set it and the next one together, or neither: without them the billing routes answer 503 `busy` and no account has a plan | none |
+//! | `STRIPE_WEBHOOK_SECRET_FILE` | A file with the signing secret of the Stripe webhook endpoint (`whsec_…`) | none |
+//! | `APASSY_CONNECT_FAMILY_EXTRA_CENTS`, `APASSY_CONNECT_FAMILY_EXTRA_YEAR_CENTS` | Tier 2 of the Family prices that a checkout expects (cents, VAT included); a Family checkout is 503 `busy` while Stripe's price differs | `100`, `1000` |
+//! | `APASSY_CONNECT_GRACE_DAYS` | Entitled days after the first failed payment, 1 to 60 | `14` |
+//! | `APASSY_CONNECT_READ_ONLY_DAYS` | Read-only days after the end of a plan, 1 to 365 | `30` |
+//! | `APASSY_CONNECT_DELETE_DAYS` | Days from the end of a plan to the deletion of its vault stores, above the read-only days, at most 730 | `90` |
+//! | `APASSY_CONNECT_AUTO_RAISE_SEATS` | `1`: the maintenance pass raises the quantity of a Family or Team plan at Stripe to its active members, with a proration (a charge without an action of the owner); `0`: the members beyond the paid quantity stay read-only until the owner raises the seats | `0` |
+//! | `APASSY_CONNECT_INGRESS_LISTEN` | With the account routes: the address of the SNI ingress of the tunnel (connect-tunnel-v1 section 7.1; hosted `0.0.0.0:443`) | none: no ingress |
+//! | `APASSY_CONNECT_ACME_LISTEN` | With the account routes: the address of the ACME HTTP-01 listener of the tunnel (section 7.2; hosted `0.0.0.0:80`) | none: no ACME listener |
+//! | `APASSY_CONNECT_NODE_ZONE` | The DNS zone of the nodes' public names (`<10 characters>.<zone>`) | `node.apassy.wyderka.cc` |
+//! | `APASSY_CONNECT_TUNNEL_STREAMS` | Open tunnel streams of one account, 1 to 4096 | `64` |
+//! | `APASSY_CONNECT_TUNNEL_NODES` | Nodes of one account, 1 to 64 | `8` |
+//! | `APASSY_CONNECT_TUNNEL_DIALS_PER_MINUTE` | Dials of one account in one minute, 1 to 6000 | `60` |
+//! | `APASSY_CONNECT_TUNNEL_GIB_PER_MONTH` | Tunnel GiB of one account in one UTC month for each person (Family) or member (Team), 1 to 10240 | `20` |
+//! | `APASSY_CONNECT_TUNNEL_PING_SECS` | Connect pings each node WebSocket this often, 5 to 300 seconds | `30` |
+//! | `APASSY_CONNECT_TUNNEL_IDLE_SECS` | A tunnel WebSocket with no message for this long closes, 10 to 3600 seconds and above the ping interval | `90` |
+//! | `APASSY_CONNECT_TUNNEL_STREAM_IDLE_SECS` | A stream with no byte for this long is reset, 60 to 86400 seconds | `900` |
+//! | `APASSY_CONNECT_TUNNEL_STREAM_BUFFER_KIB` | KiB buffered toward one client of a stream; over it the stream is reset, 64 to 16384 | `256` |
+//! | `APASSY_CONNECT_TUNNEL_GRANTEE_STREAMS` | Open dials of one other account (with a grant) to the nodes of one account, 1 to `APASSY_CONNECT_TUNNEL_GRANTEE_STREAMS_TOTAL` | `16`, at most the total |
+//! | `APASSY_CONNECT_TUNNEL_GRANTEE_STREAMS_TOTAL` | Open dials of all other accounts together to the nodes of one account, of its `APASSY_CONNECT_TUNNEL_STREAMS`; the rest stays for its own devices; 1 to `APASSY_CONNECT_TUNNEL_STREAMS` | `32`, at most half of the streams (at least 1) |
+//! | `APASSY_CONNECT_TUNNEL_GRANTEE_BYTES_PERCENT` | The share of an account's dial bytes that the dials of other accounts may spend together, 1 to 90 percent | `50` |
+//! | `APASSY_CONNECT_TUNNEL_INGRESS_STREAMS` | Open `public` and `acme` streams of one account, slots of their own apart from the dials, 1 to 4096 | `16` |
+//! | `APASSY_CONNECT_TUNNEL_INGRESS_PER_MINUTE` | New `public` and `acme` streams of one node in one minute (refused ones count), 1 to 6000 | `60` |
+//! | `APASSY_CONNECT_TUNNEL_INGRESS_FIRST_BYTE_SECS` | The node sends its first frame on a `public` or `acme` stream within this, else a reset, 1 to 120 seconds | `10` |
+//! | `APASSY_CONNECT_TUNNEL_INGRESS_GIB_PER_MONTH` | GiB of the `public` and `acme` streams of one account in one UTC month for each person or member, a budget apart from the dial bytes, 1 to 10240 | `5` |
+//! | `APASSY_CONNECT_TUNNEL_MAX_STREAMS` | Open streams of the whole broker (every account), 64 to 65536 | `4096` |
+//! | `APASSY_CONNECT_TUNNEL_INGRESS_SHARE_PERCENT` | The share of `APASSY_CONNECT_TUNNEL_MAX_STREAMS` that the `public` and `acme` streams of all nodes may hold together; the rest stays for device dials, 1 to 90 percent | `50` |
 //!
 //! Push needs all three push values; none of them turns it off. Some but not all is a
 //! configuration error, so a typo does not turn push off without a word.
@@ -78,6 +113,22 @@ pub const DEFAULT_FEED_LONG_POLLS_PER_TEAM: usize = 16;
 /// the feed lane less one operator team's share, as `DEFAULT_CONNECT_LONG_POLLS` is for
 /// the question lane.
 pub const DEFAULT_CONNECT_FEED_LONG_POLLS: usize = 48;
+/// The site of Apassy Connect (`APASSY_CONNECT_SITE_URL`): the Stripe return pages and the
+/// group invites.
+pub const DEFAULT_CONNECT_SITE_URL: &str = "https://apassy.wyderka.cc";
+/// The zone of the nodes' public names (`APASSY_CONNECT_NODE_ZONE`, connect-tunnel-v1 section 2).
+pub const DEFAULT_CONNECT_NODE_ZONE: &str = "node.apassy.wyderka.cc";
+/// The largest signing key file of `APASSY_CONNECT_SIGNING_KEY_FILE`.
+const MAX_SIGNING_KEY_FILE_BYTES: u64 = 4096;
+/// The largest file of `APASSY_CONNECT_PUBLISHED_KEYS_FILE`, and its most keys.
+const MAX_PUBLISHED_KEYS_FILE_BYTES: u64 = 16_384;
+pub const MAX_PUBLISHED_KEYS: usize = 8;
+/// New Connect accounts of the whole relay in 24 hours (`APASSY_RELAY_CONNECT_ACCOUNTS_PER_DAY`).
+pub const DEFAULT_CONNECT_ACCOUNTS_PER_DAY: u64 = 1000;
+pub const MAX_CONNECT_ACCOUNTS_PER_DAY: u64 = 100_000;
+/// Connect accounts the relay holds at once (`APASSY_RELAY_CONNECT_ACCOUNTS_MAX`).
+pub const DEFAULT_CONNECT_ACCOUNTS_MAX: u64 = 100_000;
+pub const MAX_CONNECT_ACCOUNTS_MAX: u64 = 10_000_000;
 /// The directory of the relay in the data directory: the teams and their keys.
 pub const DIRECTORY_FILE: &str = "relay.db";
 /// The folder of the team files in the data directory.
@@ -98,10 +149,33 @@ pub const DEFAULT_NODE_PORT: u16 = 8444;
 pub const EMBEDDED_SESSION_TTL_SECS: u64 = 600;
 /// How long a run of an embedded node waits for the owner: the broker's question wait.
 pub const EMBEDDED_APPROVAL_TIMEOUT_SECS: u64 = 300;
-/// The name of the Mac on the connect page: "your Mac". The page is public (anyone with
-/// its address reads it), so it never shows the computer name; only the owner's own
-/// prompts, on the Mac and the iPhone, name the Mac.
-pub const EMBEDDED_MAC_NAME: &str = "your Mac";
+/// The machine that this relay runs on, as the pages of its embedded node name it: "Mac"
+/// on macOS (the node of the Mac app), "computer" on Linux (the Linux node and
+/// `apassy owner serve`). The relay cannot use the app's wording macros
+/// (`src/wording.rs`), so it has its own; a string literal, for `concat!`.
+#[cfg(not(target_os = "linux"))]
+macro_rules! host_word {
+    () => {
+        "Mac"
+    };
+}
+/// On Linux: "computer".
+#[cfg(target_os = "linux")]
+macro_rules! host_word {
+    () => {
+        "computer"
+    };
+}
+pub(crate) use host_word;
+
+/// [`host_word!`] as a value: "Mac" on macOS, "computer" on Linux.
+pub const HOST_WORD: &str = host_word!();
+
+/// The name of the computer on the connect page: "your Mac" on macOS, "your computer"
+/// on Linux ([`HOST_WORD`]). The page is public (anyone with its address reads it), so
+/// it never shows the computer name; only the owner's own prompts, on the computer and
+/// the iPhone, name it.
+pub const EMBEDDED_MAC_NAME: &str = concat!("your ", host_word!());
 /// The requests that the public listener of an embedded node handles at once. It has
 /// no member reserve: only agents use it (`Scope::Public`).
 pub const PUBLIC_MAX_ACTIVE: usize = 32;
@@ -223,6 +297,9 @@ pub struct Limits {
     /// The feed long polls that Connect teams hold at once, all of them together, out of
     /// `feed_long_polls`. A poll over this is answered at once.
     pub connect_feed_long_polls: usize,
+    /// The heads of each vault store that maintenance keeps: the newest ones
+    /// (`server::sync::KEPT_HEADS`). Only tests make it smaller.
+    pub kept_heads: u64,
 }
 
 impl Default for Limits {
@@ -239,6 +316,7 @@ impl Default for Limits {
             feed_long_polls: DEFAULT_FEED_LONG_POLLS,
             feed_long_polls_per_team: DEFAULT_FEED_LONG_POLLS_PER_TEAM,
             connect_feed_long_polls: DEFAULT_CONNECT_FEED_LONG_POLLS,
+            kept_heads: crate::server::sync::KEPT_HEADS,
         }
     }
 }
@@ -263,6 +341,595 @@ impl EdgeMode {
             Self::Off => None,
         }
     }
+}
+
+/// What the relay serves (`APASSY_RELAY_MODE`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RelayMode {
+    /// Every route of the relay (the default).
+    #[default]
+    Relay,
+    /// Apassy Connect only (ADR 0037 stage 7): no master key, plain files, the account
+    /// routes. The retired routes are the cutover unit's (C5).
+    Connect,
+}
+
+/// The Ed25519 signing key of the entitlement token, as the PKCS#8 DER of its file. Debug
+/// is redacted; the bytes are zeroized on drop.
+#[derive(Clone)]
+pub struct ConnectSigningKey(std::sync::Arc<zeroize::Zeroizing<Vec<u8>>>);
+
+impl std::fmt::Debug for ConnectSigningKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ConnectSigningKey(<redacted>)")
+    }
+}
+
+impl ConnectSigningKey {
+    /// A key from the bytes of a PKCS#8 file: DER, or PEM (`-----BEGIN PRIVATE KEY-----`,
+    /// as `openssl genpkey -algorithm ed25519` writes it). Refuses anything that `ring`
+    /// does not take as an Ed25519 key.
+    pub fn from_file_bytes(bytes: &[u8]) -> RelayResult<Self> {
+        let invalid = || {
+            RelayError::invalid(
+                "APASSY_CONNECT_SIGNING_KEY_FILE is not an Ed25519 key in PKCS#8 (DER or PEM).",
+            )
+        };
+        let der = if bytes.starts_with(b"-----BEGIN") {
+            use base64::prelude::{BASE64_STANDARD, Engine as _};
+            let text = std::str::from_utf8(bytes).map_err(|_| invalid())?;
+            let body: String = text
+                .lines()
+                .filter(|line| !line.starts_with("-----"))
+                .collect::<Vec<_>>()
+                .concat();
+            let body = zeroize::Zeroizing::new(body);
+            zeroize::Zeroizing::new(
+                BASE64_STANDARD
+                    .decode(body.trim().as_bytes())
+                    .map_err(|_| invalid())?,
+            )
+        } else {
+            zeroize::Zeroizing::new(bytes.to_vec())
+        };
+        ring::signature::Ed25519KeyPair::from_pkcs8_maybe_unchecked(&der).map_err(|_| invalid())?;
+        Ok(Self(std::sync::Arc::new(der)))
+    }
+
+    /// The PKCS#8 DER. Do not log it.
+    pub fn pkcs8(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// The settings of Apassy Connect (ADR 0037 stage 7, connect-account-v1).
+#[derive(Debug, Clone)]
+pub struct ConnectConfig {
+    pub mode: RelayMode,
+    /// The account routes are served (`APASSY_RELAY_CONNECT_ACCOUNTS=1`, or `connect` mode).
+    pub accounts: bool,
+    /// The signing key of the entitlement token (`APASSY_CONNECT_SIGNING_KEY_FILE`).
+    pub signing_key: Option<ConnectSigningKey>,
+    /// The other published keys of the well-known document
+    /// (`APASSY_CONNECT_PUBLISHED_KEYS_FILE`): the next key and the previous one.
+    pub published_keys: Vec<crate::server::entitlement::PublishedKey>,
+    /// New accounts of the relay in 24 hours (`APASSY_RELAY_CONNECT_ACCOUNTS_PER_DAY`).
+    pub accounts_per_day: u64,
+    /// Accounts the relay holds at once (`APASSY_RELAY_CONNECT_ACCOUNTS_MAX`).
+    pub accounts_max: u64,
+    /// The site origin (`APASSY_CONNECT_SITE_URL`), for billing and groups.
+    pub site_url: String,
+    /// Stripe billing (`STRIPE_SECRET_KEY_FILE`, `STRIPE_WEBHOOK_SECRET_FILE`), or `None`:
+    /// the billing routes answer 503 `busy` and no account has a plan.
+    pub billing: Option<BillingSettings>,
+    /// The tunnel and its ingress (connect-tunnel-v1), used only with the account routes.
+    pub tunnel: TunnelSettings,
+}
+
+/// The settings of Connect billing (docs/SPEC.md section 34.7).
+#[derive(Clone)]
+pub struct BillingSettings {
+    /// The restricted Stripe key (`STRIPE_SECRET_KEY_FILE`).
+    pub secret_key: SecretString,
+    /// The webhook endpoint secret (`STRIPE_WEBHOOK_SECRET_FILE`).
+    pub webhook_secret: SecretString,
+    /// The site, the Family extra price, and the durations of the plan state.
+    pub config: crate::server::billing::BillingConfig,
+    /// The Stripe API base: always `https://api.stripe.com` from the environment. Only
+    /// code sets another one, and `Relay::start` takes no other than a loopback `http://`
+    /// base (the fake Stripe server of the tests).
+    pub stripe_api_base: String,
+}
+
+impl std::fmt::Debug for BillingSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BillingSettings")
+            .field("config", &self.config)
+            .field("stripe_api_base", &self.stripe_api_base)
+            .finish_non_exhaustive()
+    }
+}
+
+impl BillingSettings {
+    /// Settings with the default configuration, for tests and a self-hosted Connect.
+    pub fn new(secret_key: SecretString, webhook_secret: SecretString) -> Self {
+        Self {
+            secret_key,
+            webhook_secret,
+            config: crate::server::billing::BillingConfig::default(),
+            stripe_api_base: crate::server::stripe::API_BASE.to_string(),
+        }
+    }
+
+    /// The Stripe base that `Relay::start` accepts: the real API, or a loopback `http://`
+    /// address.
+    pub fn check_api_base(&self) -> RelayResult<()> {
+        let base = self.stripe_api_base.trim_end_matches('/');
+        let loopback = ["http://127.0.0.1:", "http://[::1]:", "http://localhost:"]
+            .iter()
+            .any(|prefix| base.starts_with(prefix));
+        if base == crate::server::stripe::API_BASE || loopback {
+            Ok(())
+        } else {
+            Err(RelayError::invalid(
+                "The Stripe API base is https://api.stripe.com, or a loopback http:// address in a test.",
+            ))
+        }
+    }
+}
+
+impl Default for ConnectConfig {
+    /// No accounts: every account route is 404.
+    fn default() -> Self {
+        Self {
+            mode: RelayMode::Relay,
+            accounts: false,
+            signing_key: None,
+            published_keys: Vec::new(),
+            accounts_per_day: DEFAULT_CONNECT_ACCOUNTS_PER_DAY,
+            accounts_max: DEFAULT_CONNECT_ACCOUNTS_MAX,
+            site_url: DEFAULT_CONNECT_SITE_URL.to_string(),
+            billing: None,
+            tunnel: TunnelSettings::default(),
+        }
+    }
+}
+
+impl ConnectConfig {
+    /// The settings of a relay with the account routes on and the signing key `key`, for
+    /// tests and for a self-hosted Connect.
+    pub fn accounts(signing_key: Option<ConnectSigningKey>) -> Self {
+        Self {
+            accounts: true,
+            signing_key,
+            ..Self::default()
+        }
+    }
+
+    /// True in `connect` mode: no master key, plain files.
+    pub fn plain_files(&self) -> bool {
+        self.mode == RelayMode::Connect
+    }
+}
+
+/// The Connect settings from the environment. `master_key_set`: `APASSY_RELAY_KEY` or
+/// `APASSY_RELAY_KEY_FILE` is set, which `connect` mode refuses.
+fn connect_from(
+    lookup: &impl Fn(&str) -> Option<String>,
+    master_key_set: bool,
+) -> RelayResult<ConnectConfig> {
+    let mode = match lookup("APASSY_RELAY_MODE").as_deref().map(str::trim) {
+        None | Some("relay") => RelayMode::Relay,
+        Some("connect") => RelayMode::Connect,
+        Some(_) => {
+            return Err(RelayError::invalid(
+                "APASSY_RELAY_MODE is relay or connect.",
+            ));
+        }
+    };
+    if mode == RelayMode::Connect && master_key_set {
+        return Err(RelayError::invalid(
+            "APASSY_RELAY_MODE=connect refuses a master key: unset APASSY_RELAY_KEY and APASSY_RELAY_KEY_FILE (Connect keeps no secret, ADR 0037 stage 7).",
+        ));
+    }
+    let accounts = match lookup("APASSY_RELAY_CONNECT_ACCOUNTS").as_deref() {
+        None => mode == RelayMode::Connect,
+        Some("0") => false,
+        Some("1") => true,
+        Some(_) => {
+            return Err(RelayError::invalid(
+                "APASSY_RELAY_CONNECT_ACCOUNTS is 0 or 1.",
+            ));
+        }
+    };
+    if mode == RelayMode::Connect && !accounts {
+        return Err(RelayError::invalid(
+            "APASSY_RELAY_MODE=connect serves the account routes: APASSY_RELAY_CONNECT_ACCOUNTS cannot be 0 there.",
+        ));
+    }
+    let signing_key = match lookup("APASSY_CONNECT_SIGNING_KEY_FILE") {
+        None => None,
+        Some(path) => {
+            let unreadable =
+                || RelayError::invalid("APASSY_CONNECT_SIGNING_KEY_FILE cannot be read.");
+            let file = std::fs::File::open(path.trim()).map_err(|_| unreadable())?;
+            let mut bytes = zeroize::Zeroizing::new(Vec::new());
+            std::io::Read::read_to_end(
+                &mut std::io::Read::take(file, MAX_SIGNING_KEY_FILE_BYTES + 1),
+                &mut bytes,
+            )
+            .map_err(|_| unreadable())?;
+            if bytes.len() as u64 > MAX_SIGNING_KEY_FILE_BYTES {
+                return Err(unreadable());
+            }
+            Some(ConnectSigningKey::from_file_bytes(&bytes)?)
+        }
+    };
+    let published_keys = match lookup("APASSY_CONNECT_PUBLISHED_KEYS_FILE") {
+        None => Vec::new(),
+        Some(path) => {
+            let unreadable =
+                || RelayError::invalid("APASSY_CONNECT_PUBLISHED_KEYS_FILE cannot be read.");
+            let file = std::fs::File::open(path.trim()).map_err(|_| unreadable())?;
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(
+                &mut std::io::Read::take(file, MAX_PUBLISHED_KEYS_FILE_BYTES + 1),
+                &mut bytes,
+            )
+            .map_err(|_| unreadable())?;
+            if bytes.len() as u64 > MAX_PUBLISHED_KEYS_FILE_BYTES {
+                return Err(unreadable());
+            }
+            published_keys_from(&bytes)?
+        }
+    };
+    let accounts_per_day = number(
+        lookup,
+        "APASSY_RELAY_CONNECT_ACCOUNTS_PER_DAY",
+        DEFAULT_CONNECT_ACCOUNTS_PER_DAY,
+        0,
+        MAX_CONNECT_ACCOUNTS_PER_DAY,
+    )?;
+    let accounts_max = number(
+        lookup,
+        "APASSY_RELAY_CONNECT_ACCOUNTS_MAX",
+        DEFAULT_CONNECT_ACCOUNTS_MAX,
+        0,
+        MAX_CONNECT_ACCOUNTS_MAX,
+    )?;
+    let site_url = match lookup("APASSY_CONNECT_SITE_URL") {
+        None => DEFAULT_CONNECT_SITE_URL.to_string(),
+        Some(text) => {
+            let url = checked_public_url(&text)?;
+            if !url.starts_with("https://") {
+                return Err(RelayError::invalid(
+                    "APASSY_CONNECT_SITE_URL is an https:// origin.",
+                ));
+            }
+            url
+        }
+    };
+    let billing = billing_from(lookup, &site_url)?;
+    let tunnel = tunnel_from(lookup)?;
+    Ok(ConnectConfig {
+        mode,
+        accounts,
+        signing_key,
+        published_keys,
+        accounts_per_day,
+        accounts_max,
+        site_url,
+        billing,
+        tunnel,
+    })
+}
+
+/// The keys of `APASSY_CONNECT_PUBLISHED_KEYS_FILE`: `{"keys":[{"kid","public_key"}]}`,
+/// at most `MAX_PUBLISHED_KEYS`, each an Ed25519 public key (b64u, 32 bytes) named by its
+/// own `entitlement::key_id`, no kid twice.
+pub fn published_keys_from(
+    bytes: &[u8],
+) -> RelayResult<Vec<crate::server::entitlement::PublishedKey>> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct File {
+        keys: Vec<Entry>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Entry {
+        kid: String,
+        public_key: String,
+    }
+    let invalid = |why: &str| {
+        RelayError::invalid(format!(
+            "APASSY_CONNECT_PUBLISHED_KEYS_FILE is not valid: {why}"
+        ))
+    };
+    let file: File = serde_json::from_slice(bytes)
+        .map_err(|_| invalid("it is JSON {\"keys\":[{\"kid\",\"public_key\"}]}."))?;
+    if file.keys.len() > MAX_PUBLISHED_KEYS {
+        return Err(invalid("it has more than 8 keys."));
+    }
+    let mut keys: Vec<crate::server::entitlement::PublishedKey> = Vec::new();
+    for entry in file.keys {
+        let text = entry.public_key.trim();
+        let public_key: [u8; 32] = crate::hostkeys::decode_b64(text, 32)
+            .ok()
+            .filter(|_| text.len() == 43)
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or_else(|| invalid("a public key is not b64u of 32 bytes."))?;
+        if entry.kid != crate::server::entitlement::key_id(&public_key) {
+            return Err(invalid("a kid is not the key id of its public key."));
+        }
+        if keys.iter().any(|key| key.kid == entry.kid) {
+            return Err(invalid("a kid is there twice."));
+        }
+        keys.push(crate::server::entitlement::PublishedKey {
+            kid: entry.kid,
+            public_key,
+        });
+    }
+    Ok(keys)
+}
+
+/// The settings of the Connect tunnel (connect-tunnel-v1 sections 7 and 8). Only a relay
+/// with the account routes uses them: `Relay::start` makes the broker then, and each
+/// ingress listener only when its address is set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TunnelSettings {
+    /// The SNI ingress (`APASSY_CONNECT_INGRESS_LISTEN`), or none.
+    pub ingress_listen: Option<SocketAddr>,
+    /// The ACME HTTP-01 listener (`APASSY_CONNECT_ACME_LISTEN`), or none.
+    pub acme_listen: Option<SocketAddr>,
+    /// The zone of the public names, lowercase, without a trailing dot.
+    pub node_zone: String,
+    /// Open streams of one account (its nodes, all kinds).
+    pub streams_per_account: usize,
+    /// Nodes of one account (registered, and online at once).
+    pub nodes_per_account: usize,
+    /// Dials of one account in one minute.
+    pub dials_per_minute: u32,
+    /// Bytes of one account in one UTC month for each person (Family) or member (Team).
+    pub bytes_per_month: u64,
+    /// Connect pings each tunnel WebSocket this often.
+    pub ping_interval: Duration,
+    /// A tunnel WebSocket with no message for this long closes.
+    pub idle_timeout: Duration,
+    /// A stream with no byte for this long is reset.
+    pub stream_idle: Duration,
+    /// Bytes buffered toward one client of a stream.
+    pub stream_buffer: usize,
+    /// Open dials of one other account to the nodes of one account.
+    pub streams_per_grantee: usize,
+    /// Open dials of all other accounts together to the nodes of one account.
+    pub grantee_streams: usize,
+    /// The share of the dial budget, in percent, that other accounts may spend together.
+    pub grantee_bytes_percent: u64,
+    /// Open public and ACME streams of one account.
+    pub ingress_streams: usize,
+    /// New public and ACME streams of one node in one minute.
+    pub ingress_per_minute: u32,
+    /// The node's first frame on a public or ACME stream comes within this.
+    pub ingress_first_byte: Duration,
+    /// Bytes of the public and ACME streams of one account in one UTC month for each
+    /// person or member.
+    pub ingress_bytes_per_month: u64,
+    /// Open streams of the whole broker.
+    pub max_streams: usize,
+    /// The share of `max_streams`, in percent, that the public and ACME streams of all
+    /// nodes may hold together; the rest stays for device dials.
+    pub ingress_share_percent: u64,
+}
+
+impl Default for TunnelSettings {
+    /// The contract's defaults (section 8), no ingress listener.
+    fn default() -> Self {
+        Self {
+            ingress_listen: None,
+            acme_listen: None,
+            node_zone: DEFAULT_CONNECT_NODE_ZONE.to_string(),
+            streams_per_account: 64,
+            nodes_per_account: 8,
+            dials_per_minute: 60,
+            bytes_per_month: 20 * 1024 * 1024 * 1024,
+            ping_interval: Duration::from_secs(30),
+            idle_timeout: Duration::from_secs(90),
+            stream_idle: Duration::from_secs(15 * 60),
+            stream_buffer: 256 * 1024,
+            streams_per_grantee: 16,
+            grantee_streams: 32,
+            grantee_bytes_percent: 50,
+            ingress_streams: 16,
+            ingress_per_minute: 60,
+            ingress_first_byte: Duration::from_secs(10),
+            ingress_bytes_per_month: 5 * 1024 * 1024 * 1024,
+            max_streams: 4096,
+            ingress_share_percent: 50,
+        }
+    }
+}
+
+/// A DNS zone for public names: labels of `a-z`, `0-9`, and `-` (1 to 63 characters, no
+/// `-` at either end), at least two labels, and room for the 11 characters of a node's
+/// label and its dot within 253. Lowercased, without a trailing dot.
+fn checked_zone(text: &str) -> Option<String> {
+    let zone = text.trim().trim_end_matches('.').to_ascii_lowercase();
+    let labels: Vec<&str> = zone.split('.').collect();
+    let label_ok = |label: &&str| {
+        (1..=63).contains(&label.len())
+            && label
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+    };
+    (labels.len() >= 2 && zone.len() <= 242 && labels.iter().all(label_ok)).then_some(zone)
+}
+
+/// The tunnel settings from the environment: none of the keys set is the default.
+fn tunnel_from(lookup: &impl Fn(&str) -> Option<String>) -> RelayResult<TunnelSettings> {
+    let address = |name: &str| -> RelayResult<Option<SocketAddr>> {
+        lookup(name)
+            .map(|text| {
+                text.trim().parse::<SocketAddr>().map_err(|_| {
+                    RelayError::invalid(format!("{name} is an address such as 0.0.0.0:443."))
+                })
+            })
+            .transpose()
+    };
+    let ingress_listen = address("APASSY_CONNECT_INGRESS_LISTEN")?;
+    let acme_listen = address("APASSY_CONNECT_ACME_LISTEN")?;
+    let node_zone = match lookup("APASSY_CONNECT_NODE_ZONE") {
+        None => DEFAULT_CONNECT_NODE_ZONE.to_string(),
+        Some(text) => checked_zone(&text).ok_or_else(|| {
+            RelayError::invalid("APASSY_CONNECT_NODE_ZONE is a DNS name such as node.example.com.")
+        })?,
+    };
+    let streams_per_account =
+        number(lookup, "APASSY_CONNECT_TUNNEL_STREAMS", 64, 1, 4096)? as usize;
+    let nodes_per_account = number(lookup, "APASSY_CONNECT_TUNNEL_NODES", 8, 1, 64)? as usize;
+    let dials_per_minute = number(
+        lookup,
+        "APASSY_CONNECT_TUNNEL_DIALS_PER_MINUTE",
+        60,
+        1,
+        6000,
+    )? as u32;
+    let gib = number(lookup, "APASSY_CONNECT_TUNNEL_GIB_PER_MONTH", 20, 1, 10_240)?;
+    let ping = number(lookup, "APASSY_CONNECT_TUNNEL_PING_SECS", 30, 5, 300)?;
+    let idle = number(lookup, "APASSY_CONNECT_TUNNEL_IDLE_SECS", 90, 10, 3600)?;
+    if idle <= ping {
+        return Err(RelayError::invalid(
+            "APASSY_CONNECT_TUNNEL_IDLE_SECS is above APASSY_CONNECT_TUNNEL_PING_SECS.",
+        ));
+    }
+    let stream_idle = number(
+        lookup,
+        "APASSY_CONNECT_TUNNEL_STREAM_IDLE_SECS",
+        900,
+        60,
+        86_400,
+    )?;
+    let buffer_kib = number(
+        lookup,
+        "APASSY_CONNECT_TUNNEL_STREAM_BUFFER_KIB",
+        256,
+        64,
+        16_384,
+    )?;
+    // The other accounts' slots are of the account's own: by default at most half of them
+    // (contract section 8: 32 of 64, 16 for each), so that its own devices keep the rest.
+    let fitting_total = (streams_per_account / 2).clamp(1, 32) as u64;
+    let grantee_streams = number(
+        lookup,
+        "APASSY_CONNECT_TUNNEL_GRANTEE_STREAMS_TOTAL",
+        fitting_total,
+        1,
+        streams_per_account as u64,
+    )?;
+    let streams_per_grantee = number(
+        lookup,
+        "APASSY_CONNECT_TUNNEL_GRANTEE_STREAMS",
+        grantee_streams.min(16),
+        1,
+        grantee_streams,
+    )?;
+    let grantee_bytes_percent = number(
+        lookup,
+        "APASSY_CONNECT_TUNNEL_GRANTEE_BYTES_PERCENT",
+        50,
+        1,
+        90,
+    )?;
+    let ingress_streams = number(lookup, "APASSY_CONNECT_TUNNEL_INGRESS_STREAMS", 16, 1, 4096)?;
+    let ingress_per_minute = number(
+        lookup,
+        "APASSY_CONNECT_TUNNEL_INGRESS_PER_MINUTE",
+        60,
+        1,
+        6000,
+    )?;
+    let ingress_first_byte = number(
+        lookup,
+        "APASSY_CONNECT_TUNNEL_INGRESS_FIRST_BYTE_SECS",
+        10,
+        1,
+        120,
+    )?;
+    let ingress_gib = number(
+        lookup,
+        "APASSY_CONNECT_TUNNEL_INGRESS_GIB_PER_MONTH",
+        5,
+        1,
+        10_240,
+    )?;
+    let max_streams = number(
+        lookup,
+        "APASSY_CONNECT_TUNNEL_MAX_STREAMS",
+        4096,
+        64,
+        65_536,
+    )?;
+    let ingress_share_percent = number(
+        lookup,
+        "APASSY_CONNECT_TUNNEL_INGRESS_SHARE_PERCENT",
+        50,
+        1,
+        90,
+    )?;
+    Ok(TunnelSettings {
+        ingress_listen,
+        acme_listen,
+        node_zone,
+        streams_per_account,
+        nodes_per_account,
+        dials_per_minute,
+        bytes_per_month: gib * 1024 * 1024 * 1024,
+        ping_interval: Duration::from_secs(ping),
+        idle_timeout: Duration::from_secs(idle),
+        stream_idle: Duration::from_secs(stream_idle),
+        stream_buffer: buffer_kib as usize * 1024,
+        streams_per_grantee: streams_per_grantee as usize,
+        grantee_streams: grantee_streams as usize,
+        grantee_bytes_percent,
+        ingress_streams: ingress_streams as usize,
+        ingress_per_minute: ingress_per_minute as u32,
+        ingress_first_byte: Duration::from_secs(ingress_first_byte),
+        ingress_bytes_per_month: ingress_gib * 1024 * 1024 * 1024,
+        max_streams: max_streams as usize,
+        ingress_share_percent,
+    })
+}
+
+/// The billing settings from the environment: both Stripe files or neither, and the five
+/// settings of `BillingConfig::from_lookup` (checked even without the files, so a typo
+/// stops the start). The site is `APASSY_CONNECT_SITE_URL` as checked above.
+fn billing_from(
+    lookup: &impl Fn(&str) -> Option<String>,
+    site_url: &str,
+) -> RelayResult<Option<BillingSettings>> {
+    let mut config = crate::server::billing::BillingConfig::from_lookup(&|name| lookup(name))?;
+    config.site_url = site_url.trim_end_matches('/').to_string();
+    let key = lookup("STRIPE_SECRET_KEY_FILE");
+    let webhook = lookup("STRIPE_WEBHOOK_SECRET_FILE");
+    let (key, webhook) = match (key, webhook) {
+        (None, None) => return Ok(None),
+        (Some(key), Some(webhook)) => (key, webhook),
+        _ => {
+            return Err(RelayError::invalid(
+                "Set STRIPE_SECRET_KEY_FILE and STRIPE_WEBHOOK_SECRET_FILE together, or neither.",
+            ));
+        }
+    };
+    Ok(Some(BillingSettings {
+        secret_key: crate::server::stripe::read_secret_key_file(std::path::Path::new(key.trim()))?,
+        webhook_secret: crate::server::stripe::read_webhook_secret_file(std::path::Path::new(
+            webhook.trim(),
+        ))?,
+        config,
+        stripe_api_base: crate::server::stripe::API_BASE.to_string(),
+    }))
 }
 
 /// What an embedded node needs (`RelayConfig::embedded`, docs/SPEC.md section 30).
@@ -313,6 +980,11 @@ pub struct RelayConfig {
     pub tailnet_agents: bool,
     /// For example `https://apassy-relay.wyderka.cc`. Base URLs start with it.
     pub public_url: String,
+    /// The origins of the public listener, `public_url` first (docs/SPEC.md section 31.1):
+    /// a node with Funnel and the Connect route both on has two, and answers each request
+    /// with the one it arrived on. Empty: `public_url` alone. Set it with
+    /// `RelayConfig::with_public_origins`, read it with `RelayConfig::public_origins`.
+    pub public_origins: Vec<String>,
     /// The origins that a device may sign at sign-in (docs/SPEC.md section 23.2, 32.3).
     /// Empty: `public_url` alone, as the hosted relay. A node: its node origin first, and
     /// with the public route on, the Funnel `public_url`. Read it with
@@ -351,6 +1023,13 @@ pub struct RelayConfig {
     /// (no relay sync, 403 `plan_required`) or 1 MiB to 64 MiB. A team keeps the value
     /// it was made with; `admin limits` changes it for one team.
     pub connect_sync_bytes: u64,
+    /// The free Connect paths of ADR 0032 are served (`APASSY_RELAY_FREE_CONNECT`, 1 by
+    /// default). Off (the transition before the cutover, ADR 0037 D14): `POST /v1/connect`
+    /// and the questions, feed, and push routes of free Connect teams are 410
+    /// `free_connect_ended`, and with `connect_sync_bytes` 0 their pushes and receipts are
+    /// 403 `plan_required` (`free_sync_ended`). Operator teams and vault stores never see
+    /// it. Always off in `connect` mode.
+    pub free_connect: bool,
     /// Each listener counts bad bearer tokens and session keys: after
     /// `http::AUTH_FAILURES_MAX` in `http::AUTH_FAILURE_WINDOW_SECS`, the listener answers
     /// 429 `rate_limited` until the window ends (docs/SPEC.md section 30.5). On for an
@@ -366,6 +1045,9 @@ pub struct RelayConfig {
     /// 31): its metadata, `/oauth/...`, and `WWW-Authenticate` on a 401 of `/mcp`. `None`
     /// on the hosted relay: every OAuth path is 404 there.
     pub oauth: Option<OAuthConfig>,
+    /// Apassy Connect: the account routes, the mode, the entitlement signing key
+    /// (connect-account-v1). The default has no accounts.
+    pub connect: ConnectConfig,
 }
 
 /// The settings of the MCP authorization flow of an embedded node (docs/SPEC.md section
@@ -594,6 +1276,55 @@ impl RelayConfig {
         }
     }
 
+    /// The origins of the public listener, in order: `public_origins`, or `public_url`
+    /// alone when it is empty. The first is the origin of every request that did not come
+    /// through a stream of the Connect tunnel (docs/SPEC.md section 31.1).
+    pub fn public_origins(&self) -> Vec<&str> {
+        if self.public_origins.is_empty() {
+            vec![self.public_url.as_str()]
+        } else {
+            self.public_origins.iter().map(String::as_str).collect()
+        }
+    }
+
+    /// The origin of `public_origins` whose host is `server_name` (the TLS server name of
+    /// a stream of the Connect tunnel), compared without case and without a final dot.
+    pub fn public_origin_named(&self, server_name: &str) -> Option<&str> {
+        let name = server_name.trim_end_matches('.').to_ascii_lowercase();
+        if name.is_empty() {
+            return None;
+        }
+        self.public_origins()
+            .into_iter()
+            .find(|origin| crate::decision::public_host(origin) == name)
+    }
+
+    /// Adds `further` origins of the public listener after `public_url` (an embedded node:
+    /// the public name at Connect, `https://<label>.node.<zone>`, while Funnel is up too).
+    /// Each is checked as `public_url` is (`checked_public_url`); one that is already in
+    /// the set is left out. With none left, the set stays `public_url` alone. Further
+    /// origins need the public listener (400 `invalid_request`).
+    pub fn with_public_origins(mut self, further: &[String]) -> RelayResult<Self> {
+        let mut origins = vec![self.public_url.clone()];
+        for origin in further {
+            let origin = checked_public_url(origin)?;
+            if !origins.contains(&origin) {
+                origins.push(origin);
+            }
+        }
+        if origins.len() > 1 && self.public_listen.is_none() {
+            return Err(RelayError::invalid(
+                "Further public origins need the public listener.",
+            ));
+        }
+        self.public_origins = if origins.len() > 1 {
+            origins
+        } else {
+            Vec::new()
+        };
+        Ok(self)
+    }
+
     /// True for a node on the tailnet: a relay with a tailnet listener. Only a node takes
     /// a node pairing code (directory 1005).
     pub fn is_node(&self) -> bool {
@@ -622,6 +1353,66 @@ impl RelayConfig {
                     "A relay without the edge listens on loopback addresses only.",
                 ));
             }
+        }
+        Ok(())
+    }
+
+    /// True when the free relay sync of Connect teams is over (the transition before the
+    /// cutover, ADR 0037 D14): `APASSY_RELAY_FREE_CONNECT=0` and
+    /// `APASSY_RELAY_CONNECT_SYNC_BYTES` 0. A push or a receipt of a free Connect team is
+    /// then 403 `plan_required` whatever its own `sync_bytes`; its pulls and downloads
+    /// still work, so its devices can move their vault. Operator teams and vault stores
+    /// never see it.
+    pub fn free_sync_ended(&self) -> bool {
+        !self.free_connect && self.connect_sync_bytes == 0
+    }
+
+    /// Refuses a configuration that `connect` mode cannot run (docs/SPEC.md section 37):
+    /// a master key, push, shared team vaults, the public or tailnet listener of a node,
+    /// the MCP authorization flow, or no account routes (`free_connect` has no effect
+    /// there: every free Connect route is 410 `hosted_retired` before it is read). The
+    /// environment cannot make one (`from_lookup` refuses it first); this keeps a
+    /// configuration made in code (a test, a self-hosted Connect) to the same rules. Any
+    /// configuration in `relay` mode passes.
+    pub fn check_mode(&self) -> RelayResult<()> {
+        if !self.connect.plain_files() {
+            return Ok(());
+        }
+        let refused = |what: &str| {
+            Err(RelayError::invalid(format!(
+                "APASSY_RELAY_MODE=connect cannot run with {what} (docs/SPEC.md section 37)."
+            )))
+        };
+        if !self.master_key.is_empty() {
+            return refused("a master key");
+        }
+        if self.push.is_some() {
+            return refused("push");
+        }
+        if self.team_vaults {
+            return refused("shared team vaults");
+        }
+        if self.public_listen.is_some() || self.tailnet_listen.is_some() {
+            return refused("the public or tailnet listener of a node");
+        }
+        if self.oauth.is_some() {
+            return refused("the MCP authorization flow");
+        }
+        if !self.connect.accounts {
+            return refused("the account routes off");
+        }
+        Ok(())
+    }
+
+    /// Refuses `what` (an operator command that opens the files with their keys) in
+    /// `connect` mode, where the files are plain and no image before Connect can read them:
+    /// the way back from Connect is the backup made before the cutover and the previous
+    /// image (docs/operations/connect.md).
+    pub fn refuse_connect_mode(&self, what: &str) -> RelayResult<()> {
+        if self.connect.plain_files() {
+            return Err(RelayError::invalid(format!(
+                "{what} does not apply in APASSY_RELAY_MODE=connect: relay.db and the vault stores are plain files that no image before Apassy Connect opens. Roll back with the backup made before the cutover and the previous image (docs/operations/connect.md)."
+            )));
         }
         Ok(())
     }
@@ -677,6 +1468,7 @@ impl RelayConfig {
             tailnet_listen: options.tailnet_listen,
             tailnet_agents: options.tailnet_agents,
             public_url,
+            public_origins: Vec::new(),
             sign_in_origins,
             edge: EdgeMode::Off,
             master_key: options.master_key,
@@ -692,9 +1484,11 @@ impl RelayConfig {
             connect_teams_per_day: 0,
             connect_teams_max: 0,
             connect_sync_bytes: DEFAULT_CONNECT_SYNC_BYTES,
+            free_connect: true,
             auth_limiter: true,
             operator_socket: false,
             oauth: Some(OAuthConfig::new(EMBEDDED_MAC_NAME)),
+            connect: ConnectConfig::default(),
         };
         config.check_listeners()?;
         Ok(config)
@@ -723,8 +1517,16 @@ impl RelayConfig {
                 "The edge secret must have at least {MIN_EDGE_SECRET_BYTES} bytes."
             )));
         }
-        let master_key = secret_from(&lookup, "APASSY_RELAY_KEY")?;
-        if master_key.len() < MIN_KEY_BYTES {
+        let master_key_set =
+            lookup("APASSY_RELAY_KEY").is_some() || lookup("APASSY_RELAY_KEY_FILE").is_some();
+        let connect = connect_from(&lookup, master_key_set)?;
+        // `connect` mode has no master key: its files are plain (`Store::open_plain`).
+        let master_key = if connect.plain_files() {
+            SecretString::new(String::new())
+        } else {
+            secret_from(&lookup, "APASSY_RELAY_KEY")?
+        };
+        if !connect.plain_files() && master_key.len() < MIN_KEY_BYTES {
             return Err(RelayError::invalid(format!(
                 "The master key must have at least {MIN_KEY_BYTES} bytes."
             )));
@@ -776,6 +1578,35 @@ impl RelayConfig {
             0,
             MAX_CONNECT_LONG_POLLS as u64,
         )?;
+        let free_connect = match lookup("APASSY_RELAY_FREE_CONNECT")
+            .as_deref()
+            .map(str::trim)
+        {
+            // Connect has no free path: everything of ADR 0032 is retired there.
+            _ if connect.plain_files() => false,
+            None | Some("1") => true,
+            Some("0") => false,
+            Some(_) => {
+                return Err(RelayError::invalid("APASSY_RELAY_FREE_CONNECT is 0 or 1."));
+            }
+        };
+        // Connect sends no push: the nodes push through the push gateway (ADR 0037 D7),
+        // and the Worker's push route is off there. A push value left in the compose file
+        // would otherwise start the push thread of a relay that has no question.
+        if connect.plain_files()
+            && [
+                "APASSY_RELAY_PUSH_URL",
+                "APASSY_RELAY_PUSH_TOPIC",
+                "APASSY_RELAY_PUSH_SECRET",
+                "APASSY_RELAY_PUSH_SECRET_FILE",
+            ]
+            .iter()
+            .any(|name| lookup(name).is_some())
+        {
+            return Err(RelayError::invalid(
+                "APASSY_RELAY_MODE=connect sends no push: unset APASSY_RELAY_PUSH_URL, APASSY_RELAY_PUSH_TOPIC, and APASSY_RELAY_PUSH_SECRET (or _FILE).",
+            ));
+        }
         let mut upstream = UpstreamOptions::default();
         if let Some(text) = lookup("APASSY_RELAY_BLOCKED_ADDRESSES") {
             for part in text.split(',').filter(|part| !part.trim().is_empty()) {
@@ -793,6 +1624,7 @@ impl RelayConfig {
             tailnet_listen: None,
             tailnet_agents: false,
             public_url,
+            public_origins: Vec::new(),
             sign_in_origins: Vec::new(),
             edge: EdgeMode::Required(edge_secret),
             master_key,
@@ -811,6 +1643,8 @@ impl RelayConfig {
             ),
             push: push_from(&lookup)?,
             team_vaults: match lookup("APASSY_RELAY_TEAM_VAULTS").as_deref() {
+                // Shared team vaults hold item keys: never in `connect` mode.
+                _ if connect.plain_files() => false,
                 None | Some("1") => true,
                 Some("0") => false,
                 Some(_) => {
@@ -829,9 +1663,11 @@ impl RelayConfig {
             connect_teams_per_day,
             connect_teams_max,
             connect_sync_bytes,
+            free_connect,
             auth_limiter: false,
             operator_socket: true,
             oauth: None,
+            connect,
         })
     }
 }
@@ -1103,6 +1939,96 @@ mod tests {
     }
 
     #[test]
+    fn connect_accounts_per_day_is_0_to_100000_and_max_0_to_10000000() {
+        let with = |name: &str, value: &str| {
+            RelayConfig::from_lookup(lookup(&[
+                ("APASSY_RELAY_PUBLIC_URL", "https://relay.example.test"),
+                ("APASSY_RELAY_EDGE_SECRET", EDGE),
+                ("APASSY_RELAY_KEY", "a synthetic vault passphrase"),
+                (name, value),
+            ]))
+            .map(|config| (config.connect.accounts_per_day, config.connect.accounts_max))
+        };
+        let defaults = with("APASSY_RELAY_SESSION_TTL", "900").unwrap();
+        assert_eq!(
+            defaults,
+            (
+                DEFAULT_CONNECT_ACCOUNTS_PER_DAY,
+                DEFAULT_CONNECT_ACCOUNTS_MAX
+            )
+        );
+        assert_eq!(defaults, (1000, 100_000));
+        let per_day = "APASSY_RELAY_CONNECT_ACCOUNTS_PER_DAY";
+        assert_eq!(with(per_day, "0").unwrap().0, 0);
+        assert_eq!(with(per_day, "100000").unwrap().0, 100_000);
+        assert!(with(per_day, "100001").is_err());
+        assert!(with(per_day, "-1").is_err());
+        assert!(with(per_day, "many").is_err());
+        let max = "APASSY_RELAY_CONNECT_ACCOUNTS_MAX";
+        assert_eq!(with(max, "0").unwrap().1, 0);
+        assert_eq!(with(max, "10000000").unwrap().1, 10_000_000);
+        assert!(with(max, "10000001").is_err());
+        assert!(with(max, "lots").is_err());
+    }
+
+    #[test]
+    fn published_keys_come_from_their_file_with_their_own_key_ids() {
+        use crate::server::entitlement::key_id;
+        let key = |byte: u8| {
+            let public = [byte; 32];
+            (key_id(&public), crate::hostkeys::encode_b64(&public))
+        };
+        let (kid_a, key_a) = key(1);
+        let (kid_b, key_b) = key(2);
+        let file = format!(
+            r#"{{"keys":[{{"kid":"{kid_a}","public_key":"{key_a}"}},{{"kid":"{kid_b}","public_key":"{key_b}"}}]}}"#
+        );
+        let keys = published_keys_from(file.as_bytes()).unwrap();
+        assert_eq!(
+            keys.iter().map(|k| k.kid.as_str()).collect::<Vec<_>>(),
+            [kid_a.as_str(), kid_b.as_str()]
+        );
+        assert_eq!(keys[1].public_key, [2u8; 32]);
+        assert!(published_keys_from(br#"{"keys":[]}"#).unwrap().is_empty());
+        for bad in [
+            "{}".to_string(),
+            "not json".to_string(),
+            format!(r#"{{"keys":[{{"kid":"ek_0000000000000000","public_key":"{key_a}"}}]}}"#),
+            format!(r#"{{"keys":[{{"kid":"{kid_a}","public_key":"AAAA"}}]}}"#),
+            format!(
+                r#"{{"keys":[{{"kid":"{kid_a}","public_key":"{key_a}"}},{{"kid":"{kid_a}","public_key":"{key_a}"}}]}}"#
+            ),
+            format!(r#"{{"keys":[{{"kid":"{kid_a}","public_key":"{key_a}","alg":"Ed25519"}}]}}"#),
+        ] {
+            assert!(published_keys_from(bad.as_bytes()).is_err(), "{bad}");
+        }
+        // From the environment: the file is read once at start.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("published.json");
+        std::fs::write(&path, &file).unwrap();
+        let config = RelayConfig::from_lookup(lookup(&[
+            ("APASSY_RELAY_PUBLIC_URL", "https://relay.example.test"),
+            ("APASSY_RELAY_EDGE_SECRET", EDGE),
+            ("APASSY_RELAY_KEY", "a synthetic vault passphrase"),
+            ("APASSY_CONNECT_PUBLISHED_KEYS_FILE", path.to_str().unwrap()),
+        ]))
+        .unwrap();
+        assert_eq!(config.connect.published_keys, keys);
+        assert!(
+            RelayConfig::from_lookup(lookup(&[
+                ("APASSY_RELAY_PUBLIC_URL", "https://relay.example.test"),
+                ("APASSY_RELAY_EDGE_SECRET", EDGE),
+                ("APASSY_RELAY_KEY", "a synthetic vault passphrase"),
+                (
+                    "APASSY_CONNECT_PUBLISHED_KEYS_FILE",
+                    dir.path().join("missing.json").to_str().unwrap()
+                ),
+            ]))
+            .is_err()
+        );
+    }
+
+    #[test]
     fn refuses_short_secrets_and_bad_values() {
         let short = RelayConfig::from_lookup(lookup(&[
             ("APASSY_RELAY_PUBLIC_URL", "https://relay.example.test"),
@@ -1333,6 +2259,56 @@ mod tests {
     }
 
     #[test]
+    fn a_node_with_funnel_and_connect_has_two_public_origins_funnel_first() {
+        let funnel = "https://mac.example.ts.net:8443";
+        let connect = "https://k7m2q4x3ca.node.example.test";
+        // One origin: `public_url` alone, as before.
+        let one = RelayConfig::embedded(embedded_options(Some("127.0.0.1:49200"))).unwrap();
+        assert!(one.public_origins.is_empty());
+        assert_eq!(one.public_origins(), [funnel]);
+        let same = one
+            .clone()
+            .with_public_origins(&[format!("{funnel}/")])
+            .unwrap();
+        assert!(same.public_origins.is_empty(), "a repeat is left out");
+        // Two: Funnel first, then the public name at Connect.
+        let two = one
+            .clone()
+            .with_public_origins(&[format!("{connect}/"), connect.to_string()])
+            .unwrap();
+        assert_eq!(two.public_origins(), [funnel, connect]);
+        assert_eq!(two.public_url, funnel);
+        // A server name finds the origin of its host, without case or a final dot.
+        assert_eq!(
+            two.public_origin_named("K7M2Q4X3CA.node.example.test."),
+            Some(connect)
+        );
+        assert_eq!(two.public_origin_named("mac.example.ts.net"), Some(funnel));
+        assert_eq!(two.public_origin_named("other.node.example.test"), None);
+        assert_eq!(two.public_origin_named(""), None);
+        assert_eq!(two.public_origin_named("."), None);
+        // Not an origin, or no public listener: refused.
+        assert!(
+            one.clone()
+                .with_public_origins(&["k7m2q4x3ca".into()])
+                .is_err()
+        );
+        assert!(
+            one.clone()
+                .with_public_origins(&[format!("{connect}/mcp")])
+                .is_err()
+        );
+        let private = RelayConfig::embedded(embedded_options(None)).unwrap();
+        assert_eq!(
+            private
+                .with_public_origins(&[connect.into()])
+                .unwrap_err()
+                .code,
+            crate::error::codes::INVALID_REQUEST
+        );
+    }
+
+    #[test]
     fn the_tailnet_options_are_checked() {
         let refused = |options: EmbeddedOptions| {
             RelayConfig::embedded(options).unwrap_err().code == crate::error::codes::INVALID_REQUEST
@@ -1427,8 +2403,16 @@ mod tests {
         assert!(!config.operator_socket);
         let oauth = config.oauth.as_ref().expect("an embedded node has OAuth");
         assert_eq!(oauth.mac_name, EMBEDDED_MAC_NAME);
-        // The public page never names the computer (security review finding 5).
-        assert_eq!(EMBEDDED_MAC_NAME, "your Mac");
+        // The public page never names the computer (security review finding 5), only
+        // the platform word of the machine the relay runs on.
+        assert_eq!(
+            EMBEDDED_MAC_NAME,
+            if cfg!(target_os = "linux") {
+                "your computer"
+            } else {
+                "your Mac"
+            }
+        );
         assert_eq!(oauth.access_token_secs, 86_400);
         assert_eq!(oauth.refresh_token_secs, 90 * 86_400);
         assert_eq!((oauth.connect_secs, oauth.code_secs), (300, 300));
@@ -1458,5 +2442,199 @@ mod tests {
             ..embedded_options(None)
         });
         assert!(short.is_err());
+    }
+    #[test]
+    fn the_tunnel_keys_have_the_contract_defaults_and_bounds() {
+        let base = [
+            ("APASSY_RELAY_PUBLIC_URL", "https://relay.example.test"),
+            ("APASSY_RELAY_EDGE_SECRET", EDGE),
+            ("APASSY_RELAY_KEY", "a synthetic vault passphrase"),
+        ];
+        let with = |extra: &[(&str, &str)]| {
+            let mut pairs = base.to_vec();
+            pairs.extend_from_slice(extra);
+            RelayConfig::from_lookup(lookup(&pairs)).map(|config| config.connect.tunnel)
+        };
+        let none = with(&[]).unwrap();
+        assert_eq!(none, TunnelSettings::default());
+        assert_eq!(none.ingress_listen, None);
+        assert_eq!(none.acme_listen, None);
+        assert_eq!(none.node_zone, "node.apassy.wyderka.cc");
+        assert_eq!(
+            (
+                none.streams_per_account,
+                none.nodes_per_account,
+                none.dials_per_minute
+            ),
+            (64, 8, 60)
+        );
+        assert_eq!(none.bytes_per_month, 20 * 1024 * 1024 * 1024);
+        assert_eq!(none.stream_buffer, 256 * 1024);
+        let set = with(&[
+            ("APASSY_CONNECT_INGRESS_LISTEN", "0.0.0.0:443"),
+            ("APASSY_CONNECT_ACME_LISTEN", "[::]:80"),
+            ("APASSY_CONNECT_NODE_ZONE", "Node.Example.TEST."),
+            ("APASSY_CONNECT_TUNNEL_STREAMS", "16"),
+            ("APASSY_CONNECT_TUNNEL_NODES", "2"),
+            ("APASSY_CONNECT_TUNNEL_DIALS_PER_MINUTE", "5"),
+            ("APASSY_CONNECT_TUNNEL_GIB_PER_MONTH", "1"),
+            ("APASSY_CONNECT_TUNNEL_PING_SECS", "10"),
+            ("APASSY_CONNECT_TUNNEL_IDLE_SECS", "40"),
+            ("APASSY_CONNECT_TUNNEL_STREAM_IDLE_SECS", "120"),
+            ("APASSY_CONNECT_TUNNEL_STREAM_BUFFER_KIB", "64"),
+        ])
+        .unwrap();
+        assert_eq!(set.ingress_listen, Some("0.0.0.0:443".parse().unwrap()));
+        assert_eq!(set.acme_listen, Some("[::]:80".parse().unwrap()));
+        assert_eq!(set.node_zone, "node.example.test");
+        assert_eq!(
+            (
+                set.streams_per_account,
+                set.nodes_per_account,
+                set.dials_per_minute
+            ),
+            (16, 2, 5)
+        );
+        assert_eq!(set.bytes_per_month, 1024 * 1024 * 1024);
+        assert_eq!(set.ping_interval, Duration::from_secs(10));
+        assert_eq!(set.idle_timeout, Duration::from_secs(40));
+        assert_eq!(set.stream_idle, Duration::from_secs(120));
+        assert_eq!(set.stream_buffer, 64 * 1024);
+        // Unset, the other accounts' slots fit the smaller account limit: half of 16.
+        assert_eq!((set.grantee_streams, set.streams_per_grantee), (8, 8));
+        assert_eq!(
+            (
+                none.streams_per_grantee,
+                none.grantee_streams,
+                none.grantee_bytes_percent
+            ),
+            (16, 32, 50)
+        );
+        assert_eq!(
+            (
+                none.ingress_streams,
+                none.ingress_per_minute,
+                none.ingress_first_byte,
+                none.ingress_bytes_per_month
+            ),
+            (16, 60, Duration::from_secs(10), 5 * 1024 * 1024 * 1024)
+        );
+        assert_eq!((none.max_streams, none.ingress_share_percent), (4096, 50));
+        let one = with(&[("APASSY_CONNECT_TUNNEL_STREAMS", "1")]).unwrap();
+        assert_eq!((one.grantee_streams, one.streams_per_grantee), (1, 1));
+        let others = with(&[
+            ("APASSY_CONNECT_TUNNEL_GRANTEE_STREAMS", "4"),
+            ("APASSY_CONNECT_TUNNEL_GRANTEE_STREAMS_TOTAL", "12"),
+            ("APASSY_CONNECT_TUNNEL_GRANTEE_BYTES_PERCENT", "25"),
+            ("APASSY_CONNECT_TUNNEL_INGRESS_STREAMS", "8"),
+            ("APASSY_CONNECT_TUNNEL_INGRESS_PER_MINUTE", "30"),
+            ("APASSY_CONNECT_TUNNEL_INGRESS_FIRST_BYTE_SECS", "5"),
+            ("APASSY_CONNECT_TUNNEL_INGRESS_GIB_PER_MONTH", "2"),
+            ("APASSY_CONNECT_TUNNEL_MAX_STREAMS", "1000"),
+            ("APASSY_CONNECT_TUNNEL_INGRESS_SHARE_PERCENT", "20"),
+        ])
+        .unwrap();
+        assert_eq!(
+            (
+                others.streams_per_grantee,
+                others.grantee_streams,
+                others.grantee_bytes_percent
+            ),
+            (4, 12, 25)
+        );
+        assert_eq!(
+            (
+                others.ingress_streams,
+                others.ingress_per_minute,
+                others.ingress_first_byte,
+                others.ingress_bytes_per_month
+            ),
+            (8, 30, Duration::from_secs(5), 2 * 1024 * 1024 * 1024)
+        );
+        assert_eq!(
+            (others.max_streams, others.ingress_share_percent),
+            (1000, 20)
+        );
+        let limits = crate::server::tunnel_routes::limits_of(&others);
+        assert_eq!(
+            (
+                limits.streams_per_grantee,
+                limits.grantee_streams,
+                limits.grantee_bytes_percent,
+                limits.ingress_streams,
+                limits.ingress_per_minute,
+                limits.ingress_first_byte,
+                limits.ingress_bytes_per_month,
+                limits.max_streams,
+                limits.ingress_share_percent,
+            ),
+            (
+                4,
+                12,
+                25,
+                8,
+                30,
+                Duration::from_secs(5),
+                2 * 1024 * 1024 * 1024,
+                1000,
+                20
+            )
+        );
+        // A total above the account's streams, or one other account above the total.
+        assert!(
+            with(&[
+                ("APASSY_CONNECT_TUNNEL_STREAMS", "16"),
+                ("APASSY_CONNECT_TUNNEL_GRANTEE_STREAMS_TOTAL", "17"),
+            ])
+            .is_err()
+        );
+        assert!(
+            with(&[
+                ("APASSY_CONNECT_TUNNEL_GRANTEE_STREAMS_TOTAL", "8"),
+                ("APASSY_CONNECT_TUNNEL_GRANTEE_STREAMS", "9"),
+            ])
+            .is_err()
+        );
+        for bad in [
+            ("APASSY_CONNECT_TUNNEL_GRANTEE_STREAMS", "0"),
+            ("APASSY_CONNECT_TUNNEL_GRANTEE_STREAMS_TOTAL", "0"),
+            ("APASSY_CONNECT_TUNNEL_GRANTEE_BYTES_PERCENT", "0"),
+            ("APASSY_CONNECT_TUNNEL_GRANTEE_BYTES_PERCENT", "91"),
+            ("APASSY_CONNECT_TUNNEL_INGRESS_STREAMS", "0"),
+            ("APASSY_CONNECT_TUNNEL_INGRESS_STREAMS", "4097"),
+            ("APASSY_CONNECT_TUNNEL_INGRESS_PER_MINUTE", "0"),
+            ("APASSY_CONNECT_TUNNEL_INGRESS_FIRST_BYTE_SECS", "0"),
+            ("APASSY_CONNECT_TUNNEL_INGRESS_FIRST_BYTE_SECS", "121"),
+            ("APASSY_CONNECT_TUNNEL_INGRESS_GIB_PER_MONTH", "0"),
+            ("APASSY_CONNECT_TUNNEL_MAX_STREAMS", "63"),
+            ("APASSY_CONNECT_TUNNEL_MAX_STREAMS", "65537"),
+            ("APASSY_CONNECT_TUNNEL_INGRESS_SHARE_PERCENT", "0"),
+            ("APASSY_CONNECT_TUNNEL_INGRESS_SHARE_PERCENT", "91"),
+            ("APASSY_CONNECT_TUNNEL_INGRESS_SHARE_PERCENT", "x"),
+        ] {
+            assert!(with(&[bad]).is_err(), "{bad:?}");
+        }
+        for bad in [
+            ("APASSY_CONNECT_INGRESS_LISTEN", "443"),
+            ("APASSY_CONNECT_ACME_LISTEN", "localhost:80"),
+            ("APASSY_CONNECT_NODE_ZONE", "localhost"),
+            ("APASSY_CONNECT_NODE_ZONE", "-bad.example.com"),
+            ("APASSY_CONNECT_NODE_ZONE", "under_score.example.com"),
+            ("APASSY_CONNECT_NODE_ZONE", "a..example.com"),
+            ("APASSY_CONNECT_TUNNEL_STREAMS", "0"),
+            ("APASSY_CONNECT_TUNNEL_STREAMS", "4097"),
+            ("APASSY_CONNECT_TUNNEL_NODES", "65"),
+            ("APASSY_CONNECT_TUNNEL_DIALS_PER_MINUTE", "0"),
+            ("APASSY_CONNECT_TUNNEL_GIB_PER_MONTH", "0"),
+            ("APASSY_CONNECT_TUNNEL_PING_SECS", "4"),
+            ("APASSY_CONNECT_TUNNEL_IDLE_SECS", "30"),
+            ("APASSY_CONNECT_TUNNEL_STREAM_IDLE_SECS", "59"),
+            ("APASSY_CONNECT_TUNNEL_STREAM_BUFFER_KIB", "16385"),
+        ] {
+            assert!(with(&[bad]).is_err(), "{bad:?}");
+        }
+        let label = "a".repeat(63);
+        let long = format!("{label}.{label}.{label}.{label}.example.com");
+        assert!(with(&[("APASSY_CONNECT_NODE_ZONE", long.as_str())]).is_err());
     }
 }

@@ -3,10 +3,13 @@
 //! **node pairing link** `<origin>/pair#<team code>` that `apassy pair` makes on a node.
 //!
 //! The fragment carries the pin of the node and its other destinations
-//! (`&pin=…&alt=…&name=…`) and, for an iPhone, the ADR 0032 handoff (`&handoff=…`,
-//! always last). A link without a pin is a hosted link: today's form, system trust. The
-//! fragment never reaches a server: [`PairedLink::url`] gives the address with its trust,
-//! and only the code goes to the relay.
+//! (`&pin=…&alt=…&node=…&name=…`) and, for an iPhone, the ADR 0032 handoff
+//! (`&handoff=…`, always last). One of the other destinations can be the node's Connect
+//! route (section 7a): `wss://<Connect host>/v1/tunnel/dial/<node id>` as the last entry
+//! of `alt`, with the node id in `node`. A link without a pin is a hosted link: today's
+//! form, system trust. The fragment never reaches a server: [`PairedLink::url`] gives the
+//! address with its trust, its alternatives, and its route, and only the code goes to the
+//! relay.
 //!
 //! [`PairedLink::parse`] reads the whole text with the grammar of section 5 and refuses a
 //! link with the first reason of section 7 ([`LinkRefusal`]); a refusal makes no request.
@@ -21,7 +24,9 @@ use zeroize::Zeroizing;
 use crate::net::pin::{Pin, parse as parse_pin};
 use crate::sync::SyncError;
 use crate::sync::relay_crypto::{decode_b64u, link_code_team, valid_team_code};
-use crate::sync::relay_http::{MAX_ALTERNATIVES, RelayUrl, TlsTrust, split_host_port};
+use crate::sync::relay_http::{
+    MAX_ALTERNATIVES, RelayUrl, TlsTrust, TunnelRoute, split_host_port, valid_node_id,
+};
 
 /// The longest link, in bytes, after the white space at its ends goes (section 5 rule 3).
 pub const MAX_LINK_BYTES: usize = 2048;
@@ -35,7 +40,7 @@ pub const LINK_UPDATE_TEXT: &str = "Update Apassy to use this code.";
 pub const PIN_CHANGED_TEXT: &str = "This node's certificate changed. Pair again.";
 
 /// The keys of the fragment, in their order (section 5 rule 1).
-const KEYS: [&str; 4] = ["pin", "alt", "name", "handoff"];
+const KEYS: [&str; 5] = ["pin", "alt", "node", "name", "handoff"];
 
 /// What a link is for (section 6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +69,13 @@ pub enum LinkRefusal {
     HandoffOnPair,
     BadPin,
     BadAlt,
+    /// An `alt` entry with a scheme that is not the Connect route of section 7a: not
+    /// `wss://`, not of its form, a second one, not the last entry, or through another
+    /// host than the configured Connect host.
+    BadConnect,
+    /// A `node` that is not a node id, without a Connect route, or another node than
+    /// the route's; or a Connect route without `node`.
+    BadNode,
     BadName,
     BadHandoff,
 }
@@ -83,6 +95,8 @@ impl LinkRefusal {
             Self::HandoffOnPair => "handoff_on_pair",
             Self::BadPin => "bad_pin",
             Self::BadAlt => "bad_alt",
+            Self::BadConnect => "bad_connect",
+            Self::BadNode => "bad_node",
             Self::BadName => "bad_name",
             Self::BadHandoff => "bad_handoff",
         }
@@ -113,8 +127,11 @@ pub struct PairedLink {
     /// The link code (`apassy_lnk_…`) or the team code of kind node (`apassy_tcd_…`).
     pub code: Zeroizing<String>,
     pub pin: Option<Pin>,
-    /// The alternative destinations, `host:port` each with the port written, in order.
+    /// The alternative destinations of the tailnet, `host:port` each with the port
+    /// written, in order.
     pub alt: Vec<String>,
+    /// The Connect route of the node (section 7a): the last `alt` entry and `node`.
+    pub tunnel: Option<TunnelRoute>,
     /// The node's display name, decoded: a label, never an authority.
     pub name: Option<String>,
     /// The ADR 0032 handoff (`2.<qid>.<secret>.<key>`), unchanged bytes.
@@ -131,6 +148,7 @@ impl fmt::Debug for PairedLink {
             .field("origin", &self.origin)
             .field("pin", &self.pin)
             .field("alt", &self.alt)
+            .field("tunnel", &self.tunnel)
             .field("name", &self.name)
             .field("handoff", &self.handoff.is_some())
             .finish_non_exhaustive()
@@ -139,8 +157,15 @@ impl fmt::Debug for PairedLink {
 
 impl PairedLink {
     /// Read `text` (a scanned or pasted link) with the grammar of node-pairing-v1. The
-    /// ASCII white space at both ends goes, nothing inside.
+    /// ASCII white space at both ends goes, nothing inside. A Connect route must go
+    /// through the Connect host of this process (`crate::connect::configured_origin`).
     pub fn parse(text: &str) -> Result<Self, LinkRefusal> {
+        Self::parse_for(text, &crate::connect::configured_origin())
+    }
+
+    /// [`Self::parse`] with the Connect origin `connect_origin`: the only Connect host
+    /// that a route of the link may name (section 7a).
+    pub fn parse_for(text: &str, connect_origin: &str) -> Result<Self, LinkRefusal> {
         let text = text.trim_matches(|c: char| c.is_ascii_whitespace());
         if text.len() > MAX_LINK_BYTES {
             return Err(LinkRefusal::TooLong);
@@ -180,13 +205,13 @@ impl PairedLink {
         if params.iter().any(|(_, value)| value.is_empty()) {
             return Err(LinkRefusal::EmptyValue);
         }
-        let mut values: [Option<&str>; 4] = [None; 4];
+        let mut values: [Option<&str>; 5] = [None; 5];
         for (index, value) in &params {
             if let Some(index) = index {
                 values[*index] = Some(*value);
             }
         }
-        let [pin, alt, name, handoff] = values;
+        let [pin, alt, node, name, handoff] = values;
 
         let code_ok = match kind {
             LinkKind::Device => link_code_team(code).is_some(),
@@ -195,7 +220,9 @@ impl PairedLink {
         if !code_ok {
             return Err(LinkRefusal::BadCode);
         }
-        if pin.is_none() && (alt.is_some() || name.is_some() || kind == LinkKind::Pair) {
+        if pin.is_none()
+            && (alt.is_some() || node.is_some() || name.is_some() || kind == LinkKind::Pair)
+        {
             return Err(LinkRefusal::NeedsPin);
         }
         if kind == LinkKind::Pair && handoff.is_some() {
@@ -206,10 +233,15 @@ impl PairedLink {
             Some(text) => Some(parse_pin(text).ok_or(LinkRefusal::BadPin)?),
             None => None,
         };
-        let alt = match alt {
-            Some(list) => parse_alt(list, &origin_host, origin_port)?,
-            None => Vec::new(),
+        let (alt, tunnel) = match alt {
+            Some(list) => parse_alt(list, &origin_host, origin_port, connect_origin)?,
+            None => (Vec::new(), None),
         };
+        match (node, &tunnel) {
+            (None, None) => {}
+            (Some(node), Some(route)) if valid_node_id(node) && route.node() == node => {}
+            _ => return Err(LinkRefusal::BadNode),
+        }
         let name = name.map(decode_node_name).transpose()?;
         if let Some(handoff) = handoff
             && !valid_handoff(handoff)
@@ -226,6 +258,7 @@ impl PairedLink {
             code: Zeroizing::new(code.to_owned()),
             pin,
             alt,
+            tunnel,
             name,
             handoff: handoff.map(|text| Zeroizing::new(text.to_owned())),
             without_handoff: Zeroizing::new(without_handoff),
@@ -237,23 +270,50 @@ impl PairedLink {
         self.pin.map_or(TlsTrust::System, TlsTrust::Pinned)
     }
 
-    /// The address to connect to: the origin with the trust and the alternatives of the
-    /// link. The pin, the alternatives, and the name never go to a server.
+    /// The address to connect to: the origin with the trust, the alternatives, and the
+    /// Connect route of the link. The pin, the alternatives, the route, and the name never
+    /// go to a server.
     pub fn url(&self) -> Result<RelayUrl, SyncError> {
-        RelayUrl::parse_with_trust(&self.origin, self.trust())?.alternatives(&self.alt)
+        RelayUrl::parse_with_trust(&self.origin, self.trust())?
+            .alternatives(&self.alt)?
+            .with_tunnel(self.tunnel.clone())
     }
 
-    /// Write a link of `kind` for `url` (its origin, pin, and alternatives) with `code`
-    /// and the node name `name`, cut to its limits ([`clean_node_name`]). The link has no
-    /// handoff: the ADR 0032 channel appends it (`PairingChannel::link`). The result
-    /// passes [`Self::parse`]; else the reason, for example `NeedsPin` for a pair link of
-    /// a hosted address, or `BadAlt` for a loopback alternative.
+    /// Write a link of `kind` for `url` (its origin, pin, alternatives, and Connect
+    /// route) with `code` and the node name `name`, cut to its limits
+    /// ([`clean_node_name`]). The link has no handoff: the ADR 0032 channel appends it
+    /// (`PairingChannel::link`). The result passes [`Self::parse`]; else the reason, for
+    /// example `NeedsPin` for a pair link of a hosted address, `BadAlt` for a loopback
+    /// alternative, or `BadConnect` for a route through another Connect host than this
+    /// process's.
     pub fn format(
         kind: LinkKind,
         url: &RelayUrl,
         code: &str,
         name: Option<&str>,
     ) -> Result<Zeroizing<String>, LinkRefusal> {
+        Self::format_with(kind, url, code, name, url.tunnel())
+    }
+
+    /// [`Self::format`] with the Connect route `connect` in place of the address's own
+    /// (`None`: no route): the Mac's code of a node on Connect (plan s7 unit M5) adds
+    /// `alt=…,wss://<Connect host>/v1/tunnel/dial/<node>` and `node=<node>` beside the
+    /// tailnet address. A route takes one of the [`MAX_ALTERNATIVES`] entries
+    /// (`BadAlt` when none is left).
+    pub fn format_with(
+        kind: LinkKind,
+        url: &RelayUrl,
+        code: &str,
+        name: Option<&str>,
+        connect: Option<&TunnelRoute>,
+    ) -> Result<Zeroizing<String>, LinkRefusal> {
+        let url = url.clone().with_tunnel(connect.cloned()).map_err(|_| {
+            if url.pin().is_none() {
+                LinkRefusal::NeedsPin
+            } else {
+                LinkRefusal::BadAlt
+            }
+        })?;
         let path = match kind {
             LinkKind::Device => "link",
             LinkKind::Pair => "pair",
@@ -266,6 +326,10 @@ impl PairedLink {
             if !alt.is_empty() {
                 link.push_str("&alt=");
                 link.push_str(&alt.join(","));
+            }
+            if let Some(route) = url.tunnel() {
+                link.push_str("&node=");
+                link.push_str(route.node());
             }
             if let Some(name) = name.and_then(clean_node_name) {
                 link.push_str("&name=");
@@ -328,16 +392,32 @@ fn local_or_unspecified(host: &str) -> bool {
     })
 }
 
+/// An entry of `alt` with its index.
+type Entry<'a> = (usize, &'a str);
+
 /// The alternatives of section 7: 1 to 4 entries, each `host[:port]` with the origin's
 /// port when it has none; the origin itself, a repeated entry, a loopback, an
-/// unspecified, or a link-local address is `BadAlt`.
-fn parse_alt(list: &str, origin_host: &str, origin_port: u16) -> Result<Vec<String>, LinkRefusal> {
+/// unspecified, or a link-local address is `BadAlt`. An entry with a scheme (`://`) is
+/// the Connect route of section 7a: only one, the last entry, the canonical
+/// `wss://<host>/v1/tunnel/dial/<node id>`, through the host of `connect_origin`, else
+/// `BadConnect`. Every tailnet entry is checked before the route.
+fn parse_alt(
+    list: &str,
+    origin_host: &str,
+    origin_port: u16,
+    connect_origin: &str,
+) -> Result<(Vec<String>, Option<TunnelRoute>), LinkRefusal> {
     let entries: Vec<&str> = list.split(',').collect();
     if entries.is_empty() || entries.len() > MAX_ALTERNATIVES {
         return Err(LinkRefusal::BadAlt);
     }
-    let mut out: Vec<String> = Vec::with_capacity(entries.len());
-    for entry in entries {
+    let (routes, hosts): (Vec<Entry<'_>>, Vec<Entry<'_>>) = entries
+        .iter()
+        .copied()
+        .enumerate()
+        .partition(|(_, entry)| entry.contains("://"));
+    let mut out: Vec<String> = Vec::with_capacity(hosts.len());
+    for (_, entry) in hosts {
         let (host, port) = split_host_port(entry).ok_or(LinkRefusal::BadAlt)?;
         let port = port.unwrap_or(origin_port);
         let bare = host.trim_start_matches('[').trim_end_matches(']');
@@ -350,7 +430,18 @@ fn parse_alt(list: &str, origin_host: &str, origin_port: u16) -> Result<Vec<Stri
         }
         out.push(text);
     }
-    Ok(out)
+    let tunnel = match routes.as_slice() {
+        [] => None,
+        [(index, entry)] if *index == entries.len() - 1 => {
+            let route = TunnelRoute::parse(entry).ok_or(LinkRefusal::BadConnect)?;
+            if !route.is_through(connect_origin) {
+                return Err(LinkRefusal::BadConnect);
+            }
+            Some(route)
+        }
+        _ => return Err(LinkRefusal::BadConnect),
+    };
+    Ok((out, tunnel))
 }
 
 /// A byte that the name writes literally (RFC 3986 unreserved).
@@ -928,5 +1019,159 @@ mod tests {
                 "{text}"
             );
         }
+    }
+
+    /// The Connect route of section 7a: the vectors of
+    /// `tests/fixtures/node-pairing-v1/connect-route.json`. Old links still parse without
+    /// a route; a new link gives the route and the node; each refusal has its reason.
+    #[test]
+    fn the_connect_route_follows_the_fixture_vectors() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/node-pairing-v1/connect-route.json"
+        ))
+        .unwrap();
+        let connect = fixture["connect_origin"].as_str().unwrap();
+        let route = TunnelRoute::parse(fixture["route"].as_str().unwrap()).unwrap();
+        assert_eq!(route.node(), fixture["node"].as_str().unwrap());
+        assert_eq!(route.text(), fixture["route"].as_str().unwrap());
+        assert!(route.is_through(connect));
+        assert_eq!(
+            TunnelRoute::new(connect, route.node()).unwrap(),
+            route,
+            "the route of the Connect origin and the node id"
+        );
+
+        for old in fixture["old"].as_array().unwrap() {
+            let text = old["text"].as_str().unwrap();
+            let paired = PairedLink::parse_for(text, connect).expect(text);
+            assert!(paired.tunnel.is_none(), "{text}");
+            // The same parts as the reader without a Connect origin.
+            assert_eq!(
+                PairedLink::parse_for(text, "https://other.example.com"),
+                Ok(paired)
+            );
+        }
+        for accepted in fixture["accepted"].as_array().unwrap() {
+            let text = accepted["text"].as_str().unwrap();
+            let paired = PairedLink::parse_for(text, connect).expect(text);
+            let kind = match accepted["kind"].as_str().unwrap() {
+                "device" => LinkKind::Device,
+                _ => LinkKind::Pair,
+            };
+            assert_eq!(paired.kind, kind);
+            assert_eq!(paired.origin, accepted["origin"].as_str().unwrap());
+            assert_eq!(
+                paired.pin.map(|pin| pin.text()).as_deref(),
+                accepted["pin"].as_str()
+            );
+            let alt: Vec<String> = serde_json::from_value(accepted["alt"].clone()).unwrap();
+            assert_eq!(paired.alt, alt);
+            assert_eq!(
+                paired.tunnel.as_ref().map(TunnelRoute::text).as_deref(),
+                accepted["route"].as_str()
+            );
+            assert_eq!(paired.name.as_deref(), accepted["node_name"].as_str());
+            assert_eq!(
+                paired.handoff.is_some(),
+                accepted["handoff"].as_bool().unwrap()
+            );
+            assert_eq!(
+                paired.without_handoff.as_str(),
+                accepted["without_handoff"].as_str().unwrap()
+            );
+            // The address keeps the route as its last alternative: the stored form.
+            let url = paired.url().unwrap();
+            let stored: Vec<String> =
+                serde_json::from_value(accepted["stored_alt"].clone()).unwrap();
+            assert_eq!(url.alternative_list(), stored);
+            assert_eq!(url.tunnel(), paired.tunnel.as_ref());
+            assert_eq!(url.pin(), paired.pin);
+            // Read back from the stored form, the address is the same.
+            let back = RelayUrl::parse_with_trust(&paired.origin, paired.trust())
+                .unwrap()
+                .alternatives(&stored)
+                .unwrap();
+            assert_eq!(back.tunnel(), paired.tunnel.as_ref());
+            assert_eq!(back.alternative_list(), stored);
+            // A reader of another Connect refuses the route.
+            assert_eq!(
+                PairedLink::parse_for(text, "https://other.example.com"),
+                Err(LinkRefusal::BadConnect),
+                "{text}"
+            );
+        }
+        for refused in fixture["refused"].as_array().unwrap() {
+            let text = refused["text"].as_str().unwrap();
+            let reason = refused["reason"].as_str().unwrap();
+            let got = PairedLink::parse_for(text, connect).expect_err(text);
+            assert_eq!(got.reason(), reason, "{}: {text}", refused["name"]);
+            assert_eq!(got.message(), LINK_INVALID_TEXT);
+        }
+    }
+
+    /// The builder writes the route of a node on Connect beside the tailnet address:
+    /// `alt=…,wss://…` and `node=`, in the order of the grammar, and the reader takes it
+    /// back. Without a route the link is as before.
+    #[test]
+    fn the_builder_adds_the_connect_route_and_the_reader_takes_it() {
+        let connect = crate::connect::configured_origin();
+        let route = TunnelRoute::new(&connect, "node_k7m2q4x3ca").unwrap();
+        let url = RelayUrl::parse_with_trust(ORIGIN, TlsTrust::Pinned(pin()))
+            .unwrap()
+            .alternatives(&["apassy-mini.tail0123.ts.net".to_owned()])
+            .unwrap();
+        let without =
+            PairedLink::format(LinkKind::Device, &url, LINK_CODE, Some("Studio")).unwrap();
+        assert!(!without.contains("node=") && !without.contains("wss://"));
+        let with = PairedLink::format_with(
+            LinkKind::Device,
+            &url,
+            LINK_CODE,
+            Some("Studio"),
+            Some(&route),
+        )
+        .unwrap();
+        assert_eq!(
+            with.as_str(),
+            format!(
+                "{ORIGIN}/link#{LINK_CODE}&pin={PIN}&alt=apassy-mini.tail0123.ts.net:8444,{}&node=node_k7m2q4x3ca&name=Studio",
+                route.text()
+            )
+        );
+        let read = PairedLink::parse(&with).unwrap();
+        assert_eq!(read.tunnel.as_ref(), Some(&route));
+        assert_eq!(read.alt, ["apassy-mini.tail0123.ts.net:8444"]);
+        // The address with its route gives the same link through `format`.
+        let routed = url.clone().with_tunnel(Some(route.clone())).unwrap();
+        assert_eq!(
+            PairedLink::format(LinkKind::Device, &routed, LINK_CODE, Some("Studio")).unwrap(),
+            with
+        );
+        // A route of another Connect host, a hosted address, or no room left is refused.
+        let elsewhere = TunnelRoute::new("https://connect.example.com", "node_k7m2q4x3ca").unwrap();
+        assert_eq!(
+            PairedLink::format_with(LinkKind::Device, &url, LINK_CODE, None, Some(&elsewhere))
+                .unwrap_err(),
+            LinkRefusal::BadConnect
+        );
+        let hosted = RelayUrl::parse("https://apassy-relay.wyderka.cc").unwrap();
+        assert_eq!(
+            PairedLink::format_with(LinkKind::Device, &hosted, LINK_CODE, None, Some(&route))
+                .unwrap_err(),
+            LinkRefusal::NeedsPin
+        );
+        let full = url
+            .alternatives(&[
+                "a.example.com".to_owned(),
+                "b.example.com".to_owned(),
+                "c.example.com".to_owned(),
+                "d.example.com".to_owned(),
+            ])
+            .unwrap();
+        assert_eq!(
+            PairedLink::format_with(LinkKind::Device, &full, LINK_CODE, None, Some(&route))
+                .unwrap_err(),
+            LinkRefusal::BadAlt
+        );
     }
 }

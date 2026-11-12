@@ -215,12 +215,17 @@ pub(super) fn sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
                 }
             }
         });
+        // `apassy-sandbox` (Seatbelt) is macOS only: say what that means before setup.
+        #[cfg(target_os = "linux")]
+        kit::note(ui, crate::agents_unconfined!());
         kit::section(
             ui,
             None,
-            Some(
-                "You confirm once with Touch ID or the passphrase. Then the bouncer decides each use, and a question waits up to 5 minutes for you.",
-            ),
+            Some(concat!(
+                "You confirm once with ",
+                crate::owner_check!(),
+                ". Then the bouncer decides each use, and a question waits up to 5 minutes for you."
+            )),
             |s| {
                 let field = s.field("Name", |ui| {
                     kit::text_input(
@@ -246,7 +251,7 @@ pub(super) fn sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
                     &format!("Connect {}", selected.name()),
                     Style::Prominent,
                 )
-                .on_hover_text("⌘S")
+                .on_hover_text(crate::shortcut!("S"))
                 .clicked();
                 cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();
             },
@@ -299,6 +304,18 @@ fn host_row(ui: &mut egui::Ui, host: ConnectHost, selected: bool) {
 }
 
 /// The start of the host in a terminal, with the tool time-out of the 5-minute wait.
+/// Linux has no Apassy sandbox launcher (Seatbelt is macOS only): the host starts
+/// as itself.
+#[cfg(target_os = "linux")]
+pub(super) fn launch_command(host: Host) -> String {
+    match host {
+        Host::Claude => format!("{CLAUDE_TOOL_TIMEOUT} claude"),
+        Host::Codex => "codex".to_owned(),
+    }
+}
+
+/// The start of the host in a terminal, with the tool time-out of the 5-minute wait.
+#[cfg(not(target_os = "linux"))]
 pub(super) fn launch_command(host: Host) -> String {
     let launcher = std::env::current_exe()
         .ok()
@@ -310,6 +327,7 @@ pub(super) fn launch_command(host: Host) -> String {
     launch_command_at(host, &launcher)
 }
 
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 fn launch_command_at(host: Host, launcher: &std::path::Path) -> String {
     let launcher = format!(
         "'{}'",
@@ -337,7 +355,11 @@ pub(super) fn after_setup_notes(ui: &mut egui::Ui, host: ConnectHost) {
     kit::note(
         ui,
         format!(
-            "Configuration saved. Start {} in the Apassy sandbox on macOS with the command below. Keep Apassy open and the vault unlocked. Connection and first use still need verification.",
+            concat!(
+                "Configuration saved. Start {} ",
+                crate::agent_sandbox!(),
+                " Keep Apassy open and the vault unlocked. Connection and first use still need verification."
+            ),
             setup.name()
         ),
     );

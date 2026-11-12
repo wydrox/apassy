@@ -199,7 +199,10 @@ fn create_with_sync_writes_the_file_and_settings_shows_the_status() {
     let folders = folders();
     let mut app = folders.mac("mac-a");
     let text = frames(&mut app);
-    assert!(text.contains("Use a vault from another Mac"), "{text}");
+    assert!(
+        text.contains(concat!("Use a vault from another ", crate::computer!())),
+        "{text}"
+    );
     app.ui.start = Step::Create;
     let text = frames(&mut app);
     assert!(text.contains("Sync"), "{text}");
@@ -451,7 +454,10 @@ fn a_new_passphrase_from_another_mac_asks_once_and_rekeys() {
         )))
     ));
     let text = frames(&mut b);
-    assert!(text.contains("changed on another Mac"), "{text}");
+    assert!(
+        text.contains(concat!("changed on another ", crate::computer!())),
+        "{text}"
+    );
     let err = b.sync_take_passphrase(OTHER_PASS).unwrap_err();
     assert!(err.contains("does not open"), "{err}");
     b.sync_take_passphrase(NEW_PASS).expect("new passphrase");
@@ -478,7 +484,10 @@ fn open_a_synced_vault_adds_it_with_sync_on() {
     let mut b = folders.mac("mac-b");
     b.ui.start = Step::OpenSynced;
     let text = frames(&mut b);
-    assert!(text.contains("Use a vault from another Mac"), "{text}");
+    assert!(
+        text.contains(concat!("Use a vault from another ", crate::computer!())),
+        "{text}"
+    );
     assert!(text.contains("Team"), "the Dropbox file is listed: {text}");
 
     let file = folders.dropbox.join("Team.apassy");
@@ -652,11 +661,16 @@ fn second_mac_flow_shows_file_service_and_existing_passphrase_without_paths() {
         "Existing vault passphrase",
         "Choose another file",
         "Details",
-        "Help with iCloud",
         "Refresh",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
+    // iCloud Drive is a macOS place: Linux shows no help for it.
+    assert_eq!(
+        text.contains("Help with iCloud"),
+        !cfg!(target_os = "linux"),
+        "{text}"
+    );
     assert!(!text.contains("sandbox"), "{text}");
     assert!(
         !text.contains(&file.display().to_string()),
@@ -680,8 +694,10 @@ fn discovery_timeout_has_retry_and_help_and_preserves_safe_values() {
     let text = frames(&mut b);
     assert!(text.contains("did not respond in time"), "{text}");
     assert!(text.contains("cause is not known"), "{text}");
-    assert!(
-        text.contains("Retry") && text.contains("Help with iCloud"),
+    assert!(text.contains("Retry"), "{text}");
+    assert_eq!(
+        text.contains("Help with iCloud"),
+        !cfg!(target_os = "linux"),
         "{text}"
     );
     assert_eq!(b.sync.open_pick, Some(file.clone()));
@@ -737,12 +753,20 @@ fn folder_sync_status_does_not_claim_receipt_on_another_mac() {
         let text = status.words(true);
         assert!(text.contains("local file in the sync folder"), "{text}");
         assert!(
-            text.contains("Receipt on another Mac is not confirmed"),
+            text.contains(concat!(
+                "Receipt on another ",
+                crate::computer!(),
+                " is not confirmed"
+            )),
             "{text}"
         );
         assert_eq!(status.tag().0, "Saved to sync folder");
     }
-    assert!(UiStatus::Syncing.words(false).contains("Saved on this Mac"));
+    assert!(
+        UiStatus::Syncing
+            .words(false)
+            .contains(concat!("Saved on this ", crate::computer!()))
+    );
     assert_eq!(UiStatus::Waiting.tag().0, "Waiting for file");
     let folders = folders();
     let mut a = folders.mac("mac-a");
@@ -869,7 +893,11 @@ fn the_worker_syncs_while_a_run_waits_for_the_owner() {
     assert_ne!(
         fs::read(&file).expect("file"),
         before,
-        "the change of this Mac went up while the run waits"
+        concat!(
+            "the change of this ",
+            crate::computer!(),
+            " went up while the run waits"
+        )
     );
     assert!(!a.sync_change_waits_for_test());
 
@@ -1007,7 +1035,10 @@ fn a_new_passphrase_found_by_the_worker_opens_the_sheet_in_the_next_frame() {
         b.ui.sheet
     );
     let text = frames(&mut b);
-    assert!(text.contains("changed on another Mac"), "{text}");
+    assert!(
+        text.contains(concat!("changed on another ", crate::computer!())),
+        "{text}"
+    );
 }
 
 #[test]
@@ -1100,12 +1131,66 @@ fn assert_qr_encodes(qr: &crate::desktop::companion::QrModules, link: &str) {
     }
 }
 
+/// A vault that syncs through a vault store of the Connect account is named "Apassy
+/// Connect" everywhere the window names its sync: Settings › Vault › Sync (the picker,
+/// the tag, the line), the Vault row of Settings and the sidebar; and its buttons fit
+/// Connect: no device link ("Add a device…", "Devices…"), the devices of the account
+/// instead.
+#[test]
+fn a_vault_on_connect_is_named_apassy_connect() {
+    let folders = folders();
+    let relay = fake_relay::FakeRelay::start();
+    let (mut a, id) = relay_mac_a(&folders, &relay);
+    super::open_settings(&mut a, super::SettingsSection::Vault);
+    // The label that the turn-on through Connect (or the first sync of a store) keeps.
+    a.vault_list
+        .registry
+        .entry_mut(&id)
+        .and_then(|entry| entry.sync.as_mut())
+        .and_then(|link| link.relay.as_mut())
+        .expect("relay link")
+        .connect = true;
+    assert!(a.syncs_on_connect(&id));
+    // The message of the turn-on of the relay sync above goes.
+    a.status_text.clear();
+    let text = settled_frames(&mut a);
+    for expected in [
+        "Apassy Connect",
+        "Saved to Apassy Connect",
+        "Devices of the Account…",
+        "Sync now",
+    ] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+    for refused in [
+        "Apassy relay",
+        "Saved to the relay",
+        "Add a device…",
+        "Devices…",
+    ] {
+        assert!(!text.contains(refused), "{refused}: {text}");
+    }
+    assert_eq!(super::sync::sidebar_status(&a).0, "Apassy Connect");
+    let entry = a.vault_list.registry.get(&id).expect("entry").clone();
+    assert_eq!(super::sync::method_words(&a, &entry), "Apassy Connect");
+    // A vault of the relay keeps its name.
+    a.vault_list
+        .registry
+        .entry_mut(&id)
+        .and_then(|entry| entry.sync.as_mut())
+        .and_then(|link| link.relay.as_mut())
+        .expect("relay link")
+        .connect = false;
+    assert!(!a.syncs_on_connect(&id));
+    assert_eq!(super::sync::method_words(&a, &entry), "Apassy relay");
+}
+
 #[test]
 fn the_picker_offers_the_relay_after_the_detected_folders() {
     use super::sync::{Pick, picker_choices};
     let folders = folders();
     let app = folders.mac("mac-a");
-    let labels: Vec<String> = picker_choices(&app.sync.folders, true)
+    let labels: Vec<String> = picker_choices(&app.sync.folders, true, false)
         .into_iter()
         .map(|(_, label)| label)
         .collect();
@@ -1120,13 +1205,31 @@ fn the_picker_offers_the_relay_after_the_detected_folders() {
         ]
     );
     assert!(
-        picker_choices(&app.sync.folders, true).contains(&(Pick::Relay, "Apassy relay".into()))
+        picker_choices(&app.sync.folders, true, false)
+            .contains(&(Pick::Relay, "Apassy relay".into()))
+    );
+    // With an account that can sync through Connect, "Apassy Connect" follows the relay:
+    // the choice that the start screen names ("select Apassy Connect").
+    let labels: Vec<String> = picker_choices(&app.sync.folders, true, true)
+        .into_iter()
+        .map(|(_, label)| label)
+        .collect();
+    assert_eq!(
+        labels,
+        [
+            "Off",
+            "iCloud Drive",
+            "Dropbox",
+            "Apassy relay",
+            "Apassy Connect",
+            "Choose folder…"
+        ]
     );
     // The Create screen keeps folders only.
     assert!(
-        !picker_choices(&app.sync.folders, false)
+        !picker_choices(&app.sync.folders, false, true)
             .iter()
-            .any(|(pick, _)| *pick == Pick::Relay)
+            .any(|(pick, _)| matches!(pick, Pick::Relay | Pick::Connect))
     );
 }
 
@@ -1140,17 +1243,20 @@ fn the_relay_setup_sheet_asks_for_the_address_the_team_code_and_the_name() {
     super::open_settings(&mut a, super::SettingsSection::Vault);
     a.sync_open_sheet(SyncSheet::RelaySetup { id: id.clone() }, None);
     assert_eq!(a.sync.relay.url_input, crate::sync::DEFAULT_RELAY_URL);
-    assert!(!a.sync.relay.device_input.is_empty(), "this Mac's name");
+    assert!(
+        !a.sync.relay.device_input.is_empty(),
+        concat!("this ", crate::computer!(), "'s name")
+    );
     let ctx = egui::Context::default();
     let text = frames_in(&ctx, &mut a, Vec::new());
     for expected in [
         "Sync “Personal” through the Apassy relay",
         "New relay copy",
-        "Join from another Mac",
+        concat!("Join from another ", crate::computer!()),
         "Your own node",
         "Relay address",
         "Relay with a team code",
-        "Name of this Mac",
+        concat!("Name of this ", crate::computer!()),
         "https://apassy-relay.wyderka.cc",
         "Turn on",
     ] {
@@ -1251,10 +1357,7 @@ fn add_a_mac_shows_a_link_then_the_safety_words_and_confirm_needs_the_owner_chec
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
-    assert_eq!(
-        super::sync::sidebar_status(&a).0,
-        "Synced just now · Apassy relay"
-    );
+    assert_eq!(super::sync::sidebar_status(&a).0, "Apassy relay");
 
     // Mac A: the link, and nobody asks yet.
     a.sync_open_sheet(SyncSheet::AddMac { id: id.clone() }, None);
@@ -1336,7 +1439,10 @@ fn add_a_mac_shows_a_link_then_the_safety_words_and_confirm_needs_the_owner_chec
         "the used code is erased"
     );
     let text = frames(&mut b);
-    assert!(text.contains("Waiting for the other Mac…"), "{text}");
+    assert!(
+        text.contains(concat!("Waiting for the other ", crate::computer!(), "…")),
+        "{text}"
+    );
     assert!(text.contains(&words), "{words}: {text}");
 
     // Mac A shows the same words for the Mac that asks.
@@ -1421,7 +1527,7 @@ fn add_a_mac_shows_a_link_then_the_safety_words_and_confirm_needs_the_owner_chec
     let text = settled_frames(&mut a);
     for expected in [
         "Synthetic MacBook",
-        "This Mac",
+        concat!("This ", crate::computer!()),
         "Synthetic Mac mini",
         "Remove",
     ] {
@@ -1473,7 +1579,8 @@ fn add_a_mac_shows_a_link_then_the_safety_words_and_confirm_needs_the_owner_chec
     a.sync_now();
     a.relay_settle_for_test();
     assert!(
-        a.status_text.contains("1 credential changed on this Mac"),
+        a.status_text
+            .contains(concat!("1 credential changed on this ", crate::computer!())),
         "{}",
         a.status_text
     );
@@ -1511,7 +1618,11 @@ fn relay_statuses_read_as_in_the_adr() {
     };
     assert_eq!(
         words(&up, Some(&unnamed)),
-        "Saved to the relay. Received by another Mac 1 minute ago."
+        concat!(
+            "Saved to the relay. Received by another ",
+            crate::computer!(),
+            " 1 minute ago."
+        )
     );
     assert_eq!(tag(&up), ("Saved to the relay", super::kit::Tone::Good));
     let problem = |error: SyncError| UiStatus::Problem(error.to_string());
@@ -1528,17 +1639,24 @@ fn relay_statuses_read_as_in_the_adr() {
         "The copy on the relay fails a check. Apassy did not use it, and does not download it again until it changes."
     );
     assert!(
-        words(&problem(SyncError::RemovedFromRelay), None).starts_with(
-            "Removed from the relay. This Mac keeps its vault. Turn relay sync off, then join again with a link from another Mac."
-        )
+        words(&problem(SyncError::RemovedFromRelay), None).starts_with(concat!(
+            "Removed from the relay. This ",
+            crate::computer!(),
+            " keeps its vault. Turn relay sync off, then join again with a link from another ",
+            crate::computer!(),
+            "."
+        ))
     );
     assert_eq!(
         tag(&problem(SyncError::RemovedFromRelay)).0,
         "Removed from the relay"
     );
     assert!(
-        words(&problem(SyncError::ForkedCopy), None)
-            .starts_with("The relay served a copy that does not include this Mac's last change.")
+        words(&problem(SyncError::ForkedCopy), None).starts_with(concat!(
+            "The relay served a copy that does not include this ",
+            crate::computer!(),
+            "'s last change."
+        ))
     );
     assert_eq!(tag(&problem(SyncError::StaleCopy)).0, "Relay copy refused");
     // A relay that limits: the worker waits and tries again on its own.
@@ -1555,7 +1673,11 @@ fn relay_statuses_read_as_in_the_adr() {
     let hourly = problem(SyncError::Relay(RelayRefusal::TeamLimit));
     assert_eq!(tag(&hourly).0, "Sync paused");
     assert!(
-        words(&hourly, None).ends_with("The changes stay on this Mac and sync later."),
+        words(&hourly, None).ends_with(concat!(
+            "The changes stay on this ",
+            crate::computer!(),
+            " and sync later."
+        )),
         "{}",
         words(&hourly, None)
     );
@@ -1658,7 +1780,7 @@ fn turn_off_of_a_removed_or_last_mac_says_what_happened() {
     assert_eq!(
         relay.log().len(),
         calls,
-        "a removed Mac asks the relay nothing"
+        concat!("a removed ", crate::computer!(), " asks the relay nothing")
     );
 
     // "Turn off" asks the relay once more: a suspended relay refuses the same way.
@@ -1669,7 +1791,10 @@ fn turn_off_of_a_removed_or_last_mac_says_what_happened() {
     assert_eq!(relay.count("DELETE /v1/devices/"), 1, "only A's removal");
     let done = b.status_text.clone();
     assert!(done.contains("no longer in the relay team"), "{done}");
-    assert!(done.contains("“Devices…” on another Mac"), "{done}");
+    assert!(
+        done.contains(concat!("“Devices…” on another ", crate::computer!())),
+        "{done}"
+    );
     assert!(!done.contains("still in the relay team"), "{done}");
     assert!(!done.contains("Turn relay sync off"), "{done}");
 
@@ -1678,10 +1803,17 @@ fn turn_off_of_a_removed_or_last_mac_says_what_happened() {
     a.relay_settle_for_test();
     let done = a.status_text.clone();
     assert!(
-        done.contains("was the last Mac of the relay team"),
+        done.contains(concat!(
+            "was the last ",
+            crate::computer!(),
+            " of the relay team"
+        )),
         "{done}"
     );
-    assert!(!done.contains("on another Mac"), "{done}");
+    assert!(
+        !done.contains(concat!("on another ", crate::computer!())),
+        "{done}"
+    );
     assert_eq!(relay.devices().len(), 1, "the relay keeps the last device");
 }
 
@@ -1699,7 +1831,8 @@ fn turning_relay_sync_off_keeps_the_copy_and_the_last_mac_can_delete_it() {
     );
     assert!(
         text.contains("Delete the copy on the relay"),
-        "the last Mac gets the choice: {text}"
+        concat!("the last ", crate::computer!(), " gets the choice: {text}"),
+        text = text
     );
     a.relay_turn_off(&id, false, None).expect("off");
     a.relay_settle_for_test();
@@ -1707,7 +1840,8 @@ fn turning_relay_sync_off_keeps_the_copy_and_the_last_mac_can_delete_it() {
     assert!(done.contains("The copy on the relay stays."), "{done}");
     assert!(
         done.contains("only the operator of the relay can delete the copy now"),
-        "the last Mac says what stays: {done}"
+        concat!("the last ", crate::computer!(), " says what stays: {done}"),
+        done = done
     );
     assert_eq!(relay.version(), 1, "the relay copy stays");
     assert!(
@@ -1749,7 +1883,11 @@ fn turning_relay_sync_off_keeps_the_copy_and_the_last_mac_can_delete_it() {
         "{team}: {:?}",
         relay.log()
     );
-    assert_eq!(names(&a), vec!["Alpha"], "the vault on this Mac stays");
+    assert_eq!(
+        names(&a),
+        vec!["Alpha"],
+        concat!("the vault on this ", crate::computer!(), " stays")
+    );
 }
 
 /// Mac A confirms the one Mac that waits in its "Add a device…" sheet.
@@ -1815,7 +1953,10 @@ fn a_mac_that_turned_relay_sync_off_joins_again_with_a_link_and_merges() {
     b.relay_join_request(Some(id_b.clone()), None);
     b.relay_join_settle_for_test();
     let text = frames(&mut b);
-    assert!(text.contains("Waiting for the other Mac…"), "{text}");
+    assert!(
+        text.contains(concat!("Waiting for the other ", crate::computer!(), "…")),
+        "{text}"
+    );
     confirm_waiting_mac(&mut a);
     b.relay_join_poll_now_for_test();
     assert!(b.ui.sheet.is_none(), "{:?}", b.sync.relay.join_error);
@@ -1879,7 +2020,7 @@ fn joining_a_relay_copy_under_another_passphrase_asks_for_it() {
     for expected in [
         "uses another passphrase than this vault",
         "Passphrase of the copy",
-        "takes it, as on your other Macs",
+        concat!("takes it, as on your other ", crate::computers!()),
         "Merge",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
@@ -2369,13 +2510,17 @@ fn relay_calls_of_the_owner_leave_the_window_responsive() {
         started.elapsed()
     );
     assert!(
-        text.contains("Apassy asks the relay for the Macs…"),
+        text.contains(concat!(
+            "Apassy asks the relay for the ",
+            crate::computers!(),
+            "…"
+        )),
         "{text}"
     );
     devices.release();
     let text = settled_frames(&mut a);
     assert!(
-        text.contains("Synthetic MacBook") && text.contains("This Mac"),
+        text.contains("Synthetic MacBook") && text.contains(concat!("This ", crate::computer!())),
         "{text}"
     );
 }
@@ -2434,7 +2579,14 @@ fn switching_a_relay_vault_to_a_folder_leaves_the_relay_team() {
         text.contains("Sync “Personal” with Dropbox instead of the relay?"),
         "{text}"
     );
-    assert!(text.contains("this Mac leaves the relay team"), "{text}");
+    assert!(
+        text.contains(concat!(
+            "this ",
+            crate::computer!(),
+            " leaves the relay team"
+        )),
+        "{text}"
+    );
     assert!(text.contains("Switch"), "{text}");
     b.relay_turn_off(&id_b, false, Some(folders.dropbox.clone()))
         .expect("switch");
@@ -2498,7 +2650,14 @@ fn a_damaged_relay_copy_offers_replace_with_this_macs_vault() {
         text.contains("The copy of “Personal” on the relay fails a check"),
         "{text}"
     );
-    assert!(text.contains("Replace with this Mac's vault…"), "{text}");
+    assert!(
+        text.contains(concat!(
+            "Replace with this ",
+            crate::computer!(),
+            "'s vault…"
+        )),
+        "{text}"
+    );
 
     a.ui.sheet = Some(Sheet::Vault(VaultSheet::Sync(SyncSheet::ReplaceDamaged {
         id: id.clone(),
@@ -2511,8 +2670,11 @@ fn a_damaged_relay_copy_offers_replace_with_this_macs_vault() {
     a.relay_replace(&id);
     let text = frames(&mut a);
     assert!(
-        text.contains("Apassy uploads the vault of this Mac to the relay…")
-            || a.relay_jobs_for_test() == 0,
+        text.contains(concat!(
+            "Apassy uploads the vault of this ",
+            crate::computer!(),
+            " to the relay…"
+        )) || a.relay_jobs_for_test() == 0,
         "{text}"
     );
     a.relay_settle_for_test();
@@ -2524,8 +2686,11 @@ fn a_damaged_relay_copy_offers_replace_with_this_macs_vault() {
         Some(UiStatus::UpToDate(_))
     ));
     assert!(
-        a.status_text
-            .starts_with("The relay has the vault of this Mac now."),
+        a.status_text.starts_with(concat!(
+            "The relay has the vault of this ",
+            crate::computer!(),
+            " now."
+        )),
         "{}",
         a.status_text
     );
@@ -2554,7 +2719,11 @@ fn received_by_shows_the_receipt_of_the_other_mac() {
     let text = settled_frames(&mut a);
     // The fake relay sends no device names; the real relay does (contract section 9).
     assert!(
-        text.contains("Saved to the relay. Received by another Mac just now."),
+        text.contains(concat!(
+            "Saved to the relay. Received by another ",
+            crate::computer!(),
+            " just now."
+        )),
         "{text}"
     );
 }
@@ -2681,7 +2850,10 @@ fn use_the_relay_copy_asks_for_the_passphrase_of_an_older_copy() {
     assert!(text.contains("uses another passphrase"), "{text}");
     assert!(text.contains("Passphrase of the copy"), "{text}");
     assert!(text.contains("keeps its passphrase"), "{text}");
-    assert!(!text.contains("changed on another Mac"), "{text}");
+    assert!(
+        !text.contains(concat!("changed on another ", crate::computer!())),
+        "{text}"
+    );
     a.ui.sheet = None;
     super::open_settings(&mut a, super::SettingsSection::Vault);
     let text = frames(&mut a);
@@ -2690,13 +2862,17 @@ fn use_the_relay_copy_asks_for_the_passphrase_of_an_older_copy() {
         text.contains(super::sync::relay::OLDER_COPY_WORDS),
         "{text}"
     );
-    assert!(!text.contains("changed on another Mac"), "{text}");
+    assert!(
+        !text.contains(concat!("changed on another ", crate::computer!())),
+        "{text}"
+    );
 
     a.relay_take_passphrase(&id, Zeroizing::new(PASS.to_owned()));
     a.relay_settle_for_test();
     assert!(a.ui.sheet.is_none(), "{}", a.status_text);
     assert!(
-        a.status_text.contains("keeps the passphrase of this Mac"),
+        a.status_text
+            .contains(concat!("keeps the passphrase of this ", crate::computer!())),
         "{}",
         a.status_text
     );
@@ -2913,7 +3089,7 @@ fn questions_through_a_notifications_only_team_need_the_owner_check() {
     for expected in [
         "Get approvals on your iPhone",
         "Relay address",
-        "Name of this Mac",
+        concat!("Name of this ", crate::computer!()),
         "Connect…",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
@@ -3022,7 +3198,10 @@ fn questions_through_a_notifications_only_team_need_the_owner_check() {
         Some(&membership.device_id)
     );
     let text = frames(&mut a);
-    assert!(text.contains("Add an iPhone or a Mac…"), "{text}");
+    assert!(
+        text.contains(concat!("Add an iPhone or a ", crate::computer!(), "…")),
+        "{text}"
+    );
 
     // Off: no check; the membership and its key go, and the vault keeps its sync.
     a.questions_turn_off();
@@ -3241,8 +3420,8 @@ fn add_an_iphone_to_the_questions_shows_a_qr_code_and_needs_the_owner_check() {
     a.questions_settle_for_test();
     // This Mac's row has the name of the machine, not its device name on the relay.
     for expected in [
-        "This Mac",
-        "Mac · Asks for approvals",
+        concat!("This ", crate::computer!()),
+        concat!(crate::computer_cap!(), " · Asks for approvals"),
         "Test iPhone",
         "iPhone · Approves runs",
         "via Apassy relay",
@@ -3760,9 +3939,11 @@ fn a_second_mac_joins_the_questions_team_with_a_link() {
     a.relay_ask_confirm_for_test(links[0].id);
     let request = a.owner.check.as_ref().expect("owner check").request.clone();
     assert!(
-        request
-            .describe()
-            .starts_with("Add the Mac \"Synthetic Mac mini\" to the questions of this vault"),
+        request.describe().starts_with(concat!(
+            "Add the ",
+            crate::computer!(),
+            " \"Synthetic Mac mini\" to the questions of this vault"
+        )),
         "{}",
         request.describe()
     );
@@ -3980,7 +4161,10 @@ fn the_relay_sync_notice_shows_only_for_the_hosted_relay() {
     );
     assert!(notice.contains("part of Apassy Connect"), "{notice}");
     assert!(
-        notice.contains("Mac or Linux node can be the sync home (free)"),
+        notice.contains(concat!(
+            crate::computer!(),
+            " or Linux node can be the sync home (free)"
+        )),
         "{notice}"
     );
     // Plans section 5: relay sync is not the paid feature, and no price shows.
@@ -4050,7 +4234,10 @@ fn the_new_relay_copy_step_has_no_code_field_for_the_hosted_relay() {
     );
     assert!(words.contains(FREE_RELAY_PATHS_END_VERSION), "{words}");
     assert!(
-        words.contains("Mac or Linux node can be the sync home (free)"),
+        words.contains(concat!(
+            crate::computer!(),
+            " or Linux node can be the sync home (free)"
+        )),
         "{words}"
     );
     // Plans section 5: relay sync is not the paid feature, and no price shows.
@@ -4145,11 +4332,11 @@ fn your_own_node_takes_a_pairing_link_and_the_iphone_link_names_the_node_and_its
     let text = frames_in(&ctx, &mut a, Vec::new());
     for expected in [
         "New relay copy",
-        "Join from another Mac",
+        concat!("Join from another ", crate::computer!()),
         "Your own node",
         "Pairing link",
         "apassy pair",
-        "Name of this Mac",
+        concat!("Name of this ", crate::computer!()),
         "Turn on",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
@@ -4173,7 +4360,11 @@ fn your_own_node_takes_a_pairing_link_and_the_iphone_link_names_the_node_and_its
     assert!(a.ui.sheet.is_none(), "{}", a.status_text);
     assert_eq!(
         a.status_text,
-        "“Personal” syncs through your own node. To add another Mac or an iPhone, select “Add a device…”."
+        concat!(
+            "“Personal” syncs through your own node. To add another ",
+            crate::computer!(),
+            " or an iPhone, select “Add a device…”."
+        )
     );
     assert!(a.sync.relay.pair_input.is_empty(), "the code is erased");
     assert_eq!(relay.version(), 1);
@@ -4437,5 +4628,245 @@ fn a_wrong_pin_refuses_the_node_before_any_request() {
     assert_eq!(
         RelayConfig::for_link(&a.vault_list.data_dir, &entry.path, &tampered, &state).unwrap_err(),
         SyncError::InvalidRelayAddress
+    );
+}
+
+// ---- A vault store deleted at a recovery (connect-account-v1 sections 9 and 16.7). ----
+
+/// The line and the tag of a vault store that Connect deleted at a recovery say so, and
+/// never "damaged", "removed", or "join again with a link". A store that refuses this
+/// device for another reason claims no recovery and names no link.
+#[test]
+fn a_store_deleted_at_a_recovery_says_so_and_nothing_else() {
+    use super::sync::relay::{STORE_REFUSED_WORDS, tag_of, words_of};
+    use crate::desktop::sync_worker::ConnectState;
+    use crate::sync::{StoreDeleted, SyncError};
+    let deleted = |why| UiStatus::Connect(ConnectState::StoreDeleted(why));
+    assert_eq!(
+        words_of(&deleted(StoreDeleted::Recovered), None, true),
+        "The copy of this vault at Apassy Connect was deleted when the account was recovered."
+    );
+    assert_eq!(
+        words_of(&deleted(StoreDeleted::OwnerRecovered), None, true),
+        "The copy of this vault at Apassy Connect was deleted when the person who shares it with you recovered their account."
+    );
+    for why in [StoreDeleted::Recovered, StoreDeleted::OwnerRecovered] {
+        let words = words_of(&deleted(why), None, true);
+        let (tag, tone) = tag_of(&deleted(why), true);
+        assert_eq!(
+            (tag, tone),
+            ("Copy at Connect deleted", super::kit::Tone::Warning)
+        );
+        for wrong in ["amaged", "emoved", "link", "relay"] {
+            assert!(
+                !words.contains(wrong) && !tag.contains(wrong),
+                "{words} {tag}"
+            );
+        }
+    }
+    let refused = UiStatus::Problem(SyncError::RemovedFromRelay.to_string());
+    let words = words_of(&refused, None, true);
+    assert_eq!(words, STORE_REFUSED_WORDS);
+    assert!(
+        !words.contains("recovered") && !words.contains("link"),
+        "{words}"
+    );
+}
+
+/// The row of a deleted store keeps its line and "Sync Through Apassy Connect Again…"
+/// inside the row from the narrowest Settings column to a wide one
+/// (`rows::text_buttons`): the line wraps, and the button goes under it.
+#[test]
+fn the_row_of_a_deleted_store_fits_its_column_at_each_width() {
+    use super::sync::relay::{SYNC_AGAIN, deleted_store_row};
+    use crate::sync::StoreDeleted;
+    for width in [300.0_f32, 340.0, 560.0] {
+        let ctx = egui::Context::default();
+        let left = 20.0;
+        for frame in 0..3 {
+            let screen = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 800.0))),
+                ..Default::default()
+            };
+            let output = ctx.run_ui(screen, |ui| {
+                let rect = Rect::from_min_size(egui::pos2(left, 0.0), Vec2::new(width, 800.0));
+                ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                    let _ = deleted_store_row(ui, StoreDeleted::OwnerRecovered, true);
+                });
+            });
+            if frame == 2 {
+                let mut text = String::new();
+                for clipped in &output.shapes {
+                    collect(&clipped.shape, &mut text);
+                    let right = clipped.shape.visual_bounding_rect().right();
+                    assert!(
+                        right <= left + width + 3.0,
+                        "at {width}: a shape ends at {right}, past {}: {:?}",
+                        left + width,
+                        clipped.shape
+                    );
+                }
+                assert!(text.contains(SYNC_AGAIN), "at {width}:\n{text}");
+                assert!(text.contains("recovered their"), "at {width}:\n{text}");
+            }
+            output.drop_without_applying_deltas();
+        }
+    }
+}
+
+/// The whole path in the window: a vault syncs through its store; the account file then
+/// says that this device recovered the account, and the state of the sync names an earlier
+/// account key (as after a recovery, which also deleted the store at Connect). The window
+/// marks the sync at its Connect step: its row says so with "Sync Through Apassy Connect
+/// Again…", no sync and no "Sync now" asks Connect, and the button opens the step that
+/// turns on the sync through Apassy Connect, which makes a new store that syncs.
+#[test]
+fn a_store_deleted_at_a_recovery_is_named_once_and_a_new_store_syncs() {
+    use super::connect::{Action, live};
+    use super::connect_tests::fake_connect::FakeConnect;
+    use super::connect_tests::{create_account, until};
+    use super::sync::relay::{SYNC_AGAIN, SetupMode};
+    use crate::connect::MemoryKeyStore;
+    use crate::desktop::sync_worker::ConnectState;
+    use crate::sync::{StoreDeleted, StorePlan};
+    let dir = TempDir::new().expect("temp dir");
+    let relay = Arc::new(fake_relay::FakeRelay::start());
+    let connect = FakeConnect::with_relay(Arc::clone(&relay) as _);
+    let mut app = DesktopApp::new();
+    app.load_vault_list(dir.path().join("mac"), true);
+    app.sync.offered = true;
+    let ctx = egui::Context::default();
+    app.vault_list.name_input = "Personal".to_owned();
+    app.owner_ui.passphrase.push_str(PASS);
+    app.owner_ui.passphrase_confirm.push_str(PASS);
+    start::create_vault(&mut app, &ctx);
+    assert!(!app.owner_ui.session.is_locked(), "{}", app.status_text);
+    let data = dir.path().join("data");
+    fs::create_dir_all(&data).expect("data dir");
+    app.connect_configure(Some(Arc::new(MemoryKeyStore::new())), Some(data));
+    app.ui.connect.live.origin = Some(connect.url.clone());
+    super::open_settings(&mut app, super::SettingsSection::Connect);
+    let account_id = create_account(&ctx, &mut app, "Rafal");
+    connect.entitle(&account_id);
+    let output = ctx.run_ui(RawInput::default(), |ui| {
+        live::act(&mut app, ui.ctx(), Action::SignIn);
+    });
+    output.drop_without_applying_deltas();
+    until(&ctx, &mut app, "the plan", |app| {
+        app.ui
+            .connect
+            .live
+            .sync_account()
+            .is_some_and(|account| account.plan.is_some_and(StorePlan::entitled))
+    });
+    let id = current_id(&app);
+    app.relay_enable_connect(&id).expect("turn on");
+    app.relay_settle_for_test();
+    let sync = app.relay_of(&id).expect("the relay sync");
+    let state = sync.state().expect("state").expect("on");
+    let old = state.team_id.clone().expect("a store");
+    let key = state.store_key.clone().expect("the account key");
+
+    // A recovery: Connect deletes the store; the account file says so; the state names an
+    // earlier key of this device.
+    connect.delete_store(&old);
+    let file = app.ui.connect.live.session().path().expect("account file");
+    let mut account: serde_json::Value =
+        serde_json::from_slice(&fs::read(&file).expect("read")).expect("json");
+    account["recovered_at"] = serde_json::json!(1_790_000_000_u64);
+    fs::write(&file, serde_json::to_vec(&account).expect("json")).expect("write");
+    let earlier = crate::sync::DeviceKey::generate()
+        .expect("key")
+        .public_key_b64u();
+    assert_ne!(earlier, key);
+    let path = sync.config().state_path.clone();
+    let mut written: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).expect("read")).expect("json");
+    written["store_key"] = serde_json::json!(earlier);
+    fs::write(&path, serde_json::to_vec(&written).expect("json")).expect("write");
+
+    // The Connect step of the window marks it (no network), before any sync asks.
+    app.relay_connect_tick_now_for_test();
+    assert_eq!(app.relay_store_deleted(&id), Some(StoreDeleted::Recovered));
+    assert_eq!(
+        app.sync.statuses.get(&id),
+        Some(&UiStatus::Connect(ConnectState::StoreDeleted(
+            StoreDeleted::Recovered
+        )))
+    );
+    let asked = |relay: &fake_relay::FakeRelay| {
+        relay
+            .log()
+            .iter()
+            .filter(|line| {
+                line.contains(&old) || line.contains("/v1/sync") || line.contains("/v1/auth")
+            })
+            .count()
+    };
+    let before = asked(&relay);
+    app.sync_now();
+    app.relay_settle_for_test();
+    let now = Instant::now();
+    app.sync.worker.tick(now);
+    app.sync.worker.tick(now + SETTLE + Duration::from_secs(1));
+    app.sync
+        .worker
+        .tick(now + CHECK_EVERY + Duration::from_secs(1));
+    assert_eq!(asked(&relay), before, "{:?}", relay.log());
+    let events = app.sync.worker.take_events();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                crate::desktop::sync_worker::SyncEvent::Failure { .. }
+            ))
+            .count(),
+        1,
+        "said once: {events:?}"
+    );
+    super::open_settings(&mut app, super::SettingsSection::Vault);
+    let text = frames(&mut app);
+    assert!(
+        text.contains("was deleted when the account was recovered."),
+        "{text}"
+    );
+    assert!(text.contains(SYNC_AGAIN), "{text}");
+    for wrong in ["Damaged", "Removed from", "join again", "Sync now"] {
+        assert!(!text.contains(wrong), "{wrong:?} in {text}");
+    }
+
+    // The button: the setup sheet on "Apassy Connect", whose "Turn on" makes a new store.
+    app.relay_sync_again(&id, Some(&ctx));
+    assert!(matches!(
+        &app.ui.sheet,
+        Some(Sheet::Vault(VaultSheet::Sync(SyncSheet::RelaySetup { id: open }))) if *open == id
+    ));
+    assert_eq!(app.sync.relay.mode, SetupMode::Connect);
+    app.relay_enable_connect(&id).expect("turn on again");
+    app.relay_settle_for_test();
+    assert_eq!(app.relay_store_deleted(&id), None);
+    let state = app
+        .relay_of(&id)
+        .expect("the relay sync")
+        .state()
+        .expect("state")
+        .expect("on");
+    let new = state.team_id.clone().expect("a store");
+    assert_ne!(new, old, "a new store");
+    assert_eq!(state.store_key.as_deref(), Some(key.as_str()));
+    app.relay_connect_tick_now_for_test();
+    assert_eq!(
+        app.relay_store_deleted(&id),
+        None,
+        "the new store is not deleted"
+    );
+    app.sync_now();
+    app.relay_settle_for_test();
+    assert!(
+        matches!(app.sync.statuses.get(&id), Some(UiStatus::UpToDate(_))),
+        "{:?} {}",
+        app.sync.statuses.get(&id),
+        app.status_text
     );
 }

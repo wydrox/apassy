@@ -98,7 +98,7 @@ use std::error::Error;
 use std::io::Error as IoError;
 use std::io::ErrorKind as IoErrorKind;
 use std::io::Result as IoResult;
-use std::net::{Shutdown, TcpStream, ToSocketAddrs};
+use std::net::{Shutdown, SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::mpsc;
@@ -110,9 +110,9 @@ use client::ClientConnection;
 use connection::Connection;
 use util::MessagesQueue;
 
-pub use common::{HTTPVersion, Header, HeaderField, Method, StatusCode};
+pub use common::{asks_upgrade, HTTPVersion, Header, HeaderField, Method, StatusCode};
 pub use connection::{ConfigListenAddr, ListenAddr, Listener};
-pub use request::{ReadWrite, Request};
+pub use request::{ReadWrite, Request, UpgradedParts};
 pub use response::{Response, ResponseBox};
 pub use test::TestRequest;
 
@@ -120,6 +120,8 @@ mod client;
 mod common;
 mod connection;
 mod deadline;
+#[cfg(test)]
+mod keep_alive_tests;
 mod request;
 mod response;
 mod ssl;
@@ -179,6 +181,25 @@ pub struct ServerConfig {
 
     /// If `Some`, then the server will use SSL to encode the communications.
     pub ssl: Option<SslConfig>,
+}
+
+/// Apassy (connect keep-alive): sequential requests on one connection of a deadline
+/// server, only where `allow` says so (`Server::http_with_deadlines_and_keep_alive`).
+///
+/// `allow` gets the client's address and the listener's address, when an answer is about
+/// to be written; a connection that it refuses serves one request and its answer says
+/// `Connection: close`, as on a server without keep-alive. Requests are never pipelined:
+/// the next head is read only after the answer of the request before it was written
+/// whole, and bytes of a next request that came before that close the connection. Each
+/// request has the header, body, and handle deadlines of a new connection; between two
+/// requests the first byte of the next head must come within `idle`. An idle or
+/// pipelined connection closes without a byte from the server.
+#[derive(Clone)]
+pub struct KeepAlive {
+    /// The longest wait for the first byte of the next request head.
+    pub idle: Duration,
+    /// True for a connection (client address, listener address) that may stay open.
+    pub allow: Arc<dyn Fn(SocketAddr, SocketAddr) -> bool + Send + Sync>,
 }
 
 /// Configuration of the server for SSL.
@@ -245,7 +266,7 @@ impl Server {
         listener: L,
         ssl_config: Option<SslConfig>,
     ) -> Result<Server, Box<dyn Error + Send + Sync + 'static>> {
-        Self::from_listener_deadlines(listener, ssl_config, None)
+        Self::from_listener_deadlines(listener, ssl_config, None, None)
     }
 
     /// Relay-only plain HTTP transport: absolute header/body/handle deadlines.
@@ -256,10 +277,24 @@ impl Server {
         body: Duration,
         handle: Duration,
     ) -> Result<Server, Box<dyn Error + Send + Sync + 'static>> {
+        Self::http_with_deadlines_and_keep_alive(addr, header, body, handle, None)
+    }
+
+    /// Apassy (connect keep-alive): [`Server::http_with_deadlines`] whose connections
+    /// carry sequential requests where `keep` allows it ([`KeepAlive`]). `None`: every
+    /// connection serves one request.
+    pub fn http_with_deadlines_and_keep_alive<A: ToSocketAddrs>(
+        addr: A,
+        header: Duration,
+        body: Duration,
+        handle: Duration,
+        keep: Option<KeepAlive>,
+    ) -> Result<Server, Box<dyn Error + Send + Sync + 'static>> {
         Self::from_listener_deadlines(
             ConfigListenAddr::from_socket_addrs(addr)?.bind()?,
             None,
             Some((header, body, handle)),
+            keep,
         )
     }
 
@@ -267,6 +302,7 @@ impl Server {
         listener: L,
         ssl_config: Option<SslConfig>,
         deadlines: Option<(Duration, Duration, Duration)>,
+        keep: Option<KeepAlive>,
     ) -> Result<Server, Box<dyn Error + Send + Sync + 'static>> {
         let listener = listener.into();
         // building the "close" variable
@@ -277,6 +313,11 @@ impl Server {
             let local_addr = listener.local_addr()?;
             log::debug!("Server listening on {}", local_addr);
             (listener, local_addr)
+        };
+        // Apassy: keep-alive needs the listener's IP address; without one it is off.
+        let keep = match (keep, local_addr.clone().to_ip()) {
+            (Some(keep), Some(listen)) => Some((keep, listen)),
+            _ => None,
         };
 
         // building the SSL capabilities
@@ -321,7 +362,7 @@ impl Server {
                     Ok((sock, _)) => {
                         let guard = if let Some((header, body, handle)) = deadlines {
                             let mut tracked = reaper.as_ref().unwrap().lock().unwrap();
-                            tracked.retain(|(weak, _)| weak.strong_count() > 0);
+                            tracked.retain(|weak| weak.strong_count() > 0);
                             // Bound work before parsing or spawning a connection
                             // thread, including clients that never finish headers.
                             if tracked.len() >= 1024 {
@@ -334,9 +375,13 @@ impl Server {
                                 Ok(copy) => copy,
                                 Err(_) => continue,
                             };
-                            let guard = deadline::Deadline::new(copy, header, body);
-                            tracked
-                                .push((Arc::downgrade(&guard), std::time::Instant::now() + handle));
+                            let keep = keep.as_ref().map(|(keep, listen)| deadline::Keep {
+                                idle: keep.idle,
+                                allow: keep.allow.clone(),
+                                listen: *listen,
+                            });
+                            let guard = deadline::Deadline::new(copy, header, body, handle, keep);
+                            tracked.push(Arc::downgrade(&guard));
                             Some(guard)
                         } else {
                             None
@@ -372,8 +417,10 @@ impl Server {
                         let mut client = Some(client);
                         tasks_pool.spawn(Box::new(move || {
                             if let Some(client) = client.take() {
-                                // Synchronization is needed for HTTPS requests to avoid a deadlock
-                                if client.secure() {
+                                // Synchronization is needed for HTTPS requests to avoid a deadlock.
+                                // Apassy: a kept connection reads its next head only after the
+                                // answer of the request before it was written.
+                                if client.secure() || client.waits_for_answers() {
                                     let (sender, receiver) = mpsc::channel();
                                     for rq in client {
                                         messages.push(rq.with_notify_sender(sender.clone()).into());

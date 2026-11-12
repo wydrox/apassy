@@ -138,7 +138,11 @@ fn welcome(app: &mut DesktopApp, ui: &mut egui::Ui) {
     title(
         ui,
         "Welcome to Apassy",
-        "Credentials for you and your agents. Each vault is one encrypted file on this Mac. Agents use the secrets through Apassy and never see the values.",
+        concat!(
+            "Credentials for you and your agents. Each vault is one encrypted file on this ",
+            crate::computer!(),
+            ". Agents use the secrets through Apassy and never see the values."
+        ),
     );
     vaults::start_notices(app, ui);
     vaults::welcome_list(app, ui);
@@ -147,7 +151,13 @@ fn welcome(app: &mut DesktopApp, ui: &mut egui::Ui) {
     }
     if app.sync.offered {
         ui.add_space(8.0);
-        if kit::wide_button(ui, "Use a vault from another Mac", Style::Bordered).clicked() {
+        if kit::wide_button(
+            ui,
+            concat!("Use a vault from another ", crate::computer!()),
+            Style::Bordered,
+        )
+        .clicked()
+        {
             super::sync::begin_open(app);
         }
     }
@@ -448,9 +458,11 @@ pub(super) fn restore_form(app: &mut DesktopApp, ui: &mut egui::Ui) -> bool {
     kit::section(
         ui,
         None,
-        Some(
-            "The passphrase is the one of the backup. The restored vault is a new vault in your list. Leave the file empty for the default folder. Touch ID unlock stays off for the restored file.",
-        ),
+        Some(if cfg!(target_os = "linux") {
+            "The passphrase is the one of the backup. The restored vault is a new vault in your list. Leave the file empty for the default folder."
+        } else {
+            "The passphrase is the one of the backup. The restored vault is a new vault in your list. Leave the file empty for the default folder. Touch ID unlock stays off for the restored file."
+        }),
         |s| {
             let source = s.field("Backup file", |ui| {
                 files::path_input(

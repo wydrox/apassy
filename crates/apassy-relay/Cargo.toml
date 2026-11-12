@@ -1,6 +1,6 @@
 [package]
 name = "apassy-relay"
-version = "0.5.19"
+version = "0.5.20"
 edition = "2024"
 rust-version = "1.97"
 publish = false
@@ -17,7 +17,7 @@ serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 zeroize = "=1.9.0"
 # Exactly the core version and features: libsqlite3-sys is a `links` crate.
-rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled-sqlcipher-vendored-openssl", "backup"] }
+rusqlite = { version = "=0.42.0", default-features = false, features = ["bundled-sqlcipher-vendored-openssl", "backup"] }
 getrandom = "=0.4.3"
 rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-platform-verifier = "=0.7.0"
@@ -44,6 +44,9 @@ qrcode = { version = "=0.14.1", default-features = false }
 # A test certificate authority for the mock upstream (the core pin).
 rcgen = { version = "=0.14.10", default-features = false, features = ["crypto", "pem", "ring"] }
 tempfile = "=3.27.0"
+# tests/server_tunnel.rs: a client socket with a small receive buffer (a slow reader whose
+# kernel buffers do not hide the tunnel's window). The pin of the workspace's dev tests.
+socket2 = { version = "=0.6.3", default-features = false }
 
 [[bin]]
 name = "apassy-relay"

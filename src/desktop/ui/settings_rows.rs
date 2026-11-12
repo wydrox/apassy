@@ -11,7 +11,7 @@ use eframe::egui::{
     epaint,
 };
 
-use super::super::kit::{self, Font};
+use super::super::kit::{self, Font, Size, Style};
 
 /// The side padding of a row.
 pub(crate) const PAD_X: f32 = 12.0;
@@ -25,6 +25,10 @@ const LABEL_MIN: f32 = 110.0;
 const GAP: f32 = 10.0;
 /// The space above a group label.
 const LABEL_TOP: f32 = 18.0;
+/// The least width that the text of a [`text_buttons`] row keeps beside its buttons.
+pub(crate) const TEXT_MIN: f32 = 200.0;
+/// The space between the buttons of a row.
+const BUTTON_GAP: f32 = 8.0;
 
 /// The label of a group: 12 points, semibold, secondary.
 pub(crate) fn group_label(ui: &mut Ui, title: &str) {
@@ -300,6 +304,13 @@ impl Group<'_> {
         });
     }
 
+    /// A row with a note in the color of `tone` and its icon in front: a warning
+    /// triangle for a warning or an error, a circled i for a hint.
+    pub(crate) fn tone_icon_row(&mut self, text: impl Into<String>, tone: kit::Tone) {
+        let text = text.into();
+        self.row(|ui| kit::tone_note_icon(ui, text, tone, Font::Callout));
+    }
+
     /// A row with a note in a status color.
     pub(crate) fn tone_row(&mut self, text: impl Into<String>, color: Color32) {
         let text = text.into();
@@ -376,4 +387,58 @@ fn one_line_widget(
             });
         },
     );
+}
+
+/// The content of a row with a text that wraps and small buttons at the trailing edge (the
+/// first button is the rightmost), for rows whose text or buttons name a person, a
+/// device, or a vault. The buttons stay on the line of the text while the text keeps
+/// [`TEXT_MIN`] points; else they go on a line of their own under it, at the trailing
+/// edge. A button wider than the row is cut with "…" ([`kit::small_button_fit`]). So
+/// nothing of the row reaches past the window, at any width. Returns the index of the
+/// pressed button.
+pub(crate) fn text_buttons(
+    ui: &mut Ui,
+    text: impl Into<WidgetText>,
+    buttons: &[(&str, Style)],
+) -> Option<usize> {
+    let text = text.into();
+    let width = ui.available_width();
+    let needed: f32 = buttons
+        .iter()
+        .map(|(label, style)| kit::button_width(ui, label, *style, Size::Small) + BUTTON_GAP)
+        .sum();
+    let mut pressed = None;
+    let draw = |ui: &mut Ui, pressed: &mut Option<usize>| {
+        ui.spacing_mut().item_spacing.x = BUTTON_GAP;
+        for (index, (label, style)) in buttons.iter().enumerate() {
+            if kit::small_button_fit(ui, label, *style, width).clicked() {
+                *pressed = Some(index);
+            }
+        }
+    };
+    if buttons.is_empty() {
+        ui.add(Label::new(text).wrap());
+    } else if needed + TEXT_MIN <= width {
+        egui::Sides::new()
+            .shrink_left()
+            .wrap_mode(TextWrapMode::Wrap)
+            .height(LINE)
+            .show(
+                ui,
+                |ui| {
+                    ui.add(Label::new(text).wrap());
+                },
+                |ui| draw(ui, &mut pressed),
+            );
+    } else {
+        ui.add(Label::new(text).wrap());
+        // A line of its own for the buttons: as high as a button, not the rest of the
+        // column.
+        ui.allocate_ui_with_layout(
+            Vec2::new(width, LINE),
+            Layout::right_to_left(Align::Min).with_main_wrap(true),
+            |ui| draw(ui, &mut pressed),
+        );
+    }
+    pressed
 }

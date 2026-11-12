@@ -16,7 +16,7 @@ use tempfile::TempDir;
 
 use super::DesktopApp;
 use super::model::{DetailDraft, ItemDraft};
-use super::owner_check::OwnerRequest;
+use super::owner_check::{NO_ACCOUNT, OwnerRequest};
 use super::owner_socket::{self, Envelope, LineWire, PeerGone};
 use super::owner_store::{SecretForm, detail_field_name};
 use super::passkey_socket::{Out, PeerRule, PlatformEvent, PlatformTicket, read_bridge};
@@ -743,6 +743,18 @@ fn several_accounts_wait_for_a_choice_and_sign_the_chosen_one() {
     let bob = add_passkey(&app, "bob@example.com", "Bob");
     let answer = ask(&mut app, &ctx, Command::PasskeyGet(get_request(&[])));
     let request = app.owner.check.as_ref().unwrap().request.clone();
+    // The newest passkey comes first: Bob's login is the later one. The accounts differ,
+    // so none is chosen.
+    let OwnerRequest::SignPasskey {
+        accounts, chosen, ..
+    } = &request
+    else {
+        panic!("not a passkey request");
+    };
+    assert_eq!(*chosen, NO_ACCOUNT);
+    assert_eq!(accounts[0].credential_id, bob.credential_id);
+    assert_eq!(accounts[1].credential_id, ada.credential_id);
+    assert!(accounts.iter().all(|account| account.added.is_some()));
     assert!(!request.is_ready(), "no account is chosen");
     assert!(!request.starts_touch_id(), "Touch ID waits for the choice");
     let text = request.describe();
@@ -760,14 +772,15 @@ fn several_accounts_wait_for_a_choice_and_sign_the_chosen_one() {
     let OwnerAction::SignPasskey { credential_id, .. } = &chosen else {
         panic!("not a passkey action");
     };
-    assert_eq!(credential_id, &bob.credential_id);
+    assert_eq!(credential_id, &ada.credential_id);
     // A proof for the account before the choice is refused.
     let stale_choice = fresh_proof(&app, first);
     app.finish_owner_check_with(stale_choice);
     assert_eq!(now(&answer).code, "refused");
 
+    // The newest one, chosen and confirmed, signs.
     let answer = ask(&mut app, &ctx, Command::PasskeyGet(get_request(&[])));
-    app.choose_passkey(1);
+    app.choose_passkey(0);
     confirm(&mut app);
     let json = serde_json::to_value(now(&answer)).unwrap();
     assert_eq!(
@@ -780,6 +793,38 @@ fn several_accounts_wait_for_a_choice_and_sign_the_chosen_one() {
         client_json("webauthn.get", ORIGIN).as_bytes(),
     );
     assert_ne!(ada.credential_id, bob.credential_id);
+}
+
+#[test]
+fn two_passkeys_of_one_account_select_the_newest() {
+    let dir = TempDir::new().unwrap();
+    let mut app = unlocked_app(&dir);
+    let ctx = egui::Context::default();
+    let older = add_passkey(&app, "ada@example.com", "Ada");
+    let newer = add_passkey(&app, "ada@example.com", "Ada");
+    let answer = ask(&mut app, &ctx, Command::PasskeyGet(get_request(&[])));
+    let request = app.owner.check.as_ref().unwrap().request.clone();
+    // One account with two passkeys: the older one may be unknown to the site, so the
+    // newest is selected, and the owner can still choose the other.
+    let OwnerRequest::SignPasskey {
+        accounts, chosen, ..
+    } = &request
+    else {
+        panic!("not a passkey request");
+    };
+    assert_eq!(*chosen, 0);
+    assert_eq!(accounts[0].credential_id, newer.credential_id);
+    assert_eq!(accounts[1].credential_id, older.credential_id);
+    assert!(
+        request.is_ready(),
+        "the newest passkey of the account is chosen"
+    );
+    confirm(&mut app);
+    let json = serde_json::to_value(now(&answer)).unwrap();
+    assert_eq!(
+        json["data"]["credential_id"],
+        encode_bytes(&newer.credential_id)
+    );
 }
 
 // ---- Browser registration. ----
@@ -1295,7 +1340,11 @@ fn the_sheet_lists_metadata_and_signs_after_its_own_check() {
     assert!(dialog.browser.is_none(), "no browser note for the sheet");
     let text = dialog.request.describe();
     assert!(
-        text.starts_with("macOS asks to sign in to example.com"),
+        text.starts_with(if cfg!(target_os = "linux") {
+            "An app on this computer asks to sign in to example.com"
+        } else {
+            "macOS asks to sign in to example.com"
+        }),
         "{text}"
     );
     assert!(!text.contains("https://"), "{text}");
@@ -1974,6 +2023,61 @@ fn the_socket_marks_a_request_whose_peer_hung_up() {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert!(envelope.request.is_set());
+    socket.stop();
+}
+
+/// A wire whose second peer check, after the UI answered, refuses.
+struct RecheckWire;
+
+impl LineWire for RecheckWire {
+    type Request = ();
+    type Response = Response;
+    const NAME: &'static str = "recheck-test";
+    const MAX_REQUEST_BYTES: usize = 1024;
+    const MAX_CONNECTIONS: usize = 2;
+    const BUSY: &'static str = "busy";
+
+    fn parse(_line: &[u8]) -> Result<(), Response> {
+        Ok(())
+    }
+
+    fn error(code: &'static str, message: &'static str) -> Response {
+        Response::error(code, message)
+    }
+
+    fn check_peer_again(
+        _stream: &UnixStream,
+        _seen: &owner_socket::PeerSeen,
+    ) -> Result<(), Response> {
+        Err(Response::error("unsupported", "checked again"))
+    }
+}
+
+/// The answer of the UI leaves only when the peer passes its check again: otherwise the
+/// peer gets the refusal and never the answer.
+#[test]
+fn the_socket_withholds_the_answer_when_the_second_peer_check_refuses() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("r").join("recheck.sock");
+    let (mut socket, inbox) =
+        owner_socket::start_line::<RecheckWire>(&path, || {}).expect("socket");
+    let mut client = UnixStream::connect(&path).unwrap();
+    client.write_all(b"{}\n").unwrap();
+    let envelope = inbox.recv_timeout(Duration::from_secs(5)).expect("request");
+    envelope
+        .reply
+        .send(Response::ok(
+            "answer of the ui",
+            Data::Status {
+                vault: VaultState::Unlocked,
+                version: "test".to_owned(),
+            },
+        ))
+        .unwrap();
+    let mut text = String::new();
+    client.read_to_string(&mut text).unwrap();
+    assert!(text.contains("checked again"), "{text}");
+    assert!(!text.contains("answer of the ui"), "{text}");
     socket.stop();
 }
 

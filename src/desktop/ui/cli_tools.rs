@@ -2,9 +2,96 @@
 use std::path::Path;
 const TOOLS: [&str; 4] = ["apassy", "apassy-mcp", "apassy-hook", "apassy-sandbox"];
 
-/// Check the links this app installs. This does not establish the terminal PATH
-/// or a connection to an agent host.
+/// The command that the Linux vault package installs. The package ships only this
+/// command, so the links of the macOS app (`TOOLS`) do not apply on Linux.
+#[cfg(any(target_os = "linux", test))]
+const PACKAGE_COMMAND: &str = "/usr/bin/apassy";
+
+/// Where the `apassy` command comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Place {
+    /// Linux: the package installed [`PACKAGE_COMMAND`].
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    Package,
+    /// macOS: the links of this app in `~/.local/bin`.
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
+    Links,
+    Missing,
+}
+
+/// What Settings > Tools > Command line shows for a [`Place`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Row {
+    pub(super) value: &'static str,
+    pub(super) footer: &'static str,
+    /// "Install tools…": links can be made (macOS only).
+    pub(super) install: bool,
+}
+
+impl Place {
+    pub(super) fn row(self) -> Row {
+        match self {
+            Self::Package => Row {
+                value: "/usr/bin/apassy",
+                footer: "Installed by the apassy-vault package. Commands never show a secret value.",
+                install: false,
+            },
+            Self::Links => Row {
+                value: "~/.local/bin",
+                footer: "In Terminal: add ~/.local/bin to PATH, then run eval \"$(apassy login)\".",
+                install: false,
+            },
+            Self::Missing if cfg!(target_os = "linux") => Row {
+                value: "Not installed",
+                footer: "Install the apassy-vault package to get the apassy command. Commands never show a secret value.",
+                install: false,
+            },
+            Self::Missing => Row {
+                value: "Not installed",
+                footer: "Commands never show a secret value.",
+                install: true,
+            },
+        }
+    }
+}
+
+/// Where the command line comes from on this computer.
+pub(super) fn place() -> Place {
+    #[cfg(target_os = "linux")]
+    {
+        package_place(Path::new(PACKAGE_COMMAND))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        if links_present() {
+            Place::Links
+        } else {
+            Place::Missing
+        }
+    }
+}
+
+/// True when the command line is installed: by the Linux package, or as the links of
+/// this app. This does not establish the terminal PATH or a connection to an agent
+/// host.
 pub(super) fn installed() -> bool {
+    place() != Place::Missing
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn package_place(command: &Path) -> Place {
+    use std::os::unix::fs::PermissionsExt;
+    match std::fs::metadata(command) {
+        Ok(metadata) if metadata.is_file() && metadata.permissions().mode() & 0o111 != 0 => {
+            Place::Package
+        }
+        _ => Place::Missing,
+    }
+}
+
+/// Check the links this app installs.
+#[cfg(not(target_os = "linux"))]
+fn links_present() -> bool {
     let Some(exe) = std::env::current_exe()
         .ok()
         .and_then(|path| std::fs::canonicalize(path).ok())
@@ -20,6 +107,7 @@ pub(super) fn installed() -> bool {
     links_installed(source, &Path::new(&home).join(".local/bin"))
 }
 
+#[cfg(any(not(target_os = "linux"), test))]
 fn links_installed(source: &Path, destination: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     TOOLS.iter().all(|name| {
@@ -47,14 +135,24 @@ fn install_in(source: &Path, destination: &Path) -> Result<(), String> {
         let target = source.join(name);
         if !target.is_file() {
             return Err(format!(
-                "The app package is missing {name}. Reinstall the complete Apassy.app package."
+                concat!(
+                    "The app package is missing {}. Reinstall the complete ",
+                    crate::app_package!(),
+                    " package."
+                ),
+                name
             ));
         }
         let metadata = std::fs::metadata(&target)
             .map_err(|e| format!("Cannot check {}: {e}", target.display()))?;
         if metadata.permissions().mode() & 0o111 == 0 {
             return Err(format!(
-                "The app tool {name} is not executable. Reinstall the complete Apassy.app package."
+                concat!(
+                    "The app tool {} is not executable. Reinstall the complete ",
+                    crate::app_package!(),
+                    " package."
+                ),
+                name
             ));
         }
         let link = destination.join(name);
@@ -96,6 +194,28 @@ fn install_in(source: &Path, destination: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Linux package installs /usr/bin/apassy: Settings showed "Not installed" and
+    /// offered links that the package cannot provide (Linux acceptance, 2026-11-10).
+    #[test]
+    fn the_package_command_counts_as_installed_and_offers_no_links() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let command = dir.path().join("apassy");
+        assert_eq!(package_place(&command), Place::Missing);
+        std::fs::write(&command, b"test").unwrap();
+        std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(package_place(&command), Place::Missing, "not executable");
+        std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(package_place(&command), Place::Package);
+        assert_eq!(package_place(dir.path()), Place::Missing, "a folder");
+        let row = Place::Package.row();
+        assert_eq!(row.value, PACKAGE_COMMAND);
+        assert!(!row.install);
+        assert!(!Place::Links.row().install);
+        assert_eq!(Place::Missing.row().value, "Not installed");
+        assert_eq!(Place::Missing.row().install, !cfg!(target_os = "linux"));
+    }
 
     #[test]
     fn installation_check_requires_all_links_and_executable_targets() {

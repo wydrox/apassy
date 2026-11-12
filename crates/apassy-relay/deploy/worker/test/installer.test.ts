@@ -2,7 +2,7 @@ import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -23,8 +23,8 @@ function fixture(t: TestContext, os = 'Darwin', arch = 'arm64', version = 'apass
   writeFileSync(join(dl,filename),blob);
   writeFileSync(join(dl,'SHA256SUMS'),`${createHash('sha256').update(blob).digest('hex')}  ${filename}\n`);
   const installed = join(target,'apassy-team'); writeFileSync(installed,'old-binary');
-  return {dir, installed, marker, run: () => execute('/bin/sh',[installer], {env:{...process.env,
-    HOME:dir, PATH:`${bin}:${process.env.PATH}`, APASSY_INSTALL_AS_ROOT:'1', APASSY_INSTALL_DIR:target, APASSY_RELAY_URL:`file://${dir}`}})};
+  return {dir, installed, marker, run: (extraEnv: Record<string, string> = {}) => execute('/bin/sh',[installer], {env:{...process.env,
+    HOME:dir, PATH:`${bin}:${process.env.PATH}`, APASSY_INSTALL_AS_ROOT:'1', APASSY_INSTALL_DIR:target, APASSY_RELAY_URL:`file://${dir}`, APASSY_COMPONENT:'node', ...extraEnv}})};
 }
 for (const [os,arch] of [['Darwin','x86_64']]) {
   test(`unsupported ${os}/${arch} fails before any download`,async t => {
@@ -94,4 +94,189 @@ test('a checksum mismatch never executes or replaces the downloaded binary', asy
   await assert.rejects(f.run(), /SHA-256 check failed/);
   assert.equal(existsSync(executed), false);
   assert.equal(readFileSync(f.installed, 'utf8'), 'old-binary');
+});
+
+// Vault mode is explicit and system-wide. Fixtures replace the packaged installer
+// with a marker script; these tests never write to the host's /usr tree.
+// Each vault fixture is a supported system (Debian 12, glibc 2.36) unless a test says
+// otherwise: getconf and os-release are fixtures too.
+function fakeSystem(dir: string, osRelease: string, glibc = 'glibc 2.36') {
+  writeFileSync(join(dir, 'bin', 'getconf'), `#!/bin/sh\n[ "$1" = GNU_LIBC_VERSION ] && [ -n '${glibc}' ] && echo '${glibc}' && exit 0\nexit 1\n`, {mode:0o755});
+  writeFileSync(join(dir, 'os-release'), osRelease);
+}
+const DEBIAN_12 = 'PRETTY_NAME="Debian GNU/Linux 12 (bookworm)"\nID=debian\nVERSION_ID="12"\n';
+async function vaultFixture(t: TestContext, arch = 'x86_64', extra = false) {
+  const f = fixture(t, 'Linux', arch);
+  writeFileSync(join(f.dir, 'bin', 'id'), '#!/bin/sh\necho 0\n', {mode:0o755});
+  fakeSystem(f.dir, DEBIAN_12);
+  const nodeArch = arch === 'arm64' ? 'aarch64' : arch;
+  const top = `apassy-vault-0.5.8-linux-${nodeArch}`;
+  const tree = join(f.dir, 'vault-tree');
+  mkdirSync(join(tree, top, 'usr', 'bin'), {recursive:true});
+  writeFileSync(join(tree, top, 'usr', 'bin', 'apassy'), "#!/bin/sh\necho 'apassy 0.5.8'\n", {mode:0o755});
+  const executed = join(f.dir, 'vault-installed');
+  writeFileSync(join(tree, top, 'install-vault.sh'), `#!/bin/sh\ntouch '${executed}'\n`, {mode:0o755});
+  const names = [top];
+  if (extra) { writeFileSync(join(tree, 'outside'), 'x'); names.push('outside'); }
+  const tarball = join(f.dir, 'dl', `${top}.tar.gz`);
+  await execute('tar', ['-czf', tarball, '-C', tree, ...names], {env:{...process.env, COPYFILE_DISABLE:'1'}});
+  const blob = readFileSync(tarball);
+  writeFileSync(join(f.dir, 'dl', 'SHA256SUMS'), `${createHash('sha256').update(blob).digest('hex')}  ${top}.tar.gz\n`);
+  return {...f, executed, tarball, runVault: (extraEnv: Record<string, string> = {}) =>
+    f.run({APASSY_COMPONENT:'vault', APASSY_INSTALL_DIR:'', APASSY_VAULT_FORMAT:'tar',
+      APASSY_OS_RELEASE:join(f.dir, 'os-release'), ...extraEnv})};
+}
+for (const arch of ['x86_64', 'arm64']) {
+  test(`vault mode explicitly selects the Linux ${arch} archive`, async t => {
+    const f = await vaultFixture(t, arch);
+    const output = await f.runVault();
+    assert.match(output.stdout, /apassy 0\.5\.8/);
+    assert.equal(existsSync(f.executed), true);
+    assert.equal(readFileSync(f.installed, 'utf8'), 'old-binary');
+  });
+}
+test('vault mode refuses a custom prefix before downloading', async t => {
+  const f = await vaultFixture(t);
+  await assert.rejects(f.runVault({APASSY_INSTALL_DIR:join(f.dir, 'unsafe')}), /fixed \/usr paths/);
+  assert.equal(existsSync(f.marker), false);
+  assert.equal(existsSync(f.executed), false);
+});
+test('vault mode refuses missing explicit root authorization before downloading', async t => {
+  const f = await vaultFixture(t);
+  await assert.rejects(f.runVault({APASSY_INSTALL_AS_ROOT:'0'}), /Do not run as root/);
+  assert.equal(existsSync(f.marker), false);
+  assert.equal(existsSync(f.executed), false);
+});
+test('vault checksum mismatch never executes its installer', async t => {
+  const f = await vaultFixture(t);
+  writeFileSync(f.tarball, 'tampered');
+  await assert.rejects(f.runVault(), /SHA-256 check failed/);
+  assert.equal(existsSync(f.executed), false);
+});
+test('vault tarball with an outside entry never executes its installer', async t => {
+  const f = await vaultFixture(t, 'x86_64', true);
+  await assert.rejects(f.runVault(), /entries outside/);
+  assert.equal(existsSync(f.executed), false);
+});
+test('unknown installer component is refused before downloading', async t => {
+  const f = fixture(t);
+  await assert.rejects(f.run({APASSY_COMPONENT:'unexpected'}), /must be node or vault/);
+  assert.equal(existsSync(f.marker), false);
+});
+
+test('vault archive links are refused before its installer executes', async t => {
+  const f = await vaultFixture(t);
+  const tree = join(f.dir, 'vault-tree');
+  const top = 'apassy-vault-0.5.8-linux-x86_64';
+  symlinkSync('/tmp', join(tree, top, 'unsafe-link'));
+  await execute('tar', ['-czf', f.tarball, '-C', tree, top], {env:{...process.env, COPYFILE_DISABLE:'1'}});
+  const blob = readFileSync(f.tarball);
+  writeFileSync(join(f.dir, 'dl', 'SHA256SUMS'), `${createHash('sha256').update(blob).digest('hex')}  ${top}.tar.gz\n`);
+  await assert.rejects(f.runVault(), /link or a special file/);
+  assert.equal(existsSync(f.executed), false);
+});
+
+// Distribution and C library: the vault is built on glibc 2.31 and tested on Debian 12
+// and 13 and Ubuntu 22.04 and 24.04. Others are refused before any download.
+for (const [name, release, glibc] of [
+  ['Debian 11', 'PRETTY_NAME="Debian GNU/Linux 11 (bullseye)"\nID=debian\nVERSION_ID="11"\n', 'glibc 2.31'],
+  ['Ubuntu 20.04', 'PRETTY_NAME="Ubuntu 20.04.6 LTS"\nID=ubuntu\nVERSION_ID="20.04"\n', 'glibc 2.31'],
+  ['Fedora 41', 'PRETTY_NAME="Fedora Linux 41"\nID=fedora\nVERSION_ID=41\n', 'glibc 2.40'],
+  ['Debian testing', 'PRETTY_NAME="Debian GNU/Linux forky/sid"\nID=debian\n', 'glibc 2.42'],
+]) {
+  test(`vault mode refuses ${name} before downloading`, async t => {
+    const f = await vaultFixture(t);
+    fakeSystem(f.dir, release, glibc);
+    await assert.rejects(f.runVault(), (e: Error & {stderr?:string}) =>
+      /supports Debian 12 or later and Ubuntu 22\.04 or later/.test(e.stderr ?? '') && /APASSY_ALLOW_UNSUPPORTED=1/.test(e.stderr ?? ''));
+    assert.equal(existsSync(f.marker), false);
+    assert.equal(existsSync(f.executed), false);
+  });
+}
+for (const [name, release] of [
+  ['Debian 13', 'PRETTY_NAME="Debian GNU/Linux 13 (trixie)"\nID=debian\nVERSION_ID="13"\n'],
+  ['Ubuntu 22.04', 'PRETTY_NAME="Ubuntu 22.04.5 LTS"\nID=ubuntu\nVERSION_ID="22.04"\n'],
+  ['Ubuntu 24.04', "PRETTY_NAME='Ubuntu 24.04.3 LTS'\nID=ubuntu\nVERSION_ID='24.04'\n"],
+]) {
+  test(`vault mode accepts ${name}`, async t => {
+    const f = await vaultFixture(t);
+    fakeSystem(f.dir, release);
+    await f.runVault();
+    assert.equal(existsSync(f.executed), true);
+  });
+}
+test('vault mode installs elsewhere only with APASSY_ALLOW_UNSUPPORTED=1, with a warning', async t => {
+  const f = await vaultFixture(t);
+  fakeSystem(f.dir, 'PRETTY_NAME="Fedora Linux 41"\nID=fedora\nVERSION_ID=41\n', 'glibc 2.40');
+  const output = await f.runVault({APASSY_ALLOW_UNSUPPORTED:'1'});
+  assert.match(output.stderr, /Fedora Linux 41 is not tested/);
+  assert.equal(existsSync(f.executed), true);
+});
+for (const [name, glibc, message] of [
+  ['an old glibc', 'glibc 2.28', /needs glibc 2\.31 or later; this system has 2\.28/],
+  ['no glibc (musl)', '', /no GNU C library/],
+]) {
+  test(`vault mode refuses ${name} even with APASSY_ALLOW_UNSUPPORTED=1`, async t => {
+    const f = await vaultFixture(t);
+    fakeSystem(f.dir, DEBIAN_12, glibc as string);
+    await assert.rejects(f.runVault({APASSY_ALLOW_UNSUPPORTED:'1'}), message as RegExp);
+    assert.equal(existsSync(f.marker), false);
+  });
+}
+test('vault mode refuses an unknown package format before downloading', async t => {
+  const f = await vaultFixture(t);
+  await assert.rejects(f.runVault({APASSY_VAULT_FORMAT:'rpm'}), /must be deb or tar/);
+  assert.equal(existsSync(f.marker), false);
+});
+
+// The deb: the single apassy-vault_<version>_<deb arch>.deb of SHA256SUMS, its fields
+// checked with dpkg-deb, then `apt-get install` of the verified file. dpkg-deb and
+// apt-get are fixtures (apt-get records its arguments and the file's SHA-256); nothing
+// is installed, so the run stops at the check of /usr/bin/apassy afterwards.
+async function debFixture(t: TestContext, arch = 'x86_64', fields = {Package:'apassy-vault', Version:'0.5.8'}) {
+  const f = await vaultFixture(t, arch);
+  const debArch = arch === 'arm64' ? 'arm64' : 'amd64';
+  const otherArch = debArch === 'amd64' ? 'arm64' : 'amd64';
+  const deb = `apassy-vault_0.5.8_${debArch}.deb`;
+  const blob = Buffer.from('!<arch>\nsynthetic deb ' + debArch);
+  writeFileSync(join(f.dir, 'dl', deb), blob);
+  const other = Buffer.from('!<arch>\nsynthetic deb ' + otherArch);
+  writeFileSync(join(f.dir, 'dl', `apassy-vault_0.5.8_${otherArch}.deb`), other);
+  const sums = readFileSync(join(f.dir, 'dl', 'SHA256SUMS'), 'utf8') +
+    `${createHash('sha256').update(blob).digest('hex')}  ${deb}\n` +
+    `${createHash('sha256').update(other).digest('hex')}  apassy-vault_0.5.8_${otherArch}.deb\n`;
+  writeFileSync(join(f.dir, 'dl', 'SHA256SUMS'), sums);
+  const all = {Architecture: debArch, ...fields} as Record<string, string>;
+  writeFileSync(join(f.dir, 'bin', 'dpkg-deb'), `#!/bin/sh\n[ "$1" = --field ] || exit 2\ncase "$3" in ${
+    Object.entries(all).map(([k, v]) => `${k}) echo '${v}' ;;`).join(' ')} *) exit 1 ;; esac\n`, {mode:0o755});
+  const apt = join(f.dir, 'apt-args');
+  writeFileSync(join(f.dir, 'bin', 'apt-get'), `#!/bin/sh\nprintf '%s\\n' "$@" > '${apt}'\nsha256sum "$3" >> '${apt}' 2>/dev/null || shasum -a 256 "$3" >> '${apt}'\n`, {mode:0o755});
+  return {...f, deb, apt, sha: createHash('sha256').update(blob).digest('hex'),
+    runDeb: (extraEnv: Record<string, string> = {}) => f.runVault({APASSY_VAULT_FORMAT:'', ...extraEnv})};
+}
+for (const arch of ['x86_64', 'arm64']) {
+  test(`vault mode installs the verified ${arch} deb with apt-get by default`, async t => {
+    const f = await debFixture(t, arch);
+    // /usr/bin/apassy of the test machine is not this package: the installer stops there.
+    await assert.rejects(f.runDeb(), /installed vault/);
+    const args = readFileSync(f.apt, 'utf8').split('\n');
+    assert.equal(args[0], 'install');
+    assert.equal(args[1], '-y');
+    assert.ok(args[2]!.endsWith('/' + f.deb), args[2]);
+    assert.match(args[3]!, new RegExp('^' + f.sha));
+    assert.equal(existsSync(f.executed), false);
+  });
+}
+test('a deb with another package name or version is never installed', async t => {
+  for (const fields of [{Package:'apassy', Version:'0.5.8'}, {Package:'apassy-vault', Version:'0.5.9'}]) {
+    const f = await debFixture(t, 'x86_64', fields);
+    await assert.rejects(f.runDeb(), /has (Package|Version)/);
+    assert.equal(existsSync(f.apt), false);
+  }
+});
+test('a deb checksum mismatch is never installed', async t => {
+  const f = await debFixture(t);
+  writeFileSync(join(f.dir, 'dl', f.deb), 'tampered');
+  await assert.rejects(f.runDeb(), /SHA-256 check failed/);
+  assert.equal(existsSync(f.apt), false);
 });

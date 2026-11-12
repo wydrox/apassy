@@ -49,10 +49,21 @@ const RETRY_WAITS: [u64; 5] = [2, 4, 8, 16, 30];
 const STEP: Duration = Duration::from_millis(250);
 
 const TOO_SOON: &str = "The connect request ends too soon for your other devices.";
-const BUSY: &str = "Another connect request is on your iPhone. Answer this one on this Mac.";
-const NOT_SENT: &str =
-    "This connect request could not be sent to your other devices. Answer it on this Mac.";
-const NO_KEY: &str = "This vault has no question key yet. Answer the connect request on this Mac.";
+const BUSY: &str = concat!(
+    "Another connect request is on your iPhone. Answer this one on this ",
+    crate::computer!(),
+    "."
+);
+const NOT_SENT: &str = concat!(
+    "This connect request could not be sent to your other devices. Answer it on this ",
+    crate::computer!(),
+    "."
+);
+const NO_KEY: &str = concat!(
+    "This vault has no question key yet. Answer the connect request on this ",
+    crate::computer!(),
+    "."
+);
 
 /// A connect request of the node, as the lane posts it (plan type `PendingConnect`).
 #[derive(Debug, Clone, PartialEq, Eq)]

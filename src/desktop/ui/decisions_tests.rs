@@ -961,7 +961,7 @@ fn the_agent_page_saves_the_note_and_removes_an_exception_after_the_check() {
     let (text, _) = frames(&mut app, WIDE, 3);
     for expected in [
         "CI on GitHub",
-        "This Mac · connected",
+        concat!("This ", crate::computer!(), " · connected"),
         // Four tiles, as in the mockup (frame 4).
         "Runs",
         "Asked you",
@@ -1479,7 +1479,7 @@ fn suggestions_accept_a_stricter_value_at_once_and_a_looser_one_after_the_check(
         "Ignore",
         "Development",
         "Production",
-        "Development needs Touch ID or the passphrase.",
+        concat!("Development needs ", crate::owner_check!(), "."),
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
@@ -1676,7 +1676,7 @@ fn ignore_needs_the_check_only_when_it_restores_a_looser_environment() {
         "Is Guarded key a production key?",
         "Before",
         "Ignore makes it development again.",
-        "Development and Ignore need Touch ID or the passphrase.",
+        concat!("Development and Ignore need ", crate::owner_check!(), "."),
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
@@ -2053,7 +2053,12 @@ fn a_question_of_another_mac_waits_from_that_mac_and_allow_needs_the_owner_check
     assert!(app.owner.check.is_none(), "no owner check");
     app.settle_remote_answers_for_test();
     assert_eq!(
-        app.status_text, "This question no longer waits on this Mac.",
+        app.status_text,
+        concat!(
+            "This question no longer waits on this ",
+            crate::computer!(),
+            "."
+        ),
         "{}",
         app.status_text
     );

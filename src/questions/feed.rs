@@ -622,7 +622,13 @@ pub fn names_hold(
 /// The reason of the refusal of a v1 action that gives authority back (section 9.5 step
 /// 8a): the sender `iphone` signed ids only.
 pub fn v1_refusal(iphone: &str) -> String {
-    format!("update Apassy on {iphone} to remove this from it, or remove it on this Mac")
+    format!(
+        concat!(
+            "update Apassy on {iphone} to remove this from it, or remove it on this ",
+            crate::computer!()
+        ),
+        iphone = iphone
+    )
 }
 
 fn short_u32(value: u64) -> u64 {
@@ -1142,13 +1148,19 @@ const fn stale(reason: &'static str) -> Refusal {
 
 pub const UNREADABLE: Refusal = refused("it could not be read");
 pub const BAD_FORM: Refusal = refused("it has a bad form");
-pub const OTHER_TARGET: Refusal = refused("it is for another Mac");
+pub const OTHER_TARGET: Refusal = refused(concat!("it is for another ", crate::computer!()));
 pub const NOT_A_DEVICE: Refusal = refused("the device is not an iPhone of this vault");
 pub const TOO_OLD: Refusal = refused("too old");
-pub const GONE: Refusal = stale("the agent or the credential is not on this Mac");
+pub const GONE: Refusal = stale(concat!(
+    "the agent or the credential is not on this ",
+    crate::computer!()
+));
 pub const BAD_SIGNATURE: Refusal = refused("its signature does not verify");
-pub const CHANGED: Refusal = stale("the list on this Mac changed");
-pub const NAMES_CHANGED: Refusal = stale("the names on the iPhone did not match this Mac");
+pub const CHANGED: Refusal = stale(concat!("the list on this ", crate::computer!(), " changed"));
+pub const NAMES_CHANGED: Refusal = stale(concat!(
+    "the names on the iPhone did not match this ",
+    crate::computer!()
+));
 pub const LOCKED: Refusal = refused("the vault was locked during the check");
 pub const NOT_REMOVED: Refusal = refused("the exception could not be removed");
 
@@ -1702,7 +1714,11 @@ impl Shared {
 
     /// A feed call failed for a reason that does not pass by itself.
     fn feed_error(&self, active: &Active, error: &QuestionsError) {
-        if error.status() == Some(404) {
+        if let Some(why) = error.path_ended() {
+            // `410` of the hosted relay (plan s7 unit M5): the questions and the feed of
+            // the team stop for good.
+            self.mark_ended(active, "Apassy", why);
+        } else if error.status() == Some(404) {
             self.feed_unsupported(active);
         } else if error.code() == Some("feed_rate") {
             // `403 feed_rate` (section 10.2): this Mac read its feed text of the relay's
@@ -1814,6 +1830,10 @@ impl Shared {
             Ok(list) => list,
             Err(error) if error.status() == Some(404) => {
                 self.feed_unsupported(&active);
+                return;
+            }
+            Err(error) if error.path_ended().is_some() => {
+                self.feed_error(&active, &error);
                 return;
             }
             Err(error) => {

@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
 use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
 
 use apassy::broker::packs::RuleSet;
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use serde_json::json;
 
@@ -44,6 +44,86 @@ fn sweep_idle(conn: &rusqlite::Connection, created_at: u64, before: u64) -> Rela
         )
         .map_err(db)?;
     Ok(heads == 0 && last.map_or(created_at, to_u) <= before)
+}
+
+/// The first wait of a removal from a vault store that could not be written; each
+/// further try waits twice as long, at most `STORE_REMOVAL_MAX_WAIT_SECS`.
+pub const STORE_REMOVAL_RETRY_SECS: u64 = 60;
+pub const STORE_REMOVAL_MAX_WAIT_SECS: u64 = 3600;
+/// Waiting removals tried in one maintenance pass at most.
+const STORE_REMOVALS_PER_PASS: u64 = 100;
+
+/// Revokes the device row `store_device` (named by the account device `device`) of a vault
+/// store file, with its audit row, or without it when the file cannot take both (a file
+/// at its cap). A row revoked already counts as done.
+fn revoke_in_store(
+    store: &Store,
+    audit: &Audit,
+    device: &str,
+    store_device: u64,
+    now: u64,
+) -> RelayResult<()> {
+    let write = |with_audit: bool| {
+        store.tx(|tx| {
+            let changed = tx
+                .execute(
+                    "UPDATE device SET revoked_at = ?2 WHERE id = ?1 AND revoked_at IS NULL",
+                    params![to_i(store_device), to_i(now)],
+                )
+                .map_err(db)?;
+            if changed > 0 && with_audit {
+                audit.write_on(
+                    tx,
+                    now,
+                    RELAY_ACTOR,
+                    "device_revoked",
+                    None,
+                    &json!({"device_id": store_device, "name": device}),
+                )?;
+            }
+            Ok(())
+        })
+    };
+    write(true).or_else(|_| write(false))
+}
+
+/// One removal of an account device from a vault store: the store, the account device,
+/// and its device number in the store file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoreRemoval {
+    pub team: TeamId,
+    pub device: String,
+    pub store_device: u64,
+}
+
+/// The first half of every removal from a vault store, inside the directory transaction
+/// of the change that causes it (a revoke, a group removal): the row of
+/// `account_store_device` goes, so the relay-sync sign-in to the store refuses the device
+/// from the commit on (`account::store_device_live`), and an `account_store_removal` row
+/// waits for the store file. The second half is `Hub::apply_removals` after the
+/// commit; the open of the store and the maintenance pass apply a row that is left.
+pub(crate) fn queue_store_removal(
+    tx: &Connection,
+    removal: &StoreRemoval,
+    now: u64,
+) -> RelayResult<()> {
+    tx.execute(
+        "DELETE FROM account_store_device WHERE team_id = ?1 AND device_id = ?2",
+        params![removal.team.as_str(), removal.device],
+    )
+    .map_err(db)?;
+    tx.execute(
+        "INSERT INTO account_store_removal (team_id, store_device, device_id, created_at, attempts, next_at) \
+         VALUES (?1, ?2, ?3, ?4, 0, ?4) ON CONFLICT(team_id, store_device) DO NOTHING",
+        params![
+            removal.team.as_str(),
+            to_i(removal.store_device),
+            removal.device,
+            to_i(now)
+        ],
+    )
+    .map_err(db)?;
+    Ok(())
 }
 
 /// A team that was just made, with its owner.
@@ -77,30 +157,49 @@ pub fn make_team_file(
     owner: &str,
     now: u64,
 ) -> RelayResult<NewTeam> {
-    make_team_file_with_device(config, name, owner, now, None)
+    make_team_file_with_device(config, name, owner, now, None, None)
 }
 
+/// `make_team_file` with the first device of the owner (`device`: its name and key), and
+/// the id `given` (a file that is there already is 409 `conflict`, and stays), else a new
+/// random id.
 fn make_team_file_with_device(
     config: &RelayConfig,
     name: &str,
     owner: &str,
     now: u64,
     device: Option<(&str, &[u8])>,
+    given: Option<&TeamId>,
 ) -> RelayResult<NewTeam> {
     let name = checked_team_name(name)?;
     let owner = admin::checked_member_name(owner)?;
-    let mut id =
-        TeamId::generate().map_err(|_| RelayError::internal("The system has no random source."))?;
-    for _ in 0..8 {
-        if std::fs::symlink_metadata(config.team_path(&id)).is_err() {
-            break;
+    let id = match given {
+        Some(id) => id.clone(),
+        None => {
+            let mut id = TeamId::generate()
+                .map_err(|_| RelayError::internal("The system has no random source."))?;
+            for _ in 0..8 {
+                if std::fs::symlink_metadata(config.team_path(&id)).is_err() {
+                    break;
+                }
+                id = TeamId::generate()
+                    .map_err(|_| RelayError::internal("The system has no random source."))?;
+            }
+            id
         }
-        id = TeamId::generate()
-            .map_err(|_| RelayError::internal("The system has no random source."))?;
-    }
+    };
     let path = config.team_path(&id);
-    let file_key = new_file_key()?;
-    let store = Store::create_team(&path, &file_key)?;
+    // `connect` mode: a plain file and no file key (ADR 0037 stage 7).
+    let (file_key, store) = if config.connect.plain_files() {
+        (
+            SecretString::new(String::new()),
+            Store::create_team_plain(&path, config)?,
+        )
+    } else {
+        let file_key = new_file_key()?;
+        let store = Store::create_team(&path, &file_key)?;
+        (file_key, store)
+    };
     let owner_token = new_token(TokenKind::Member, &id)?;
     let hash = token_hash(owner_token.expose());
     let audit = Audit::new();
@@ -376,6 +475,21 @@ pub struct Hub {
     /// The bad codes and refresh tokens of each OAuth client of an embedded node, in
     /// memory only (docs/SPEC.md section 31.5).
     pub(crate) oauth_failures: crate::server::oauth::ClientFailures,
+    /// Apassy Connect accounts: the sign-in state in memory, the plan and group seams,
+    /// and the entitlement signer (`server::account`).
+    pub(crate) accounts: crate::server::account::Accounts,
+    /// Connect billing (docs/SPEC.md section 34): with the account routes on and the
+    /// Stripe files set. It is also the `Plans` seam of the accounts.
+    pub(crate) billing: Option<Arc<crate::server::billing_store::ConnectBilling>>,
+    /// The time of the last billing maintenance pass (`billing_store::maintain`).
+    pub(crate) billing_maintained_at: std::sync::atomic::AtomicU64,
+    /// The Connect tunnel broker (`server::tunnel_routes`): set once by `Relay::start`
+    /// when the account routes are on, else never.
+    pub(crate) tunnel: std::sync::OnceLock<crate::server::tunnel::Broker>,
+    /// Held while a removal is applied to a store file and while a device is added to a
+    /// store, so an add that clears a waiting removal and the apply of that removal never
+    /// cross (`add_store_device`, `apply_removal`).
+    store_changes: Mutex<()>,
 }
 
 impl Hub {
@@ -392,12 +506,34 @@ impl Hub {
                 "There is no relay in the data directory. Run `apassy-relay init` first.",
             ));
         }
+        // A cutover to Apassy Connect that is not finished: no start, before any file is
+        // opened, migrated, or swept (docs/SPEC.md section 37.3).
+        crate::server::cutover::check_start(&config)?;
         let directory = Directory::open(&config)?;
         let rules = RuleSet::builtin().map_err(|_| {
             RelayError::internal("The built-in rule packs of the core cannot be loaded.")
         })?;
         let push = crate::server::push::Push::start(config.push.clone(), stop.clone())?;
+        let signer = config
+            .connect
+            .signing_key
+            .as_ref()
+            .map(crate::server::entitlement::EntitlementSigner::from_key)
+            .transpose()?;
+        let billing = match (&config.connect.billing, config.connect.accounts) {
+            (Some(settings), true) => {
+                settings.check_api_base()?;
+                Some(Arc::new(crate::server::billing_store::build(
+                    settings,
+                    directory.store.clone(),
+                )?))
+            }
+            _ => None,
+        };
         let hub = Arc::new(Self {
+            accounts: crate::server::account::Accounts::new(signer)?,
+            billing,
+            billing_maintained_at: std::sync::atomic::AtomicU64::new(0),
             public_host: crate::decision::public_host(&config.public_url),
             config: Arc::new(config),
             directory,
@@ -415,7 +551,20 @@ impl Hub {
             connect_polls: Arc::new(AtomicUsize::new(0)),
             connect_feed_polls: Arc::new(AtomicUsize::new(0)),
             oauth_failures: crate::server::oauth::ClientFailures::default(),
+            tunnel: std::sync::OnceLock::new(),
+            store_changes: Mutex::new(()),
         });
+        if hub.config.connect.accounts {
+            crate::server::account::record_keys(&hub, crate::now_unix())?;
+        }
+        if hub.config.connect.accounts {
+            hub.set_groups(Arc::new(crate::server::group::DirectoryGroups));
+        }
+        if let Some(billing) = &hub.billing {
+            hub.set_plans(Arc::new(crate::server::billing_store::BillingPlans(
+                billing.clone(),
+            )));
+        }
         let rows = hub.directory.teams()?;
         finish_migration(&hub.config, &rows);
         sweep_orphans(&hub.config, &rows);
@@ -426,9 +575,24 @@ impl Hub {
         }
         // Each open derives the key of its file (PBKDF2, 256 000 rounds, about 0.1 s of
         // one core): with many Connect teams, open them on several threads.
+        // `connect` mode serves vault stores only (docs/SPEC.md section 37). A cutover that
+        // is not finished never gets here (`cutover::check_start`), and a finished one and
+        // `init` leave only vault stores: a team of another kind is a `relay.db` changed by
+        // hand, and is logged and not served.
+        let plain = hub.config.connect.plain_files();
+        for row in rows
+            .iter()
+            .filter(|row| plain && row.kind != TeamKind::Account)
+        {
+            eprintln!(
+                "apassy-relay: team {} is not a vault store and is not served in connect mode",
+                row.id
+            );
+        }
         let active: Vec<&TeamRow> = rows
             .iter()
             .filter(|row| row.state == TeamState::Active)
+            .filter(|row| !plain || row.kind == TeamKind::Account)
             .collect();
         let threads = std::thread::available_parallelism()
             .map_or(1, std::num::NonZeroUsize::get)
@@ -442,8 +606,12 @@ impl Hub {
                         // One team that cannot be opened does not stop the others. It
                         // stays out of service until the operator suspends or deletes it.
                         if let Err(error) = hub.open_team(row) {
+                            let advice = crate::server::cutover::open_failure_advice(
+                                plain,
+                                plain && !crate::server::cutover::plain_header(&hub.config.team_path(&row.id)),
+                            );
                             eprintln!(
-                                "apassy-relay: team {} cannot be opened and is out of service: {} Suspend or delete it with `apassy-relay admin`.",
+                                "apassy-relay: team {} cannot be opened and is out of service: {} {advice}",
                                 row.id, error.message
                             );
                         }
@@ -457,7 +625,12 @@ impl Hub {
     /// Opens the file of a team and adds it to the hub. A restart ends every session:
     /// a run that was `ready` becomes `ended`.
     fn open_team(&self, row: &TeamRow) -> RelayResult<Arc<Core>> {
-        let store = Store::open_team(&self.config.team_path(&row.id), &row.file_key)?;
+        let path = self.config.team_path(&row.id);
+        let store = if self.config.connect.plain_files() {
+            Store::open_team_plain(&path, &self.config)?
+        } else {
+            Store::open_team(&path, &row.file_key)?
+        };
         self.register(row.id.clone(), store, row.limits, row.kind)
     }
 
@@ -494,6 +667,10 @@ impl Hub {
             eprintln!("apassy-relay: the page cache of team {id} could not be bounded");
         }
         let audit = Audit::new();
+        // A vault store takes the removals that waited for it before it is served.
+        if kind == TeamKind::Account {
+            self.apply_store_removals(&id, &store, &audit, crate::now_unix())?;
+        }
         if end_ready_runs(&store, &audit, crate::now_unix()).is_err() {
             eprintln!(
                 "apassy-relay: the sessions of team {id} from before the start could not be ended"
@@ -581,6 +758,527 @@ impl Hub {
         }
     }
 
+    /// The Connect tunnel broker, on a started relay with the account routes.
+    pub fn tunnel(&self) -> Option<&crate::server::tunnel::Broker> {
+        self.tunnel.get()
+    }
+
+    /// Installs the plans of billing (C2): until then every account has none.
+    pub fn set_plans(&self, plans: Arc<dyn crate::server::account::Plans>) {
+        self.accounts.set_plans(plans);
+    }
+
+    /// Connect billing, when it is configured (the tests call its maintenance pass and
+    /// read its store through it).
+    pub fn billing(&self) -> Option<&Arc<crate::server::billing_store::ConnectBilling>> {
+        self.billing.as_ref()
+    }
+
+    /// Installs the groups (C3): until then no account is in a group.
+    pub fn set_groups(&self, groups: Arc<dyn crate::server::account::Groups>) {
+        self.accounts.set_groups(groups);
+    }
+
+    /// The account that made a vault store, or `None` for a team of another kind.
+    pub fn account_of_team(&self, team: &TeamId) -> RelayResult<Option<String>> {
+        Ok(self
+            .directory
+            .team(team)?
+            .filter(|row| row.kind == TeamKind::Account)
+            .and_then(|row| row.account_id))
+    }
+
+    /// `POST /v1/account/vaults` (connect-account-v1 section 8): a vault store, a team of
+    /// kind `account` with `TeamLimits::account`, for `vault_id` of `account`, with the id
+    /// `team` that the device made (a file at its path is 409 `conflict`). Its owner
+    /// member is named by the account id; its device 1 is the account device `device`
+    /// (named by its id) with the key `public_key`, so the relay-sync sign-in works with
+    /// the account device key. `entry` runs first in the directory transaction that
+    /// inserts the store (the `store` entry of the account's list); then the store row and
+    /// the map of the account device to the store device (`account_store_device`). Any
+    /// failure removes the file. A race for the same vault answers the store that won.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_vault_store(
+        &self,
+        account: &str,
+        device: &str,
+        public_key: &[u8],
+        vault_id: &str,
+        name: &str,
+        team: &TeamId,
+        entry: impl FnOnce(&Connection) -> RelayResult<()>,
+        now: u64,
+    ) -> RelayResult<TeamId> {
+        let name = checked_team_name(name)?.to_string();
+        let limits = TeamLimits::account(1);
+        limits.validate()?;
+        let new = match make_team_file_with_device(
+            &self.config,
+            &name,
+            account,
+            now,
+            Some((device, public_key)),
+            Some(team),
+        ) {
+            Ok(new) => new,
+            Err(error) if error.code == codes::CONFLICT => {
+                return Err(RelayError::new(
+                    codes::CONFLICT,
+                    "That store id is taken. Make a new id and sign its entry again.",
+                ));
+            }
+            Err(error) => return Err(error),
+        };
+        let store_device = new.store.with(|conn| {
+            conn.query_row(
+                "SELECT id FROM device WHERE member_id = ?1 AND revoked_at IS NULL",
+                params![to_i(new.owner_id.0)],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(db)
+        });
+        let added = store_device.and_then(|store_device| {
+            self.directory.store.tx(|tx| {
+                entry(tx)?;
+                directory::insert_vault_store(
+                    tx, &new.id, &name, &new.file_key, &limits, account, vault_id, now,
+                )?;
+                tx.execute(
+                    "INSERT INTO account_store_device (team_id, device_id, account_id, store_device, added_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![new.id.as_str(), device, account, store_device, to_i(now)],
+                )
+                .map_err(db)?;
+                self.directory.audit.write_on(
+                    tx,
+                    now,
+                    &format!("account:{account}"),
+                    "vault_store_created",
+                    None,
+                    &json!({"team_id": new.id, "account_id": account, "device_id": device}),
+                )
+            })
+        });
+        if let Err(error) = added {
+            // The team row did not commit: its file has no key anywhere.
+            let id = new.id.clone();
+            drop(new);
+            let _ = remove_team_file(&self.config, &id);
+            let winner: Option<String> = self.directory.store.with(|conn| {
+                conn.query_row(
+                    "SELECT id FROM team WHERE kind = 'account' AND account_id = ?1 AND vault_id = ?2",
+                    params![account, vault_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(db)
+            })?;
+            return winner.as_deref().and_then(TeamId::parse).ok_or(error);
+        }
+        let NewTeam { id, store, .. } = new;
+        self.register(id.clone(), store, limits, TeamKind::Account)?;
+        Ok(id)
+    }
+
+    /// Adds the account device `device` (key `public_key`) of `account` to the vault store
+    /// `team`: a member named by the account id (made when it is not there) and a device
+    /// named by the device id, without the item keys. Returns the store device id. A
+    /// device whose key is in the store already keeps its id.
+    ///
+    /// The map row goes into the directory in a transaction that checks again that the
+    /// device is live and may be in the store (`account::may_join_store`): when it may not
+    /// any more (a revoke or a group removal since the caller's checks), that transaction
+    /// queues the removal of the row the store file just took, the removal is applied, and
+    /// the answer is 403 `not_in_group`. A store device id that is used again ends the
+    /// removal that waited for it, so it does not revoke the device later. Under
+    /// `store_changes`, so no removal is applied to the row in between.
+    pub fn add_store_device(
+        &self,
+        team: &TeamId,
+        account: &str,
+        device: &str,
+        public_key: &[u8],
+        now: u64,
+    ) -> RelayResult<u64> {
+        let core = self
+            .team(team)
+            .filter(|core| core.kind == TeamKind::Account)
+            .ok_or_else(|| RelayError::internal("The vault store is not open."))?;
+        let _changes = self
+            .store_changes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let store_device = core.store.tx(|tx| {
+            let existing: Option<i64> = tx
+                .query_row(
+                    "SELECT id FROM device WHERE public_key = ?1 AND revoked_at IS NULL",
+                    params![public_key],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(db)?;
+            if let Some(id) = existing {
+                return Ok(to_u(id));
+            }
+            let member: Option<i64> = tx
+                .query_row(
+                    "SELECT id FROM member WHERE name = ?1 AND revoked_at IS NULL",
+                    params![account],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(db)?;
+            let member = match member {
+                Some(member) => member,
+                None => {
+                    tx.execute(
+                        "INSERT INTO member (name, role, created_at) VALUES (?1, 'member', ?2)",
+                        params![account, to_i(now)],
+                    )
+                    .map_err(db)?;
+                    tx.last_insert_rowid()
+                }
+            };
+            tx.execute(
+                "INSERT INTO device (member_id, name, public_key, key_holder, created_at) VALUES (?1, ?2, ?3, 0, ?4)",
+                params![member, device, public_key, to_i(now)],
+            )
+            .map_err(db)?;
+            let id = to_u(tx.last_insert_rowid());
+            core.audit.write_on(
+                tx,
+                now,
+                RELAY_ACTOR,
+                "device_added",
+                None,
+                &json!({"member_id": member, "device_id": id, "name": device}),
+            )?;
+            Ok(id)
+        })?;
+        let removal = StoreRemoval {
+            team: team.clone(),
+            device: device.to_string(),
+            store_device,
+        };
+        let mapped = self.directory.store.tx(|tx| {
+            if !crate::server::account::may_join_store(tx, team, account, device, public_key)? {
+                queue_store_removal(tx, &removal, now)?;
+                return Ok(false);
+            }
+            tx.execute(
+                "DELETE FROM account_store_removal WHERE team_id = ?1 AND store_device = ?2",
+                params![team.as_str(), to_i(store_device)],
+            )
+            .map_err(db)?;
+            tx.execute(
+                "INSERT INTO account_store_device (team_id, device_id, account_id, store_device, added_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(team_id, device_id) DO NOTHING",
+                params![team.as_str(), device, account, to_i(store_device), to_i(now)],
+            )
+            .map_err(db)?;
+            Ok(true)
+        })?;
+        if !mapped {
+            self.apply_removal(&core, &removal, now);
+            return Err(RelayError::new(
+                codes::NOT_IN_GROUP,
+                "That device is not a live device of your account or of your family or team.",
+            ));
+        }
+        Ok(store_device)
+    }
+
+    /// Removes the account device `device` (store device `store_device`) from the vault
+    /// store `team`: the row of `account_store_device` goes with a waiting removal in one
+    /// transaction (`queue_store_removal`), so the relay-sync sign-in to the store refuses
+    /// it from now on (`account::store_device_live`), then the removal is applied to the
+    /// store file when it is open (`Self::apply_removals`). A store that is not open,
+    /// or a write that fails (a full file, also without the audit row), keeps the waiting
+    /// row: the open of the store applies it before it serves, and the maintenance pass
+    /// retries it (`retry_store_removals`). The heads it signed stay verifiable
+    /// (relay-sync-v1: a removed device keeps its key).
+    pub fn remove_store_device(
+        &self,
+        team: &TeamId,
+        device: &str,
+        store_device: u64,
+        now: u64,
+    ) -> RelayResult<()> {
+        let removal = StoreRemoval {
+            team: team.clone(),
+            device: device.to_string(),
+            store_device,
+        };
+        self.directory
+            .store
+            .tx(|tx| queue_store_removal(tx, &removal, now))?;
+        self.apply_removals(std::slice::from_ref(&removal), now);
+        Ok(())
+    }
+
+    /// The second half of removals that `queue_store_removal` wrote and committed: for each
+    /// store that is open, its relay-sync tokens of the device end and its long polls wake,
+    /// and its device row is revoked; the waiting row goes when that write worked. A store
+    /// that is not open, or a write that fails, keeps its waiting row for the open of the
+    /// store or the maintenance pass. Answers how many store files took the write.
+    pub fn apply_removals(&self, removals: &[StoreRemoval], now: u64) -> usize {
+        let mut written = 0;
+        for removal in removals {
+            let Some(core) = self
+                .team(&removal.team)
+                .filter(|core| core.kind == TeamKind::Account)
+            else {
+                continue;
+            };
+            let _changes = self
+                .store_changes
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if self.apply_removal(&core, removal, now) {
+                written += 1;
+            }
+        }
+        written
+    }
+
+    /// One removal of `apply_removals` to the open store `core`, under `store_changes`:
+    /// only while its waiting row is there (an add of the device since then ended it).
+    /// Its tokens end and its polls wake, its row is revoked, and the waiting row goes when
+    /// the write worked. True when the store file took the write.
+    fn apply_removal(&self, core: &Core, removal: &StoreRemoval, now: u64) -> bool {
+        let waiting = self.directory.store.with(|conn| {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM account_store_removal WHERE team_id = ?1 \
+                 AND store_device = ?2 AND device_id = ?3)",
+                params![
+                    removal.team.as_str(),
+                    to_i(removal.store_device),
+                    removal.device
+                ],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(db)
+        });
+        if matches!(waiting, Ok(false)) {
+            return false;
+        }
+        let done = revoke_in_store(
+            &core.store,
+            &core.audit,
+            &removal.device,
+            removal.store_device,
+            now,
+        )
+        .is_ok();
+        crate::server::devices::drop_tokens(core, &[DeviceId(removal.store_device)]);
+        core.notify.notify();
+        if !done {
+            return false;
+        }
+        let settled = self.directory.store.with(|conn| {
+            conn.execute(
+                "DELETE FROM account_store_removal WHERE team_id = ?1 AND store_device = ?2",
+                params![removal.team.as_str(), to_i(removal.store_device)],
+            )
+            .map_err(db)
+            .map(drop)
+        });
+        match settled {
+            Ok(()) => true,
+            // The row waits: the next pass finds the device revoked and ends it.
+            Err(error) => {
+                eprintln!(
+                    "apassy-relay: a removal from vault store {} was applied, and its row stays for the next pass: {}",
+                    removal.team, error.message
+                );
+                false
+            }
+        }
+    }
+
+    /// The removals that wait for the vault store `team` (`account_store_removal`),
+    /// applied to its file as it opens. A removal that fails waits again.
+    fn apply_store_removals(
+        &self,
+        team: &TeamId,
+        store: &Store,
+        audit: &Audit,
+        now: u64,
+    ) -> RelayResult<()> {
+        let waiting: Vec<(i64, String, i64)> = self.directory.store.with(|conn| {
+            let mut statement = conn
+                .prepare(
+                    "SELECT store_device, device_id, attempts FROM account_store_removal WHERE team_id = ?1",
+                )
+                .map_err(db)?;
+            let rows = statement
+                .query_map(params![team.as_str()], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })
+                .map_err(db)?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(db)
+        })?;
+        for (store_device, device, attempts) in waiting {
+            let applied = revoke_in_store(store, audit, &device, to_u(store_device), now).is_ok();
+            self.settle_store_removal(team, store_device, attempts, applied, now)?;
+        }
+        Ok(())
+    }
+
+    /// The maintenance part of `remove_store_device`: each waiting removal that is due is
+    /// applied to its open store; a removal of a store that is gone ends; one that fails,
+    /// or whose store is not open, waits twice as long as before (at most an hour; the
+    /// open of the store applies it anyway). Answers how many were applied.
+    pub fn retry_store_removals(&self, now: u64) -> RelayResult<usize> {
+        let due: Vec<(String, i64, String, i64)> = self.directory.store.with(|conn| {
+            let mut statement = conn
+                .prepare(
+                    "SELECT team_id, store_device, device_id, attempts FROM account_store_removal \
+                     WHERE next_at <= ?1 ORDER BY next_at LIMIT ?2",
+                )
+                .map_err(db)?;
+            let rows = statement
+                .query_map(params![to_i(now), to_i(STORE_REMOVALS_PER_PASS)], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })
+                .map_err(db)?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(db)
+        })?;
+        let mut applied = 0;
+        for (team, store_device, device, attempts) in due {
+            let store = TeamId::parse(&team).and_then(|id| {
+                self.directory
+                    .team(&id)
+                    .ok()
+                    .flatten()
+                    .filter(|row| row.kind == TeamKind::Account)
+                    .map(|_| id)
+            });
+            let Some(team) = store else {
+                // The store is gone, and the removal with it.
+                self.directory.store.with(|conn| {
+                    conn.execute(
+                        "DELETE FROM account_store_removal WHERE team_id = ?1 AND store_device = ?2",
+                        params![team, store_device],
+                    )
+                    .map_err(db)
+                    .map(drop)
+                })?;
+                continue;
+            };
+            let Some(core) = self
+                .team(&team)
+                .filter(|core| core.kind == TeamKind::Account)
+            else {
+                self.settle_store_removal(&team, store_device, attempts, false, now)?;
+                continue;
+            };
+            let removal = StoreRemoval {
+                team: team.clone(),
+                device,
+                store_device: to_u(store_device),
+            };
+            let _changes = self
+                .store_changes
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if self.apply_removal(&core, &removal, now) {
+                applied += 1;
+            } else {
+                // Not written, or ended by an add of the device: a row that is left waits
+                // twice as long.
+                self.settle_store_removal(&team, store_device, attempts, false, now)?;
+            }
+        }
+        Ok(applied)
+    }
+
+    /// Ends a waiting removal that was applied, or sets its next try.
+    fn settle_store_removal(
+        &self,
+        team: &TeamId,
+        store_device: i64,
+        attempts: i64,
+        applied: bool,
+        now: u64,
+    ) -> RelayResult<()> {
+        self.directory.store.with(|conn| {
+            if applied {
+                conn.execute(
+                    "DELETE FROM account_store_removal WHERE team_id = ?1 AND store_device = ?2",
+                    params![team.as_str(), store_device],
+                )
+            } else {
+                let wait = STORE_REMOVAL_RETRY_SECS
+                    .saturating_mul(1 << to_u(attempts).min(6))
+                    .min(STORE_REMOVAL_MAX_WAIT_SECS);
+                conn.execute(
+                    "UPDATE account_store_removal SET attempts = attempts + 1, next_at = ?3 \
+                     WHERE team_id = ?1 AND store_device = ?2",
+                    params![team.as_str(), store_device, to_i(now.saturating_add(wait))],
+                )
+            }
+            .map_err(db)
+            .map(drop)
+        })
+    }
+
+    /// Deletes the vault store `team` (connect-account-v1 sections 6, 8, 9): it leaves
+    /// service at once, its requests drain (at most 10 seconds, else 409 and the store
+    /// stays out of service until a retry or a restart), then its row, its device map, and
+    /// its file with the snapshots go. `actor` names the account in the relay audit.
+    pub fn delete_vault_store(&self, team: &TeamId, actor: &str, now: u64) -> RelayResult<()> {
+        self.directory
+            .team(team)?
+            .filter(|row| row.kind == TeamKind::Account)
+            .ok_or_else(|| RelayError::not_found("vault store"))?;
+        let core = self
+            .teams
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(team);
+        if let Some(core) = core {
+            core.close();
+            self.draining
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(team.clone(), Arc::downgrade(&core));
+        }
+        self.wait_for_drained(team)?;
+        self.directory.store.tx(|tx| {
+            tx.execute("DELETE FROM team WHERE id = ?1", params![team.as_str()])
+                .map_err(db)?;
+            tx.execute(
+                "DELETE FROM account_store_device WHERE team_id = ?1",
+                params![team.as_str()],
+            )
+            .map_err(db)?;
+            tx.execute(
+                "DELETE FROM account_store_removal WHERE team_id = ?1",
+                params![team.as_str()],
+            )
+            .map_err(db)?;
+            // The join marks of the store go with it (the entries of the lists stay).
+            tx.execute(
+                "DELETE FROM account_join_share WHERE team_id = ?1",
+                params![team.as_str()],
+            )
+            .map_err(db)?;
+            self.directory.audit.write_on(
+                tx,
+                now,
+                actor,
+                "vault_store_deleted",
+                None,
+                &json!({"team_id": team}),
+            )
+        })?;
+        self.draining
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(team);
+        remove_team_file(&self.config, team)
+    }
+
     /// Every active team.
     pub fn all(&self) -> Vec<Arc<Core>> {
         self.teams
@@ -627,6 +1325,7 @@ impl Hub {
                 &request.owner,
                 now,
                 Some((&device_name, &public_key)),
+                None,
             )?;
             made = Some(new.id.clone());
             let added = directory::mark_team_code_used(tx, code_id, &new.id, now)
@@ -763,6 +1462,7 @@ impl Hub {
             PERSONAL_OWNER,
             now,
             Some((&device_name, &public_key)),
+            None,
         )?;
         let added = self.directory.store.tx(|tx| {
             directory::insert_team(tx, &new.id, &name, &new.file_key, false, now)?;
@@ -929,6 +1629,7 @@ impl Hub {
             CONNECT_OWNER,
             now,
             Some((&device_name, &public_key)),
+            None,
         )?;
         let mut refused: Option<&'static str> = None;
         let added = self.directory.store.tx(|tx| {
@@ -1087,12 +1788,20 @@ impl Hub {
     /// Deletes a suspended team: its row and file key in the directory, then its file.
     /// There is no undo. With `free_connect_key` (a Connect team only, 400 otherwise) the
     /// device key that made the team may make a new one (docs/SPEC.md section 27.10).
-    /// Returns whether a connect key was freed.
+    /// Returns whether a connect key was freed. A vault store of an account (kind
+    /// `account`) is refused in both modes: only its account removes it, with its device
+    /// map and waiting removals (`delete_vault_store`).
     pub fn delete(&self, id: &TeamId, free_connect_key: bool, now: u64) -> RelayResult<bool> {
         let row = self
             .directory
             .team(id)?
             .ok_or_else(|| RelayError::not_found("team"))?;
+        if row.kind == TeamKind::Account {
+            return Err(RelayError::new(
+                codes::CONFLICT,
+                "This is a vault store of an account: `admin delete` never deletes one. Its account removes it (`DELETE /v1/account/vaults/{team_id}` from a device in the store, or `DELETE /v1/account`). Nothing was changed.",
+            ));
+        }
         if free_connect_key && row.kind != TeamKind::Connect {
             return Err(RelayError::invalid(
                 "Only a Connect team has a connect key to free.",
@@ -1176,6 +1885,7 @@ impl Hub {
         }
         Ok(
             json!({"ready": ready, "teams": teams, "push": self.push.status(),
+            "billing": crate::server::billing_store::readiness(self),
             "connect": {"held": held, "capacity": self.config.connect_teams_max,
                 "high_water": (held as u64).saturating_mul(10) >= self.config.connect_teams_max.saturating_mul(8)}}),
         )
@@ -1445,6 +2155,13 @@ impl Hub {
             let limits = row.limits.apply(update)?;
             let (store, audit) = match &core {
                 Some(core) => (core.store.clone(), core.audit.clone()),
+                None if self.config.connect.plain_files() => (
+                    Arc::new(Store::open_team_plain(
+                        &self.config.team_path(id),
+                        &self.config,
+                    )?),
+                    Audit::new(),
+                ),
                 None => (
                     Arc::new(Store::open_team(&self.config.team_path(id), &row.file_key)?),
                     Audit::new(),
@@ -1529,7 +2246,8 @@ impl Hub {
         // Lock order: directory -> sync_commit -> team store (the sync commit order).
         let rows = self.directory.store.with(|conn| {
             let target = dir.join(crate::config::DIRECTORY_FILE);
-            let bytes = Store::snapshot_on(conn, &target, &self.config.master_key)?;
+            // `connect` mode copies plain files to plain files (docs/SPEC.md section 37).
+            let bytes = Store::snapshot_for(&self.config, conn, &target, &self.config.master_key)?;
             copied.push((crate::config::DIRECTORY_FILE.to_string(), target, bytes));
             let rows = directory::read_teams(conn)?;
             for row in &rows {
@@ -1547,19 +2265,23 @@ impl Hub {
                 });
                 let file = format!("{}/{}.db", crate::config::TEAMS_DIR, row.id);
                 let target = dir.join(&file);
+                let config = &self.config;
                 let bytes = if let Some(core) = &core {
                     core.store
-                        .with(|conn| Store::snapshot_on(conn, &target, &row.file_key))?
+                        .with(|conn| Store::snapshot_for(config, conn, &target, &row.file_key))?
                 } else {
                     // Includes suspended and failed-open teams. Missing/unreadable is
                     // an explicit backup failure, never a successful partial manifest.
-                    let store =
-                        Store::open_read_only(&self.config.team_path(&row.id), &row.file_key)?;
-                    store.with(|conn| Store::snapshot_on(conn, &target, &row.file_key))?
+                    let store = Store::open_read_only_for(
+                        config,
+                        &config.team_path(&row.id),
+                        &row.file_key,
+                    )?;
+                    store.with(|conn| Store::snapshot_for(config, conn, &target, &row.file_key))?
                 };
                 copied.push((file, target.clone(), bytes));
                 copied.extend(self.copy_snapshots(&row.id, &dir)?);
-                let saved = Store::open_read_only(&target, &row.file_key)?;
+                let saved = Store::open_read_only_for(config, &target, &row.file_key)?;
                 saved.with(|conn| {
                     crate::server::sync::verify_snapshots(
                         conn,
@@ -1587,12 +2309,16 @@ impl Hub {
             let hex = crate::sync_head::hex(&hasher.finalize());
             files.push(json!({"name": file, "bytes": bytes, "sha256": hex}));
         }
-        let manifest = json!({
+        let mut manifest = json!({
             "dir": published.to_string_lossy(),
             "created_at": now,
             "teams": rows.len(),
             "files": files,
         });
+        // A backup of `connect` mode holds plain files: a restore starts it without a key.
+        if self.config.connect.plain_files() {
+            manifest["mode"] = json!("connect");
+        }
         let text = serde_json::to_vec_pretty(&manifest)
             .map_err(|_| RelayError::internal("The manifest cannot be written."))?;
         let mut file = std::fs::OpenOptions::new()

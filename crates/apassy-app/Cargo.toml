@@ -1,17 +1,20 @@
 [package]
 name = "apassy-app"
-version = "0.5.19"
+version = "0.5.20"
 edition = "2024"
 rust-version = "1.97"
 publish = false
 license = "Apache-2.0"
 repository = "https://github.com/wydrox/apassy"
-description = "The Apassy app: on macOS the window, the owner command line, and the Mac's own node; on Linux the node without a window"
+description = "The Apassy desktop, interactive owner command line, and node on macOS and Linux"
 
 [features]
-# The window and the owner command line (the macOS bundle). The Linux package builds
-# `--no-default-features --features node`: no eframe, no desktop code (plan S2-S3, D8).
-default = ["window", "node"]
+# The desktop vault package uses the defaults on macOS and Linux. The separate
+# Linux node package keeps `--no-default-features --features node`; add `owner` for
+# interactive vault operations without eframe or a graphical session.
+default = ["window", "node", "owner"]
+# Interactive terminal vault operations, also available without a window.
+owner = ["apassy/vault"]
 window = ["apassy/desktop", "dep:eframe", "dep:tracing"]
 # The node commands (`serve`, `up`, `pair`, `status`, `doctor`, `team`), in the relay
 # crate (`apassy_relay::node`). Always on; the feature names the Linux build.
@@ -25,12 +28,13 @@ apassy = { path = "../..", features = ["vault"] }
 # The embedded node behind `apassy::node::backend` (crates/apassy-relay/src/embedded.rs),
 # and the node commands of Linux (`apassy_relay::node`).
 apassy-relay = { path = "../apassy-relay" }
-eframe = { version = "=0.36.2", optional = true, default-features = false, features = ["accesskit", "default_fonts", "glow"] }
+eframe = { version = "=0.36.2", optional = true, default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
 tracing = { version = "=0.1.44", optional = true }
 
 [dev-dependencies]
-# The unit test reads the core limit that `apassy::harden` set (src/main.rs).
-rustix = { version = "=1.1.4", default-features = false, features = ["std", "process"] }
+# The unit test reads the core limit that `apassy::harden` set (src/main.rs);
+# tests/owner_serve.rs runs `apassy owner serve` on a pseudo-terminal (`pty`).
+rustix = { version = "=1.1.4", default-features = false, features = ["std", "process", "pty"] }
 # tests/cloud_e2e.rs: the remote agent's OAuth and MCP client (ureq, as the relay tests),
 # a TLS upstream with its own test root (rcgen, rustls), PKCE (ring), the key store in
 # memory (zeroize), and temporary directories. The pins of the workspace: all are in
@@ -42,6 +46,9 @@ serde_json = "=1.0.151"
 tempfile = "=3.27.0"
 ureq = { version = "=3.4.2", default-features = false, features = ["rustls"] }
 zeroize = "=1.9.0"
+# tests/connect_tunnel.rs: the loopback Connect routes the tunnel paths to the relay's
+# broker on the relay's own HTTP server, as `Relay::start` binds it (the vendored copy).
+tiny_http = { version = "=0.12.0", path = "../apassy-relay/vendor/tiny_http", default-features = false }
 
 # Another name than the root `apassy` target, so the two do not overwrite each other
 # in target/. scripts/build-app.sh copies it into the bundle as Contents/MacOS/apassy;

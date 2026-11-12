@@ -52,12 +52,17 @@ pub use folder::{
     FOLDER_NAME, FolderEntry, PUSH_SUFFIX, SYNC_FILE_EXTENSION, SyncFolder, detect_folders_in,
     file_name_for, list_folder_vaults, start_download,
 };
+pub use relay::connect::{
+    ConnectEnableReport, MoveFailure, MoveRecord, MoveStep, StoreDeleted, StoreError, StorePlan,
+    is_plan_refusal, store_deleted, waits_for_account,
+};
 pub use relay::{
-    DeviceView, JoinedDevice, KeySource, LINK_INVALID_TEXT, LINK_UPDATE_TEXT, LinkCode, LinkKind,
-    LinkRefusal, MAX_LINK_BYTES, MAX_NODE_NAME_CHARS, PIN_CHANGED_TEXT, PairedLink, PendingJoin,
-    PendingLink, Receipt, RelayAdoptReport, RelayCallError, RelayConfig, RelayDownload,
-    RelayEnableReport, RelayMember, RelayPoll, RelaySync, RelayTransport, clean_node_name,
-    clear_relay_work, encode_node_name, membership_relay_url,
+    DepartedHead, DeviceView, JoinedDevice, KEPT_HEADS, KeySource, LINK_INVALID_TEXT,
+    LINK_UPDATE_TEXT, LinkCode, LinkKind, LinkRefusal, MAX_LINK_BYTES, MAX_NODE_NAME_CHARS,
+    PIN_CHANGED_TEXT, PairedLink, PendingJoin, PendingLink, Receipt, RelayAdoptReport,
+    RelayCallError, RelayConfig, RelayDownload, RelayEnableReport, RelayMember, RelayPoll,
+    RelaySync, RelayTransport, SignerPolicy, StoreSigners, clean_node_name, clear_relay_work,
+    encode_node_name, membership_relay_url,
 };
 pub use relay_crypto::{
     DeviceKey, HeadFields, MAX_SNAPSHOT_BYTES, NO_PREVIOUS, SignedHead, WORDS, decode_b64u,
@@ -66,10 +71,11 @@ pub use relay_crypto::{
 };
 pub use relay_http::{
     Cancel, DEFAULT_RELAY_URL, ExternalAnswer, ExternalRequest, HttpError, HttpTransport,
-    MAX_ALTERNATIVES, RelayUrl, TlsTrust, clear_local_route, post_json, set_http_transport,
-    set_local_route,
+    KEPT_DIAL_IDLE, KeptDials, MAX_ALTERNATIVES, NodeRoute, RelayUrl, TUNNEL_DIAL_PATH, TlsTrust,
+    TunnelDialer, TunnelPipe, TunnelRoute, clear_local_route, post_json, probe_direct,
+    set_http_transport, set_local_route, valid_node_id,
 };
-pub use state::{SyncState, TransportKind};
+pub use state::{ApprovedHead, SyncState, TransportKind};
 pub use transport::{FolderTransport, Precondition, Remote, RemoteHead, SyncTransport, Transport};
 
 use crate::vault::{
@@ -303,10 +309,33 @@ pub enum SyncError {
     RelayUnreachable,
     /// The relay refuses the device of this Mac: it was removed.
     RemovedFromRelay,
+    /// The vault store of this sync was deleted at Apassy Connect when an account was
+    /// recovered (connect-account-v1 section 9; [`RelaySync::store_deleted`]): nothing is
+    /// asked of Connect for it any more.
+    StoreDeleted,
     /// The relay serves an older copy than this Mac saw.
     StaleCopy,
     /// The relay serves a copy whose chain does not include this Mac's last change.
     ForkedCopy,
+    /// The head of a vault store of Apassy Connect was pushed by a device that left the
+    /// account after this Mac's last sync: this Mac waits for a device of the account to
+    /// sync, which signs a head of its own over it. Nothing was changed. The head is
+    /// [`RelaySync::waiting_head`]; the owner can take it ([`RelaySync::use_departed_copy`])
+    /// or replace it ([`RelaySync::replace_relay_copy`]).
+    WaitsForAccountDevice,
+    /// The chain of a vault store holds an entry by a key that the device list of this
+    /// Mac does not hold: a device that this Mac has not learned yet. The window asks
+    /// Connect for the device list ([`RelaySync::note_device_list`]); nothing was changed.
+    ChecksDeviceList,
+    /// The chain of a vault store holds an entry by a key that a device list fetched after
+    /// the first refusal still does not hold. "Use the relay copy…" goes on from there.
+    UnknownSigner,
+    /// The first download of a vault store: its head is signed by a device of a verified
+    /// list, and an earlier entry of its chain by a key that no list verifies, also after
+    /// the lists were read again (a person who shares the vault reset their account).
+    /// Nothing was taken; the owner can take the head without its earlier history
+    /// (`JoinedDevice::download_without_history`).
+    HistoryUnverified,
     /// Another sync of this vault runs now. The next sync tries again.
     Running,
     /// The copy is larger than the relay takes (64 MiB).
@@ -358,6 +387,14 @@ pub enum RelayRefusal {
     RateLimited,
     /// `503 busy` after the retries.
     Busy,
+    /// `410 free_connect_ended`: the free path of the hosted relay (the questions-only
+    /// Connect of ADR 0032, its questions, feed, and push) ended (ADR 0037 D14,
+    /// connect-account-v1 section 4). It never passes by itself: the app stops calling
+    /// that path and offers the choices of the notice (plan s7 unit M5).
+    FreeEnded,
+    /// `410 hosted_retired`: the hosted relay serves Apassy Connect only and retired this
+    /// route (connect-account-v1 section 14). It never passes by itself either.
+    HostedRetired,
     /// Another error of the relay.
     Error,
 }
@@ -367,11 +404,11 @@ impl fmt::Display for RelayRefusal {
         f.write_str(match self {
             Self::InvalidRequest => "the relay refused a malformed request",
             Self::Forbidden => {
-                "this link does not work. Another device may have used it. Make a new link on the other Mac"
+                concat!("this link does not work. Another device may have used it. Make a new link on the other ", crate::computer!())
             }
             Self::InviteInvalid => "the team code is wrong, used, or expired",
-            Self::JoinPending => "the other Mac has not confirmed this Mac yet",
-            Self::JoinRefused => "the other Mac refused, or the link expired",
+            Self::JoinPending => concat!("the other ", crate::computer!(), " has not confirmed this ", crate::computer!(), " yet"),
+            Self::JoinRefused => concat!("the other ", crate::computer!(), " refused, or the link expired"),
             Self::HeadInvalid => "the relay refused the signed head of this push",
             Self::TeamLimit => "the relay limits the pushes of this vault for this hour",
             Self::PlanRequired => {
@@ -379,10 +416,12 @@ impl fmt::Display for RelayRefusal {
             }
             Self::NotFound => "the relay does not have this item",
             Self::Conflict => {
-                "the relay's record of this Mac does not match. Nothing was added"
+                concat!("the relay's record of this ", crate::computer!(), " does not match. Nothing was added")
             }
             Self::RateLimited => "the relay asks to wait a minute",
             Self::Busy => "the relay is busy. Apassy tries again",
+            Self::FreeEnded => "the free path of apassy-relay.wyderka.cc ended",
+            Self::HostedRetired => "apassy-relay.wyderka.cc no longer serves this. It serves Apassy Connect only",
             Self::Error => "the relay had an error",
         })
     }
@@ -395,10 +434,10 @@ impl fmt::Display for SyncError {
             Self::AlreadyEnabled => f.write_str("sync is already on for this vault"),
             Self::FolderUnavailable => f.write_str("the synced folder is not available"),
             Self::NotDownloaded => {
-                f.write_str("the synced file is not on this Mac yet; wait for the download")
+                f.write_str(concat!("the synced file is not on this ", crate::computer!(), " yet; wait for the download"))
             }
             Self::NeedsPassphrase => f.write_str(
-                "the synced file has another passphrase: the passphrase changed on another Mac",
+                concat!("the synced file has another passphrase: the passphrase changed on another ", crate::computer!()),
             ),
             Self::Damaged => f.write_str("the synced file is damaged"),
             Self::OtherVault => f.write_str("the synced file holds another vault"),
@@ -410,22 +449,41 @@ impl fmt::Display for SyncError {
             Self::TimedOut => f.write_str(
                 "the synced folder did not respond in time. The local vault is safe. Check the sync service and try again",
             ),
-            Self::PreconditionFailed => f.write_str("another Mac pushed to the relay first"),
+            Self::PreconditionFailed => f.write_str(concat!("another ", crate::computer!(), " pushed to the relay first")),
             Self::RelayBusy => {
-                f.write_str("the relay is busy with another Mac. Apassy tries again")
+                f.write_str(concat!("the relay is busy with another ", crate::computer!(), ". Apassy tries again"))
             }
             Self::RelayUnreachable => {
                 f.write_str("relay not reachable. Apassy syncs when it is back")
             }
             Self::RemovedFromRelay => f.write_str(
-                "removed from the relay. This Mac keeps its vault. Turn relay sync off, then join again with a link from another Mac",
+                concat!("removed from the relay. This ", crate::computer!(), " keeps its vault. Turn relay sync off, then join again with a link from another ", crate::computer!()),
+            ),
+            Self::StoreDeleted => f.write_str(
+                "the copy of this vault at Apassy Connect was deleted when the account was recovered",
             ),
             Self::StaleCopy => f.write_str(
-                "the relay has an older copy than this Mac saw. To go on, select “Use the relay copy…” in Settings > Vault > Sync",
+                concat!("the relay has an older copy than this ", crate::computer!(), " saw. To go on, select “Use the relay copy…” in Settings > Vault > Sync"),
             ),
             Self::ForkedCopy => f.write_str(
-                "the relay served a copy that does not include this Mac's last change. To go on, select “Use the relay copy…” in Settings > Vault > Sync",
+                concat!("the relay served a copy that does not include this ", crate::computer!(), "'s last change. To go on, select “Use the relay copy…” in Settings > Vault > Sync"),
             ),
+            Self::WaitsForAccountDevice => f.write_str(
+                "waiting for another device of this account to sync. The last copy was saved by a device that left the account; nothing was changed",
+            ),
+            Self::ChecksDeviceList => f.write_str(concat!(
+                "checking the device list of this account. The relay copy has a change by a device that this ",
+                crate::computer!(),
+                " does not know yet; nothing was changed"
+            )),
+            Self::UnknownSigner => f.write_str(
+                "the relay copy has a change by a device that is not in the device list of this account. To go on, select “Use the relay copy…” in Settings > Vault > Sync",
+            ),
+            Self::HistoryUnverified => f.write_str(concat!(
+                "the relay copy has earlier versions saved by devices that this ",
+                crate::computer!(),
+                " cannot verify; nothing was taken"
+            )),
             Self::Running => f.write_str("another sync of this vault runs now. Apassy tries again"),
             Self::TooLarge => f.write_str("the vault is too large for the relay (64 MiB)"),
             Self::InvalidRelayAddress => f.write_str(
@@ -435,10 +493,10 @@ impl fmt::Display for SyncError {
                 f.write_str("the relay calls itself by another address than the settings say")
             }
             Self::RelayEmpty => f.write_str(
-                "the relay has no copy of this vault yet. Turn on relay sync on the other Mac first",
+                concat!("the relay has no copy of this vault yet. Turn on relay sync on the other ", crate::computer!(), " first"),
             ),
             Self::SafetyMismatch => f.write_str(
-                "the relay's words differ from this Mac's. Cancel and make a new link",
+                concat!("the relay's words differ from this ", crate::computer!(), "'s. Cancel and make a new link"),
             ),
             Self::PinMismatch => f.write_str(PIN_CHANGED_TEXT),
             Self::LinkInvalid(refusal) => f.write_str(refusal.message()),

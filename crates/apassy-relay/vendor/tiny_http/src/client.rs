@@ -2,7 +2,7 @@ use ascii::AsciiString;
 
 use std::io::Error as IoError;
 use std::io::Result as IoResult;
-use std::io::{BufReader, BufWriter, ErrorKind, Read};
+use std::io::{BufRead, BufReader, BufWriter, ErrorKind, Read};
 
 use std::net::SocketAddr;
 use std::str::FromStr;
@@ -31,6 +31,9 @@ pub struct ClientConnection {
 
     // set to true if we know that the previous request is the last one
     no_more_requests: bool,
+
+    // Apassy (connect keep-alive): a request came on this connection already
+    served: bool,
 
     // true if the connection goes through SSL
     secure: bool,
@@ -66,6 +69,7 @@ impl ClientConnection {
             remote_addr,
             next_header_source: first_header,
             no_more_requests: false,
+            served: false,
             secure,
             deadline,
         }
@@ -74,6 +78,14 @@ impl ClientConnection {
     /// true if the connection is HTTPS
     pub fn secure(&self) -> bool {
         self.secure
+    }
+
+    /// Apassy (connect keep-alive): the connection may carry sequential requests, so the
+    /// server hands it the next request only after the answer of the last one.
+    pub(crate) fn waits_for_answers(&self) -> bool {
+        self.deadline
+            .as_ref()
+            .map_or(false, |deadline| deadline.keeps())
     }
 
     /// Reads the next line from self.next_header_source.
@@ -171,18 +183,16 @@ impl ClientConnection {
             (method, path, version, headers)
         };
 
-        if self.deadline.is_some()
-            && headers.iter().any(|h: &crate::Header| {
-                h.field.equiv("Upgrade")
-                    || (h.field.equiv("Connection")
-                        && h.value
-                            .as_str()
-                            .split(',')
-                            .any(|token| token.trim().eq_ignore_ascii_case("upgrade")))
-            })
-        {
-            // Relay endpoints do not upgrade. Upstream's upgrade reader ignores
-            // Content-Length and Transfer-Encoding, so never select it here.
+        // Apassy (connect-tunnel-v1): a GET upgrade without body framing headers is
+        // allowed; its reader is the raw stream and nothing in it is a body. The handler
+        // either answers it (one request per connection) or calls `upgrade_split`.
+        let bodyless_get = method == Method::Get
+            && !headers.iter().any(|h: &crate::Header| {
+                h.field.equiv("Content-Length") || h.field.equiv("Transfer-Encoding")
+            });
+        if self.deadline.is_some() && !bodyless_get && crate::common::asks_upgrade(&headers) {
+            // Relay endpoints upgrade only a body-less GET. Upstream's upgrade reader
+            // ignores Content-Length and Transfer-Encoding, so never select it otherwise.
             return Err(ReadError::WrongHeader(version));
         }
         if let Some(deadline) = &self.deadline {
@@ -221,11 +231,52 @@ impl ClientConnection {
         if let Some(deadline) = &self.deadline {
             request.deadline = Some(deadline.clone());
             // One request per connection avoids a deadline/rejection of an earlier
-            // request affecting a pipelined successor.
-            self.no_more_requests = true;
+            // request affecting a pipelined successor. Apassy (connect keep-alive): a
+            // listener that allows sequential requests reads a next head only after the
+            // answer of this one kept the connection open (`await_next`).
+            if !deadline.keeps() {
+                self.no_more_requests = true;
+            }
         }
         // return the request
         Ok(request)
+    }
+
+    /// Apassy (connect keep-alive): whether a kept connection carries a next request.
+    /// It waits until the request before it is dropped (its answer is then written), and
+    /// goes on only when that answer kept the connection open and no byte came before it
+    /// was written (a pipelined request closes the connection). Then the first byte of
+    /// the next head must come within the idle wait; from that byte on the request has
+    /// fresh header, body, and handle deadlines. Nothing is ever written in between: an
+    /// idle or pipelined connection just closes.
+    fn await_next(&mut self, deadline: &crate::deadline::Deadline) -> bool {
+        let reader = self.next_header_source.inner();
+        if !deadline.take_again() {
+            return false;
+        }
+        if !reader.buffer().is_empty() {
+            deadline.close(std::net::Shutdown::Both);
+            return false;
+        }
+        deadline.idle_wait();
+        loop {
+            match reader.fill_buf() {
+                Ok(bytes) if !bytes.is_empty() => break,
+                Ok(_) => return false,
+                Err(ref err)
+                    if matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut)
+                        && !deadline.expired() =>
+                {
+                    continue
+                }
+                Err(_) => {
+                    deadline.close(std::net::Shutdown::Both);
+                    return false;
+                }
+            }
+        }
+        deadline.next_request();
+        true
     }
 }
 
@@ -241,6 +292,13 @@ impl Iterator for ClientConnection {
         //  or is using HTTP 1.0, meaning that no new request will come
         if self.no_more_requests {
             return None;
+        }
+        if self.served {
+            if let Some(deadline) = self.deadline.clone() {
+                if !self.await_next(&deadline) {
+                    return None;
+                }
+            }
         }
 
         loop {
@@ -310,10 +368,13 @@ impl Iterator for ClientConnection {
                 .map(|h| h.value.as_str());
 
             let lowercase = connection_header.map(|h| h.to_ascii_lowercase());
+            // Apassy: an upgrade is the one rule of the crate (`asks_upgrade`).
+            if crate::common::asks_upgrade(rq.headers()) {
+                self.no_more_requests = true;
+            }
 
             match lowercase {
                 Some(ref val) if val.contains("close") => self.no_more_requests = true,
-                Some(ref val) if val.contains("upgrade") => self.no_more_requests = true,
                 Some(ref val)
                     if !val.contains("keep-alive") && *rq.http_version() == HTTPVersion(1, 0) =>
                 {
@@ -324,6 +385,7 @@ impl Iterator for ClientConnection {
             };
 
             // returning the request
+            self.served = true;
             return Some(rq);
         }
     }

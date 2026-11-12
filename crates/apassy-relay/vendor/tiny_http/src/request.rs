@@ -5,7 +5,9 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::str::FromStr;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
+use std::sync::Arc;
 
 use crate::util::{ChunkedReader, EqualReader, FusedReader};
 use crate::{HTTPVersion, Header, Method, Response, StatusCode};
@@ -74,6 +76,26 @@ pub struct Request {
 
     // If Some, a message must be sent after responding
     notify_when_responded: Option<Sender<()>>,
+
+    // Apassy (connect keep-alive): the body was read to its end
+    body_done: Arc<AtomicBool>,
+}
+
+/// Apassy (connect keep-alive): notes that a body was read to its end, so that a kept
+/// connection never drains an unread body after its answer.
+struct UntilEnd<R> {
+    inner: R,
+    done: Arc<AtomicBool>,
+}
+
+impl<R: Read> Read for UntilEnd<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let read = self.inner.read(buf)?;
+        if read == 0 && !buf.is_empty() {
+            self.done.store(true, Ordering::SeqCst);
+        }
+        Ok(read)
+    }
 }
 
 struct NotifyOnDrop<R> {
@@ -196,16 +218,22 @@ where
         }
     };
 
-    // true if the client sent a `Connection: upgrade` header
-    let connection_upgrade = {
-        match headers
-            .iter()
-            .find(|h: &&Header| h.field.equiv("Connection"))
-            .map(|h| h.value.as_str())
-        {
-            Some(v) if v.to_ascii_lowercase().contains("upgrade") => true,
-            _ => false,
-        }
+    // Apassy: the raw reader is for a request that asks for an upgrade, by the one rule
+    // of the crate (`asks_upgrade`: an `Upgrade` header, or the token `upgrade` in any
+    // `Connection` header), and has no body framing: it never ignores a Content-Length or
+    // a Transfer-Encoding. The guarded transport admits an upgrade only as a body-less GET.
+    let connection_upgrade = crate::common::asks_upgrade(&headers)
+        && content_length.is_none()
+        && transfer_encoding.is_none();
+
+    // Apassy: set once the body was read to its end; a request without a body has none
+    // left to read.
+    let body_done = Arc::new(AtomicBool::new(false));
+    let until_end = |reader: Box<dyn Read + Send + 'static>| {
+        Box::new(UntilEnd {
+            inner: reader,
+            done: body_done.clone(),
+        }) as Box<dyn Read + Send + 'static>
     };
 
     // we wrap `source_data` around a reading whose nature depends on the transfer-encoding and
@@ -215,6 +243,7 @@ where
         Box::new(source_data) as Box<dyn Read + Send + 'static>
     } else if let Some(content_length) = content_length {
         if content_length == 0 {
+            body_done.store(true, Ordering::SeqCst);
             Box::new(io::empty()) as Box<dyn Read + Send + 'static>
         } else if prefetch_body && content_length <= 1024 && !expects_continue {
             // if the content-length is small enough, we just read everything into a buffer
@@ -235,20 +264,21 @@ where
                 offset += read;
             }
 
+            body_done.store(true, Ordering::SeqCst);
             Box::new(Cursor::new(buffer)) as Box<dyn Read + Send + 'static>
         } else {
             let (data_reader, _) = EqualReader::new(source_data, content_length); // TODO:
-            Box::new(FusedReader::new(data_reader)) as Box<dyn Read + Send + 'static>
+            until_end(Box::new(FusedReader::new(data_reader)))
         }
     } else if transfer_encoding.is_some() {
         // if a transfer-encoding was specified, then "chunked" is ALWAYS applied
         // over the message (RFC2616 #3.6)
-        Box::new(FusedReader::new(ChunkedReader::new(source_data)))
-            as Box<dyn Read + Send + 'static>
+        until_end(Box::new(FusedReader::new(ChunkedReader::new(source_data))))
     } else {
         // if we have neither a Content-Length nor a Transfer-Encoding,
         // assuming that we have no data
         // TODO: could also be multipart/byteranges
+        body_done.store(true, Ordering::SeqCst);
         Box::new(io::empty()) as Box<dyn Read + Send + 'static>
     };
 
@@ -265,6 +295,7 @@ where
         body_length: content_length,
         must_send_continue: expects_continue,
         notify_when_responded: None,
+        body_done,
     })
 }
 
@@ -371,6 +402,60 @@ impl Request {
         } else {
             Box::new(stream) as Box<dyn ReadWrite + Send>
         }
+    }
+
+    /// Apassy (connect-tunnel-v1): the upgrade of the relay's deadline transport.
+    ///
+    /// Like [`Request::upgrade`], but for a server made by `Server::http_with_deadlines`:
+    /// it first ends the request's header, body and handle deadlines (reads and writes
+    /// then fail after `idle` without progress, and the reaper forgets the transport),
+    /// prints `response` with `Connection: upgrade` and `Upgrade: {protocol}`, and returns
+    /// the read and write halves apart, so that two threads can use them, with a function
+    /// that shuts the socket down from any thread (it unblocks a pending read).
+    ///
+    /// The read half is the same buffered reader that read the request head: bytes that
+    /// arrived with the head (a first WebSocket frame in the same TCP segment) are kept.
+    /// On a server without deadlines the shutdown function does nothing and no idle
+    /// limit is set.
+    pub fn upgrade_split<R: Read>(
+        mut self,
+        protocol: &str,
+        response: Response<R>,
+        idle: std::time::Duration,
+    ) -> Result<UpgradedParts, IoError> {
+        if let Some(deadline) = &self.deadline {
+            deadline.release(idle);
+        }
+        let mut writer = self.extract_writer_impl();
+        let printed = response
+            .raw_print(
+                writer.by_ref(),
+                self.http_version.clone(),
+                &self.headers,
+                false,
+                Some(protocol),
+            )
+            .and_then(|()| writer.flush());
+        let reader = self.extract_reader_impl();
+        let deadline = self.deadline.take();
+        if let Some(sender) = self.notify_when_responded.take() {
+            let _ = sender.send(());
+        }
+        if let Err(error) = printed {
+            if let Some(deadline) = &deadline {
+                deadline.close(std::net::Shutdown::Both);
+            }
+            return Err(error);
+        }
+        let shutdown: Box<dyn Fn() + Send + Sync> = match deadline {
+            Some(deadline) => Box::new(move || deadline.close(std::net::Shutdown::Both)),
+            None => Box::new(|| {}),
+        };
+        Ok(UpgradedParts {
+            reader,
+            writer,
+            shutdown,
+        })
     }
 
     /// Allows to read the body of the request.
@@ -485,20 +570,63 @@ impl Request {
         R: Read,
     {
         let mut writer = self.extract_writer_impl();
-        if self.deadline.is_some() {
+        let keep = self.keeps_connection(&response);
+        if self.deadline.is_some() && !keep {
             response.add_header(Header::from_bytes("Connection", "close").unwrap());
         }
         let do_not_send_body = self.method == Method::Head;
 
-        Self::ignore_client_closing_errors(response.raw_print(
+        let printed = response.raw_print(
             writer.by_ref(),
             self.http_version.clone(),
             &self.headers,
             do_not_send_body,
             None,
-        ))?;
+        );
+        let mut whole = printed.is_ok();
+        Self::ignore_client_closing_errors(printed)?;
 
-        Self::ignore_client_closing_errors(writer.flush())
+        let flushed = writer.flush();
+        whole = whole && flushed.is_ok();
+        if keep && whole {
+            if let Some(deadline) = &self.deadline {
+                deadline.answered_for_next();
+            }
+        }
+        Self::ignore_client_closing_errors(flushed)
+    }
+
+    /// Apassy (connect keep-alive): whether the connection stays open after `response`,
+    /// for a next request. Only on a listener that allows it for this connection
+    /// (`Server::http_with_deadlines_and_keep_alive`, asked now), for an HTTP/1.1
+    /// request that does not ask to close or to upgrade, whose body was read to its end,
+    /// with an answer that does not close, and with no byte of a next request on the
+    /// socket yet (pipelining closes the connection). Everything else is one request
+    /// per connection, with `Connection: close`.
+    fn keeps_connection<R: Read>(&self, response: &Response<R>) -> bool {
+        let deadline = match &self.deadline {
+            Some(deadline) => deadline,
+            None => return false,
+        };
+        let asks_close = self.headers.iter().any(|header| {
+            header.field.equiv("Connection")
+                && header.value.as_str().split(',').any(|token| {
+                    token
+                        .trim_matches(|c| c == ' ' || c == '\t')
+                        .eq_ignore_ascii_case("close")
+                })
+        });
+        deadline.keeps()
+            && self.http_version == HTTPVersion(1, 1)
+            && !asks_close
+            && !crate::common::asks_upgrade(&self.headers)
+            && self.body_done.load(Ordering::SeqCst)
+            && !response
+                .headers()
+                .iter()
+                .any(|header| header.field.equiv("Connection"))
+            && deadline.allows(self.remote_addr)
+            && !deadline.input_waiting()
     }
 
     fn ignore_client_closing_errors(result: io::Result<()>) -> io::Result<()> {
@@ -537,6 +665,16 @@ impl Drop for Request {
             }
         }
     }
+}
+
+/// Apassy: the halves of an upgraded transport, from [`Request::upgrade_split`].
+pub struct UpgradedParts {
+    /// Bytes from the client, starting right after the request head.
+    pub reader: Box<dyn Read + Send + 'static>,
+    /// Bytes to the client (buffered: flush after each message).
+    pub writer: Box<dyn Write + Send + 'static>,
+    /// Shuts the socket down both ways.
+    pub shutdown: Box<dyn Fn() + Send + Sync + 'static>,
 }
 
 /// Dummy trait that regroups the `Read` and `Write` traits.

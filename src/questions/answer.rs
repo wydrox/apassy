@@ -171,13 +171,20 @@ impl AnswerError {
         match self {
             Self::NotOffered => "This question does not offer this answer.".to_owned(),
             Self::Unbuildable => "Apassy cannot send this answer from another device.".to_owned(),
-            Self::NeedsOwnerCheck => "Confirm with Touch ID to send this answer.".to_owned(),
+            Self::NeedsOwnerCheck => {
+                concat!("Confirm with ", crate::touch_id!(), " to send this answer.").to_owned()
+            }
             Self::Sign => "Apassy could not sign the answer.".to_owned(),
             Self::AlreadyAnswered => "Already answered.".to_owned(),
             Self::Expired => "Expired.".to_owned(),
             Self::NotRouted => "This device cannot answer this question.".to_owned(),
             Self::TooManyAnswers => "The relay refused the answer: too many answers.".to_owned(),
-            Self::Gone => "This question no longer waits on this Mac.".to_owned(),
+            Self::Gone => concat!(
+                "This question no longer waits on this ",
+                crate::computer!(),
+                "."
+            )
+            .to_owned(),
             Self::Relay(QuestionsError::Unreachable) => {
                 "The relay did not answer. Try again.".to_owned()
             }

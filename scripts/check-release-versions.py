@@ -68,6 +68,41 @@ def linux_node_errors(root):
     return errors
 
 
+def linux_vault_errors(root):
+    """The Linux vault package `apassy-vault` (ADR 0045, unit L6) is delivered with the
+    `linux-cli` component at the shared release version: the desktop, the owner commands
+    and the browser host for x86_64 and aarch64, as .tar.gz and .deb on /dl/. These are
+    source checks of its release path; publication is verified by
+    deploy/worker/scripts/check-public-assets.py (docs/operations/release.md)."""
+    errors = []
+    build = (root / LINUX / "build-vault.sh").read_text(encoding="utf-8")
+    if "release-versions.json" not in build:
+        errors.append("packaging/linux/build-vault.sh must take the version from release-versions.json")
+    if re.search(r"^Version: \$version$", build, re.MULTILINE) is None:
+        errors.append("packaging/linux/build-vault.sh must write Version: $version, not a literal version")
+    release = (root / LINUX / "build-vault-release.sh").read_text(encoding="utf-8")
+    if "cargo build --release --locked" not in release or "baseline=2.31" not in release:
+        errors.append("packaging/linux/build-vault-release.sh must build in release mode against glibc 2.31")
+    workflow = (root / ".github/workflows/relay-image.yml").read_text(encoding="utf-8")
+    for needle, what in (
+        ("packaging/linux/build-vault-release.sh", "build the vault packages with build-vault-release.sh"),
+        ("packaging/linux/verify-vault.sh --dist dist", "verify the vault packages"),
+        ("> SHA256SUMS-vault\n", "combine the vault checksums into SHA256SUMS-vault"),
+        ("rust:1.97.0-bullseye@", "build the vault in the bullseye image"),
+    ):
+        if needle not in workflow:
+            errors.append(f".github/workflows/relay-image.yml must {what}")
+    assets = (root / RELAY / "deploy/worker/scripts/verify-assets.mjs").read_text(encoding="utf-8")
+    public = (root / RELAY / "deploy/worker/scripts/check-public-assets.py").read_text(encoding="utf-8")
+    for path, text in (("verify-assets.mjs", assets), ("check-public-assets.py", public)):
+        if "apassy-vault_" not in text or "linux-aarch64.tar.gz" not in text:
+            errors.append(f"deploy/worker/scripts/{path} must require the four Linux vault packages")
+    installer = (root / RELAY / "deploy/worker/public/install.sh").read_text(encoding="utf-8")
+    if "apassy-vault_" not in installer or "APASSY_COMPONENT" not in installer:
+        errors.append("deploy/worker/public/install.sh must install the vault package on request")
+    return errors
+
+
 def check(root):
     manifest = json.loads((root / "release-versions.json").read_text(encoding="utf-8"))
     version = manifest["version"]
@@ -112,6 +147,7 @@ def check(root):
     if not {"apassy-relay", "apassy-team"} <= bins:
         errors.append("the relay crate must build both apassy-relay and the Linux apassy-team CLI")
     errors.extend(linux_node_errors(root))
+    errors.extend(linux_vault_errors(root))
     return version, errors
 
 
@@ -165,7 +201,7 @@ def main():
     if errors:
         print("Release version check failed:\n- " + "\n- ".join(errors), file=sys.stderr)
         return 1
-    print(f"Release source versions match {version}, the relay and the Linux node included.")
+    print(f"Release source versions match {version}, the relay, the Linux node and the Linux vault package included.")
     return 0
 
 

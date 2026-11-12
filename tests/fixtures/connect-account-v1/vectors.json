@@ -4,6 +4,7 @@
   "account_id": "acc_k7m2q4x3ca",
   "device_a": {
     "device_id": "dev_m2k7q3x4ab",
+    "name": "MacBook Pro",
     "private_hex": "4f2d9c6e1b3a7d8f0c5e2a9b7f4d1c3e6a8b0d2f4c6e8a1b3d5f7a9c0e2b4d6f",
     "public_hex": "04ea47901e55bd31d76b0a545d9c60bb8e10f7b2366f3abd1bfb88ead14cf668fc0ded38eded5f35623c3081110ec6b18410b48a1d433df5da33899d05b1318eb0",
     "public_b64u": "BOpHkB5VvTHXawpUXZxgu44Q97I2bzq9G_uI6tFM9mj8De047e1fNWI8MIERDsaxhBC0ih1DPfXaM4mdBbExjrA",
@@ -11,6 +12,7 @@
   },
   "device_b": {
     "device_id": "dev_p4n6r2t7bc",
+    "name": "iPhone",
     "private_hex": "1c9a5e3f7b2d4a6c8e0f1a3b5c7d9e2f4a6b8c0d1e3f5a7b9c2d4e6f8a1b3c5d",
     "public_hex": "0474f49f8166e7d274dd9b225bdd26f5076e6017a55ad455dd40969d56adfb8be1315c2b1ba61bd4de3d74c740a0c8f26eaec417c54788abf0d980035da97457c5",
     "public_b64u": "BHT0n4Fm59J03ZsiW90m9QduYBelWtRV3UCWnVat-4vhMVwrG6Yb1N49dMdAoMjybq7EF8VHiKvw2YADXal0V8U",
@@ -22,9 +24,9 @@
       "name": "account",
       "tag": "apassy-connect account v1",
       "signer": "device_a",
-      "message_b64u": "YXBhc3N5LWNvbm5lY3QgYWNjb3VudCB2MQBodHRwczovL2Nvbm5lY3QuZXhhbXBsZS50ZXN0AEJPcEhrQjVWdlRIWGF3cFVYWnhndTQ0UTk3STJienE5R191STZ0Rk05bWo4RGUwNDdlMWZOV0k4TUlFUkRzYXhoQkMwaWgxRFBmWGFNNG1kQmJFeGpyQQ",
-      "sha256": "c5c2149eeecf005d73996c15679548f44f01ce75e9165f882e88067084fd7b09",
-      "signature_b64u": "MEYCIQDLCqQAaXw6ELz0osjgUd6ep-PWtaTWQChc4LNjAdzqrwIhAM_yc2zz20100IW4BGjGWKmEXcSkGvhMUyJMFKuBRLnG"
+      "message_b64u": "YXBhc3N5LWNvbm5lY3QgYWNjb3VudCB2MQBodHRwczovL2Nvbm5lY3QuZXhhbXBsZS50ZXN0AEJPcEhrQjVWdlRIWGF3cFVYWnhndTQ0UTk3STJienE5R191STZ0Rk05bWo4RGUwNDdlMWZOV0k4TUlFUkRzYXhoQkMwaWgxRFBmWGFNNG1kQmJFeGpyQQBQM1ZaZ1FrS3dyVTAxSUtpYVNzbmJDa0REQW5GbU00UXV6bzhzMXBNX3cw",
+      "sha256": "0a0ee9f13c6c1546a436d0be0b17c65e43bf089e2b05b1389edff6f3f2f07c64",
+      "signature_b64u": "MEYCIQC5G2U01kHFvYg6JmeGDXObOzbASI4YXusRsb2DQYcq9wIhAPVgIV-KtWiyeAxBJm3tNMQovmk2XeRHPurE2Battvr2"
     },
     {
       "name": "sign_in",
@@ -32,23 +34,71 @@
       "signer": "device_a",
       "message_b64u": "YXBhc3N5LWNvbm5lY3Qgc2lnbi1pbiB2MQBodHRwczovL2Nvbm5lY3QuZXhhbXBsZS50ZXN0AGFjY19rN20ycTR4M2NhAEJPcEhrQjVWdlRIWGF3cFVYWnhndTQ0UTk3STJienE5R191STZ0Rk05bWo4RGUwNDdlMWZOV0k4TUlFUkRzYXhoQkMwaWgxRFBmWGFNNG1kQmJFeGpyQQBBQUVDQXdRRkJnY0lDUW9MREEwT0R4QVJFaE1VRlJZWEdCa2FHeHdkSGg4",
       "sha256": "d3f0b4542809fd46fb8e43e311818189e1c3105db90fd2251baa6b6fdf061f78",
-      "signature_b64u": "MEUCIDHdgGPhR4AKRBXenUGCgo6g1S9nD4CAgFdrbQl64ZcfAiEAk7EVrrC_JG4A8GL4Ts9vxlqu_WVbbcJ5Cy06EYPVl9M"
+      "signature_b64u": "MEUCIFTp4fCe-z2aACBZTC_U10ohxNAk_4ipZ85HrJmkoCzbAiEAg9Te-qToI_eOBfhKIBUACll00r0e1fesNwsxTsqXVns"
     },
     {
       "name": "join",
       "tag": "apassy-connect join v1",
       "signer": "device_b",
-      "message_b64u": "YXBhc3N5LWNvbm5lY3Qgam9pbiB2MQBodHRwczovL2Nvbm5lY3QuZXhhbXBsZS50ZXN0AGFjY19rN20ycTR4M2NhAEs2dGdLcF9vcWo3WGJpV3FXbURoSnEtRElUaHR2aHFiRVdZOHRlZzVKYlkAQkhUMG40Rm01OUowM1pzaVc5MG05UWR1WUJlbFd0UlYzVUNXblZhdC00dmhNVndyRzZZYjFONDlkTWRBb01qeWJxN0VGOFZIaUt2dzJZQURYYWwwVjhV",
-      "sha256": "f73761cd3449c61940144209b857c7450bcfaafd7211eea5e409778325677063",
-      "signature_b64u": "MEYCIQCo0191DUmH6H6NGblv-i2IdCeYf3xb8sLUxGeaNVVTUQIhANkozKZhV8QLRitHg-IPmsZJhq7cDrKmeyzqif2IgK_H"
+      "message_b64u": "YXBhc3N5LWNvbm5lY3Qgam9pbiB2MQBodHRwczovL2Nvbm5lY3QuZXhhbXBsZS50ZXN0AGFjY19rN20ycTR4M2NhAFA2eURHdng1ZVprd3psZEd4aHVYMWdLY2FpZ043ZEZIdzItcTI2RWI5VG8AQkhUMG40Rm01OUowM1pzaVc5MG05UWR1WUJlbFd0UlYzVUNXblZhdC00dmhNVndyRzZZYjFONDlkTWRBb01qeWJxN0VGOFZIaUt2dzJZQURYYWwwVjhVAGlQaG9uZQ",
+      "sha256": "6a33469d0b373c119960b65348a214f412a0e301a6b24ac9856ed8c203cbc0c3",
+      "signature_b64u": "MEUCIQD-8-1mMgPFPZRIg1TcpGSS-xCdn0E5AMXJNzH9OaUQKAIgcRwHkUQECGAMNGIA4UH5sksuxlkls8Ezv0mquGCx_h8"
+    },
+    {
+      "name": "join_cancel",
+      "tag": "apassy-connect join-cancel v1",
+      "signer": "device_b",
+      "message_b64u": "YXBhc3N5LWNvbm5lY3Qgam9pbi1jYW5jZWwgdjEAaHR0cHM6Ly9jb25uZWN0LmV4YW1wbGUudGVzdABhY2NfazdtMnE0eDNjYQBQNnlER3Z4NWVaa3d6bGRHeGh1WDFnS2NhaWdON2RGSHcyLXEyNkViOVRvAEJIVDBuNEZtNTlKMDNac2lXOTBtOVFkdVlCZWxXdFJWM1VDV25WYXQtNHZoTVZ3ckc2WWIxTjQ5ZE1kQW9NanlicTdFRjhWSGlLdncyWUFEWGFsMFY4VQ",
+      "sha256": "51ab538f00f6178100125b0dcbd27ae52dab7feb2211243d4c13f2c35a4a0fc7",
+      "signature_b64u": "MEYCIQDq7BW2nxixFdRqmfHDmLhc9e6dD0VgOd9lEFgMSuVcywIhAOpRHjUTQnxOzX84NcX6YyHPGI3YlkNdrc3zscIBjiFf"
+    },
+    {
+      "name": "device_list_root",
+      "tag": "apassy-connect device-list v1",
+      "signer": "device_a",
+      "message_b64u": "YXBhc3N5LWNvbm5lY3QgZGV2aWNlLWxpc3QgdjEAaHR0cHM6Ly9jb25uZWN0LmV4YW1wbGUudGVzdABhY2NfazdtMnE0eDNjYQAxAC0Acm9vdABCT3BIa0I1VnZUSFhhd3BVWFp4Z3U0NFE5N0kyYnpxOUdfdUk2dEZNOW1qOERlMDQ3ZTFmTldJOE1JRVJEc2F4aEJDMGloMURQZlhhTTRtZEJiRXhqckEALQBNYWNCb29rIFBybwBCT3BIa0I1VnZUSFhhd3BVWFp4Z3U0NFE5N0kyYnpxOUdfdUk2dEZNOW1qOERlMDQ3ZTFmTldJOE1JRVJEc2F4aEJDMGloMURQZlhhTTRtZEJiRXhqckE",
+      "sha256": "c381d54faeb8272ade6d3353f64a1406c6821f476d47cb9b273dd0515a57e9a5",
+      "signature_b64u": "MEYCIQDCdhTwhnaEDgQERMD7xjwCpvOxjcEYCy30g2VvHvB_jQIhAKGA5jk35MhT4oDMeQgmgzcuKBHLmJ5zQj0oGEyqjQQC"
+    },
+    {
+      "name": "device_list_add",
+      "tag": "apassy-connect device-list v1",
+      "signer": "device_a",
+      "message_b64u": "YXBhc3N5LWNvbm5lY3QgZGV2aWNlLWxpc3QgdjEAaHR0cHM6Ly9jb25uZWN0LmV4YW1wbGUudGVzdABhY2NfazdtMnE0eDNjYQAyAHc0SFZUNjY0SnlyZWJUTlQ5a29VQnNhQ0gwZHRSOHViSnozUVVWcFg2YVUAYWRkAEJIVDBuNEZtNTlKMDNac2lXOTBtOVFkdVlCZWxXdFJWM1VDV25WYXQtNHZoTVZ3ckc2WWIxTjQ5ZE1kQW9NanlicTdFRjhWSGlLdncyWUFEWGFsMFY4VQBQNnlER3Z4NWVaa3d6bGRHeGh1WDFnS2NhaWdON2RGSHcyLXEyNkViOVRvAGlQaG9uZQBCT3BIa0I1VnZUSFhhd3BVWFp4Z3U0NFE5N0kyYnpxOUdfdUk2dEZNOW1qOERlMDQ3ZTFmTldJOE1JRVJEc2F4aEJDMGloMURQZlhhTTRtZEJiRXhqckE",
+      "sha256": "f692a0f8b806945a5e88985b533d56127cfeb721e0a318a01ee864493818de99",
+      "signature_b64u": "MEUCIQD4IuwtQ9zw9Up_3cmAcjOOF_sHjOMRFxC7NfG3GaxZkQIgIQavBtThFru9tyKVNVeuENBiR8Ppei2bE4zWXVBlGHA"
+    },
+    {
+      "name": "device_list_remove",
+      "tag": "apassy-connect device-list v1",
+      "signer": "device_a",
+      "message_b64u": "YXBhc3N5LWNvbm5lY3QgZGV2aWNlLWxpc3QgdjEAaHR0cHM6Ly9jb25uZWN0LmV4YW1wbGUudGVzdABhY2NfazdtMnE0eDNjYQAzADlwS2ctTGdHbEZwZWlKaGJVejFXRW56LXR5SGdveGlnSHVoa1NUZ1kzcGsAcmVtb3ZlAEJIVDBuNEZtNTlKMDNac2lXOTBtOVFkdVlCZWxXdFJWM1VDV25WYXQtNHZoTVZ3ckc2WWIxTjQ5ZE1kQW9NanlicTdFRjhWSGlLdncyWUFEWGFsMFY4VQAtAC0AQk9wSGtCNVZ2VEhYYXdwVVhaeGd1NDRROTdJMmJ6cTlHX3VJNnRGTTltajhEZTA0N2UxZk5XSThNSUVSRHNheGhCQzBpaDFEUGZYYU00bWRCYkV4anJB",
+      "sha256": "0ed4babdfbf9df4f953a16ab04ff3663f9b4e2956e914063d1506d30f868befe",
+      "signature_b64u": "MEQCIGVu_6oKhg0CSFvu4ORKa4k8uiNw1lMK7r-MaXLrgcp2AiABMc1iMlDcATHF_9zkK6B3LXjwdHqNDKEFEnMMD1wzww"
     },
     {
       "name": "recover",
       "tag": "apassy-connect recover v1",
       "signer": "device_b",
-      "message_b64u": "YXBhc3N5LWNvbm5lY3QgcmVjb3ZlciB2MQBodHRwczovL2Nvbm5lY3QuZXhhbXBsZS50ZXN0AGFjY19rN20ycTR4M2NhAEJIVDBuNEZtNTlKMDNac2lXOTBtOVFkdVlCZWxXdFJWM1VDV25WYXQtNHZoTVZ3ckc2WWIxTjQ5ZE1kQW9NanlicTdFRjhWSGlLdncyWUFEWGFsMFY4VQ",
-      "sha256": "842c9eb545540e9a67d2542c5179a3f9c97dce602037aaf9e71f92643db12267",
-      "signature_b64u": "MEQCIAP_PjwLasP5lX3a-GoqJmIaRlnfof23sd2YPICtdpg7AiAQqrZwojrdi2imx533HM_W65GdPGKM29x0Vp4ViJa5YA"
+      "message_b64u": "YXBhc3N5LWNvbm5lY3QgcmVjb3ZlciB2MQBodHRwczovL2Nvbm5lY3QuZXhhbXBsZS50ZXN0AGFjY19rN20ycTR4M2NhAEJIVDBuNEZtNTlKMDNac2lXOTBtOVFkdVlCZWxXdFJWM1VDV25WYXQtNHZoTVZ3ckc2WWIxTjQ5ZE1kQW9NanlicTdFRjhWSGlLdncyWUFEWGFsMFY4VQBSbTYzaThrMGFWWTFVZTdzNlItQjZ2ZWlIc1l5eFJ6aE5pSl8wdms4dE8w",
+      "sha256": "364b915ac513c763b646523bd24a1bfdee13935aca175d471644efa0c76001aa",
+      "signature_b64u": "MEYCIQCmlZRK51Tvcvpo3e2gb3m0I2VrQhl8UMfZjrLX1ruYIgIhAIXJtBwkcNeXcNKgZxb0ursA8RHXiO2ujGKPZYuq-GFX"
+    },
+    {
+      "name": "device_list_member_root",
+      "tag": "apassy-connect device-list v1",
+      "signer": "device_b",
+      "message_b64u": "YXBhc3N5LWNvbm5lY3QgZGV2aWNlLWxpc3QgdjEAaHR0cHM6Ly9jb25uZWN0LmV4YW1wbGUudGVzdABhY2NfbTNuNXA3cTJyYgAxAC0Acm9vdABCSFQwbjRGbTU5SjAzWnNpVzkwbTlRZHVZQmVsV3RSVjNVQ1duVmF0LTR2aE1Wd3JHNlliMU40OWRNZEFvTWp5YnE3RUY4VkhpS3Z3MllBRFhhbDBWOFUALQBpUGhvbmUAQkhUMG40Rm01OUowM1pzaVc5MG05UWR1WUJlbFd0UlYzVUNXblZhdC00dmhNVndyRzZZYjFONDlkTWRBb01qeWJxN0VGOFZIaUt2dzJZQURYYWwwVjhV",
+      "sha256": "75edefb82fedda70cf998a09c526e0d7bc0cddaef5519bbe26922979b092dcec",
+      "signature_b64u": "MEUCIE0vASQMCO07zkpcAy3cZ6J6hzMLf3F_6yOuVrRa-mGsAiEAkxndZenuwkLS_5SdjlUhEmIIvpSgpx0qZn4hJsyils0"
+    },
+    {
+      "name": "device_list_recovery_root",
+      "tag": "apassy-connect device-list v1",
+      "signer": "device_b",
+      "message_b64u": "YXBhc3N5LWNvbm5lY3QgZGV2aWNlLWxpc3QgdjEAaHR0cHM6Ly9jb25uZWN0LmV4YW1wbGUudGVzdABhY2NfazdtMnE0eDNjYQAxAC0Acm9vdABCSFQwbjRGbTU5SjAzWnNpVzkwbTlRZHVZQmVsV3RSVjNVQ1duVmF0LTR2aE1Wd3JHNlliMU40OWRNZEFvTWp5YnE3RUY4VkhpS3Z3MllBRFhhbDBWOFUALQBNYWNCb29rIEFpcgBCSFQwbjRGbTU5SjAzWnNpVzkwbTlRZHVZQmVsV3RSVjNVQ1duVmF0LTR2aE1Wd3JHNlliMU40OWRNZEFvTWp5YnE3RUY4VkhpS3Z3MllBRFhhbDBWOFU",
+      "sha256": "287c54f346635821a581157666e97ac6359beb89eed4937bea3331742a189e68",
+      "signature_b64u": "MEQCIBbDCkoqZT5V-nyZvnj8dH0rpB1Xnz2cio9wP08MiASzAiAD7tlXLJmFGauVh_e15egrI04j3u6ZJ6rVLRD6DA3r1A"
     },
     {
       "name": "brain_sign_in",
@@ -56,22 +106,94 @@
       "signer": "device_a",
       "message_b64u": "YXBhc3N5LWJvdW5jZXIgc2lnbi1pbiB2MQBodHRwczovL2JyYWluLmV4YW1wbGUudGVzdABhY2NfazdtMnE0eDNjYQBCT3BIa0I1VnZUSFhhd3BVWFp4Z3U0NFE5N0kyYnpxOUdfdUk2dEZNOW1qOERlMDQ3ZTFmTldJOE1JRVJEc2F4aEJDMGloMURQZlhhTTRtZEJiRXhqckEAQUFFQ0F3UUZCZ2NJQ1FvTERBME9EeEFSRWhNVUZSWVhHQmthR3h3ZEhoOA",
       "sha256": "00300bab39c17bf919f9413f075a20f1ff8f4b29d9bb7f12408c71889fca3ce7",
-      "signature_b64u": "MEQCICDqYZEGxtdYIijNMcvnbWpY39c0gjyn2gWif0zG_BenAiAW3GyJBDLTThbqPKOwBnbgyqJdw3JvUD5AC5B9l0Ns0g"
+      "signature_b64u": "MEUCIAWO2Jhtrgr51CRSB3OX5BjqdAioH2dqjoxTK2VjGhFOAiEAwe2k0flsjTVgX1dlmwQkM4CYbHlb1_SId1c_6vo_Wdk"
+    },
+    {
+      "name": "recovery_rotate",
+      "tag": "apassy-connect recovery-rotate v1",
+      "signer": "device_a",
+      "message_b64u": "YXBhc3N5LWNvbm5lY3QgcmVjb3Zlcnktcm90YXRlIHYxAGh0dHBzOi8vY29ubmVjdC5leGFtcGxlLnRlc3QAYWNjX2s3bTJxNHgzY2EAQk9wSGtCNVZ2VEhYYXdwVVhaeGd1NDRROTdJMmJ6cTlHX3VJNnRGTTltajhEZTA0N2UxZk5XSThNSUVSRHNheGhCQzBpaDFEUGZYYU00bWRCYkV4anJBAFAzVlpnUWtLd3JVMDFJS2lhU3NuYkNrRERBbkZtTTRRdXpvOHMxcE1fdzAAcjJSNVF0VTdmcDNqekk3RUREMW5iZVZ1bjdnd3Npdng2Rzc4a3RPR1Bzcw",
+      "sha256": "676e77ab2740742c57281f07db5454e33e2a7852f1f9b6bce96bdb8325acbb78",
+      "signature_b64u": "MEYCIQCsgnTlEufIhJ0T6QOJGVJXzC4KC0nRIk_xfQIb5rHVGQIhANDjpAeRs6LNhcXVXLNp-c-neKtQGfYY6hJGrPkgAj_s"
     }
   ],
   "link": {
-    "code": "apassy_alk_acc_k7m2q4x3ca_cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
-    "link_hash": "K6tgKp_oqj7XbiWqWmDhJq-DIThtvhqbEWY8teg5JbY"
+    "code": "apassy_alk_acc_k7m2q4x3ca_cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd_61adeed8ed45fd1a91d16e31d1f9acfe",
+    "link_hash": "P6yDGvx5eZkwzldGxhuX1gKcaigN7dFHw2-q26Eb9To",
+    "root": "device_a",
+    "confirmer": "device_a",
+    "fingerprint": "61adeed8ed45fd1a91d16e31d1f9acfe"
+  },
+  "device_list": {
+    "root_message_b64u": "YXBhc3N5LWNvbm5lY3QgZGV2aWNlLWxpc3QgdjEAaHR0cHM6Ly9jb25uZWN0LmV4YW1wbGUudGVzdABhY2NfazdtMnE0eDNjYQAxAC0Acm9vdABCT3BIa0I1VnZUSFhhd3BVWFp4Z3U0NFE5N0kyYnpxOUdfdUk2dEZNOW1qOERlMDQ3ZTFmTldJOE1JRVJEc2F4aEJDMGloMURQZlhhTTRtZEJiRXhqckEALQBNYWNCb29rIFBybwBCT3BIa0I1VnZUSFhhd3BVWFp4Z3U0NFE5N0kyYnpxOUdfdUk2dEZNOW1qOERlMDQ3ZTFmTldJOE1JRVJEc2F4aEJDMGloMURQZlhhTTRtZEJiRXhqckE",
+    "entries": [
+      {
+        "version": 1,
+        "op": "root",
+        "key": "BOpHkB5VvTHXawpUXZxgu44Q97I2bzq9G_uI6tFM9mj8De047e1fNWI8MIERDsaxhBC0ih1DPfXaM4mdBbExjrA",
+        "link_hash": null,
+        "name": "MacBook Pro",
+        "by": "BOpHkB5VvTHXawpUXZxgu44Q97I2bzq9G_uI6tFM9mj8De047e1fNWI8MIERDsaxhBC0ih1DPfXaM4mdBbExjrA",
+        "signature": "MEYCIQDCdhTwhnaEDgQERMD7xjwCpvOxjcEYCy30g2VvHvB_jQIhAKGA5jk35MhT4oDMeQgmgzcuKBHLmJ5zQj0oGEyqjQQC"
+      },
+      {
+        "version": 2,
+        "op": "add",
+        "key": "BHT0n4Fm59J03ZsiW90m9QduYBelWtRV3UCWnVat-4vhMVwrG6Yb1N49dMdAoMjybq7EF8VHiKvw2YADXal0V8U",
+        "link_hash": "P6yDGvx5eZkwzldGxhuX1gKcaigN7dFHw2-q26Eb9To",
+        "name": "iPhone",
+        "by": "BOpHkB5VvTHXawpUXZxgu44Q97I2bzq9G_uI6tFM9mj8De047e1fNWI8MIERDsaxhBC0ih1DPfXaM4mdBbExjrA",
+        "signature": "MEUCIQD4IuwtQ9zw9Up_3cmAcjOOF_sHjOMRFxC7NfG3GaxZkQIgIQavBtThFru9tyKVNVeuENBiR8Ppei2bE4zWXVBlGHA"
+      },
+      {
+        "version": 3,
+        "op": "remove",
+        "key": "BHT0n4Fm59J03ZsiW90m9QduYBelWtRV3UCWnVat-4vhMVwrG6Yb1N49dMdAoMjybq7EF8VHiKvw2YADXal0V8U",
+        "link_hash": null,
+        "name": null,
+        "by": "BOpHkB5VvTHXawpUXZxgu44Q97I2bzq9G_uI6tFM9mj8De047e1fNWI8MIERDsaxhBC0ih1DPfXaM4mdBbExjrA",
+        "signature": "MEQCIGVu_6oKhg0CSFvu4ORKa4k8uiNw1lMK7r-MaXLrgcp2AiABMc1iMlDcATHF_9zkK6B3LXjwdHqNDKEFEnMMD1wzww"
+      }
+    ],
+    "hashes": [
+      "w4HVT664JyrebTNT9koUBsaCH0dtR8ubJz3QUVpX6aU",
+      "9pKg-LgGlFpeiJhbUz1WEnz-tyHgoxigHuhkSTgY3pk",
+      "DtS6vfv530-VOharBP82Y_m04pVukUBj0VBtMPhovv4"
+    ],
+    "live_at": {
+      "1": [
+        "device_a"
+      ],
+      "2": [
+        "device_a",
+        "device_b"
+      ],
+      "3": [
+        "device_a"
+      ]
+    }
   },
   "safety": {
-    "sha256": "283a792aecfa3a5fe3945c19244f2faf765ba531bb55a353e99bdabab611ebd9",
-    "words": "blaze cable flute board seal tiger"
+    "sha256": "12587ab2ab0b5fab4a2e3c2bac67fde9316427214c1fe4eac876b12492433607",
+    "words": "audio coyote forest mint magnet apple"
   },
   "recovery": {
     "bytes_hex": "101112131415161718191a1b1c1d1e1f",
     "code": "apassy_rec_101112131415161718191a1b1c1d1e1f",
     "words": "atlas attic audio aunt autumn award bacon badge bagel baker bamboo banana band barn basil basket",
-    "recovery_hash": "480e5d5b48881b734d093b637f4d49183f0b1b050cc83b7bd656a871351e93a1"
+    "seed_hex": "01a7c586b139da386c54e38672688a157f0c798a657c5cdc91e2b57adfb142e6",
+    "public_b64u": "P3VZgQkKwrU01IKiaSsnbCkDDAnFmM4Quzo8s1pM_w0",
+    "recover_signature_b64u": "9wL6-LQByIGG-1Asx18qK5yt1z9se3lc8ovubXsEclOm91FEwUhPQ7aR2ZeOdgqoqRjtLUr5DyRk7gNEFuTTAQ"
+  },
+  "new_recovery": {
+    "bytes_hex": "404142434445464748494a4b4c4d4e4f",
+    "seed_hex": "81c16db90dfea3c373e7a06bbd903cba3fa6b3106dcad60fd5c8cb26b92c191b",
+    "public_b64u": "Rm63i8k0aVY1Ue7s6R-B6veiHsYyxRzhNiJ_0vk8tO0"
+  },
+  "rotated_recovery": {
+    "bytes_hex": "505152535455565758595a5b5c5d5e5f",
+    "seed_hex": "713e6dbfc39d6a7f7b354faa53307916afcc04cf9e21265f9d2a31ef93d4fffd",
+    "public_b64u": "r2R5QtU7fp3jzI7EDD1nbeVun7gwsivx6G78ktOGPss"
   },
   "entitlement": {
     "kid": "ek_test_1",

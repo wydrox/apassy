@@ -136,6 +136,7 @@ impl UiStatus {
             Self::FolderUnavailable => ("Folder not available", Tone::Warning),
             Self::Damaged => ("Damaged copy", Tone::Warning),
             Self::Problem(_) => ("Problem", Tone::Warning),
+            Self::Connect(state) => relay::connect_tag(*state),
         }
     }
 
@@ -143,24 +144,43 @@ impl UiStatus {
     pub(crate) fn words(&self, icloud: bool) -> String {
         match self {
             Self::UpToDate(Some(at)) => format!(
-                "This Mac matches the local file in the sync folder. Last folder sync {}. Receipt on another Mac is not confirmed.",
+                concat!(
+                    "This ",
+                    crate::computer!(),
+                    " matches the local file in the sync folder. Last folder sync {}. Receipt on another ",
+                    crate::computer!(),
+                    " is not confirmed."
+                ),
                 ago(*at)
             ),
-            Self::UpToDate(None) => {
-                "This Mac matches the local file in the sync folder. Receipt on another Mac is not confirmed."
-                    .to_owned()
-            }
-            Self::Syncing => "Saved on this Mac. A change waits for the sync folder.".to_owned(),
+            Self::UpToDate(None) => concat!(
+                "This ",
+                crate::computer!(),
+                " matches the local file in the sync folder. Receipt on another ",
+                crate::computer!(),
+                " is not confirmed."
+            )
+            .to_owned(),
+            Self::Syncing => concat!(
+                "Saved on this ",
+                crate::computer!(),
+                ". A change waits for the sync folder."
+            )
+            .to_owned(),
             Self::Waiting if icloud => "Waiting for iCloud to download the synced file.".to_owned(),
             Self::Waiting => "Waiting for the synced file to download.".to_owned(),
-            Self::NeedsPassphrase => {
-                "The passphrase changed on another Mac. Type the new passphrase.".to_owned()
-            }
+            Self::NeedsPassphrase => concat!(
+                "The passphrase changed on another ",
+                crate::computer!(),
+                ". Type the new passphrase."
+            )
+            .to_owned(),
             Self::FolderUnavailable => {
                 "The synced folder is not available. Apassy syncs when it is back.".to_owned()
             }
             Self::Damaged => "The synced copy is damaged. Apassy did not use it.".to_owned(),
             Self::Problem(text) => format!("Sync: {text}."),
+            Self::Connect(state) => relay::connect_words(*state),
         }
     }
 }
@@ -189,6 +209,12 @@ pub(crate) enum SyncSheet {
     /// "Use the relay copy…": this Mac refuses the relay copy (an older copy, or a
     /// history without its last change); it takes the copy as it is now and merges it.
     UseRelayCopy { id: String },
+    /// "Use the Copy That … Left…": a vault store waits on the head that a device that
+    /// left the account pushed; this Mac takes it once and merges it.
+    UseDepartedCopy { id: String },
+    /// "Replace It with This Mac's Copy…": this Mac pushes its vault over the head that a
+    /// device that left the account pushed.
+    ReplaceDepartedCopy { id: String },
     /// "Apassy relay": the relay address, the team code, and the name of this Mac; or a
     /// link from another Mac for a vault that is on the relay already.
     RelaySetup { id: String },
@@ -217,6 +243,8 @@ impl SyncSheet {
         | Self::TurnOff { id }
         | Self::ReplaceDamaged { id }
         | Self::UseRelayCopy { id }
+        | Self::UseDepartedCopy { id }
+        | Self::ReplaceDepartedCopy { id }
         | Self::RelaySetup { id }
         | Self::AddMac { id }
         | Self::Devices { id }
@@ -252,7 +280,11 @@ fn conflict_notice(vault: &str, id: &str, conflicts: &[ConflictCopy]) -> Notice 
     Notice {
         title: format!("Sync kept both versions in “{vault}”"),
         text: format!(
-            "{} changed on this Mac and on {} at the same time. Apassy kept the later change, and the other version as an archived credential “… (conflict copy, <device>)”. Open Credentials > Archived to compare, and delete the copy when you are done.",
+            concat!(
+                "{} changed on this ",
+                crate::computer!(),
+                " and on {} at the same time. Apassy kept the later change, and the other version as an archived credential “… (conflict copy, <device>)”. Open Credentials > Archived to compare, and delete the copy when you are done."
+            ),
             names.join(", "),
             conflicts
                 .first()
@@ -274,32 +306,42 @@ pub(crate) fn sidebar_status(app: &DesktopApp) -> (String, Tone) {
             .iter()
             .find(|entry| &entry.id == id)
     }) else {
-        return ("On this Mac".to_owned(), Tone::Neutral);
+        return (
+            concat!("On this ", crate::computer!()).to_owned(),
+            Tone::Neutral,
+        );
     };
     let Some(link) = entry.sync.as_ref().filter(|_| entry.sync_state().is_some()) else {
-        return ("On this Mac".to_owned(), Tone::Neutral);
+        return (
+            concat!("On this ", crate::computer!()).to_owned(),
+            Tone::Neutral,
+        );
     };
+    let connect = link.is_relay() && app.syncs_on_connect(&entry.id);
     let folder = if link.is_relay() {
-        relay::LABEL.to_owned()
+        relay::label_of(connect).to_owned()
     } else {
         sidebar_folder_label(&app.sync.folders, &link.folder)
     };
-    // The state first: a narrow sidebar cuts the end of the line.
+    // The place first, then the state: the narrow sidebar keeps the place, and a state
+    // that needs the owner shows alone.
     match app.sync.statuses.get(&entry.id) {
-        Some(UiStatus::UpToDate(Some(at))) => {
-            (format!("Synced {} · {folder}", ago(*at)), Tone::Neutral)
-        }
-        Some(UiStatus::UpToDate(None)) | None => (format!("Synced · {folder}"), Tone::Neutral),
-        Some(UiStatus::Syncing) => (format!("Sync pending · {folder}"), Tone::Neutral),
-        Some(UiStatus::Waiting) => (format!("Waiting for the file · {folder}"), Tone::Neutral),
-        Some(status) => (status_tag(link, status).0.to_owned(), Tone::Warning),
+        // In sync: the place alone, so the narrow sidebar shows it whole; the time of
+        // the last sync is in Settings › Vault › Sync.
+        Some(UiStatus::UpToDate(_)) | None => (folder, Tone::Neutral),
+        Some(UiStatus::Syncing) => (format!("{folder} · sync pending"), Tone::Neutral),
+        Some(UiStatus::Waiting) => (format!("{folder} · waiting for the file"), Tone::Neutral),
+        Some(status) => (
+            status_tag(link, status, connect).0.to_owned(),
+            Tone::Warning,
+        ),
     }
 }
 
 /// The short tag of a status and its tone, for a folder or the relay.
-fn status_tag(link: &SyncLink, status: &UiStatus) -> (&'static str, Tone) {
+fn status_tag(link: &SyncLink, status: &UiStatus, connect: bool) -> (&'static str, Tone) {
     if link.is_relay() {
-        relay::tag(status)
+        relay::tag_of(status, connect)
     } else {
         status.tag()
     }
@@ -332,7 +374,9 @@ fn folder_label(folders: &[SyncFolder], path: &Path) -> String {
 pub(super) fn method_words(app: &DesktopApp, entry: &VaultEntry) -> String {
     match entry.sync.as_ref().filter(|_| entry.sync_state().is_some()) {
         None => "Not synced".to_owned(),
-        Some(link) if link.is_relay() => relay::LABEL.to_owned(),
+        Some(link) if link.is_relay() => {
+            relay::label_of(app.syncs_on_connect(&entry.id)).to_owned()
+        }
         Some(link) => sidebar_folder_label(&app.sync.folders, &link.folder),
     }
 }
@@ -373,7 +417,10 @@ pub(super) fn other_macs(app: &DesktopApp) -> OtherMacs {
                 words: if removed {
                     "Removed from the relay".to_owned()
                 } else {
-                    format!("Through the {}", relay::LABEL)
+                    format!(
+                        "Through {}",
+                        relay::label_of(app.syncs_on_connect(&entry.id))
+                    )
                 },
                 relay: (!removed).then(|| entry.id.clone()),
             }
@@ -618,6 +665,7 @@ impl DesktopApp {
                         VaultSync::Relay(relay) => {
                             if backoff.load(Ordering::SeqCst)
                                 || relay.is_removed()
+                                || relay.store_deleted().is_some()
                                 || !relay.local_changed(vault).unwrap_or(false)
                             {
                                 return;
@@ -723,6 +771,9 @@ impl DesktopApp {
         self.sync_take_hook_results();
         self.sync_send_list();
         for event in self.sync.worker.take_events() {
+            if let SyncEvent::Synced { id, .. } = &event {
+                self.relay_note_connect(&id.clone());
+            }
             self.sync_apply_event(event);
         }
         self.sync.statuses = self.sync.worker.statuses();
@@ -800,9 +851,19 @@ impl DesktopApp {
             self.sync.notice = Some(conflict_notice(&vault, id, &merge.conflicts));
         } else if !merge.skipped_variables.is_empty() {
             self.sync.notice = Some(Notice {
-                title: format!("A variable of “{vault}” is taken on this Mac"),
+                title: format!(
+                    concat!(
+                        "A variable of “{vault}” is taken on this ",
+                        crate::computer!()
+                    ),
+                    vault = vault
+                ),
                 text: format!(
-                    "Another credential on this Mac has the variable {}. The credential from the other device came without it. Rename one of the variables.",
+                    concat!(
+                        "Another credential on this ",
+                        crate::computer!(),
+                        " has the variable {}. The credential from the other device came without it. Rename one of the variables."
+                    ),
                     merge.skipped_variables.join(", ")
                 ),
                 warning: true,
@@ -817,7 +878,7 @@ impl DesktopApp {
         if self.is_relay(id) {
             self.sync.notice = Some(Notice {
                 title: format!("The copy of “{vault}” on the relay fails a check"),
-                text: "Apassy did not merge it, and the vault on this Mac did not change. Apassy does not download that copy again until it changes. If no other Mac can repair it, replace it with this Mac's vault. Also look at the Macs in Settings > Vault > Sync > Devices…, and remove a Mac that you do not know.".to_owned(),
+                text: concat!("Apassy did not merge it, and the vault on this ", crate::computer!(), " did not change. Apassy does not download that copy again until it changes. If no other ", crate::computer!(), " can repair it, replace it with this ", crate::computer!(), "'s vault. Also look at the Macs in Settings > Vault > Sync > Devices…, and remove a ", crate::computer!(), " that you do not know.").to_owned(),
                 warning: true,
                 vault: id.to_owned(),
             });
@@ -825,7 +886,7 @@ impl DesktopApp {
         }
         self.sync.notice = Some(Notice {
             title: format!("The synced copy of “{vault}” is damaged"),
-            text: "The file in the synced folder fails a check, so Apassy did not merge it. The vault on this Mac did not change. If no other Mac can repair it, replace it with this Mac's vault in Settings > Vault > Sync.".to_owned(),
+            text: concat!("The file in the synced folder fails a check, so Apassy did not merge it. The vault on this ", crate::computer!(), " did not change. If no other ", crate::computer!(), " can repair it, replace it with this ", crate::computer!(), "'s vault in Settings > Vault > Sync.").to_owned(),
             warning: true,
             vault: id.to_owned(),
         });
@@ -941,9 +1002,14 @@ impl DesktopApp {
                     }
                     line
                 }),
-            Err(SyncError::NeedsPassphrase) => {
-                Some("The passphrase changed on another Mac: type the new one to sync.".to_owned())
-            }
+            Err(SyncError::NeedsPassphrase) => Some(
+                concat!(
+                    "The passphrase changed on another ",
+                    crate::computer!(),
+                    ": type the new one to sync."
+                )
+                .to_owned(),
+            ),
             Err(_) => None,
         }
     }
@@ -970,7 +1036,11 @@ impl DesktopApp {
             Some(Ok(outcome)) => {
                 let text = match (&outcome.merge, outcome.pushed) {
                     (Some(merge), _) if merge.changed_local() => format!(
-                        "Folder sync: {} credential{} changed on this Mac.",
+                        concat!(
+                            "Folder sync: {} credential{} changed on this ",
+                            crate::computer!(),
+                            "."
+                        ),
                         merge.inserted + merge.updated + merge.deleted,
                         if merge.inserted + merge.updated + merge.deleted == 1 {
                             ""
@@ -978,8 +1048,12 @@ impl DesktopApp {
                             "s"
                         }
                     ),
-                    (_, true) => "Saved to the sync folder on this Mac.".to_owned(),
-                    _ => "Saved to the sync folder on this Mac.".to_owned(),
+                    (_, true) => {
+                        concat!("Saved to the sync folder on this ", crate::computer!(), ".")
+                            .to_owned()
+                    }
+                    _ => concat!("Saved to the sync folder on this ", crate::computer!(), ".")
+                        .to_owned(),
                 };
                 self.set_ok(text);
             }
@@ -1047,8 +1121,16 @@ impl DesktopApp {
             )
         } else {
             format!(
-                "“{}” syncs with {label} as {}. On your other Mac, select “Use a vault from another Mac”.",
-                entry.name, report.file_name
+                concat!(
+                    "“{}” syncs with {label} as {}. On your other ",
+                    crate::computer!(),
+                    ", select “Use a vault from another ",
+                    crate::computer!(),
+                    "”."
+                ),
+                entry.name,
+                report.file_name,
+                label = label
             )
         })
     }
@@ -1088,8 +1170,14 @@ impl DesktopApp {
         let (folder, file) = self.sync_disable(id)?;
         if relay {
             return Some(
-                " The copy on the Apassy relay stays, and this Mac stays in its relay team: remove it in “Devices…” on another Mac."
-                    .to_owned(),
+                concat!(
+                    " The copy on the Apassy relay stays, and this ",
+                    crate::computer!(),
+                    " stays in its relay team: remove it in “Devices…” on another ",
+                    crate::computer!(),
+                    "."
+                )
+                .to_owned(),
             );
         }
         Some(format!(
@@ -1272,8 +1360,13 @@ impl DesktopApp {
         let _ = self.apply(
             unlocked,
             &format!(
-                "“{name}” is on this Mac. Folder sync is on for {}.",
-                folder_label(&self.sync.folders, folder)
+                concat!(
+                    "“{name}” is on this ",
+                    crate::computer!(),
+                    ". Folder sync is on for {}."
+                ),
+                folder_label(&self.sync.folders, folder),
+                name = name
             ),
         );
     }
@@ -1348,17 +1441,39 @@ impl DesktopApp {
 /// The note text of a sync that failed in the step before a lock.
 fn lock_failure(err: SyncError) -> String {
     match err {
-        SyncError::NeedsPassphrase => "Sync: the passphrase changed on another Mac. Unlock the vault, then type the new passphrase.".to_owned(),
-        SyncError::FolderUnavailable => "Sync: the synced folder is not available. The changes stay on this Mac and sync when it is back.".to_owned(),
-        SyncError::NotDownloaded => "Sync: iCloud has not downloaded the synced file yet. The changes stay on this Mac.".to_owned(),
-        other => format!("Sync: {other}. The changes stay on this Mac."),
+        SyncError::NeedsPassphrase => concat!(
+            "Sync: the passphrase changed on another ",
+            crate::computer!(),
+            ". Unlock the vault, then type the new passphrase."
+        )
+        .to_owned(),
+        SyncError::FolderUnavailable => concat!(
+            "Sync: the synced folder is not available. The changes stay on this ",
+            crate::computer!(),
+            " and sync when it is back."
+        )
+        .to_owned(),
+        SyncError::NotDownloaded => concat!(
+            "Sync: iCloud has not downloaded the synced file yet. The changes stay on this ",
+            crate::computer!(),
+            "."
+        )
+        .to_owned(),
+        other => format!(
+            concat!(
+                "Sync: {other}. The changes stay on this ",
+                crate::computer!(),
+                "."
+            ),
+            other = other
+        ),
     }
 }
 
 fn enable_error(err: SyncError, vault: &str) -> String {
     match err {
         SyncError::FolderUnavailable => "The folder is not available. Choose a folder that exists, or the folder of a sync service.".to_owned(),
-        SyncError::NotDownloaded => "A file with this name is in iCloud but not on this Mac yet. Apassy asked iCloud for it. Try again when the download ends.".to_owned(),
+        SyncError::NotDownloaded => concat!("A file with this name is in iCloud but not on this ", crate::computer!(), " yet. Apassy asked iCloud for it. Try again when the download ends.").to_owned(),
         SyncError::Vault(VaultErrorKind::UnsupportedSchema) => "A file with this name in the folder is from another Apassy version. Update Apassy, then try again.".to_owned(),
         SyncError::Vault(VaultErrorKind::InvalidInput) => "Another program uses the vault file (a journal file is next to it). Sync stays off.".to_owned(),
         other => format!("Sync of “{vault}” stays off: {other}."),
@@ -1368,8 +1483,8 @@ fn enable_error(err: SyncError, vault: &str) -> String {
 fn adopt_error(err: SyncError) -> String {
     match err {
         SyncError::TimedOut => "The synced file did not respond in time. No vault was added. Check the sync service and try again.".to_owned(),
-        SyncError::Vault(VaultErrorKind::WrongKeyOrCorrupt) => "The passphrase does not open this synced vault, or the file is damaged. Nothing changed on this Mac.".to_owned(),
-        SyncError::NotDownloaded => "The file is not on this Mac yet. Apassy asked iCloud for it. Try again when the download ends.".to_owned(),
+        SyncError::Vault(VaultErrorKind::WrongKeyOrCorrupt) => concat!("The passphrase does not open this synced vault, or the file is damaged. Nothing changed on this ", crate::computer!(), ".").to_owned(),
+        SyncError::NotDownloaded => concat!("The file is not on this ", crate::computer!(), " yet. Apassy asked iCloud for it. Try again when the download ends.").to_owned(),
         SyncError::Vault(VaultErrorKind::UnsupportedSchema) => "This file is from another Apassy version, or it is not a synced vault. Update Apassy, then try again.".to_owned(),
         SyncError::Vault(VaultErrorKind::NotFound) => "Apassy cannot find this file.".to_owned(),
         SyncError::InvalidName => "Pick an .apassy file.".to_owned(),
@@ -1397,8 +1512,12 @@ fn draw_notice(app: &mut DesktopApp, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             if damaged
                 && app.vault_list.current.as_deref() == Some(notice.vault.as_str())
-                && kit::small_button(ui, "Replace with this Mac's vault…", Style::Bordered)
-                    .clicked()
+                && kit::small_button(
+                    ui,
+                    concat!("Replace with this ", crate::computer!(), "'s vault…"),
+                    Style::Bordered,
+                )
+                .clicked()
             {
                 replace = true;
             }
@@ -1449,8 +1568,18 @@ fn passphrase_words(app: &DesktopApp, entry: &VaultEntry) -> (String, &'static s
         )
     } else {
         (
-            format!("The passphrase of “{}” changed on another Mac", entry.name),
-            "Type the new passphrase to go on syncing. Apassy then uses it on this Mac too.",
+            format!(
+                concat!(
+                    "The passphrase of “{}” changed on another ",
+                    crate::computer!()
+                ),
+                entry.name
+            ),
+            concat!(
+                "Type the new passphrase to go on syncing. Apassy then uses it on this ",
+                crate::computer!(),
+                " too."
+            ),
         )
     }
 }
@@ -1472,6 +1601,10 @@ pub(super) enum Pick {
     Folder(PathBuf),
     /// The Apassy relay (ADR 0022). Settings offers it; the Create screen does not.
     Relay,
+    /// A vault store of the Apassy Connect account (plan s7 unit M3): the setup sheet
+    /// on its "Apassy Connect" choice. Settings offers it while this device can sync
+    /// through Connect.
+    Connect,
     Choose,
 }
 
@@ -1481,11 +1614,17 @@ enum Current<'a> {
     Off,
     Folder(&'a Path),
     Relay,
+    Connect,
 }
 
 /// The choices of the picker in their order, with their labels: off, the detected
-/// folders, the Apassy relay after them when `relay` is true, and "Choose folder…".
-pub(super) fn picker_choices(folders: &[SyncFolder], relay: bool) -> Vec<(Pick, String)> {
+/// folders, the Apassy relay after them when `relay` is true, Apassy Connect when
+/// `connect` is true too, and "Choose folder…".
+pub(super) fn picker_choices(
+    folders: &[SyncFolder],
+    relay: bool,
+    connect: bool,
+) -> Vec<(Pick, String)> {
     let mut choices = vec![(Pick::Off, "Off".to_owned())];
     choices.extend(
         folders
@@ -1494,6 +1633,9 @@ pub(super) fn picker_choices(folders: &[SyncFolder], relay: bool) -> Vec<(Pick, 
     );
     if relay {
         choices.push((Pick::Relay, relay::LABEL.to_owned()));
+        if connect {
+            choices.push((Pick::Connect, relay::CONNECT_LABEL.to_owned()));
+        }
     }
     choices.push((Pick::Choose, "Choose folder…".to_owned()));
     choices
@@ -1506,11 +1648,13 @@ fn sync_picker(
     folders: &[SyncFolder],
     current: Current<'_>,
     relay: bool,
+    connect: bool,
 ) -> Option<Pick> {
     let label = match current {
         Current::Off => "Off".to_owned(),
         Current::Folder(path) => folder_label(folders, path),
         Current::Relay => relay::LABEL.to_owned(),
+        Current::Connect => relay::CONNECT_LABEL.to_owned(),
     };
     let mut pick = None;
     kit::menu(
@@ -1520,9 +1664,18 @@ fn sync_picker(
     )
     .truncate()
     .show_ui(ui, |ui| {
-        for (choice, text) in picker_choices(folders, relay) {
+        // A vault on Connect shows its choice, also while no plan offers it to others.
+        // Relay sync and Connect do not switch here: a vault on the relay moves with
+        // "Move the Relay Copy to Connect", so each shows only its own.
+        let connect = (connect && current != Current::Relay) || current == Current::Connect;
+        for (choice, text) in picker_choices(folders, relay, connect)
+            .into_iter()
+            .filter(|(choice, _)| !(current == Current::Connect && *choice == Pick::Relay))
+        {
             let selected = match (&choice, current) {
-                (Pick::Off, Current::Off) | (Pick::Relay, Current::Relay) => true,
+                (Pick::Off, Current::Off)
+                | (Pick::Relay, Current::Relay)
+                | (Pick::Connect, Current::Connect) => true,
                 (Pick::Folder(path), Current::Folder(now)) => path == now,
                 _ => false,
             };
@@ -1562,28 +1715,57 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let mut sheet = None;
     let mut sync_now = false;
     let mut open_synced = false;
+    let mut move_to: Option<String> = None;
+    let mut undo_move: Option<String> = None;
+    let mut check_list: Option<String> = None;
+    let mut open_connect = false;
+    let mut connect_setup = false;
+    let mut sync_again: Option<String> = None;
+    let connect_offered = app.connect_sync_available();
     super::settings::rows::section(
         ui,
         Some("Sync"),
-        Some("An encrypted copy syncs. Agents and your answers stay on each Mac."),
+        Some(concat!(
+            "An encrypted copy syncs. Agents and your answers stay on each ",
+            crate::computer!(),
+            "."
+        )),
         |g| {
             for entry in app.vault_list.registry.entries() {
                 let open_unlocked = unlocked && Some(&entry.id) == current.as_ref();
                 let status = app.sync.statuses.get(&entry.id);
                 let link = entry.sync.as_ref().filter(|_| entry.sync_state().is_some());
                 let on_relay = link.is_some_and(SyncLink::is_relay);
+                // A vault store of the Connect account: named "Apassy Connect".
+                let on_connect = on_relay && app.syncs_on_connect(&entry.id);
                 let syncing = on_relay && app.relay_busy(&entry.id, Job::SyncNow);
                 // No other choice while relay sync turns on or off.
                 let changing = app.relay_changing(&entry.id);
                 let refused = on_relay && status.is_some_and(relay::refused_copy);
+                // A vault store that waits on the head of a device that left the account:
+                // the two steps of the owner, with the name of that device.
+                let departed = if on_relay && open_unlocked {
+                    app.relay_departed(&entry.id)
+                } else {
+                    None
+                };
                 // Removed from the relay: the line says to turn relay sync off.
                 let removed = on_relay && app.relay_removed(&entry.id);
+                // A vault store that Connect deleted at a recovery: its line, and a new
+                // store as the only step.
+                let deleted = if on_relay {
+                    app.relay_store_deleted(&entry.id)
+                } else {
+                    None
+                };
+                let removed = removed || deleted.is_some();
                 g.row(|ui| {
                     let label = super::settings::rows::label_text(&entry.name);
                     super::settings::rows::one_line(ui, label.into(), None, |ui| {
                         if open_unlocked {
                             let now = match link {
                                 None => Current::Off,
+                                Some(_) if on_connect => Current::Connect,
                                 Some(link) if link.is_relay() => Current::Relay,
                                 Some(link) => Current::Folder(link.folder.as_path()),
                             };
@@ -1595,6 +1777,7 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                                         &app.sync.folders,
                                         now,
                                         true,
+                                        connect_offered,
                                     )
                                 })
                                 .inner;
@@ -1609,7 +1792,7 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                             });
                         }
                         if let (Some(status), Some(link)) = (status, link) {
-                            let (tag, tone) = status_tag(link, status);
+                            let (tag, tone) = status_tag(link, status, on_connect);
                             kit::tag(ui, tag, tone);
                         }
                     });
@@ -1623,8 +1806,15 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                             relay::OLDER_COPY_WORDS.to_owned()
                         }
                         (Some(_), Some(status)) if on_relay => {
-                            relay::words(status, app.sync.relay.receipt(&entry.id))
+                            app.share_sync_line(&entry.id, status).unwrap_or_else(|| {
+                                relay::words_of(
+                                    status,
+                                    app.sync.relay.receipt(&entry.id),
+                                    on_connect,
+                                )
+                            })
                         }
+                        (Some(_), None) if on_connect => "Syncs through Apassy Connect.".to_owned(),
                         (Some(_), None) if on_relay => "Syncs through the Apassy relay.".to_owned(),
                         (Some(link), Some(status)) => format!(
                             "{} {} in {}.",
@@ -1642,7 +1832,30 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                             "Sync is off. Open and unlock this vault to turn it on.".to_owned()
                         }
                     };
-                    ui.add(Label::new(super::settings::rows::note(&line)).wrap());
+                    // A plan state of Apassy Connect is a warning, with its icon.
+                    if let Some(why) = deleted {
+                        if relay::deleted_store_row(ui, why, open_unlocked && !changing) {
+                            sync_again = Some(entry.id.clone());
+                        }
+                    } else if matches!(status, Some(UiStatus::Connect(_))) && !syncing {
+                        kit::tone_note_icon(ui, line, Tone::Warning, Font::Callout);
+                    } else {
+                        ui.add(Label::new(super::settings::rows::note(&line)).wrap());
+                    }
+                    if on_relay
+                        && let Some(line) =
+                            status.and_then(|status| app.share_unverified_line(&entry.id, status))
+                    {
+                        kit::tone_note_icon(ui, line, Tone::Warning, Font::Callout);
+                    } else if on_relay && open_unlocked && app.relay_checks_list_long(&entry.id) {
+                        kit::tone_note(ui, relay::CHECK_LIST_UNREACHABLE, Tone::Warning);
+                        if kit::small_button(ui, "Try Again", Style::Prominent).clicked() {
+                            check_list = Some(entry.id.clone());
+                        }
+                    }
+                    if let Some(departed) = &departed {
+                        ui.add(Label::new(super::settings::rows::note(&departed.words())).wrap());
+                    }
                     // ADR 0037 D14: free relay sync on the hosted relay ends (plan s7 N1).
                     if let Some(notice) = link
                         .and_then(|link| link.relay.as_ref())
@@ -1650,11 +1863,38 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                     {
                         ui.add(Label::new(super::settings::rows::note(&notice)).wrap());
                     }
+                    // A move to Apassy Connect that did not finish (plan s7 unit M3): what
+                    // happened, and the way on.
+                    let moving = app.relay_busy(&entry.id, relay::Job::Move)
+                        || app.relay_busy(&entry.id, relay::Job::UndoMove);
+                    if open_unlocked
+                        && !moving
+                        && let Some((step, text)) = app.relay_move_state(&entry.id)
+                    {
+                        kit::tone_note(ui, text, Tone::Warning);
+                        ui.horizontal_wrapped(|ui| {
+                            if kit::small_button(ui, "Try Again", Style::Prominent).clicked() {
+                                move_to = Some(entry.id.clone());
+                            }
+                            if step == crate::sync::MoveStep::Pushed
+                                && kit::small_button(ui, "Undo the Move…", Style::Bordered)
+                                    .clicked()
+                            {
+                                undo_move = Some(entry.id.clone());
+                            }
+                        });
+                    } else if moving {
+                        ui.add(
+                            Label::new(super::settings::rows::note(relay::Job::Move.progress()))
+                                .wrap(),
+                        );
+                    }
                     // The actions of a synced vault, under its state.
                     let actions = open_unlocked
                         && ((link.is_some() && !removed)
                             || status == Some(&UiStatus::NeedsPassphrase)
-                            || refused);
+                            || refused
+                            || departed.is_some());
                     if actions {
                         ui.add_space(2.0);
                         ui.horizontal_wrapped(|ui| {
@@ -1678,6 +1918,22 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                                     id: entry.id.clone(),
                                 });
                             }
+                            if let Some(departed) = &departed {
+                                if kit::small_button(ui, &departed.use_label(), Style::Prominent)
+                                    .clicked()
+                                {
+                                    sheet = Some(SyncSheet::UseDepartedCopy {
+                                        id: entry.id.clone(),
+                                    });
+                                }
+                                if kit::small_button(ui, relay::REPLACE_DEPARTED, Style::Bordered)
+                                    .clicked()
+                                {
+                                    sheet = Some(SyncSheet::ReplaceDepartedCopy {
+                                        id: entry.id.clone(),
+                                    });
+                                }
+                            }
                             if link.is_some()
                                 && !removed
                                 && ui
@@ -1689,7 +1945,16 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                             {
                                 sync_now = true;
                             }
-                            if on_relay && !removed {
+                            // A vault store has no device links: the devices of the
+                            // account sync it, in Settings › Connect.
+                            if on_connect && !removed {
+                                if kit::small_button(ui, relay::CONNECT_DEVICES, Style::Bordered)
+                                    .on_hover_text(relay::CONNECT_DEVICES_NOTE)
+                                    .clicked()
+                                {
+                                    open_connect = true;
+                                }
+                            } else if on_relay && !removed {
                                 if kit::small_button(ui, "Add a device…", Style::Bordered).clicked()
                                 {
                                     sheet = Some(SyncSheet::AddMac {
@@ -1702,6 +1967,22 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                                     });
                                 }
                             }
+                            // The hosted relay copy moves to Apassy Connect (plan s7 M3).
+                            if on_relay
+                                && !removed
+                                && !moving
+                                && app.relay_move_state(&entry.id).is_none()
+                                && app.relay_can_move(&entry.id)
+                                && kit::small_button(
+                                    ui,
+                                    "Move the Relay Copy to Connect",
+                                    Style::Bordered,
+                                )
+                                .on_hover_text(relay::MOVE_WORDS)
+                                .clicked()
+                            {
+                                move_to = Some(entry.id.clone());
+                            }
                         });
                     }
                 });
@@ -1712,7 +1993,23 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
         },
     );
     let ctx = ui.ctx().clone();
-    if sync_now {
+    if open_connect {
+        super::open_settings(app, super::settings_view::SettingsSection::Connect);
+    }
+    if let Some(id) = sync_again {
+        app.relay_sync_again(&id, Some(&ctx));
+        return;
+    }
+    if let Some(id) = check_list {
+        app.relay_check_list_again(&id);
+    }
+    if let Some(id) = move_to {
+        if let Err(text) = app.relay_move_to_connect(&id) {
+            app.set_err(text);
+        }
+    } else if let Some(id) = undo_move {
+        app.relay_ask_undo_move(&id, Some(&ctx));
+    } else if sync_now {
         app.sync_now();
     } else if open_synced {
         app.leave_vault_for(Step::OpenSynced, Some(&ctx));
@@ -1734,6 +2031,11 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
             Pick::Relay => {
                 sheet = Some(SyncSheet::RelaySetup { id });
             }
+            // The setup sheet on its "Apassy Connect" choice.
+            Pick::Connect => {
+                connect_setup = true;
+                sheet = Some(SyncSheet::RelaySetup { id });
+            }
             // A vault on the relay leaves its relay team first, in the "Turn off" sheet.
             Pick::Folder(folder) if app.is_relay(&id) => {
                 app.relay_switch_to_folder(&id, folder, Some(&ctx));
@@ -1746,6 +2048,9 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     }
     if let Some(sheet) = sheet {
         app.sync_open_sheet(sheet, Some(&ctx));
+        if connect_setup {
+            app.sync.relay.mode = relay::SetupMode::Connect;
+        }
     }
 }
 
@@ -1767,6 +2072,8 @@ pub(super) fn sheet(app: &mut DesktopApp, ctx: &egui::Context, sheet: &SyncSheet
     | SyncSheet::TurnOff { id }
     | SyncSheet::ReplaceDamaged { id }
     | SyncSheet::UseRelayCopy { id }
+    | SyncSheet::UseDepartedCopy { id }
+    | SyncSheet::ReplaceDepartedCopy { id }
     | SyncSheet::RelaySetup { id }
     | SyncSheet::AddMac { id }
     | SyncSheet::Devices { id }
@@ -1786,6 +2093,8 @@ pub(super) fn sheet(app: &mut DesktopApp, ctx: &egui::Context, sheet: &SyncSheet
         SyncSheet::TurnOff { .. } => turn_off_sheet(app, ctx, &entry),
         SyncSheet::ReplaceDamaged { .. } => replace_sheet(app, ctx, &entry),
         SyncSheet::UseRelayCopy { .. } => relay::use_copy_sheet(app, ctx, &entry),
+        SyncSheet::UseDepartedCopy { .. } => relay::departed_sheet(app, ctx, &entry, false),
+        SyncSheet::ReplaceDepartedCopy { .. } => relay::departed_sheet(app, ctx, &entry, true),
         SyncSheet::RelaySetup { .. } => relay::setup_sheet(app, ctx, &entry),
         SyncSheet::AddMac { .. } => relay::add_mac_sheet(app, ctx, &entry, false),
         SyncSheet::AddIphone { .. } => relay::add_mac_sheet(app, ctx, &entry, true),
@@ -1815,9 +2124,11 @@ fn choose_folder_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &VaultE
         kit::sheet_title(
             ui,
             &format!("Sync “{}” with a folder", entry.name),
-            Some(
-                "Type the path of a folder that a sync service keeps in step on each Mac: Dropbox, Google Drive, OneDrive, Syncthing, or a network share. Apassy puts the encrypted file <name>.apassy there. A teammate who opens that file with the passphrase shares the whole vault.",
-            ),
+            Some(concat!(
+                "Type the path of a folder that a sync service keeps in step on each ",
+                crate::computer!(),
+                ": Dropbox, Google Drive, OneDrive, Syncthing, or a network share. Apassy puts the encrypted file <name>.apassy there. A teammate who opens that file with the passphrase shares the whole vault."
+            )),
         );
         kit::section(ui, None, None, |s| {
             let field = s.field("Folder", |ui| {
@@ -1873,17 +2184,35 @@ fn new_passphrase_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &Vault
             kit::sheet_title(
                 ui,
                 &format!("The relay copy of “{}” uses another passphrase", entry.name),
-                Some(
-                    "The copy on the relay can be from before a passphrase change. Type the passphrase that it was made with. Apassy uses it only to open the copy, merges the copy into the vault on this Mac, and uploads the result under the passphrase of this Mac. This vault keeps its passphrase.",
-                ),
+                Some(concat!(
+                    "The copy on the relay can be from before a passphrase change. Type the passphrase that it was made with. Apassy uses it only to open the copy, merges the copy into the vault on this ",
+                    crate::computer!(),
+                    ", and uploads the result under the passphrase of this ",
+                    crate::computer!(),
+                    ". This vault keeps its passphrase."
+                )),
             );
         } else {
             kit::sheet_title(
                 ui,
-                &format!("The passphrase of “{}” changed on another Mac", entry.name),
-                Some(
-                    "Type the new passphrase. Apassy checks it with the synced copy, then uses it for the vault on this Mac too, and syncs. Touch ID unlock on this Mac then needs to be turned on again.",
+                &format!(
+                    concat!(
+                        "The passphrase of “{}” changed on another ",
+                        crate::computer!()
+                    ),
+                    entry.name
                 ),
+                Some(if cfg!(target_os = "linux") {
+                    "Type the new passphrase. Apassy checks it with the synced copy, then uses it for the vault on this computer too, and syncs."
+                } else {
+                    concat!(
+                        "Type the new passphrase. Apassy checks it with the synced copy, then uses it for the vault on this ",
+                        crate::computer!(),
+                        " too, and syncs. Touch ID unlock on this ",
+                        crate::computer!(),
+                        " then needs to be turned on again."
+                    )
+                }),
             );
         }
         kit::section(ui, None, None, |s| {
@@ -1966,7 +2295,15 @@ fn turn_off_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &VaultEntry)
             ui,
             &format!("Stop syncing “{}”?", entry.name),
             Some(&format!(
-                "Apassy stops merging this vault. The vault on this Mac stays. The synced copy {file} stays in {folder}, and your other Macs keep it. Delete it there if you do not want it."
+                concat!(
+                    "Apassy stops merging this vault. The vault on this ",
+                    crate::computer!(),
+                    " stays. The synced copy {file} stays in {folder}, and your other ",
+                    crate::computers!(),
+                    " keep it. Delete it there if you do not want it."
+                ),
+                file = file,
+                folder = folder
             )),
         );
         kit::sheet_buttons(
@@ -2004,7 +2341,17 @@ fn replace_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &VaultEntry) 
                 ui,
                 "Replace the damaged copy on the relay?",
                 Some(&format!(
-                    "The copy of “{}” on the relay fails a check, so no Mac can merge it. Apassy can upload the vault of this Mac as a new version over it. Changes that only the damaged copy had are lost; a change that another Mac still has comes back when that Mac syncs.",
+                    concat!(
+                        "The copy of “{}” on the relay fails a check, so no ",
+                        crate::computer!(),
+                        " can merge it. Apassy can upload the vault of this ",
+                        crate::computer!(),
+                        " as a new version over it. Changes that only the damaged copy had are lost; a change that another ",
+                        crate::computer!(),
+                        " still has comes back when that ",
+                        crate::computer!(),
+                        " syncs."
+                    ),
                     entry.name
                 )),
             );
@@ -2016,7 +2363,17 @@ fn replace_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &VaultEntry) 
                 ui,
                 "Replace the damaged synced copy?",
                 Some(&format!(
-                    "The synced copy of “{}” fails a check, so no Mac can merge it. Apassy can write the vault of this Mac in its place. Changes that only the damaged copy had are lost; a change that another Mac still has comes back when that Mac syncs.",
+                    concat!(
+                        "The synced copy of “{}” fails a check, so no ",
+                        crate::computer!(),
+                        " can merge it. Apassy can write the vault of this ",
+                        crate::computer!(),
+                        " in its place. Changes that only the damaged copy had are lost; a change that another ",
+                        crate::computer!(),
+                        " still has comes back when that ",
+                        crate::computer!(),
+                        " syncs."
+                    ),
                     entry.name
                 )),
             );
@@ -2041,7 +2398,11 @@ fn replace_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &VaultEntry) 
         match app.sync_replace_damaged() {
             Ok(()) => {
                 app.ui.sheet = None;
-                app.set_ok("The synced copy has the vault of this Mac now.");
+                app.set_ok(concat!(
+                    "The synced copy has the vault of this ",
+                    crate::computer!(),
+                    " now."
+                ));
             }
             Err(text) => app.set_err(text),
         }
@@ -2077,7 +2438,13 @@ pub(super) fn start_link(app: &mut DesktopApp, ui: &mut egui::Ui) {
         return;
     }
     ui.vertical_centered(|ui| {
-        if kit::small_button(ui, "Use a vault from another Mac…", Style::Link).clicked() {
+        if kit::small_button(
+            ui,
+            concat!("Use a vault from another ", crate::computer!(), "…"),
+            Style::Link,
+        )
+        .clicked()
+        {
             begin_open(app);
         }
     });
@@ -2092,9 +2459,11 @@ pub(super) fn create_option(app: &mut DesktopApp, ui: &mut egui::Ui) {
     kit::section(
         ui,
         None,
-        Some(
-            "Sync keeps an encrypted copy in a folder that your other Macs, or your team, keep in step.",
-        ),
+        Some(concat!(
+            "Sync keeps an encrypted copy in a folder that your other ",
+            crate::computers!(),
+            ", or your team, keep in step."
+        )),
         |s| {
             s.row(|ui| {
                 egui::Sides::new().show(
@@ -2110,6 +2479,7 @@ pub(super) fn create_option(app: &mut DesktopApp, ui: &mut egui::Ui) {
                             "sync-create-picker",
                             &app.sync.folders,
                             current,
+                            false,
                             false,
                         );
                     },
@@ -2140,7 +2510,7 @@ pub(super) fn create_option(app: &mut DesktopApp, ui: &mut egui::Ui) {
             app.sync.create_folder = None;
             app.sync.create_custom = true;
         }
-        Some(Pick::Relay) | None => {}
+        Some(Pick::Relay | Pick::Connect) | None => {}
     }
 }
 
@@ -2272,7 +2642,13 @@ pub(super) fn open_screen(app: &mut DesktopApp, ui: &mut egui::Ui) {
         return;
     }
     ui.add_space(8.0);
-    ui.label(kit::text("Use a vault from another Mac", Font::Title).color(kit::palette().label));
+    ui.label(
+        kit::text(
+            concat!("Use a vault from another ", crate::computer!()),
+            Font::Title,
+        )
+        .color(kit::palette().label),
+    );
     ui.add_space(6.0);
     let before = app.sync.relay.source;
     kit::segmented(
@@ -2282,6 +2658,7 @@ pub(super) fn open_screen(app: &mut DesktopApp, ui: &mut egui::Ui) {
         &[
             (OpenSource::Folder, "Synced folder"),
             (OpenSource::Relay, relay::LABEL),
+            (OpenSource::Connect, "Apassy Connect"),
         ],
     );
     if app.sync.relay.source != before {
@@ -2292,12 +2669,25 @@ pub(super) fn open_screen(app: &mut DesktopApp, ui: &mut egui::Ui) {
         relay::open_screen(app, ui);
         return;
     }
+    // Plan s7 unit M5: a vault of the Connect account that this Mac does not have yet.
+    if app.sync.relay.source == OpenSource::Connect {
+        relay::connect_open_screen(app, ui);
+        return;
+    }
     kit::paragraph(
         ui,
-        "Select your vault file. Use the same vault passphrase as on the other Mac. Apassy keeps a local copy on this Mac.",
+        concat!(
+            "Select your vault file. Use the same vault passphrase as on the other ",
+            crate::computer!(),
+            ". Apassy keeps a local copy on this ",
+            crate::computer!(),
+            "."
+        ),
         Font::Callout,
         kit::palette().secondary,
     );
+    // iCloud Drive and its permission prompt exist only on macOS.
+    #[cfg(not(target_os = "linux"))]
     kit::paragraph(
         ui,
         "macOS can ask for permission to use iCloud Drive before Apassy can read the file.",
@@ -2356,7 +2746,12 @@ pub(super) fn open_screen(app: &mut DesktopApp, ui: &mut egui::Ui) {
         let text = if app.sync.open_error_from_adopt {
             adopt_error(error)
         } else if error == SyncError::TimedOut {
-            "The synced folder did not respond in time. The cause is not known. Your selected file and name stay in this form. Check for a macOS permission request or a file download. Then try again.".to_owned()
+            concat!(
+                "The synced folder did not respond in time. The cause is not known. Your selected file and name stay in this form. Check for ",
+                crate::os_permission_or_download!(),
+                ". Then try again."
+            )
+            .to_owned()
         } else {
             format!("Apassy could not read the synced file or folder: {error}.")
         };
@@ -2392,10 +2787,11 @@ pub(super) fn open_screen(app: &mut DesktopApp, ui: &mut egui::Ui) {
         app.sync_select_open_file(path, false, Some(&ctx));
     }
     let mut help = app.ui.is_expanded("sync-open-help");
-    if kit::disclosure(ui, &mut help, "Help with iCloud").changed() {
+    // iCloud Drive is a macOS place: Linux shows no help for it.
+    if !cfg!(target_os = "linux") && kit::disclosure(ui, &mut help, "Help with iCloud").changed() {
         app.ui.set_expanded("sync-open-help", help);
     }
-    if help {
+    if help && !cfg!(target_os = "linux") {
         kit::paragraph(
             ui,
             "If macOS shows an iCloud permission request, permit access for Apassy. In Finder, open iCloud Drive and find the vault file. If the file needs a download, use Download Now. Then select Refresh or Retry.",
@@ -2490,7 +2886,12 @@ pub(super) fn open_screen(app: &mut DesktopApp, ui: &mut egui::Ui) {
                     {
                         pick = Some((PathBuf::from(app.sync.open_path.trim()), false));
                     }
-                    super::vaults::name_field(app, s, "vault-sync-name", "Name on this Mac");
+                    super::vaults::name_field(
+                        app,
+                        s,
+                        "vault-sync-name",
+                        concat!("Name on this ", crate::computer!()),
+                    );
                 },
             );
         }
@@ -2548,7 +2949,11 @@ pub(super) fn unlock_notices(app: &mut DesktopApp, ui: &mut egui::Ui) {
             kit::tone_note(
                 ui,
                 format!(
-                    "{} You can unlock the vault on this Mac now.",
+                    concat!(
+                        "{} You can unlock the vault on this ",
+                        crate::computer!(),
+                        " now."
+                    ),
                     status.words(icloud)
                 ),
                 Tone::Accent,

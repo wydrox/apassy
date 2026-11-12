@@ -122,7 +122,7 @@ impl Environment {
         Self {
             scope: DeviceScope::ThisMac,
             name: if name.is_empty() {
-                "This Mac".to_owned()
+                concat!("This ", crate::computer!()).to_owned()
             } else {
                 clip(name)
             },
@@ -151,7 +151,7 @@ impl Environment {
     /// age of its report.
     pub(crate) fn menu_detail(&self, now: u64, offset: i64) -> String {
         if self.is_this_mac() {
-            "This Mac".to_owned()
+            concat!("This ", crate::computer!()).to_owned()
         } else if self.never_reported {
             "Never reported".to_owned()
         } else {

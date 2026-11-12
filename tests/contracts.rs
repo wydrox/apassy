@@ -3832,11 +3832,12 @@ mod connect_v1 {
 
     /// connect-account-v1 section 4: every Connect code with its status, and the
     /// relay-sync-v1 codes that the Connect examples use.
-    const CODES: [(&str, u16); 14] = [
+    const CODES: [(&str, u16); 16] = [
         ("account_required", 403),
         ("not_in_group", 403),
         ("plan_required", 403),
         ("account_limit", 403),
+        ("account_id_taken", 409),
         ("seat_limit", 409),
         ("tunnel_limit", 429),
         ("node_unknown", 404),
@@ -3847,6 +3848,7 @@ mod connect_v1 {
         ("forbidden", 403),
         ("join_pending", 403),
         ("not_found", 404),
+        ("device_removed", 403),
     ];
 
     /// The codes that unit D1 of the stage 7 plan names.
@@ -3863,7 +3865,7 @@ mod connect_v1 {
     ];
 
     pub fn check_error_table() {
-        for (code, status) in CODES.iter().take(10) {
+        for (code, status) in CODES.iter().take(11) {
             let row = format!("| {status} | `{code}` |");
             assert!(
                 ACCOUNT_CONTRACT.contains(&row),
@@ -4061,8 +4063,10 @@ mod connect_v1 {
     }
 
     /// A name of connect-account-v1 section 2.
+    /// A name of section 2 in its canonical form: trimmed, 1 to 64 bytes, no control
+    /// character, not the placeholder `-`.
     pub fn is_name(text: &str) -> bool {
-        !text.is_empty() && text.len() <= 64 && text.trim() == text && is_text(text)
+        !text.is_empty() && text.len() <= 64 && text.trim() == text && is_text(text) && text != "-"
     }
 
     pub fn is_text(text: &str) -> bool {
@@ -4142,11 +4146,14 @@ mod connect_v1 {
         const RELAY_SYNC_PUBLIC_KEY: &str = "BOpHkB5VvTHXawpUXZxgu44Q97I2bzq9G_uI6tFM9mj8De047e1fNWI8MIERDsaxhBC0ih1DPfXaM4mdBbExjrA";
 
         /// Section 5: the only messages that an account device key signs.
-        pub const DEVICE_KEY_TAGS: [&str; 7] = [
+        pub const DEVICE_KEY_TAGS: [&str; 10] = [
             "apassy-connect account v1",
             "apassy-connect sign-in v1",
             "apassy-connect join v1",
+            "apassy-connect join-cancel v1",
+            "apassy-connect device-list v1",
             "apassy-connect recover v1",
+            "apassy-connect recovery-rotate v1",
             "apassy-bouncer sign-in v1",
             "apassy-relay sign-in v1",
             "apassy-relay-sync-head-v1",
@@ -4155,12 +4162,14 @@ mod connect_v1 {
         #[derive(Debug, Deserialize)]
         #[serde(deny_unknown_fields)]
         struct AccountCreate {
+            account_id: String,
             name: String,
             device_name: String,
             platform: String,
             public_key: String,
-            recovery_hash: String,
+            recovery_key: String,
             signature: String,
+            statement: String,
         }
 
         #[derive(Debug, Deserialize)]
@@ -4204,6 +4213,19 @@ mod connect_v1 {
             device_id: String,
         }
 
+        /// One entry of the signed device list (section 7.5).
+        #[derive(Debug, Clone, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ListEntry {
+            version: u64,
+            op: String,
+            key: String,
+            link_hash: Option<String>,
+            name: Option<String>,
+            by: String,
+            signature: Option<String>,
+        }
+
         #[derive(Debug, Deserialize)]
         #[serde(deny_unknown_fields)]
         struct DeviceView {
@@ -4234,6 +4256,8 @@ mod connect_v1 {
             plan: PlanView,
             devices: Vec<DeviceView>,
             group: Option<GroupRef>,
+            device_list: Vec<ListEntry>,
+            recovery_key: String,
         }
 
         #[derive(Debug, Deserialize)]
@@ -4287,6 +4311,7 @@ mod connect_v1 {
             account_id: String,
             confirmer: Confirmer,
             expires_at: u64,
+            device_list: Vec<ListEntry>,
         }
 
         #[derive(Debug, Deserialize)]
@@ -4295,6 +4320,7 @@ mod connect_v1 {
             account_id: String,
             link_hash: String,
             public_key: String,
+            signature: String,
         }
 
         #[derive(Debug, Deserialize)]
@@ -4311,6 +4337,7 @@ mod connect_v1 {
             device_name: String,
             platform: String,
             public_key: String,
+            signature: String,
             created_at: u64,
             expires_at: u64,
         }
@@ -4319,6 +4346,15 @@ mod connect_v1 {
         #[serde(deny_unknown_fields)]
         struct Confirm {
             public_key: String,
+            version: u64,
+            statement: String,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Revoke {
+            version: u64,
+            statement: String,
         }
 
         #[derive(Debug, Deserialize)]
@@ -4333,6 +4369,9 @@ mod connect_v1 {
         struct VaultCreate {
             vault_id: String,
             name: String,
+            team_id: String,
+            version: u64,
+            statement: String,
         }
 
         #[derive(Debug, Deserialize)]
@@ -4349,15 +4388,18 @@ mod connect_v1 {
             team_id: String,
             vault_id: String,
             name: String,
+            account_id: String,
             created_at: u64,
             shared: bool,
             devices: Vec<StoreDevice>,
+            void: Vec<String>,
         }
 
         #[derive(Debug, Deserialize)]
         #[serde(deny_unknown_fields)]
         struct StoreDeviceAdd {
             device_id: String,
+            public_key: String,
         }
 
         #[derive(Debug, Deserialize)]
@@ -4370,12 +4412,13 @@ mod connect_v1 {
         #[serde(deny_unknown_fields)]
         struct Recover {
             account_id: String,
-            recovery: String,
             device_name: String,
             platform: String,
             public_key: String,
-            recovery_hash: String,
+            recovery_key: String,
             signature: String,
+            recovery_signature: String,
+            statement: String,
         }
 
         #[derive(Debug, Deserialize)]
@@ -4384,6 +4427,22 @@ mod connect_v1 {
             account_id: String,
             device_id: String,
             deleted_stores: u32,
+        }
+
+        /// A new recovery code from a live device (section 9.1).
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RecoveryRotate {
+            previous: String,
+            recovery_key: String,
+            signature: String,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RecoveryRotated {
+            account_id: String,
+            rotated_at: u64,
         }
 
         #[derive(Debug, Deserialize)]
@@ -4459,6 +4518,43 @@ mod connect_v1 {
             b64u_decode(text).is_some_and(|hash| hash.len() == 32)
         }
 
+        /// An Ed25519 public key on the wire: b64u of 32 bytes.
+        fn is_recovery_key(text: &str) -> bool {
+            text.len() == 43 && b64u_decode(text).is_some_and(|key| key.len() == 32)
+        }
+
+        /// The form of a device list: versions from 1, a root without a signature first,
+        /// then `add` (with a link) and `remove` (without one), each signed; at most 256.
+        fn list_is_valid(list: &[ListEntry]) -> bool {
+            !list.is_empty()
+                && list.len() <= 1024
+                && list.iter().enumerate().all(|(index, entry)| {
+                    let shape = match (index, entry.op.as_str()) {
+                        (0, "root") => {
+                            entry.signature.as_deref().is_some_and(is_signature)
+                                && entry.link_hash.is_none()
+                                && entry.name.as_deref().is_some_and(is_name)
+                                && entry.key == entry.by
+                        }
+                        (1.., "add") => {
+                            entry.link_hash.as_deref().is_some_and(is_link_hash)
+                                && entry.name.as_deref().is_some_and(is_name)
+                                && entry.signature.as_deref().is_some_and(is_signature)
+                        }
+                        (1.., "remove") => {
+                            entry.link_hash.is_none()
+                                && entry.name.is_none()
+                                && entry.signature.as_deref().is_some_and(is_signature)
+                        }
+                        _ => false,
+                    };
+                    entry.version == index as u64 + 1
+                        && shape
+                        && is_public_key(&entry.key)
+                        && is_public_key(&entry.by)
+                })
+        }
+
         fn is_account_token(text: &str, account: &str) -> bool {
             text.strip_prefix("apassy_act_")
                 .and_then(|rest| rest.strip_prefix(account))
@@ -4480,6 +4576,7 @@ mod connect_v1 {
             is_id(&view.team_id, "t_")
                 && is_uuid(&view.vault_id)
                 && is_name(&view.name)
+                && is_id(&view.account_id, "acc_")
                 && !view.devices.is_empty()
                 && view.devices.iter().all(|d| {
                     d.store_device_id > 0
@@ -4491,15 +4588,297 @@ mod connect_v1 {
                         .devices
                         .iter()
                         .all(|d| d.account_id == view.devices[0].account_id))
+                && view.void.iter().all(|account| is_id(account, "acc_"))
+        }
+
+        /// `POST /v1/account/list` (section 16.3).
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ListAppend {
+            version: u64,
+            op: String,
+            account_id: Option<String>,
+            root: Option<String>,
+            team_id: Option<String>,
+            statement: String,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ListAppended {
+            version: u64,
+            op: String,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PeerLink {
+            link_hash: String,
+            account_id: String,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PeerJoin {
+            account_id: String,
+            link_hash: String,
+            signature: String,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PeerInviter {
+            account_id: String,
+            device_id: String,
+            name: String,
+            public_key: String,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PeerJoined {
+            join_id: u64,
+            inviter: PeerInviter,
+            expires_at: u64,
+            device_list: Vec<ListEntry>,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PeerPending {
+            join_id: u64,
+            link_id: u64,
+            account_id: String,
+            name: String,
+            public_key: String,
+            signature: String,
+            created_at: u64,
+            expires_at: u64,
+            device_list: Vec<ListEntry>,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PeerJoinState {
+            join_id: u64,
+            state: String,
+            expires_at: u64,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PeerDevice {
+            device_id: String,
+            name: String,
+            platform: String,
+            public_key: String,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PeerView {
+            account_id: String,
+            name: String,
+            devices: Vec<PeerDevice>,
+            device_list: Vec<ListEntry>,
+            void: Vec<VoidMark>,
+            /// The list before the last recovery, while a store names the account.
+            #[serde(default)]
+            reset_list: Option<Vec<ListEntry>>,
+        }
+
+        /// A share that Connect counts as void (section 16.4).
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct VoidMark {
+            team_id: String,
+            account_id: String,
+        }
+
+        /// `POST /v1/account/peers/lists` (section 16.4).
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PeerListAsk {
+            account_id: String,
+            version: u64,
+            head: String,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PeerLists {
+            accounts: Vec<PeerListAsk>,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PeerListItem {
+            account_id: String,
+            state: String,
+            #[serde(default)]
+            name: Option<String>,
+            #[serde(default)]
+            device_list: Option<Vec<ListEntry>>,
+            #[serde(default)]
+            void: Option<Vec<VoidMark>>,
+            #[serde(default)]
+            reset_list: Option<Vec<ListEntry>>,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PeerListsAnswer {
+            accounts: Vec<PeerListItem>,
+        }
+
+        fn void_is_valid(marks: &[VoidMark]) -> bool {
+            marks
+                .iter()
+                .all(|mark| is_id(&mark.team_id, "t_") && is_id(&mark.account_id, "acc_"))
+        }
+
+        /// The examples of section 16.
+        fn check_share(example: &Example) -> bool {
+            match example.name.as_str() {
+                "list_append" | "list_append_store" => {
+                    let body: ListAppend = strict(example);
+                    assert!(
+                        [
+                            "peer", "unpeer", "share", "unshare", "join", "leave", "store"
+                        ]
+                        .contains(&body.op.as_str())
+                    );
+                    // No account exactly on a `store`.
+                    assert_eq!(body.op == "store", body.account_id.is_none());
+                    assert!(
+                        body.account_id
+                            .as_deref()
+                            .is_none_or(|account| is_id(account, "acc_"))
+                            && is_signature(&body.statement)
+                    );
+                    if !matches!(body.op.as_str(), "peer" | "join") {
+                        assert!(body.root.is_none());
+                    }
+                    if body.op == "peer" {
+                        assert!(body.root.is_some());
+                    }
+                    assert_eq!(
+                        ["share", "unshare", "join", "leave", "store"].contains(&body.op.as_str()),
+                        body.team_id.is_some()
+                    );
+                    assert!(body.version >= 2);
+                }
+                "peer_lists" => {
+                    let body: PeerLists = strict(example);
+                    assert!(!body.accounts.is_empty() && body.accounts.len() <= 64);
+                    for ask in &body.accounts {
+                        assert!(is_id(&ask.account_id, "acc_"));
+                        assert_eq!(ask.version == 0, ask.head.is_empty());
+                    }
+                }
+                "peer_lists_answer" => {
+                    let body: PeerListsAnswer = strict(example);
+                    for item in &body.accounts {
+                        assert!(is_id(&item.account_id, "acc_"));
+                        match item.state.as_str() {
+                            "newer" => {
+                                assert!(item.name.as_deref().is_some_and(is_name));
+                                assert!(item.device_list.as_deref().is_some_and(list_is_valid));
+                                assert!(item.void.as_deref().is_some_and(void_is_valid));
+                            }
+                            "same" => {
+                                assert!(item.device_list.is_none());
+                                assert!(item.void.as_deref().is_some_and(void_is_valid));
+                            }
+                            "refused" | "later" => {
+                                assert!(item.device_list.is_none() && item.void.is_none());
+                            }
+                            other => panic!("state {other}"),
+                        }
+                    }
+                }
+                "list_appended" => {
+                    let body: ListAppended = strict(example);
+                    assert!(body.version >= 2 && !body.op.is_empty());
+                }
+                "peer_link" => {
+                    let body: PeerLink = strict(example);
+                    assert!(is_link_hash(&body.link_hash) && is_id(&body.account_id, "acc_"));
+                }
+                "peer_link_created" => {
+                    let body: LinkAnswer = strict(example);
+                    assert!(body.link_id > 0 && body.expires_at > 0);
+                }
+                "peer_join" => {
+                    let body: PeerJoin = strict(example);
+                    assert!(is_id(&body.account_id, "acc_") && is_link_hash(&body.link_hash));
+                    assert!(is_signature(&body.signature));
+                }
+                "peer_joined" => {
+                    let body: PeerJoined = strict(example);
+                    assert!(
+                        is_id(&body.inviter.account_id, "acc_")
+                            && is_id(&body.inviter.device_id, "dev_")
+                    );
+                    assert!(is_public_key(&body.inviter.public_key) && is_name(&body.inviter.name));
+                    assert!(
+                        list_is_valid(&body.device_list) && body.join_id > 0 && body.expires_at > 0
+                    );
+                }
+                "peer_pending" => {
+                    let body: Vec<PeerPending> = strict(example);
+                    for answer in &body {
+                        assert!(is_id(&answer.account_id, "acc_") && is_name(&answer.name));
+                        assert!(
+                            is_public_key(&answer.public_key) && is_signature(&answer.signature)
+                        );
+                        assert!(list_is_valid(&answer.device_list));
+                        assert!(
+                            answer.join_id > 0
+                                && answer.link_id > 0
+                                && answer.expires_at > answer.created_at
+                        );
+                    }
+                }
+                "peer_join_state" => {
+                    let body: PeerJoinState = strict(example);
+                    assert!(
+                        ["pending", "confirmed", "refused", "cancelled", "expired"]
+                            .contains(&body.state.as_str())
+                    );
+                    assert!(body.join_id > 0 && body.expires_at > 0);
+                }
+                "peer_view" => {
+                    let body: PeerView = strict(example);
+                    assert!(is_id(&body.account_id, "acc_") && is_name(&body.name));
+                    assert!(
+                        body.devices
+                            .iter()
+                            .all(|device| is_id(&device.device_id, "dev_")
+                                && is_name(&device.name)
+                                && is_platform(&device.platform)
+                                && is_public_key(&device.public_key))
+                    );
+                    assert!(list_is_valid(&body.device_list));
+                    assert!(void_is_valid(&body.void));
+                }
+                _ => return false,
+            }
+            true
         }
 
         fn check_one(example: &Example) -> bool {
+            if check_share(example) {
+                return true;
+            }
             match example.name.as_str() {
                 "account_create" => {
                     let body: AccountCreate = strict(example);
+                    assert!(is_id(&body.account_id, "acc_"));
                     assert!(is_name(&body.name) && is_name(&body.device_name));
                     assert!(is_platform(&body.platform) && is_public_key(&body.public_key));
-                    assert!(is_hex(&body.recovery_hash, 64) && is_signature(&body.signature));
+                    assert!(is_recovery_key(&body.recovery_key) && is_signature(&body.signature));
+                    assert!(is_signature(&body.statement));
                 }
                 "account_created" => {
                     let body: AccountCreated = strict(example);
@@ -4529,6 +4908,8 @@ mod connect_v1 {
                     assert!(is_id(&body.account_id, "acc_") && is_name(&body.name));
                     assert!(plan_view_is_valid(&body.plan));
                     assert!(body.devices.iter().all(device_view));
+                    assert!(list_is_valid(&body.device_list));
+                    assert!(is_recovery_key(&body.recovery_key));
                     if let Some(group) = &body.group {
                         assert!(is_id(&group.group_id, "grp_"));
                         assert!(["family", "team"].contains(&group.kind.as_str()));
@@ -4562,10 +4943,12 @@ mod connect_v1 {
                     let body: JoinAnswer = strict(example);
                     assert!(is_id(&body.confirmer.device_id, "dev_"));
                     assert!(is_public_key(&body.confirmer.public_key));
+                    assert!(list_is_valid(&body.device_list));
                 }
                 "join_cancel" => {
                     let body: JoinCancel = strict(example);
                     assert!(is_link_hash(&body.link_hash) && is_public_key(&body.public_key));
+                    assert!(is_signature(&body.signature));
                 }
                 "join_cancel_answer" | "refuse_answer" => {
                     let body: JoinId = strict(example);
@@ -4577,16 +4960,22 @@ mod connect_v1 {
                         is_public_key(&p.public_key)
                             && is_platform(&p.platform)
                             && is_name(&p.device_name)
+                            && is_signature(&p.signature)
                             && p.created_at < p.expires_at
                     }));
                 }
                 "confirm" => {
                     let body: Confirm = strict(example);
-                    assert!(is_public_key(&body.public_key));
+                    assert!(is_public_key(&body.public_key) && is_signature(&body.statement));
+                    assert!(body.version >= 2);
                 }
                 "confirm_answer" => {
                     let body: DeviceView = strict(example);
                     assert!(device_view(&body));
+                }
+                "revoke" => {
+                    let body: Revoke = strict(example);
+                    assert!(is_signature(&body.statement) && body.version >= 2);
                 }
                 "revoke_answer" => {
                     let body: Revoked = strict(example);
@@ -4595,6 +4984,8 @@ mod connect_v1 {
                 "vault_create" => {
                     let body: VaultCreate = strict(example);
                     assert!(is_uuid(&body.vault_id) && is_name(&body.name));
+                    assert!(is_id(&body.team_id, "t_") && is_signature(&body.statement));
+                    assert!(body.version >= 2);
                 }
                 "vault_created" => {
                     let body: VaultStoreView = strict(example);
@@ -4606,7 +4997,7 @@ mod connect_v1 {
                 }
                 "store_device" => {
                     let body: StoreDeviceAdd = strict(example);
-                    assert!(is_id(&body.device_id, "dev_"));
+                    assert!(is_id(&body.device_id, "dev_") && is_public_key(&body.public_key));
                 }
                 "store_device_answer" => {
                     let body: StoreDevice = strict(example);
@@ -4618,14 +5009,27 @@ mod connect_v1 {
                 }
                 "recover" => {
                     let body: Recover = strict(example);
-                    let code = body.recovery.strip_prefix("apassy_rec_");
-                    assert!(code.is_some_and(|code| is_hex(code, 32)));
-                    assert!(is_hex(&body.recovery_hash, 64) && is_signature(&body.signature));
+                    assert!(is_recovery_key(&body.recovery_key) && is_signature(&body.signature));
+                    assert!(is_signature(&body.statement));
+                    assert_eq!(
+                        b64u_decode(&body.recovery_signature).map(|s| s.len()),
+                        Some(64)
+                    );
                     assert!(is_public_key(&body.public_key) && is_platform(&body.platform));
                 }
                 "recover_answer" => {
                     let body: RecoverAnswer = strict(example);
                     assert!(is_id(&body.device_id, "dev_"));
+                }
+                "recovery_rotate" => {
+                    let body: RecoveryRotate = strict(example);
+                    assert!(is_recovery_key(&body.previous) && is_recovery_key(&body.recovery_key));
+                    assert_ne!(body.previous, body.recovery_key);
+                    assert!(is_signature(&body.signature));
+                }
+                "recovery_rotated" => {
+                    let body: RecoveryRotated = strict(example);
+                    assert!(is_id(&body.account_id, "acc_") && body.rotated_at > 0);
                 }
                 "entitlement" => {
                     let body: EntitlementAnswer = strict(example);
@@ -4672,8 +5076,9 @@ mod connect_v1 {
             for tag in [
                 "apassy-connect entitlement v1",
                 "apassy-connect link v1",
+                "apassy-connect link-keys v1",
                 "apassy-connect safety v1",
-                "apassy-connect recovery v1",
+                "apassy-connect recovery key v1",
             ] {
                 assert!(ACCOUNT_CONTRACT.contains(&format!("`{tag}`")), "{tag}");
             }
@@ -4692,8 +5097,13 @@ mod connect_v1 {
             nonce_b64u: String,
             messages: Vec<VectorMessage>,
             link: VectorLink,
+            device_list: VectorList,
             safety: VectorSafety,
             recovery: VectorRecovery,
+            new_recovery: VectorNewRecovery,
+            /// The new recovery code that device A makes in the place of `recovery`
+            /// (section 9.1).
+            rotated_recovery: VectorNewRecovery,
             entitlement: VectorEntitlement,
         }
 
@@ -4701,6 +5111,7 @@ mod connect_v1 {
         #[serde(deny_unknown_fields)]
         struct VectorDevice {
             device_id: String,
+            name: String,
             private_hex: String,
             public_hex: String,
             public_b64u: String,
@@ -4723,6 +5134,18 @@ mod connect_v1 {
         struct VectorLink {
             code: String,
             link_hash: String,
+            root: String,
+            confirmer: String,
+            fingerprint: String,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct VectorList {
+            root_message_b64u: String,
+            entries: Vec<ListEntry>,
+            hashes: Vec<String>,
+            live_at: std::collections::BTreeMap<String, Vec<String>>,
         }
 
         #[derive(Debug, Deserialize)]
@@ -4738,7 +5161,17 @@ mod connect_v1 {
             bytes_hex: String,
             code: String,
             words: String,
-            recovery_hash: String,
+            seed_hex: String,
+            public_b64u: String,
+            recover_signature_b64u: String,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct VectorNewRecovery {
+            bytes_hex: String,
+            seed_hex: String,
+            public_b64u: String,
         }
 
         #[derive(Debug, Deserialize)]
@@ -4841,6 +5274,18 @@ mod connect_v1 {
         }
 
         #[cfg(feature = "vault")]
+        /// The message bytes of the vector `device_list_root`.
+        fn message_of_root(v: &Vectors) -> Vec<u8> {
+            b64u_decode(
+                &v.messages
+                    .iter()
+                    .find(|m| m.name == "device_list_root")
+                    .expect("the root message")
+                    .message_b64u,
+            )
+            .expect("message")
+        }
+
         fn message_signature<'a>(v: &'a Vectors, name: &str) -> &'a str {
             &v.messages
                 .iter()
@@ -4886,29 +5331,149 @@ mod connect_v1 {
                 Some((0u8..32).collect::<Vec<u8>>())
             );
 
-            // The link hash (section 2).
+            // The link code with the fingerprint of the root and the confirmer (device A
+            // for both), and the link hash (section 2).
             let code = &v.link.code;
             let prefix = format!("apassy_alk_{}_", v.account_id);
-            assert!(
-                code.strip_prefix(&prefix)
-                    .is_some_and(|rest| is_hex(rest, 64))
+            assert_eq!(code.len(), 123);
+            let (secret, fingerprint) = code
+                .strip_prefix(&prefix)
+                .and_then(|rest| rest.split_once('_'))
+                .expect("the parts of the code");
+            assert!(is_hex(secret, 64) && is_hex(fingerprint, 32));
+            assert_eq!(fingerprint, v.link.fingerprint);
+            assert_eq!(
+                (v.link.root.as_str(), v.link.confirmer.as_str()),
+                ("device_a", "device_a")
             );
+            let keys = sha256(&joined(&[b"apassy-connect link-keys v1", &a, &a]));
+            assert_eq!(hex_encode(&keys[..16]), fingerprint);
             let link_hash = b64u_encode(&sha256(&joined(&[
                 b"apassy-connect link v1",
                 code.as_bytes(),
             ])));
             assert_eq!(link_hash, v.link.link_hash);
 
+            // The recovery keys (section 9): Ed25519 key pairs of seeds made from the codes.
+            let recovery_public = |bytes_hex: &str, seed_hex: &str, public: &str| {
+                let seed = sha256(&joined(&[
+                    b"apassy-connect recovery key v1",
+                    &hex_decode(bytes_hex),
+                ]));
+                assert_eq!(hex_encode(&seed), seed_hex);
+                let pair = Ed25519KeyPair::from_seed_unchecked(&seed).expect("seed");
+                assert_eq!(b64u_encode(pair.public_key().as_ref()), public);
+                assert_eq!(public.len(), 43);
+                pair.public_key().as_ref().to_vec()
+            };
+            let old_recovery = recovery_public(
+                &v.recovery.bytes_hex,
+                &v.recovery.seed_hex,
+                &v.recovery.public_b64u,
+            );
+            recovery_public(
+                &v.new_recovery.bytes_hex,
+                &v.new_recovery.seed_hex,
+                &v.new_recovery.public_b64u,
+            );
+            recovery_public(
+                &v.rotated_recovery.bytes_hex,
+                &v.rotated_recovery.seed_hex,
+                &v.rotated_recovery.public_b64u,
+            );
+            assert_eq!(
+                hex_decode(&v.rotated_recovery.bytes_hex),
+                (80u8..96).collect::<Vec<u8>>()
+            );
+            let (rec64, new64, rotated64) = (
+                v.recovery.public_b64u.as_bytes(),
+                v.new_recovery.public_b64u.as_bytes(),
+                v.rotated_recovery.public_b64u.as_bytes(),
+            );
+
             // The messages of section 5.
             let mut names = Vec::new();
             for m in &v.messages {
                 let expected = match m.name.as_str() {
-                    "account" => joined(&[m.tag.as_bytes(), origin, a64]),
+                    "account" => joined(&[m.tag.as_bytes(), origin, a64, rec64]),
                     "sign_in" => joined(&[m.tag.as_bytes(), origin, account, a64, nonce]),
-                    "join" => {
+                    // The join signs the device name of the joining device.
+                    "join" => joined(&[
+                        m.tag.as_bytes(),
+                        origin,
+                        account,
+                        link_hash.as_bytes(),
+                        b64,
+                        v.device_b.name.as_bytes(),
+                    ]),
+                    "join_cancel" => {
                         joined(&[m.tag.as_bytes(), origin, account, link_hash.as_bytes(), b64])
                     }
-                    "recover" => joined(&[m.tag.as_bytes(), origin, account, b64]),
+                    "device_list_root" => joined(&[
+                        m.tag.as_bytes(),
+                        origin,
+                        account,
+                        b"1",
+                        b"-",
+                        b"root",
+                        a64,
+                        b"-",
+                        v.device_a.name.as_bytes(),
+                        a64,
+                    ]),
+                    "device_list_add" => joined(&[
+                        m.tag.as_bytes(),
+                        origin,
+                        account,
+                        b"2",
+                        v.device_list.hashes[0].as_bytes(),
+                        b"add",
+                        b64,
+                        link_hash.as_bytes(),
+                        v.device_b.name.as_bytes(),
+                        a64,
+                    ]),
+                    "device_list_remove" => joined(&[
+                        m.tag.as_bytes(),
+                        origin,
+                        account,
+                        b"3",
+                        v.device_list.hashes[1].as_bytes(),
+                        b"remove",
+                        b64,
+                        b"-",
+                        b"-",
+                        a64,
+                    ]),
+                    "device_list_member_root" => joined(&[
+                        m.tag.as_bytes(),
+                        origin,
+                        b"acc_m3n5p7q2rb",
+                        b"1",
+                        b"-",
+                        b"root",
+                        b64,
+                        b"-",
+                        v.device_b.name.as_bytes(),
+                        b64,
+                    ]),
+                    "device_list_recovery_root" => joined(&[
+                        m.tag.as_bytes(),
+                        origin,
+                        account,
+                        b"1",
+                        b"-",
+                        b"root",
+                        b64,
+                        b"-",
+                        b"MacBook Air",
+                        b64,
+                    ]),
+                    "recover" => joined(&[m.tag.as_bytes(), origin, account, b64, new64]),
+                    // A live device names the key that Connect holds now and the new one.
+                    "recovery_rotate" => {
+                        joined(&[m.tag.as_bytes(), origin, account, a64, rec64, rotated64])
+                    }
                     "brain_sign_in" => joined(&[
                         m.tag.as_bytes(),
                         v.brain_origin.as_bytes(),
@@ -4941,8 +5506,114 @@ mod connect_v1 {
             }
             assert_eq!(
                 names,
-                ["account", "sign_in", "join", "recover", "brain_sign_in"]
+                [
+                    "account",
+                    "sign_in",
+                    "join",
+                    "join_cancel",
+                    "device_list_root",
+                    "device_list_add",
+                    "device_list_remove",
+                    "recover",
+                    "device_list_member_root",
+                    "device_list_recovery_root",
+                    "brain_sign_in",
+                    "recovery_rotate"
+                ]
             );
+            let tag_of = |name: &str| {
+                v.messages
+                    .iter()
+                    .find(|m| m.name == name)
+                    .map(|m| m.tag.as_str())
+                    .expect("message")
+            };
+            assert_eq!(tag_of("join_cancel"), "apassy-connect join-cancel v1");
+            assert_eq!(tag_of("device_list_add"), "apassy-connect device-list v1");
+            assert_eq!(
+                tag_of("recovery_rotate"),
+                "apassy-connect recovery-rotate v1"
+            );
+
+            // The device list: A is the root, A adds B, A removes B. Each hash is the
+            // SHA-256 of its message, and the next entry names it.
+            let list = &v.device_list;
+            assert!(list_is_valid(&list.entries));
+            let root = joined(&[
+                b"apassy-connect device-list v1",
+                origin,
+                account,
+                b"1",
+                b"-",
+                b"root",
+                a64,
+                b"-",
+                v.device_a.name.as_bytes(),
+                a64,
+            ]);
+            assert_eq!(b64u_decode(&list.root_message_b64u).expect("root"), root);
+            assert_eq!(root, message_of_root(&v));
+            assert_eq!(
+                list.entries[0].signature.as_deref(),
+                Some(message_signature(&v, "device_list_root"))
+            );
+            assert_eq!(
+                list.entries[0].name.as_deref(),
+                Some(v.device_a.name.as_str())
+            );
+            assert_eq!(
+                list.entries[1].name.as_deref(),
+                Some(v.device_b.name.as_str())
+            );
+            assert_eq!(list.entries[2].name, None);
+            let message_of = |name: &str| {
+                b64u_decode(
+                    &v.messages
+                        .iter()
+                        .find(|m| m.name == name)
+                        .expect("message")
+                        .message_b64u,
+                )
+                .expect("message")
+            };
+            let messages = [
+                root,
+                message_of("device_list_add"),
+                message_of("device_list_remove"),
+            ];
+            for (index, message) in messages.iter().enumerate() {
+                assert_eq!(list.hashes[index], b64u_encode(&sha256(message)));
+            }
+            assert_eq!(list.entries[1].key, v.device_b.public_b64u);
+            assert_eq!(
+                list.entries[1].link_hash.as_deref(),
+                Some(link_hash.as_str())
+            );
+            assert_eq!(
+                list.entries[1].signature.as_deref(),
+                Some(message_signature(&v, "device_list_add"))
+            );
+            assert_eq!(
+                list.entries[2].signature.as_deref(),
+                Some(message_signature(&v, "device_list_remove"))
+            );
+            assert_eq!(list.live_at["2"], ["device_a", "device_b"]);
+            assert_eq!(list.live_at["3"], ["device_a"]);
+
+            // The recovery signature: the old recovery key over the recover message.
+            let recover = joined(&[b"apassy-connect recover v1", origin, account, b64, new64]);
+            let recovery_signature =
+                b64u_decode(&v.recovery.recover_signature_b64u).expect("signature");
+            assert_eq!(recovery_signature.len(), 64);
+            let ed25519_verifies = |public: &[u8], message: &[u8]| {
+                ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, public)
+                    .verify(message, &recovery_signature)
+                    .is_ok()
+            };
+            assert!(ed25519_verifies(&old_recovery, &recover));
+            let mut changed = recover.clone();
+            *changed.last_mut().expect("bytes") ^= 1;
+            assert!(!ed25519_verifies(&old_recovery, &changed));
 
             // A fresh signature with the vector key verifies too (ECDSA is randomized).
             let pair = EcdsaKeyPair::from_private_key_and_public_key(
@@ -4985,8 +5656,6 @@ mod connect_v1 {
             );
             let sixteen: Vec<&str> = recovery.iter().map(|&i| words[usize::from(i)]).collect();
             assert_eq!(sixteen.join(" "), v.recovery.words);
-            let hash = sha256(&joined(&[b"apassy-connect recovery v1", &recovery]));
-            assert_eq!(hex_encode(&hash), v.recovery.recovery_hash);
 
             // The entitlement tokens of section 10.
             let seed = hex_decode(&v.entitlement.seed_hex);
@@ -5084,8 +5753,8 @@ mod connect_v1 {
                 v.device_a.public_b64u.as_str()
             );
             assert_eq!(
-                body("account_create")["recovery_hash"],
-                v.recovery.recovery_hash.as_str()
+                body("account_create")["recovery_key"],
+                v.recovery.public_b64u.as_str()
             );
             assert_eq!(body("token")["signature"], signature("sign_in").as_str());
             assert_eq!(body("token")["nonce"], v.nonce_b64u.as_str());
@@ -5101,8 +5770,61 @@ mod connect_v1 {
                 body("confirm")["public_key"],
                 v.device_b.public_b64u.as_str()
             );
+            assert_eq!(
+                body("confirm")["statement"],
+                signature("device_list_add").as_str()
+            );
+            assert_eq!(body("confirm")["version"], 2);
+            assert_eq!(
+                body("revoke")["statement"],
+                signature("device_list_remove").as_str()
+            );
+            assert_eq!(body("revoke")["version"], 3);
+            assert_eq!(
+                body("account_view")["device_list"][1]["signature"],
+                signature("device_list_add").as_str()
+            );
+            assert_eq!(body("join_cancel")["link_hash"], v.link.link_hash.as_str());
+            assert_eq!(
+                body("join_cancel")["signature"],
+                signature("join_cancel").as_str()
+            );
+            assert_eq!(
+                body("store_device")["public_key"],
+                v.device_b.public_b64u.as_str()
+            );
             assert_eq!(body("recover")["signature"], signature("recover").as_str());
-            assert_eq!(body("recover")["recovery"], v.recovery.code.as_str());
+            assert_eq!(
+                body("recover")["recovery_key"],
+                v.new_recovery.public_b64u.as_str()
+            );
+            assert_eq!(
+                body("recover")["recovery_signature"],
+                v.recovery.recover_signature_b64u.as_str()
+            );
+            assert_eq!(
+                body("account_view")["recovery_key"],
+                v.recovery.public_b64u.as_str()
+            );
+            assert_eq!(
+                body("recovery_rotate")["signature"],
+                signature("recovery_rotate").as_str()
+            );
+            assert_eq!(
+                body("recovery_rotate")["previous"],
+                v.recovery.public_b64u.as_str()
+            );
+            assert_eq!(
+                body("recovery_rotate")["recovery_key"],
+                v.rotated_recovery.public_b64u.as_str()
+            );
+            assert_eq!(
+                body("recovery_rotated")["account_id"],
+                v.account_id.as_str()
+            );
+            // The recovery code is never on the wire.
+            assert!(!EXAMPLES.contains(&v.recovery.code));
+            assert!(!EXAMPLES.contains("recovery_hash"));
             assert_eq!(
                 body("entitlement")["token"],
                 v.entitlement.tokens[0].token.as_str()
@@ -5985,7 +6707,10 @@ mod connect_v1 {
         pub const OPEN: u8 = 0x01;
         pub const CLOSE: u8 = 0x02;
         pub const RESET: u8 = 0x04;
+        pub const WINDOW: u8 = 0x08;
         pub const MAX_PAYLOAD: usize = 16_384;
+        pub const INITIAL_WINDOW: u64 = 65_536;
+        pub const MAX_WINDOW: u64 = 16 * 1024 * 1024;
 
         #[derive(Debug, PartialEq)]
         pub struct Frame {
@@ -6015,11 +6740,14 @@ mod connect_v1 {
             if !(1..=3).contains(&kind) {
                 return Err("unknown_kind");
             }
-            if flags & !(OPEN | CLOSE | RESET) != 0 {
+            if flags & !(OPEN | CLOSE | RESET | WINDOW) != 0 {
                 return Err("unknown_flags");
             }
             if flags & RESET != 0 && (flags != RESET || len != 0) {
                 return Err("bad_reset");
+            }
+            if flags & WINDOW != 0 && (flags != WINDOW || len != 4 || bytes[8..] == [0, 0, 0, 0]) {
+                return Err("bad_window");
             }
             if flags == 0 && len == 0 {
                 return Err("empty_frame");
@@ -6047,6 +6775,9 @@ mod connect_v1 {
             kind: u8,
             closed_to_node: bool,
             closed_to_connect: bool,
+            /// The payload bytes that each direction's sender may still send.
+            window_to_node: u64,
+            window_to_connect: u64,
         }
 
         /// The stream rules of section 4 on one node WebSocket.
@@ -6068,15 +6799,22 @@ mod connect_v1 {
                     if frame.stream <= self.max_opened {
                         return Err("reused");
                     }
+                    let first = frame.payload.len() as u64;
+                    if first > INITIAL_WINDOW {
+                        return Err("over_window");
+                    }
                     self.max_opened = frame.stream;
                     self.live.insert(
                         frame.stream,
                         Live {
                             kind: frame.kind,
-                            closed_to_node: false,
+                            closed_to_node: frame.flags & CLOSE != 0,
                             closed_to_connect: false,
+                            window_to_node: INITIAL_WINDOW - first,
+                            window_to_connect: INITIAL_WINDOW,
                         },
                     );
+                    return Ok(());
                 } else if !self.live.contains_key(&frame.stream) {
                     // A frame for an ended stream is dropped; one above every id is an error.
                     return if frame.stream > self.max_opened {
@@ -6093,14 +6831,35 @@ mod connect_v1 {
                     self.live.remove(&frame.stream);
                     return Ok(());
                 }
-                let closed = if to_node {
-                    &mut live.closed_to_node
+                if frame.flags & WINDOW != 0 {
+                    // The receiver of the other direction lets its sender send more.
+                    let added = u64::from(u32::from_be_bytes(
+                        frame.payload[..4].try_into().expect("four bytes"),
+                    ));
+                    let window = if to_node {
+                        &mut live.window_to_connect
+                    } else {
+                        &mut live.window_to_node
+                    };
+                    if *window + added > MAX_WINDOW {
+                        return Err("over_window");
+                    }
+                    *window += added;
+                    return Ok(());
+                }
+                let (closed, window) = if to_node {
+                    (&mut live.closed_to_node, &mut live.window_to_node)
                 } else {
-                    &mut live.closed_to_connect
+                    (&mut live.closed_to_connect, &mut live.window_to_connect)
                 };
                 if *closed {
                     return Err("closed");
                 }
+                let len = frame.payload.len() as u64;
+                if len > *window {
+                    return Err("over_window");
+                }
+                *window -= len;
                 if frame.flags & CLOSE != 0 {
                     *closed = true;
                 }
@@ -6117,6 +6876,7 @@ mod connect_v1 {
             open: u8,
             close: u8,
             reset: u8,
+            window: u8,
         }
 
         #[derive(Debug, Deserialize)]
@@ -6160,6 +6920,8 @@ mod connect_v1 {
             header_bytes: usize,
             max_payload: usize,
             flags: Flags,
+            initial_window: u64,
+            max_window: u64,
             kinds: Kinds,
             frames: Vec<ValidFrame>,
             invalid: Vec<InvalidFrame>,
@@ -6175,14 +6937,28 @@ mod connect_v1 {
             assert_eq!(file.header_bytes, 8);
             assert_eq!(file.max_payload, MAX_PAYLOAD);
             assert_eq!(
-                (file.flags.open, file.flags.close, file.flags.reset),
-                (OPEN, CLOSE, RESET)
+                (
+                    file.flags.open,
+                    file.flags.close,
+                    file.flags.reset,
+                    file.flags.window
+                ),
+                (OPEN, CLOSE, RESET, WINDOW)
+            );
+            assert_eq!(
+                (file.initial_window, file.max_window),
+                (INITIAL_WINDOW, MAX_WINDOW)
             );
             assert_eq!(
                 (file.kinds.device, file.kinds.public, file.kinds.acme),
                 (1, 2, 3)
             );
-            for (name, code) in [("open", "0x01"), ("close", "0x02"), ("reset", "0x04")] {
+            for (name, code) in [
+                ("open", "0x01"),
+                ("close", "0x02"),
+                ("reset", "0x04"),
+                ("window", "0x08"),
+            ] {
                 assert!(
                     TUNNEL_CONTRACT.contains(&format!("`{name}` ({code})")),
                     "{name}"
@@ -6356,6 +7132,242 @@ mod connect_v1 {
 
         pub fn check_examples() {
             examples("connect-tunnel-v1", EXAMPLES, TUNNEL_CONTRACT, check_one);
+        }
+    }
+}
+
+/// The share vectors of connect-account-v1 sections 15 and 16, with `ring` only: each
+/// message is the join of its parts and starts with its tag, each signature verifies with
+/// its signer's key and fails over a changed byte, the share fingerprint, the share link
+/// hash, and the six share words come from their inputs, and each list hash names the
+/// message of its entry, the next entry naming it as its `previous`.
+#[cfg(feature = "vault")]
+#[test]
+fn connect_account_v1_share_vectors_match_the_contract() {
+    use ring::signature::{ECDSA_P256_SHA256_ASN1, UnparsedPublicKey};
+    use serde_json::Value;
+
+    fn sha256(data: &[u8]) -> Vec<u8> {
+        ring::digest::digest(&ring::digest::SHA256, data)
+            .as_ref()
+            .to_vec()
+    }
+    fn b64u(data: &[u8]) -> String {
+        apassy::sync::encode_b64u(data)
+    }
+    fn hex(text: &str) -> Vec<u8> {
+        (0..text.len() / 2)
+            .map(|index| u8::from_str_radix(&text[index * 2..index * 2 + 2], 16).unwrap())
+            .collect()
+    }
+    fn joined(parts: &[&[u8]]) -> Vec<u8> {
+        parts.join(&0u8)
+    }
+    let v: Value = serde_json::from_str(include_str!(
+        "fixtures/connect-account-v1/share-vectors.json"
+    ))
+    .unwrap();
+    let contract = include_str!("../docs/contracts/connect-account-v1.md");
+    for tag in [
+        "apassy-connect share-list v1",
+        "apassy-connect peer-join v1",
+        "apassy-connect share-keys v1",
+        "apassy-connect share-link v1",
+        "apassy-connect share-safety v1",
+    ] {
+        assert!(contract.contains(tag), "{tag}");
+    }
+    let (origin, a, x, store) = (
+        v["origin"].as_str().unwrap().as_bytes(),
+        v["account_a"].as_str().unwrap().as_bytes(),
+        v["account_x"].as_str().unwrap().as_bytes(),
+        v["store"].as_str().unwrap().as_bytes(),
+    );
+    let pub_a = hex(v["device_a"]["public_hex"].as_str().unwrap());
+    let pub_b = hex(v["device_b"]["public_hex"].as_str().unwrap());
+    let (a64, b64) = (b64u(&pub_a), b64u(&pub_b));
+    let code = v["code"]["code"].as_str().unwrap();
+    assert_eq!(code.len(), 123);
+    assert!(code.starts_with(&format!("apassy_shr_{}_", v["account_a"].as_str().unwrap())));
+    let fingerprint = &sha256(&joined(&[b"apassy-connect share-keys v1", &pub_a, &pub_a]))[..16];
+    let fingerprint: String = fingerprint
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    assert_eq!(fingerprint, v["code"]["fingerprint"].as_str().unwrap());
+    assert!(code.ends_with(&format!("_{fingerprint}")));
+    let link_hash = b64u(&sha256(&joined(&[
+        b"apassy-connect share-link v1",
+        code.as_bytes(),
+    ])));
+    assert_eq!(link_hash, v["code"]["link_hash"].as_str().unwrap());
+    let safety = sha256(&joined(&[
+        b"apassy-connect share-safety v1",
+        code.as_bytes(),
+        a,
+        &pub_a,
+        &pub_a,
+        x,
+        &pub_b,
+        &pub_b,
+    ]));
+    assert_eq!(
+        safety
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>(),
+        v["words"]["sha256"].as_str().unwrap()
+    );
+    let words: Vec<&str> = v["words"]["words"].as_str().unwrap().split(' ').collect();
+    assert_eq!(words.len(), 6);
+    let list = |name: &str, version: usize| {
+        v["lists"][name]["hashes"][version - 1]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let (a_root, x_root) = (list("a", 1), list("x", 1));
+    let (a_peer, x_peer) = (list("a", 2), list("x", 2));
+    let (a_store, a_share) = (list("a", 3), list("a", 4));
+    let expected: Vec<(&str, Vec<u8>)> = vec![
+        (
+            "share_list_peer",
+            joined(&[
+                b"apassy-connect share-list v1",
+                origin,
+                a,
+                b"2",
+                a_root.as_bytes(),
+                b"peer",
+                x,
+                b64.as_bytes(),
+                b"-",
+                a64.as_bytes(),
+            ]),
+        ),
+        (
+            "share_list_store",
+            joined(&[
+                b"apassy-connect share-list v1",
+                origin,
+                a,
+                b"3",
+                a_peer.as_bytes(),
+                b"store",
+                b"-",
+                b"-",
+                store,
+                a64.as_bytes(),
+            ]),
+        ),
+        (
+            "share_list_share",
+            joined(&[
+                b"apassy-connect share-list v1",
+                origin,
+                a,
+                b"4",
+                a_store.as_bytes(),
+                b"share",
+                x,
+                b"-",
+                store,
+                a64.as_bytes(),
+            ]),
+        ),
+        (
+            "share_list_member_peer",
+            joined(&[
+                b"apassy-connect share-list v1",
+                origin,
+                x,
+                b"2",
+                x_root.as_bytes(),
+                b"peer",
+                a,
+                a64.as_bytes(),
+                b"-",
+                b64.as_bytes(),
+            ]),
+        ),
+        (
+            "share_list_join",
+            joined(&[
+                b"apassy-connect share-list v1",
+                origin,
+                x,
+                b"3",
+                x_peer.as_bytes(),
+                b"join",
+                a,
+                a_share.as_bytes(),
+                store,
+                b64.as_bytes(),
+            ]),
+        ),
+        (
+            "peer_join",
+            joined(&[
+                b"apassy-connect peer-join v1",
+                origin,
+                a,
+                link_hash.as_bytes(),
+                x,
+                b64.as_bytes(),
+                b64.as_bytes(),
+            ]),
+        ),
+    ];
+    for (name, message) in expected {
+        let vector = v["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|vector| vector["name"] == name)
+            .unwrap();
+        assert_eq!(
+            b64u(&message),
+            vector["message_b64u"].as_str().unwrap(),
+            "{name}"
+        );
+        assert!(
+            message.starts_with(vector["tag"].as_str().unwrap().as_bytes()),
+            "{name}"
+        );
+        assert_eq!(
+            sha256(&message)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>(),
+            vector["sha256"].as_str().unwrap()
+        );
+        let key = if vector["signer"] == "device_a" {
+            &pub_a
+        } else {
+            &pub_b
+        };
+        let signature =
+            apassy::sync::decode_b64u(vector["signature_b64u"].as_str().unwrap()).unwrap();
+        let verify = |data: &[u8]| {
+            UnparsedPublicKey::new(&ECDSA_P256_SHA256_ASN1, key)
+                .verify(data, &signature)
+                .is_ok()
+        };
+        assert!(verify(&message), "{name}");
+        let mut changed = message.clone();
+        changed[0] ^= 1;
+        assert!(!verify(&changed), "{name}");
+        if name.starts_with("share_list") {
+            let hash = b64u(&sha256(&message));
+            assert!(
+                v["lists"]["a"]["hashes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .chain(v["lists"]["x"]["hashes"].as_array().unwrap())
+                    .any(|held| held == &Value::String(hash.clone())),
+                "{name}"
+            );
         }
     }
 }

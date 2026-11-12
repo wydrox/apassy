@@ -37,6 +37,13 @@ mod columns;
 mod companion;
 #[cfg(all(test, feature = "vault"))]
 mod companion_tests;
+/// Settings > Connect: the Apassy Connect account, plans, devices, and groups (plan s7 M2).
+mod connect;
+/// "Use a vault from another Mac" › "Apassy Connect" on the start screen.
+#[cfg(all(test, feature = "vault"))]
+mod connect_start_tests;
+#[cfg(all(test, feature = "vault"))]
+mod connect_tests;
 /// Decisions: the questions that wait for the owner (ADR 0026 §2).
 #[cfg(feature = "vault")]
 mod decisions;
@@ -121,6 +128,8 @@ mod vault_tests;
 /// Several vaults, one open at a time (ADR 0013).
 #[cfg(feature = "vault")]
 pub(crate) mod vaults;
+#[cfg(all(test, feature = "vault"))]
+mod wording_tests;
 
 use std::collections::BTreeSet;
 
@@ -327,6 +336,8 @@ pub(crate) struct UiState {
     pub(crate) wifi_notice_seen: bool,
     /// Settings > Devices: its sheets, the node cache, and the demo frame.
     pub(crate) devices: devices::State,
+    /// Settings > Connect: its sheet, the account and its worker, and the demo frame.
+    pub(crate) connect: connect::State,
     /// The shared vaults in the sidebar (ADR 0026 §6). Nothing fills it until the vault
     /// keeps shared vaults; the tests draw synthetic ones.
     pub(crate) shared_vaults: Vec<sidebar::SharedVaultRow>,
@@ -787,6 +798,8 @@ pub(super) fn native_menu_command(
 
 pub(crate) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
+    #[cfg(target_os = "linux")]
+    shell::window_keys(&ctx);
     focus::begin_frame(&mut app.ui.focus, &ctx);
     #[cfg(feature = "vault")]
     {
@@ -1192,16 +1205,25 @@ mod tests {
         app.vault_list.current = Some("adopted-test-vault".to_owned());
         app.sync.adopted_vault = app.vault_list.current.clone();
         let (text, _) = draw_frames(&mut app, DEFAULT_SIZE, 3);
-        assert!(text.contains("Use this vault on this Mac"), "{text}");
+        assert!(
+            text.contains(concat!("Use this vault on this ", crate::computer!())),
+            "{text}"
+        );
         assert!(app.sync.adopted_vault.is_none());
         app.owner_ui.session.lock().expect("lock");
         let (locked, _) = draw_frames(&mut app, DEFAULT_SIZE, 3);
-        assert!(!locked.contains("Use this vault on this Mac"), "{locked}");
+        assert!(
+            !locked.contains(concat!("Use this vault on this ", crate::computer!())),
+            "{locked}"
+        );
         app.owner_ui.session.unlock(UI_PASS).expect("unlock");
         app.vault_list.current = Some("another-vault".to_owned());
         let (other, _) = draw_frames(&mut app, DEFAULT_SIZE, 3);
         assert!(app.ui.setup_vault.is_none());
-        assert!(!other.contains("Use this vault on this Mac"), "{other}");
+        assert!(
+            !other.contains(concat!("Use this vault on this ", crate::computer!())),
+            "{other}"
+        );
     }
 
     /// A proof after a passed passphrase check (goal item A4).
@@ -1225,7 +1247,7 @@ mod tests {
         for expected in [
             "Welcome to Apassy",
             "Create my first vault",
-            "Use a vault from another Mac",
+            concat!("Use a vault from another ", crate::computer!()),
             "Open a local vault file",
             "Restore from a backup",
         ] {

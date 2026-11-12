@@ -34,8 +34,10 @@ use crate::sync_head::{HEAD_HEADER, MAX_SNAPSHOT_BYTES, SIGNATURE_HEADER, Signed
 
 /// The most chain entries in one answer.
 pub const MAX_CHAIN: u64 = 1000;
-/// The heads that maintenance keeps: the newest ones.
-pub const KEPT_HEADS: u64 = 10_000;
+/// The heads that maintenance keeps: the newest ones (`Limits::kept_heads`). The number is
+/// a fixed part of relay-sync-v1 (section 12), one constant with the client's check of a
+/// first download.
+pub const KEPT_HEADS: u64 = apassy::sync::KEPT_HEADS;
 /// A temporary file older than this is removed by maintenance.
 const TEMP_MAX_AGE_SECS: u64 = 3600;
 /// The piece of a snapshot that is read, hashed, and written at a time.
@@ -203,12 +205,13 @@ pub fn verify_snapshots(conn: &Connection, dir: &Path) -> RelayResult<()> {
 
 /// Validates a restored data directory, read-only, including suspended teams.
 pub fn verify_restored(config: &crate::config::RelayConfig) -> RelayResult<usize> {
+    use crate::server::store::Store;
+    // `connect` mode: the files are plain (docs/SPEC.md section 37).
     let directory =
-        crate::server::store::Store::open_read_only(&config.directory_path(), &config.master_key)?;
+        Store::open_read_only_for(config, &config.directory_path(), &config.master_key)?;
     let rows = directory.with(crate::server::directory::read_teams)?;
     for row in &rows {
-        let store =
-            crate::server::store::Store::open_read_only(&config.team_path(&row.id), &row.file_key)?;
+        let store = Store::open_read_only_for(config, &config.team_path(&row.id), &row.file_key)?;
         store.with(|conn| verify_snapshots(conn, &config.sync_dir(&row.id)))?;
     }
     Ok(rows.len())
@@ -365,6 +368,7 @@ pub fn view(conn: &Connection, since: u64) -> RelayResult<SyncHeadView> {
             pushed_at: None,
             chain: Vec::new(),
             chain_from: None,
+            kept_from: None,
             receipts,
             signers: Vec::new(),
         });
@@ -382,6 +386,11 @@ pub fn view(conn: &Connection, since: u64) -> RelayResult<SyncHeadView> {
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(db)?
     };
+    // The oldest head that maintenance left: the chain of a device without an anchor
+    // starts there.
+    let kept_from: Option<i64> = conn
+        .query_row("SELECT min(version) FROM sync_head", [], |row| row.get(0))
+        .map_err(db)?;
     let device_name: Option<String> = conn
         .query_row(
             "SELECT name FROM device WHERE id = ?1",
@@ -402,6 +411,7 @@ pub fn view(conn: &Connection, since: u64) -> RelayResult<SyncHeadView> {
         device_name,
         pushed_at: Some(head.pushed_at),
         chain_from: chain.first().map(|entry| entry.version),
+        kept_from: kept_from.map(to_u),
         chain,
         receipts,
         signers,
@@ -411,7 +421,8 @@ pub fn view(conn: &Connection, since: u64) -> RelayResult<SyncHeadView> {
 /// `GET /v1/sync/head?since=N&wait=S`. While the current version equals `since`, holds
 /// the answer up to `wait` seconds on the team notifier (a push or a delete wakes it).
 /// A device has at most one sync long poll; a second is answered at once. A team whose
-/// `sync_bytes` is 0 can get no new version, so it is answered at once too, and so is a
+/// `sync_bytes` is 0 (`Core::sync_bytes`: also a free Connect team after the end of free
+/// relay sync) can get no new version, so it is answered at once too, and so is a
 /// Connect team's poll over `Limits::connect_long_polls`. Marks the device as seen, as a
 /// push, a download, and a receipt do.
 pub fn head(
@@ -423,7 +434,7 @@ pub fn head(
 ) -> RelayResult<SyncHeadView> {
     let device = device_of(by)?;
     seen(core, device, now);
-    let poll = if wait_secs > 0 && core.limits().sync_bytes > 0 {
+    let poll = if wait_secs > 0 && core.sync_bytes() > 0 {
         core.sync_polls.enter(device.0)
     } else {
         None
@@ -600,8 +611,9 @@ pub fn push(
     let head = &request.head.head;
     let limits = core.limits();
     // `sync_bytes` 0: the team has no vault sync on the relay (a Connect team on Free,
-    // docs/SPEC.md section 26). Before the size, so the answer names the plan.
-    if limits.sync_bytes == 0 {
+    // docs/SPEC.md section 26, or any free Connect team once free relay sync is over,
+    // section 37). Before the size, so the answer names the plan.
+    if core.sync_bytes() == 0 {
         refused(core, now, "plan_required");
         return Err(plan_required().into());
     }
@@ -929,7 +941,7 @@ pub fn record_fetch(core: &Core, by: &MemberAuth, version: u64, now: u64) -> Rel
 }
 
 /// `POST /v1/sync/receipt`: this device merged `version`. 403 `plan_required` when the
-/// team's `sync_bytes` is 0. The `sync_received` row is written only when the device's
+/// team's `sync_bytes` is 0 (`Core::sync_bytes`). The `sync_received` row is written only when the device's
 /// version changes; the same receipt again only moves its time.
 pub fn receipt(
     core: &Core,
@@ -939,7 +951,7 @@ pub fn receipt(
 ) -> RelayResult<Value> {
     let device = device_of(by)?;
     seen(core, device, now);
-    if core.limits().sync_bytes == 0 {
+    if core.sync_bytes() == 0 {
         refused(core, now, "plan_required");
         return Err(plan_required());
     }
@@ -1026,13 +1038,15 @@ pub fn delete(core: &Core, by: &MemberAuth, if_match: u64, now: u64) -> SyncResu
     Ok(json!({"last_version": latest}))
 }
 
-/// Every 5 seconds, per team: drops the heads older than the newest `KEPT_HEADS`, and the
-/// temporary files older than one hour (a push that never finished).
+/// Every 5 seconds, per team: drops the heads older than the newest `Limits::kept_heads`
+/// (`KEPT_HEADS`), and the temporary files older than one hour (a push that never
+/// finished).
 pub fn maintenance(core: &Core, now: u64) -> RelayResult<()> {
+    let kept = core.config.limits.kept_heads.max(1);
     core.store.with(|conn| {
         conn.execute(
             "DELETE FROM sync_head WHERE version <= (SELECT max(version) FROM sync_head) - ?1",
-            params![to_i(KEPT_HEADS)],
+            params![to_i(kept)],
         )
         .map(drop)
         .map_err(db)
@@ -1115,6 +1129,24 @@ mod tests {
             pages += 1;
         }
         assert_eq!((since, pages), (2500, 3));
+    }
+
+    /// The answer says where the kept history starts: 1 while every head is kept; after
+    /// maintenance dropped the older heads, the oldest kept version, which is where the
+    /// chain of `since = 0` starts. A later page keeps saying it.
+    #[test]
+    fn the_answer_names_the_oldest_kept_head() {
+        let conn = team_with_heads(30);
+        assert_eq!(view(&conn, 0).unwrap().kept_from, Some(1));
+        conn.execute("DELETE FROM sync_head WHERE version <= 20", [])
+            .unwrap();
+        let first = view(&conn, 0).unwrap();
+        assert_eq!((first.chain_from, first.kept_from), (Some(21), Some(21)));
+        assert_eq!(first.chain.len(), 10);
+        let later = view(&conn, 25).unwrap();
+        assert_eq!((later.chain_from, later.kept_from), (Some(26), Some(21)));
+        let empty = team_with_heads(0);
+        assert_eq!(view(&empty, 0).unwrap().kept_from, None);
     }
 
     /// The signers of a page carry the keys, and a removed device the newest version it

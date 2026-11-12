@@ -3,14 +3,31 @@
 // and a coarser /48 or /24 prefix, which also travels to the relay in a header with its
 // HMAC; nothing is stored) and snapshot pushes, bounds the declared length of every body, and
 // forwards relay requests with the required edge secret. `/internal/` routes (the APNs
-// sender, apns.ts) are handled here and never forwarded.
+// sender, apns.ts) are handled here and never forwarded. The Stripe webhook
+// (connect-billing-v1 section 7) has its own 256 KiB cap and no per-address limiter:
+// Stripe sends from its own addresses, and the relay checks the signature.
+// A WebSocket upgrade goes to the relay only on `GET /v1/tunnel/*` (connect-tunnel-v1),
+// unchanged, and the relay's `101` comes back as it is; an upgrade anywhere else is
+// refused here. Dials (`GET /v1/tunnel/dial/*`) and the node's WebSocket (`GET
+// /v1/tunnel/node`) each have a per-address limiter of their own, so the dials of the
+// phones behind a node's address never keep the node offline.
+// One build serves both phases of the hosted relay (docs/operations/connect.md): the var
+// RELAY_MODE is `relay` (unset: today's hosted relay) or `connect` (after the cutover,
+// ADR 0037 stage 7). In `connect` mode the APNs sender `/internal/push` is off (404), the
+// free Connect routes `/v1/connect` and `/v1/connect/challenge` answer 410 `hosted_retired`
+// here (so they need no guard: CONNECT_LIMITER and CONNECT_PREFIX_LIMITER are not used, and
+// nothing reaches the relay), and the agent proxy `/p/` has the JSON cap (the relay has no
+// proxy there and answers 410). `/dl/*`, `/guide`, and `/install.sh` are the same in both.
+// Any other value is a configuration error: 503 on every relay route, 404 on
+// `/internal/*`; the static files stay. The deploy refuses a RELAY_MODE that differs from
+// the mode of the relay (scripts/check-relay-mode.mjs).
 // Erasable TypeScript only (no enums, namespaces, or parameter properties), so
 // Node can run it with type stripping in the tests.
 // workerd accepts only handlers as exports of this main module, so values such as
 // the length limits live in limits.ts. Type exports are fine: they are erased.
 
 import { handleInternal, type PushEnv } from "./apns.ts";
-import { MAX_FEED_LENGTH, MAX_JSON_LENGTH, MAX_PROXY_LENGTH, MAX_SNAPSHOT_LENGTH } from "./limits.ts";
+import { MAX_FEED_LENGTH, MAX_JSON_LENGTH, MAX_PROXY_LENGTH, MAX_SNAPSHOT_LENGTH, MAX_STRIPE_WEBHOOK_LENGTH } from "./limits.ts";
 
 /** A Workers VPC service binding: a tunnel from the relay's host, no public origin. */
 export interface RelayService {
@@ -42,12 +59,29 @@ export interface Env extends PushEnv {
   CONNECT_LIMITER?: CreateLimiter;
   /** The coarser key of `POST /v1/connect`: an IPv6 /48 or an IPv4 /24. */
   CONNECT_PREFIX_LIMITER?: CreateLimiter;
+  /** Connect accounts (`POST /v1/account` and `/v1/account/recover`, connect-account-v1), per IPv4 address or IPv6 /64. */
+  ACCOUNT_LIMITER?: CreateLimiter;
+  /** Tunnel dials (`GET /v1/tunnel/dial/*`, connect-tunnel-v1), per IPv4 address or IPv6 /64. */
+  TUNNEL_LIMITER?: CreateLimiter;
+  /** Node WebSockets (`GET /v1/tunnel/node`, connect-tunnel-v1), per IPv4 address or IPv6 /64: a budget of their own, apart from the dials. */
+  TUNNEL_NODE_LIMITER?: CreateLimiter;
   /** Static files served without the relay or its edge secret. */
   ASSETS?: AssetService;
+  /** `relay` (or unset) before the cutover, `connect` after it. A var. */
+  RELAY_MODE?: string;
+}
+
+/** The phase of the hosted relay that this Worker fronts, from RELAY_MODE; undefined for a bad value. */
+function relayMode(env: Env): "relay" | "connect" | undefined {
+  const mode = env.RELAY_MODE?.trim();
+  if (mode === undefined || mode === "" || mode === "relay") return "relay";
+  if (mode === "connect") return "connect";
+  return undefined;
 }
 
 const EDGE_HEADER = "x-apassy-edge";
-// The coarse client prefix of `POST /v1/connect` for the relay. The relay trusts it only
+// The coarse client prefix of `POST /v1/connect`, `POST /v1/account`, and
+// `POST /v1/account/recover` for the relay. The relay trusts it only
 // together with its MAC (below); the Worker always removes the client's copy of both.
 const CLIENT_PREFIX_HEADER = "x-apassy-client-prefix";
 // The HMAC of that prefix under the edge secret. The relay trusts the prefix only when this
@@ -64,6 +98,34 @@ const SNAPSHOT_PATH = "/v1/sync/snapshot";
 const FEED_PATH = "/v1/feed";
 /** The agent proxy prefix (SPEC 12). */
 const PROXY_PREFIX = "/p/";
+/** The Stripe webhook (connect-billing-v1 section 7): signed by Stripe, sent from Stripe's addresses. */
+const STRIPE_WEBHOOK_PATH = "/v1/stripe/webhook";
+/** A new Connect account (connect-account-v1): free, unauthenticated, so limited per client. */
+const ACCOUNT_PATH = "/v1/account";
+/** The recovery of an account (connect-account-v1 section 9): the same limiter as a new one. */
+const RECOVER_PATH = "/v1/account/recover";
+/** The tunnel routes (connect-tunnel-v1): the only ones whose WebSocket upgrade is forwarded. */
+const TUNNEL_PREFIX = "/v1/tunnel/";
+/** The dial of a node (connect-tunnel-v1 section 3.3), limited per client. */
+const DIAL_PREFIX = "/v1/tunnel/dial/";
+/** The entries of a device list that name another account (connect-account-v1 section 16.3). */
+const ACCOUNT_LIST_PATH = "/v1/account/list";
+/** The share codes and the other accounts of a family or team (sections 16.2 and 16.4). */
+const PEERS_PREFIX = "/v1/account/peers/";
+/** The batch read of other accounts' lists (section 16.4). */
+const PEER_LISTS_PATH = "/v1/account/peers/lists";
+/** The read of one other account's list (section 16.4): `GET /v1/account/peers/acc_…`. */
+const PEER_VIEW_PATH = /^\/v1\/account\/peers\/acc_[a-z2-7]{10}$/;
+/** The WebSocket of a node (connect-tunnel-v1 section 3.2), limited apart from the dials. */
+const NODE_PATH = "/v1/tunnel/node";
+
+// A request that asks to upgrade its connection: an `Upgrade` header, or a `Connection`
+// header with the token `upgrade`.
+function wantsUpgrade(request: Request): boolean {
+  if (request.headers.has("upgrade")) return true;
+  const connection = request.headers.get("connection") ?? "";
+  return connection.split(",").some((token) => token.trim().toLowerCase() === "upgrade");
+}
 
 function text(status: number, body: string): Response {
   return new Response(body, {
@@ -84,20 +146,24 @@ function jsonError(status: number, code: string, message: string, extra: Record<
 // path (an unknown path, a wrong method, a bad token, SPEC 24.10). So the edge bounds
 // the declared `Content-Length` of every request with a body before the relay sees it:
 // the snapshot push up to MAX_SNAPSHOT_LENGTH, the feed put (`PUT /v1/feed` exactly) up
-// to MAX_FEED_LENGTH, the agent proxy up to MAX_PROXY_LENGTH, everything else up to
-// MAX_JSON_LENGTH. A snapshot push and a feed put must declare their length. Elsewhere a
-// request without one has no body or a chunked one, which tiny_http does not drain.
-function lengthError(request: Request, path: string): Response | undefined {
+// to MAX_FEED_LENGTH, the Stripe webhook (`POST /v1/stripe/webhook` exactly) up to
+// MAX_STRIPE_WEBHOOK_LENGTH, the agent proxy up to MAX_PROXY_LENGTH, everything else up
+// to MAX_JSON_LENGTH. A snapshot push, a feed put, and a webhook must declare their length.
+// Elsewhere a request without one has no body or a chunked one, which tiny_http does not drain.
+function lengthError(request: Request, path: string, connectMode: boolean): Response | undefined {
   const snapshot = request.method === "PUT" && path === SNAPSHOT_PATH;
   const feed = request.method === "PUT" && path === FEED_PATH;
-  const push = snapshot || feed;
+  const webhook = request.method === "POST" && path === STRIPE_WEBHOOK_PATH;
+  const push = snapshot || feed || webhook;
   if (push && request.headers.has("transfer-encoding")) {
     return jsonError(
       400,
       "invalid_request",
       snapshot
         ? "Send the snapshot with Content-Length, not Transfer-Encoding."
-        : "Send the feed with Content-Length, not Transfer-Encoding.",
+        : webhook
+          ? "Send the webhook with Content-Length, not Transfer-Encoding."
+          : "Send the feed with Content-Length, not Transfer-Encoding.",
     );
   }
   const declared = request.headers.get("content-length");
@@ -114,13 +180,46 @@ function lengthError(request: Request, path: string): Response | undefined {
     if (Number(length) > MAX_FEED_LENGTH) {
       return jsonError(413, "payload_too_large", "The feed body is larger than 352 KiB.");
     }
-  } else if (path.startsWith(PROXY_PREFIX)) {
+  } else if (webhook) {
+    if (Number(length) > MAX_STRIPE_WEBHOOK_LENGTH) {
+      return jsonError(413, "payload_too_large", "The webhook body is larger than 256 KiB.");
+    }
+  } else if (path.startsWith(PROXY_PREFIX) && !connectMode) {
     if (Number(length) > MAX_PROXY_LENGTH) {
       return jsonError(413, "payload_too_large", "The body is larger than 8 MiB.");
     }
   } else if (Number(length) > MAX_JSON_LENGTH) {
     return jsonError(413, "payload_too_large", "The body is larger than 64 KiB.");
   }
+  return undefined;
+}
+
+/** The largest distance between `t` of a Stripe signature and the edge's clock (connect-billing-v1 section 7). */
+const STRIPE_SIGNATURE_TOLERANCE = 300;
+
+// The Stripe webhook has no per-address limiter, so the edge refuses, before it forwards a
+// byte of the body, a request whose `Stripe-Signature` cannot verify at the relay: none,
+// longer than 4 KiB, without a `t` of digits (once) or without a `v1`, or a `t` more than
+// 300 seconds from the edge's clock. The relay checks the HMAC itself.
+function stripeSignatureError(request: Request, nowSeconds: number): Response | undefined {
+  const refused = () => jsonError(400, "invalid_request", "The Stripe signature does not verify.");
+  const header = request.headers.get("stripe-signature");
+  if (header === null || header.length > 4096) return refused();
+  let t: number | undefined;
+  let v1 = false;
+  for (const part of header.split(",")) {
+    const at = part.indexOf("=");
+    if (at < 0) return refused();
+    const key = part.slice(0, at).trim();
+    const value = part.slice(at + 1).trim();
+    if (key === "t") {
+      if (t !== undefined || !/^[0-9]{1,12}$/.test(value)) return refused();
+      t = Number(value);
+    } else if (key === "v1") {
+      v1 = true;
+    }
+  }
+  if (t === undefined || !v1 || Math.abs(nowSeconds - t) > STRIPE_SIGNATURE_TOLERANCE) return refused();
   return undefined;
 }
 
@@ -194,14 +293,23 @@ function staticResponse(response: Response, noStore: boolean): Response {
 
 /** The codeless team route (SPEC 26): anyone can call it, so its limiter is the strictest. */
 const CONNECT_PATH = "/v1/connect";
+/** The challenge of the codeless team route. */
+const CONNECT_CHALLENGE_PATH = "/v1/connect/challenge";
+/** The answer of the relay in `connect` mode to a retired route (relay SPEC 37.2). */
+const HOSTED_RETIRED =
+  "This route is retired: this relay serves Apassy Connect only (accounts, vault stores, billing, groups, and the tunnel). Approvals and teams run on your own Apassy node (ADR 0037).";
 
 // The per-IP limiter of a route. Creation (a team, a join, a device link) is rare;
 // sign-in is frequent (a waiting CLI asks every 5 s); a snapshot push holds a relay
-// thread for its whole body. A Connect team needs no code at all.
+// thread for its whole body. A Connect team needs no code at all. The Stripe webhook has
+// none on purpose: Stripe sends every event from a few shared addresses, and a limit there
+// would drop paid events; its signature is the relay's check.
 function limiterFor(method: string, path: string, env: Env): CreateLimiter | undefined {
   if (method === "PUT" && path === SNAPSHOT_PATH) return env.SYNC_LIMITER;
   if (method !== "POST") return undefined;
   switch (path) {
+    case STRIPE_WEBHOOK_PATH:
+      return undefined;
     case CONNECT_PATH:
       return env.CONNECT_LIMITER;
     case "/v1/join":
@@ -212,6 +320,11 @@ function limiterFor(method: string, path: string, env: Env): CreateLimiter | und
     case "/v1/auth/challenge":
     case "/v1/auth/token":
     case "/v1/connect/challenge":
+    // The edge routes of a Connect account device (connect-account-v1 section 3).
+    case "/v1/account/challenge":
+    case "/v1/account/token":
+    case "/v1/account/devices/join":
+    case "/v1/account/devices/join/cancel":
       return env.AUTH_LIMITER;
     default:
       return undefined;
@@ -223,9 +336,21 @@ export default {
     // Check the raw path before URL parsing removes dot segments or backslashes.
     const rawPath = request.url.replace(/^[^:]+:\/\/[^/?#]+/, "").split(/[?#]/, 1)[0]!;
     const url = new URL(request.url);
+    const mode = relayMode(env);
+    const connectMode = mode === "connect";
     // The parsed path is checked too: `/./internal/push` parses to `/internal/push`.
     for (const path of [rawPath, url.pathname]) {
-      if (path === "/internal" || path.startsWith("/internal/")) return handleInternal(request, env);
+      if (path === "/internal" || path.startsWith("/internal/")) {
+        // The APNs sender serves the hosted relay before the cutover only: Connect sends no
+        // push (the nodes use the push gateway, ADR 0037 D7). A bad mode keeps it off too.
+        if (mode !== "relay") return text(404, "not found");
+        return handleInternal(request, env);
+      }
+    }
+    // The relay refuses an upgrade on every other route too; it never reaches it from here.
+    if (wantsUpgrade(request)) {
+      const tunnel = request.method === "GET" && rawPath === url.pathname && url.pathname.startsWith(TUNNEL_PREFIX);
+      if (!tunnel) return jsonError(400, "invalid_request", "This route does not upgrade the connection.");
     }
     if (rawPath.startsWith("/dl/") && unsafeDownloadPath(rawPath)) {
       return staticResponse(text(404, "not found"), false);
@@ -247,25 +372,67 @@ export default {
       return staticResponse(await env.ASSETS.fetch(assetRequest), noStore);
     }
 
+    if (mode === undefined) return text(503, "relay not configured");
+    // Connect has no free Connect teams: their two routes are retired, and the edge answers
+    // as the relay would, before a guard, a body, or the relay.
+    if (connectMode && (url.pathname === CONNECT_PATH || url.pathname === CONNECT_CHALLENGE_PATH)) {
+      return jsonError(410, "hosted_retired", HOSTED_RETIRED);
+    }
+
     const hasBody = request.method !== "GET" && request.method !== "HEAD";
     if (hasBody) {
-      const refused = lengthError(request, url.pathname);
+      const refused = lengthError(request, url.pathname, connectMode);
+      if (refused) return refused;
+    }
+    if (request.method === "POST" && url.pathname === STRIPE_WEBHOOK_PATH) {
+      const refused = stripeSignatureError(request, Math.floor(Date.now() / 1000));
       if (refused) return refused;
     }
 
     // Connect has two guards, each on its own key: the client's /64 (or IPv4 address) first,
     // then its coarser /48 (or /24) prefix, asked only when the first one lets the call pass.
-    // Every other route has one guard, keyed by the full address.
+    // Every other route has one guard, keyed by the full address. (In `connect` mode the
+    // route answered 410 above.)
     const isConnect = request.method === "POST" && url.pathname === CONNECT_PATH;
+    // A new account, and a recovery, are keyed like Connect's first guard: one client usually
+    // holds a whole /64.
+    const isAccount =
+      request.method === "POST" && (url.pathname === ACCOUNT_PATH || url.pathname === RECOVER_PATH);
+    // A dial and the WebSocket of a node are keyed the same way, each in a budget of its
+    // own: the phones behind a node's address may spend the dial budget of that address,
+    // and the node still connects.
+    const isDial = request.method === "GET" && url.pathname.startsWith(DIAL_PREFIX);
+    const isNode = request.method === "GET" && url.pathname === NODE_PATH;
+    // The routes of shared vaults (connect-account-v1 section 16), every method, in budgets
+    // of AUTH_LIMITER of their own: the reads of other accounts' lists (`POST
+    // /v1/account/peers/lists`, `GET /v1/account/peers/acc_…`; key `peer-reads:` and the /64
+    // or IPv4 address) apart from the ceremony and the list entries (key `peers:`), so the
+    // polling of `GET /v1/account/peers/pending` and the reads never use up the sign-in
+    // budget of that address or each other's. The relay also limits each device (60 a
+    // minute in each budget).
+    const isPeerRead =
+      (request.method === "POST" && url.pathname === PEER_LISTS_PATH) ||
+      (request.method === "GET" && PEER_VIEW_PATH.test(url.pathname));
+    const isPeers = url.pathname === ACCOUNT_LIST_PATH || url.pathname.startsWith(PEERS_PREFIX);
     const limiter = limiterFor(request.method, url.pathname, env);
-    if (limiter || isConnect) {
+    if (limiter || isConnect || isAccount || isDial || isNode || isPeers) {
       // Fail open if a binding is missing or fails: the relay itself checks codes, keys, and
       // signatures; this limit is a guard against floods, not an authorization check.
       // For Connect the relay also caps the teams of a day for everyone.
       const address = request.headers.get("cf-connecting-ip") ?? "unknown";
       const guards: [CreateLimiter | undefined, string][] = isConnect
         ? [[env.CONNECT_LIMITER, connectKey(address)], [env.CONNECT_PREFIX_LIMITER, connectPrefix(address)]]
-        : [[limiter, address]];
+        : isAccount
+          ? [[env.ACCOUNT_LIMITER, connectKey(address)]]
+          : isDial
+            ? [[env.TUNNEL_LIMITER, connectKey(address)]]
+            : isNode
+              ? [[env.TUNNEL_NODE_LIMITER, connectKey(address)]]
+              : isPeerRead
+                ? [[env.AUTH_LIMITER, `peer-reads:${connectKey(address)}`]]
+                : isPeers
+                  ? [[env.AUTH_LIMITER, `peers:${connectKey(address)}`]]
+                  : [[limiter, address]];
       for (const [guard, key] of guards) {
         if (!guard) continue;
         try {
@@ -299,7 +466,9 @@ export default {
     headers.set(EDGE_HEADER, env.EDGE_SECRET);
     headers.delete(CLIENT_PREFIX_HEADER);
     headers.delete(CLIENT_PREFIX_MAC_HEADER);
-    if (isConnect) {
+    // A Connect team, a new account, and a recovery count for the client's coarse prefix on
+    // the relay too; it takes the prefix only with this proof.
+    if (isConnect || isAccount) {
       const prefix = connectPrefix(request.headers.get("cf-connecting-ip") ?? "unknown");
       headers.set(CLIENT_PREFIX_HEADER, prefix);
       headers.set(CLIENT_PREFIX_MAC_HEADER, await prefixMac(env.EDGE_SECRET, prefix));
@@ -321,7 +490,8 @@ export default {
     };
     try {
       // The body and the answer stream. Nothing is buffered, and no URL is logged:
-      // the path holds session keys.
+      // the path holds session keys. A tunnel upgrade keeps its headers, and the relay's
+      // `101` (with its WebSocket) is returned as it is.
       return await (env.RELAY ? env.RELAY.fetch(target, init) : fetch(target, init));
     } catch {
       return text(502, "relay unreachable");

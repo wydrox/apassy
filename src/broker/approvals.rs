@@ -72,7 +72,7 @@ use crate::vault::{
 
 pub use owner_auth::{
     CheckMethod, ConnectGroupChange, OwnerAction, OwnerAuthError, OwnerCheck, OwnerGate,
-    OwnerProof, PROOF_LIFETIME, ProofRefusal, action_words, grant_declarations,
+    OwnerProof, PROOF_LIFETIME, ProofRefusal, ShareEntry, action_words, grant_declarations,
     grant_has_production, remote_key, touch_id_detail, verify_remote_action, verify_remote_answer,
 };
 #[cfg(feature = "desktop")]
@@ -730,7 +730,6 @@ impl ApprovalQueue {
     /// Run a local Development correction while its exact question still waits.
     /// The caller must already hold the vault lock (vault before queue). Keep this
     /// guard through proof validation and persistence; never call UI or biometry here.
-    #[cfg(feature = "desktop")]
     pub(crate) fn with_pending_development<T>(
         &self,
         confirmed: &PendingRun,

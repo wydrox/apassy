@@ -12,6 +12,10 @@
 //! `suspend`, and `remove_vault` drop them all. The agent feeds of the Macs (section
 //! 5.12, `feed.rs`) live in the same contexts.
 //!
+//! Every relay call of the questions, the feed, the access requests, the joins, and relay
+//! sync goes through one transport (`transport.rs`, section 5.15): the tailnet route of a
+//! pinned node first, and its Apassy Connect dial second, with the same pinned TLS.
+//!
 //! The Apple Watch runs this core with the role `watch` (ADR 0039, section 5.13): it holds
 //! one questions-only replica vault, answers access requests only, and refuses every
 //! other call ([`WATCH_OPS`]).
@@ -23,6 +27,7 @@
 
 mod autofill;
 mod config;
+mod connect;
 mod credential_export;
 mod dedup;
 mod errors;
@@ -37,6 +42,7 @@ mod passkey;
 mod questions;
 mod request_history;
 mod sync;
+mod transport;
 mod watchtower;
 mod wire;
 
@@ -55,6 +61,7 @@ use apassy::vault::Vault;
 use config::{Paths, PhoneList, VaultEntry};
 pub use errors::{CoreError, CoreResult};
 pub use request_history::{HistoryKeyError, HistoryKeyProvider};
+pub use transport::{DialState, Timing as DialTiming};
 use wire::{Empty, Secret, ok, params};
 
 /// The vault schema of this core. A copy of another schema is refused.
@@ -112,6 +119,10 @@ struct ConfigWire {
     device_name: Option<String>,
     #[serde(default)]
     role: Option<Role>,
+    /// The Apassy Connect origin (section 5.14): the hosted Connect when absent. Tests and
+    /// a sandbox build name another one.
+    #[serde(default)]
+    connect_url: Option<String>,
 }
 
 /// The vault core of one process.
@@ -153,6 +164,12 @@ pub struct Core {
     /// The pause of the feed reads after a `403 feed_rate`: a minute
     /// ([`Core::with_feed_rate_pause`] shortens it for tests).
     feed_rate_pause: Duration,
+    /// The Apassy Connect account of this iPhone (section 5.14, `connect.rs`): its state,
+    /// the Keychain store of its key, its file, and the Connect origin.
+    connect: Arc<connect::Accounts>,
+    /// The routes of the relay calls (section 5.15, `transport.rs`): the tailnet, then
+    /// the Connect dial with the account token.
+    transport: transport::Transport,
 }
 
 /// What a close of the vault ends.
@@ -301,6 +318,21 @@ impl Core {
         let device_name = truncate(&device_name, 64);
         // The name of this iPhone in the sync record and in a conflict copy.
         apassy::sync::set_device_name(&device_name);
+        let connect_origin = match config.connect_url.as_deref() {
+            None => apassy::connect::DEFAULT_CONNECT_URL.to_owned(),
+            Some(url) => apassy::connect::ConnectClient::new(url)
+                .map(|client| client.origin().to_owned())
+                .map_err(|_| CoreError::invalid("The Apassy Connect address is not valid."))?,
+        };
+        // The pairing codes that this process reads may name this Connect host only
+        // (node-pairing-v1 section 7a).
+        apassy::connect::set_configured_origin(&connect_origin);
+        let connect = Arc::new(connect::Accounts::new(
+            apassy::connect::account_file(&paths.data_dir),
+            connect_origin,
+        ));
+        // Only the app dials through Connect: not the AutoFill extension, not the watch.
+        let transport = transport::Transport::new(Arc::clone(&connect), role == Role::App);
         let list = PhoneList::load(&paths.data_dir)?;
         let questions = questions::State::load(&paths.data_dir);
         let core = Self {
@@ -326,6 +358,8 @@ impl Core {
             questions: Mutex::new(questions),
             opening: Mutex::new(()),
             feed_rate_pause: feed::FEED_RATE_PAUSE,
+            connect,
+            transport,
         };
         if core.role != Role::Autofill {
             core.clear_unfinished_joins();
@@ -346,6 +380,20 @@ impl Core {
         self
     }
 
+    /// Other times of the Connect dial (pings, idle limit, the waits of its states),
+    /// for tests that cannot wait 90 s or 15 minutes. The JSON config has no such
+    /// setting. A dial that is open keeps its times.
+    #[doc(hidden)]
+    pub fn set_dial_timing(&self, timing: DialTiming) {
+        self.transport.set_timing(timing);
+    }
+
+    /// The dials of this core that reached Connect, for tests (no retry storm).
+    #[doc(hidden)]
+    pub fn dials_for_test(&self) -> u64 {
+        self.transport.dials()
+    }
+
     /// One call (contract section 4): the answer as JSON.
     pub fn call(&self, request: &str) -> String {
         match self.dispatch(request) {
@@ -357,6 +405,7 @@ impl Core {
     /// Lock, end the relay calls, and cancel a join: the process ends.
     pub fn shutdown(&self) {
         self.close(Closing::Lock);
+        self.connect_join_cancel();
         let joining = guard(&self.join).take();
         if let Some(joining) = joining {
             joining.abandon();
@@ -706,6 +755,17 @@ impl Core {
                 self.require_app_or_watch()?;
                 self.questions_call(&op, request)
             }
+            // 5.14 Apassy Connect: this iPhone joins an account and shows its plan. The
+            // app only.
+            "connect_join"
+            | "connect_join_poll"
+            | "connect_join_cancel"
+            | "connect_status"
+            | "connect_forget"
+            | "connect_recovery_change_seen" => {
+                self.require_app()?;
+                self.connect_call(&op, request)
+            }
             // 5.12 The agent feeds of the Macs: the app only.
             "feed_list" | "feed_wait" | "feed_action_string" | "feed_action"
             | "feed_action_wait" | "feed_action_status" => {
@@ -783,11 +843,12 @@ impl Core {
     /// The relay sync of the selected vault, made again after a selection.
     fn select_relay(&self) -> CoreResult<()> {
         let entry = guard(&self.list).selected_entry().cloned();
-        // A node relay keeps its pin and its alternatives (node-pairing-v1 section 9).
+        // A node relay keeps its pin, its alternatives, and its Connect route
+        // (node-pairing-v1 sections 7a and 9), dialled by the transport of this core.
         let relay = match entry {
             Some(entry) => entry
                 .relay_config(&self.paths.data_dir, &self.paths.vault_file(&entry.id))?
-                .map(RelaySync::new),
+                .map(|config| RelaySync::new(self.transport.config(config))),
             None => None,
         };
         *guard(&self.relay) = relay;
@@ -867,6 +928,10 @@ impl Core {
             Closing::Lock | Closing::Suspend => self.questions_drop_all(),
         };
         *guard(&self.icloud_pending) = None;
+        if closing != Closing::Switch {
+            // The account token and key of Apassy Connect leave memory too.
+            self.connect_sign_out();
+        }
         if let Some(mut vault) = slot.take() {
             let _ = vault.lock();
         }

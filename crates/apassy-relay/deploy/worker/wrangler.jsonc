@@ -1,7 +1,9 @@
 {
   "name": "apassy-relay-edge",
   "main": "src/index.ts",
-  "build": { "command": "node scripts/verify-assets.mjs" },
+  // The build hook runs on every deploy: the asset preflight, and the check that RELAY_MODE
+  // below is the mode that the relay reports on /healthz (scripts/check-relay-mode.mjs).
+  "build": { "command": "node scripts/verify-assets.mjs && node scripts/check-relay-mode.mjs" },
   "compatibility_date": "2026-09-01",
   "workers_dev": false,
   "routes": [{ "pattern": "apassy-relay.wyderka.cc", "custom_domain": true }],
@@ -20,13 +22,29 @@
     { "name": "CONNECT_LIMITER", "namespace_id": "1004", "simple": { "limit": 1, "period": 60 } },
     // The same route, per IPv6 /48 or IPv4 /24. The relay also counts Connect teams per this
     // prefix in memory (the x-apassy-client-prefix header).
-    { "name": "CONNECT_PREFIX_LIMITER", "namespace_id": "1005", "simple": { "limit": 3, "period": 60 } }
+    { "name": "CONNECT_PREFIX_LIMITER", "namespace_id": "1005", "simple": { "limit": 3, "period": 60 } },
+    // New Connect accounts and recoveries (POST /v1/account, POST /v1/account/recover,
+    // connect-account-v1 section 3), per IPv4 address or IPv6 /64.
+    // The Stripe webhook (POST /v1/stripe/webhook) has no limiter: Stripe sends from its own
+    // addresses, and the relay checks each event's signature.
+    { "name": "ACCOUNT_LIMITER", "namespace_id": "1006", "simple": { "limit": 5, "period": 60 } },
+    // Tunnel dials (GET /v1/tunnel/dial/*, connect-tunnel-v1 section 8), per IPv4 address or
+    // IPv6 /64. The relay also limits the dials of each account (60 a minute).
+    { "name": "TUNNEL_LIMITER", "namespace_id": "1007", "simple": { "limit": 60, "period": 60 } },
+    // Node WebSockets (GET /v1/tunnel/node, connect-tunnel-v1 section 3.2), the same key, a
+    // budget of their own: the dials of the phones behind a node's address never use it up.
+    { "name": "TUNNEL_NODE_LIMITER", "namespace_id": "1008", "simple": { "limit": 60, "period": 60 } }
   ],
   // /guide explicitly fetches /guide.html; do not redirect that asset back to /guide.
   "assets": { "directory": "./public", "binding": "ASSETS", "run_worker_first": true, "html_handling": "none" },
   // APNS_KEY_ID is set by the owner before the deploy. The Worker secrets are EDGE_SECRET,
   // PUSH_SECRET, and APNS_KEY: set them with `wrangler secret put`, never in this file.
+  // RELAY_MODE: "relay" before the cutover, "connect" after it (docs/operations/connect.md).
+  // In "connect" the APNs route /internal/push is off and /v1/connect answers 410 here; the
+  // APNs vars and secrets are then unused and can be removed after the cutover. A deploy
+  // refuses a value that is not the mode of the relay (x-apassy-relay-mode on /healthz).
   "vars": {
+    "RELAY_MODE": "relay",
     "RELAY_ORIGIN": "https://replace-me.trycloudflare.com",
     "APNS_KEY_ID": "2549AX5SGX",
     "APNS_TEAM_ID": "7S3F9767BM",

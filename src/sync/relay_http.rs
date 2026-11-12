@@ -3,9 +3,10 @@
 //! `https://` uses rustls with the macOS trust store, as `crate::broker::http` does.
 //! Plain `http://` is allowed only for a loopback address with a port (the rule of
 //! `broker::http::parse_destination`). One connection per request, HTTP/1.1,
-//! `Connection: close`, no redirect. A request always has `Content-Length`; a snapshot
-//! streams from or to a file and never sits in memory. A JSON answer is read up to
-//! 2 MiB.
+//! `Connection: close`, no redirect; the one exception is a request through a Connect
+//! dial whose host keeps its dials ([`KeptDials`], below). A request always has
+//! `Content-Length`; a snapshot streams from or to a file and never sits in memory. A
+//! JSON answer is read up to 2 MiB.
 //!
 //! The request head holds the access token, so it is built in one buffer of the exact
 //! size and erased after the write. A JSON request body and every answer buffer are
@@ -44,10 +45,33 @@
 //! the host accepts only the leaf with that pin, over TLS 1.3, and answers
 //! [`HttpError::PinMismatch`] for another certificate. It connects to the origin only:
 //! the host sets `Host` from the URL, so it tries no alternative destination.
+//!
+//! A pinned address can also have a **Connect route** (node-pairing-v1 section 7a,
+//! connect-tunnel-v1 section 3.3, plan s7 unit I2): its last alternative is a
+//! [`TunnelRoute`], the dial `wss://<Connect host>/v1/tunnel/dial/<node id>`. A host that
+//! sets a [`TunnelDialer`] on the address ([`RelayUrl::with_dialer`], the iPhone core)
+//! reaches the node through the dial when the tailnet destinations do not connect: the
+//! dialer opens a byte pipe to the node's TLS front ([`TunnelPipe`]), and the request
+//! runs the same pinned TLS handshake inside it as on the tailnet, before any request
+//! byte. Connect then carries TLS records only; it never sees or changes a request, a
+//! token, or an answer, and a wrong certificate ends the dial with
+//! [`HttpError::PinMismatch`]. The request, its head, its body, and its answer do not
+//! change by one byte. An address without a dialer ignores the route.
+//!
+//! A host whose dialer keeps connections ([`TunnelDialer::kept`], the iPhone core) keeps
+//! the pinned connection inside a dial open after a complete answer, so that requests
+//! that follow each other share one dial and one TLS handshake ([`KeptDials`]: one for
+//! each node, closed after [`KEPT_DIAL_IDLE`] without a request, at a lock, or when the
+//! dial ends). Such a request does not send `Connection: close`; that line is the only
+//! byte of it that changes. A long poll dials for itself and closes after its answer, as
+//! before. A kept connection that turns out dead is replaced by a fresh one when nothing
+//! of the request reached it, and a `GET` or `HEAD` without a body goes once more on a
+//! fresh connection when the kept one ended before any byte of the answer; any other
+//! request then fails with [`HttpError::Broken`].
 
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, Write};
 use std::net::{Shutdown, SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -121,13 +145,382 @@ impl TlsTrust {
     }
 }
 
-/// The most alternative destinations of a pinned origin (node-pairing-v1 section 7).
+/// The most alternative destinations of a pinned origin (node-pairing-v1 section 7),
+/// the Connect route included.
 pub const MAX_ALTERNATIVES: usize = 4;
+
+/// The path of a dial before the node id (connect-tunnel-v1 section 3.3).
+pub const TUNNEL_DIAL_PATH: &str = "/v1/tunnel/dial/";
+
+/// Whether `text` is a node id of connect-tunnel-v1 section 2: `node_` and 10
+/// characters of `a-z2-7`.
+pub fn valid_node_id(text: &str) -> bool {
+    text.strip_prefix("node_").is_some_and(|rest| {
+        rest.len() == 10
+            && rest
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || (b'2'..=b'7').contains(&byte))
+    })
+}
+
+/// The Connect route of a pinned node (node-pairing-v1 section 7a, connect-tunnel-v1
+/// section 3.3): the dial `wss://<Connect host>/v1/tunnel/dial/<node id>`. It is a
+/// second way to the same node, after the tailnet destinations: the client runs the
+/// same pinned TLS inside the dial, so Connect carries TLS records only. The address
+/// keeps it as its last alternative; only a [`TunnelDialer`] of the host uses it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TunnelRoute {
+    /// `host[:port]` of the Connect host, the port written only when it is not 443.
+    connect: String,
+    node: String,
+}
+
+impl TunnelRoute {
+    /// The route to the node `node` through the Connect origin `connect_origin`
+    /// (`https://apassy-relay.wyderka.cc`, or a loopback `http://` in tests).
+    /// `InvalidRelayAddress` for another origin or node id.
+    pub fn new(connect_origin: &str, node: &str) -> Result<Self, SyncError> {
+        let origin = RelayUrl::parse(connect_origin)?;
+        if !valid_node_id(node) || origin.as_str() != connect_origin.trim_end_matches('/') {
+            return Err(SyncError::InvalidRelayAddress);
+        }
+        Ok(Self {
+            connect: origin.host_header().to_owned(),
+            node: node.to_owned(),
+        })
+    }
+
+    /// Read the canonical text of a route, as [`Self::text`] writes it: `wss://`, a host
+    /// of the alternatives' form with a port only when it is not 443, the dial path, and
+    /// a node id. Nothing else (no user, query, fragment, or trailing slash).
+    pub fn parse(text: &str) -> Option<Self> {
+        let rest = text.strip_prefix("wss://")?;
+        let (authority, node) = rest.split_once(TUNNEL_DIAL_PATH)?;
+        if authority.contains('/') || !valid_node_id(node) {
+            return None;
+        }
+        let (host, port) = split_host_port(authority)?;
+        let connect = match port {
+            Some(443) => return None,
+            Some(port) => format!("{host}:{port}"),
+            None => host,
+        };
+        (connect == authority).then(|| Self {
+            connect,
+            node: node.to_owned(),
+        })
+    }
+
+    /// The canonical text: `wss://apassy-relay.wyderka.cc/v1/tunnel/dial/node_k7m2q4x3ca`.
+    pub fn text(&self) -> String {
+        format!("wss://{}{TUNNEL_DIAL_PATH}{}", self.connect, self.node)
+    }
+
+    /// The node id.
+    pub fn node(&self) -> &str {
+        &self.node
+    }
+
+    /// The Connect host, `host[:port]`.
+    pub fn connect_host(&self) -> &str {
+        &self.connect
+    }
+
+    /// The path of the dial: `/v1/tunnel/dial/<node id>`.
+    pub fn dial_path(&self) -> String {
+        format!("{TUNNEL_DIAL_PATH}{}", self.node)
+    }
+
+    /// Whether the route goes through `connect_origin`: its host and port are the
+    /// origin's. A route through another host is never dialled.
+    pub fn is_through(&self, connect_origin: &str) -> bool {
+        RelayUrl::parse(connect_origin).is_ok_and(|origin| origin.host_header() == self.connect)
+    }
+}
+
+/// Which way a connection reached a pinned node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NodeRoute {
+    /// The origin's host or one of its tailnet alternatives.
+    Direct,
+    /// The Connect dial.
+    Tunnel,
+}
+
+/// The byte pipe of a dial (connect-tunnel-v1 section 3.3): after the `101` of Connect,
+/// the bytes to and from the node's TLS front. The pinned TLS of the node runs inside
+/// it, as over a socket of the tailnet.
+pub trait TunnelPipe: Read + Write + Send {
+    /// A read that waits longer fails with `TimedOut`.
+    fn set_read_timeout(&self, timeout: Duration) -> io::Result<()>;
+    /// A write that waits longer fails.
+    fn set_write_timeout(&self, timeout: Duration) -> io::Result<()>;
+    /// Ends the pipe from another thread (a cancel, a lock): reads and writes then fail.
+    fn closer(&self) -> Arc<dyn Fn() + Send + Sync>;
+    /// True while the pipe is open and holds no byte that was not read yet, so that a kept
+    /// connection over it may carry the next request ([`KeptDials`]). A pipe that cannot
+    /// tell answers false (the default): its connections are never reused.
+    fn is_idle_open(&self) -> bool {
+        false
+    }
+}
+
+/// The Connect route of a host (the iPhone core, plan s7 unit I2): it opens the dials
+/// with the account token, and it decides the route order of each pinned address with a
+/// [`TunnelRoute`]. The client calls it for every connection of such an address; an
+/// address without a dialer never dials.
+pub trait TunnelDialer: Send + Sync {
+    /// Whether the direct destinations come first now. False while they failed
+    /// recently: the dial comes first, and the direct destinations are the last resort.
+    fn direct_first(&self, url: &RelayUrl) -> bool;
+    /// A connection to `url` finished its pinned handshake through `route`.
+    fn reached(&self, url: &RelayUrl, route: NodeRoute);
+    /// No direct destination of `url` connected.
+    fn direct_failed(&self, url: &RelayUrl);
+    /// Open the dial of `route` before `deadline`. `HttpError::Connect`: no dial (Connect
+    /// unreachable or refusing; the dialer keeps why).
+    fn dial(
+        &self,
+        route: &TunnelRoute,
+        deadline: Instant,
+    ) -> Result<Box<dyn TunnelPipe>, HttpError>;
+    /// Where this host keeps the pinned connections of its dials between requests
+    /// ([`KeptDials`]). `None` (the default): no connection is kept, and every request
+    /// through a dial asks the node to close its connection after the answer.
+    fn kept(&self) -> Option<KeptDials> {
+        None
+    }
+}
+
+/// How long a kept dial waits for its next request before it closes. It is below every
+/// idle limit after it on the way to the node: the relay's wait for the next request on a
+/// stream of the tunnel (45 s, `apassy_relay::server::TUNNEL_KEEP_IDLE`), the TLS front's
+/// 120 s (`FrontLimits::idle`), and Connect's 15 minutes for a stream without a byte. The
+/// dial's own pings keep its WebSocket open meanwhile (connect-tunnel-v1 section 3.2).
+pub const KEPT_DIAL_IDLE: Duration = Duration::from_secs(30);
+/// The most connections that one host keeps: one for each node.
+const KEPT_MAX: usize = 8;
+
+/// The pinned connections inside Connect dials that a host keeps open between requests
+/// (one for each node), so that requests that follow each other share one dial instead of
+/// a dial and a TLS handshake each: Connect counts dials (60 a minute for an account).
+///
+/// A request through the dial that is not a long poll takes the kept connection of its
+/// node when there is one, and gives its connection back after a complete answer that
+/// keeps it open (HTTP/1.1, no `Connection: close`, a body with a length, nothing more on
+/// the connection). Such a request does not send `Connection: close`; nothing else of it
+/// changes. A long poll always dials for itself and closes after its answer.
+///
+/// A kept connection closes after [`KEPT_DIAL_IDLE`] (or [`Self::set_idle`]) without a
+/// request, when its pipe ends, and at [`Self::clear`] (a lock, a suspend). A kept
+/// connection that turns out dead takes a fresh connection: always when nothing of the
+/// request reached the pipe; when it did and the connection ended before any byte of the
+/// answer, only a `GET` or `HEAD` without a body is sent again, once. Any other request
+/// then fails with [`HttpError::Broken`]: it may have reached the node.
+#[derive(Clone, Default)]
+pub struct KeptDials(Arc<KeptShared>);
+
+#[derive(Default)]
+struct KeptShared {
+    state: Mutex<KeptState>,
+    changed: std::sync::Condvar,
+}
+
+#[derive(Default)]
+struct KeptState {
+    /// `None`: [`KEPT_DIAL_IDLE`].
+    idle: Option<Duration>,
+    /// One more at each [`KeptDials::clear`]: a connection of a request that started
+    /// before it is not kept.
+    epoch: u64,
+    /// For each node (origin, pin, route): its connection and since when it waits.
+    entries: BTreeMap<String, (Box<TunnelTls>, Instant)>,
+    /// A thread closes the connections at their idle limit.
+    reaping: bool,
+}
+
+impl KeptState {
+    fn idle(&self) -> Duration {
+        self.idle.unwrap_or(KEPT_DIAL_IDLE)
+    }
+
+    /// Take out the connections that waited too long or whose pipe ended. The caller
+    /// drops them outside the lock (a drop ends the dial).
+    fn expired(&mut self, now: Instant) -> Vec<(Box<TunnelTls>, Instant)> {
+        let idle = self.idle();
+        let mut gone = Vec::new();
+        for (key, (tls, since)) in &mut self.entries {
+            if now.duration_since(*since) >= idle || !reusable(tls) {
+                gone.push(key.clone());
+            }
+        }
+        gone.iter()
+            .filter_map(|key| self.entries.remove(key))
+            .collect()
+    }
+}
+
+/// True when `tls` may carry another request: its pipe is open with nothing unread in it,
+/// and TLS holds no unread plaintext and no close from the node.
+fn reusable(tls: &mut TunnelTls) -> bool {
+    tls.sock.pipe.is_idle_open()
+        && matches!(
+            tls.conn.process_new_packets(),
+            Ok(state) if state.plaintext_bytes_to_read() == 0 && !state.peer_has_closed()
+        )
+}
+
+impl std::fmt::Debug for KeptDials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KeptDials")
+            .field("kept", &self.len())
+            .finish()
+    }
+}
+
+impl KeptDials {
+    /// No connection kept yet; each waits at most [`KEPT_DIAL_IDLE`].
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Another wait for a kept connection (tests shorten it).
+    pub fn set_idle(&self, idle: Duration) {
+        self.lock().idle = Some(idle);
+        self.0.changed.notify_all();
+    }
+
+    /// Close every kept connection now (a lock, a suspend): their dials end, and a
+    /// request that started before this keeps nothing.
+    pub fn clear(&self) {
+        let gone = {
+            let mut state = self.lock();
+            state.epoch = state.epoch.wrapping_add(1);
+            std::mem::take(&mut state.entries)
+        };
+        self.0.changed.notify_all();
+        drop(gone);
+    }
+
+    /// The connections kept now.
+    pub fn len(&self) -> usize {
+        self.lock().entries.len()
+    }
+
+    /// True when no connection is kept.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, KeptState> {
+        self.0.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn epoch(&self) -> u64 {
+        self.lock().epoch
+    }
+
+    /// The kept connection of `key`, when one is there and may carry a request.
+    fn take(&self, key: &str) -> Option<Box<TunnelTls>> {
+        let (mut tls, fresh) = {
+            let mut state = self.lock();
+            let idle = state.idle();
+            let (tls, since) = state.entries.remove(key)?;
+            (tls, since.elapsed() < idle)
+        };
+        (fresh && reusable(&mut tls)).then_some(tls)
+    }
+
+    /// Keep `tls` for the next request to `key`, unless a clear came after `epoch`, the
+    /// node has one already, or this host keeps [`KEPT_MAX`] already.
+    fn put(&self, key: String, epoch: u64, mut tls: Box<TunnelTls>) {
+        if !reusable(&mut tls) {
+            return;
+        }
+        let refused = {
+            let mut state = self.lock();
+            if state.epoch != epoch
+                || state.entries.contains_key(&key)
+                || state.entries.len() >= KEPT_MAX
+            {
+                Some(tls)
+            } else {
+                state.entries.insert(key, (tls, Instant::now()));
+                if !state.reaping {
+                    state.reaping = true;
+                    let shared = Arc::clone(&self.0);
+                    let started = std::thread::Builder::new()
+                        .name("apassy-kept-dials".to_owned())
+                        .spawn(move || reap(&shared));
+                    if started.is_err() {
+                        // The next `take` still closes a connection that waited too long.
+                        state.reaping = false;
+                    }
+                }
+                None
+            }
+        };
+        self.0.changed.notify_all();
+        drop(refused);
+    }
+}
+
+/// Close the kept connections at their idle limit; end when none is left.
+fn reap(shared: &KeptShared) {
+    let mut state = shared.state.lock().unwrap_or_else(PoisonError::into_inner);
+    loop {
+        let now = Instant::now();
+        let gone = state.expired(now);
+        if !gone.is_empty() {
+            drop(state);
+            drop(gone);
+            state = shared.state.lock().unwrap_or_else(PoisonError::into_inner);
+            continue;
+        }
+        if state.entries.is_empty() {
+            state.reaping = false;
+            return;
+        }
+        let idle = state.idle();
+        let next = state
+            .entries
+            .values()
+            .map(|(_, since)| (*since + idle).saturating_duration_since(now))
+            .min()
+            .unwrap_or(idle)
+            .max(Duration::from_millis(10));
+        state = shared
+            .changed
+            .wait_timeout(state, next)
+            .unwrap_or_else(PoisonError::into_inner)
+            .0;
+    }
+}
+
+/// The dialer of an address. It is how the address is reached, not where: two
+/// addresses are equal whatever their dialers.
+#[derive(Clone)]
+pub(crate) struct DialerRef(pub(crate) Arc<dyn TunnelDialer>);
+
+impl std::fmt::Debug for DialerRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TunnelDialer")
+    }
+}
+
+impl PartialEq for DialerRef {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for DialerRef {}
 
 /// A relay address: an origin, `https://<host>[:port]` or a loopback `http://` with a
 /// port. It has no path, query, user, or trailing slash. A pinned address also has its
 /// trust and its alternative destinations ([`Self::parse_with_trust`],
-/// [`Self::alternatives`]); [`Self::as_str`] is the origin either way.
+/// [`Self::alternatives`]), one of which can be its Connect route ([`TunnelRoute`]);
+/// [`Self::as_str`] is the origin either way.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelayUrl {
     origin: String,
@@ -137,6 +530,10 @@ pub struct RelayUrl {
     /// the text `host:port` (an IPv6 host in brackets, the port always written) and
     /// where it connects.
     alternatives: Vec<(String, DestinationUrl)>,
+    /// The Connect route of a pinned node, after the alternatives.
+    tunnel: Option<TunnelRoute>,
+    /// What dials `tunnel`: set by the host ([`Self::with_dialer`]).
+    dialer: Option<DialerRef>,
 }
 
 /// `host[:port]` of an alternative destination or of a pinned origin (node-pairing-v1
@@ -221,7 +618,7 @@ impl RelayUrl {
                 }
             }
             TlsTrust::System => {
-                if !self.alternatives.is_empty() {
+                if !self.alternatives.is_empty() || self.tunnel.is_some() {
                     return Err(SyncError::InvalidRelayAddress);
                 }
             }
@@ -232,14 +629,18 @@ impl RelayUrl {
 
     /// This pinned address with the alternative destinations `list` (each
     /// `host[:port]`, without a port the origin's port), in the order to try them, in
-    /// place of any earlier ones. At most [`MAX_ALTERNATIVES`]; an entry of another form,
-    /// an entry equal to the origin's host and port, a repeated entry, or an alternative
-    /// of an address without a pin is `InvalidRelayAddress`. An empty list clears them.
-    /// The stricter rules of a link (no loopback, no link-local address) are the link
-    /// reader's (`PairedLink::parse`).
+    /// place of any earlier ones. One entry may be the Connect route of the node, the
+    /// text of a [`TunnelRoute`] (`wss://…/v1/tunnel/dial/<node>`): it is tried after the
+    /// others, and only with a dialer ([`Self::with_dialer`]). At most
+    /// [`MAX_ALTERNATIVES`] in all; an entry of another form, an entry equal to the
+    /// origin's host and port, a repeated entry, a second route, or an alternative of an
+    /// address without a pin is `InvalidRelayAddress`. An empty list clears them. The
+    /// stricter rules of a link (no loopback, no link-local address, the configured
+    /// Connect host) are the link reader's (`PairedLink::parse`).
     pub fn alternatives(mut self, list: &[String]) -> Result<Self, SyncError> {
         if list.is_empty() {
             self.alternatives.clear();
+            self.tunnel = None;
             return Ok(self);
         }
         let (origin_host, origin_port) = match (&self.destination, self.trust) {
@@ -250,7 +651,15 @@ impl RelayUrl {
             return Err(SyncError::InvalidRelayAddress);
         }
         let mut alternatives: Vec<(String, DestinationUrl)> = Vec::with_capacity(list.len());
+        let mut tunnel: Option<TunnelRoute> = None;
         for entry in list {
+            if entry.starts_with("wss://") {
+                let route = TunnelRoute::parse(entry).ok_or(SyncError::InvalidRelayAddress)?;
+                if tunnel.replace(route).is_some() {
+                    return Err(SyncError::InvalidRelayAddress);
+                }
+                continue;
+            }
             let (host, port) = split_host_port(entry).ok_or(SyncError::InvalidRelayAddress)?;
             let port = port.unwrap_or(origin_port);
             let bare = host
@@ -267,7 +676,44 @@ impl RelayUrl {
             alternatives.push((text, DestinationUrl::Https { host: bare, port }));
         }
         self.alternatives = alternatives;
+        self.tunnel = tunnel;
         Ok(self)
+    }
+
+    /// This pinned address with the Connect route `route` in place of any earlier one
+    /// (`None` removes it). The route counts as one of the [`MAX_ALTERNATIVES`];
+    /// `InvalidRelayAddress` for an address without a pin or with no room left.
+    pub fn with_tunnel(mut self, route: Option<TunnelRoute>) -> Result<Self, SyncError> {
+        if route.is_some()
+            && (self.trust == TlsTrust::System || self.alternatives.len() >= MAX_ALTERNATIVES)
+        {
+            return Err(SyncError::InvalidRelayAddress);
+        }
+        self.tunnel = route;
+        Ok(self)
+    }
+
+    /// The Connect route of this pinned address, when it has one.
+    pub fn tunnel(&self) -> Option<&TunnelRoute> {
+        self.tunnel.as_ref()
+    }
+
+    /// This address with the dialer of its Connect route: a connection then tries the
+    /// direct destinations and the dial in the order that the dialer gives. An address
+    /// without a pin or without a route never dials.
+    #[must_use]
+    pub fn with_dialer(mut self, dialer: Arc<dyn TunnelDialer>) -> Self {
+        self.dialer = Some(DialerRef(dialer));
+        self
+    }
+
+    /// This address without its Connect route and its dialer: the direct destinations
+    /// only, for a probe of the direct route.
+    fn direct_only(&self) -> Self {
+        let mut url = self.clone();
+        url.tunnel = None;
+        url.dialer = None;
+        url
     }
 
     /// How this address checks the certificate of its relay.
@@ -280,12 +726,13 @@ impl RelayUrl {
         self.trust.pin()
     }
 
-    /// The alternative destinations, `host:port` each, in the order they are tried: the
-    /// stored form.
+    /// The alternative destinations, `host:port` each, in the order they are tried, and
+    /// the Connect route last: the stored form.
     pub fn alternative_list(&self) -> Vec<String> {
         self.alternatives
             .iter()
             .map(|(text, _)| text.clone())
+            .chain(self.tunnel.iter().map(TunnelRoute::text))
             .collect()
     }
 
@@ -318,6 +765,8 @@ impl RelayUrl {
             destination,
             trust: TlsTrust::System,
             alternatives: Vec::new(),
+            tunnel: None,
+            dialer: None,
         })
     }
 
@@ -448,6 +897,8 @@ enum InFlight {
     Socket(TcpStream),
     /// The ID of a request of the external transport, with the transport.
     External(u64, &'static dyn HttpTransport),
+    /// The end of the pipe of a Connect dial ([`TunnelPipe::closer`]).
+    Pipe(Arc<dyn Fn() + Send + Sync>),
 }
 
 impl std::fmt::Debug for InFlight {
@@ -455,6 +906,7 @@ impl std::fmt::Debug for InFlight {
         match self {
             Self::Socket(socket) => f.debug_tuple("Socket").field(socket).finish(),
             Self::External(id, _) => f.debug_tuple("External").field(id).finish(),
+            Self::Pipe(_) => f.write_str("Pipe"),
         }
     }
 }
@@ -471,6 +923,7 @@ impl Cancel {
                     let _ = socket.shutdown(Shutdown::Both);
                 }
                 InFlight::External(id, transport) => transport.cancel(id),
+                InFlight::Pipe(close) => close(),
             }
         }
     }
@@ -506,6 +959,19 @@ impl Cancel {
         }
         let number = self.next.fetch_add(1, Ordering::SeqCst);
         held.push((number, InFlight::External(id, transport)));
+        Ok(number)
+    }
+
+    /// Keep the end of the pipe of a dial in flight. Fails, and ends the pipe, when
+    /// closed.
+    fn hold_pipe(&self, close: Arc<dyn Fn() + Send + Sync>) -> Result<u64, HttpError> {
+        let mut held = self.sockets.lock().unwrap_or_else(PoisonError::into_inner);
+        if self.is_closed() {
+            close();
+            return Err(HttpError::Connect);
+        }
+        let number = self.next.fetch_add(1, Ordering::SeqCst);
+        held.push((number, InFlight::Pipe(close)));
         Ok(number)
     }
 
@@ -788,29 +1254,61 @@ fn exchange_external(
     checked_external(answer?)
 }
 
+/// The pinned TLS of a node inside a Connect dial.
+type TunnelTls = StreamOwned<ClientConnection, CountingPipe>;
+
+/// The pipe of a dial with the bytes that went into it since [`CountingPipe::sent`] was
+/// last set to zero: a kept connection whose request left nothing in the pipe can take a
+/// fresh connection without any risk of a double request.
+struct CountingPipe {
+    pipe: Box<dyn TunnelPipe>,
+    sent: u64,
+}
+
+impl Read for CountingPipe {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.pipe.read(buf)
+    }
+}
+
+impl Write for CountingPipe {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let written = self.pipe.write(buf)?;
+        self.sent = self.sent.saturating_add(written as u64);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.pipe.flush()
+    }
+}
+
 enum Conn {
     Plain(TcpStream),
     Tls(Box<StreamOwned<ClientConnection, TcpStream>>),
+    /// The pinned TLS of a node inside a Connect dial.
+    Tunnel(Box<TunnelTls>),
 }
 
 impl Conn {
-    fn socket(&self) -> &TcpStream {
-        match self {
-            Self::Plain(stream) => stream,
-            Self::Tls(stream) => &stream.sock,
-        }
-    }
-
     fn set_read_timeout(&self, timeout: Duration) -> Result<(), HttpError> {
-        self.socket()
-            .set_read_timeout(Some(timeout.max(Duration::from_millis(1))))
-            .map_err(|_| HttpError::Broken)
+        let timeout = timeout.max(Duration::from_millis(1));
+        match self {
+            Self::Plain(stream) => stream.set_read_timeout(Some(timeout)),
+            Self::Tls(stream) => stream.sock.set_read_timeout(Some(timeout)),
+            Self::Tunnel(stream) => stream.sock.pipe.set_read_timeout(timeout),
+        }
+        .map_err(|_| HttpError::Broken)
     }
 
     fn set_write_timeout(&self, timeout: Duration) -> Result<(), HttpError> {
-        self.socket()
-            .set_write_timeout(Some(timeout.max(Duration::from_millis(1))))
-            .map_err(|_| HttpError::Broken)
+        let timeout = timeout.max(Duration::from_millis(1));
+        match self {
+            Self::Plain(stream) => stream.set_write_timeout(Some(timeout)),
+            Self::Tls(stream) => stream.sock.set_write_timeout(Some(timeout)),
+            Self::Tunnel(stream) => stream.sock.pipe.set_write_timeout(timeout),
+        }
+        .map_err(|_| HttpError::Broken)
     }
 }
 
@@ -819,6 +1317,7 @@ impl Read for Conn {
         let read = match self {
             Self::Plain(stream) => stream.read(buf),
             Self::Tls(stream) => stream.read(buf),
+            Self::Tunnel(stream) => stream.read(buf),
         };
         match read {
             // A server can close TLS without close_notify. The body length decides.
@@ -833,6 +1332,7 @@ impl Write for Conn {
         match self {
             Self::Plain(stream) => stream.write(buf),
             Self::Tls(stream) => stream.write(buf),
+            Self::Tunnel(stream) => stream.write(buf),
         }
     }
 
@@ -840,6 +1340,7 @@ impl Write for Conn {
         match self {
             Self::Plain(stream) => stream.flush(),
             Self::Tls(stream) => stream.flush(),
+            Self::Tunnel(stream) => stream.flush(),
         }
     }
 }
@@ -942,6 +1443,12 @@ fn hold_socket<'a>(tcp: &TcpStream, request: &Request<'a>) -> Result<Held<'a>, H
 /// connection is refused or times out; all of it ends within `CONNECT_LIMIT`. A TLS
 /// failure stops at once: a pin mismatch is [`HttpError::PinMismatch`], and no other
 /// destination is tried after a wrong certificate.
+///
+/// A pinned address with a Connect route and a dialer (plan s7 unit I2) has a second
+/// route: the dial, with the same pinned TLS inside it. The dialer gives the order: the
+/// direct destinations first (within [`DIRECT_SHARE`], so the dial keeps time), then
+/// the dial; or, while the direct destinations failed recently, the dial first and the
+/// direct destinations last. A pin mismatch on either route stops at once.
 fn connect<'a>(url: &RelayUrl, request: &Request<'a>) -> Result<(Conn, Held<'a>), HttpError> {
     let limit = Instant::now() + CONNECT_LIMIT;
     let end = request
@@ -960,6 +1467,73 @@ fn connect<'a>(url: &RelayUrl, request: &Request<'a>) -> Result<(Conn, Held<'a>)
         TlsTrust::System => None,
         TlsTrust::Pinned(pin) => Some(TlsClient::pinned(&pin).map_err(|_| HttpError::Connect)?),
     };
+    let (Some(route), Some(dialer), Some(tls)) = (&url.tunnel, &url.dialer, &pinned) else {
+        return connect_direct(url, request, pinned.as_ref(), end);
+    };
+    let dialer = dialer.0.as_ref();
+    let cancelled = || request.cancel.is_some_and(Cancel::is_closed);
+    if dialer.direct_first(url) {
+        let direct_end = end.min(Instant::now() + DIRECT_SHARE);
+        match connect_direct(url, request, pinned.as_ref(), direct_end) {
+            Ok(found) => {
+                dialer.reached(url, NodeRoute::Direct);
+                return Ok(found);
+            }
+            Err(HttpError::Connect) if !cancelled() => dialer.direct_failed(url),
+            Err(error) => return Err(error),
+        }
+        let found = connect_tunnel(url, request, tls, route, dialer, end)?;
+        dialer.reached(url, NodeRoute::Tunnel);
+        return Ok(found);
+    }
+    match connect_tunnel(url, request, tls, route, dialer, end) {
+        Ok(found) => {
+            dialer.reached(url, NodeRoute::Tunnel);
+            Ok(found)
+        }
+        Err(HttpError::Connect) if !cancelled() => {
+            let found = connect_direct(url, request, pinned.as_ref(), end)?;
+            dialer.reached(url, NodeRoute::Direct);
+            Ok(found)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// The longest time of the direct destinations when a Connect dial comes after them.
+const DIRECT_SHARE: Duration = CONNECT_TIMEOUT;
+
+/// The pinned (or system) TLS handshake of `name` on `sock`, before any request byte.
+/// A pin mismatch is [`HttpError::PinMismatch`]; every other failure `Connect`.
+fn handshake<S: Read + Write>(
+    config: Arc<rustls::ClientConfig>,
+    host: &str,
+    sock: S,
+    pinned: bool,
+) -> Result<StreamOwned<ClientConnection, S>, HttpError> {
+    let name = ServerName::try_from(host.to_owned()).map_err(|_| HttpError::Connect)?;
+    let conn = ClientConnection::new(config, name).map_err(|_| HttpError::Connect)?;
+    let mut stream = StreamOwned::new(conn, sock);
+    while stream.conn.is_handshaking() {
+        stream.conn.complete_io(&mut stream.sock).map_err(|error| {
+            if pinned && is_pin_mismatch(&error) {
+                HttpError::PinMismatch
+            } else {
+                HttpError::Connect
+            }
+        })?;
+    }
+    Ok(stream)
+}
+
+/// The direct destinations of `url`, the origin's host first: [`connect`] without a
+/// local route and without the dial.
+fn connect_direct<'a>(
+    url: &RelayUrl,
+    request: &Request<'a>,
+    pinned: Option<&TlsClient>,
+    end: Instant,
+) -> Result<(Conn, Held<'a>), HttpError> {
     for destination in url.destinations() {
         if request.cancel.is_some_and(Cancel::is_closed) {
             break;
@@ -974,34 +1548,91 @@ fn connect<'a>(url: &RelayUrl, request: &Request<'a>) -> Result<(Conn, Held<'a>)
             DestinationUrl::Loopback { .. } => return Ok((Conn::Plain(tcp), held)),
             DestinationUrl::Https { host, .. } => host,
         };
-        let config = match &pinned {
+        let config = match pinned {
             Some(pinned) => pinned.client_config(),
             None => tls()?.client_config(),
         };
-        let name = ServerName::try_from(host.clone()).map_err(|_| HttpError::Connect)?;
-        let conn = ClientConnection::new(config, name).map_err(|_| HttpError::Connect)?;
-        let mut stream = StreamOwned::new(conn, tcp);
         // Finish the handshake before any request byte.
-        while stream.conn.is_handshaking() {
-            stream.conn.complete_io(&mut stream.sock).map_err(|error| {
-                if pinned.is_some() && is_pin_mismatch(&error) {
-                    HttpError::PinMismatch
-                } else {
-                    HttpError::Connect
-                }
-            })?;
-        }
+        let stream = handshake(config, host, tcp, pinned.is_some())?;
         return Ok((Conn::Tls(Box::new(stream)), held));
     }
     Err(HttpError::Connect)
+}
+
+/// The Connect dial of `route`, and the pinned TLS of the node inside it: the same
+/// verifier and the same server name as on the tailnet, so Connect sees TLS records
+/// only. The end of the pipe is in the [`Cancel`] of the request from the dial on. A
+/// pin mismatch ends the dial before any request byte.
+fn connect_tunnel<'a>(
+    url: &RelayUrl,
+    request: &Request<'a>,
+    pinned: &TlsClient,
+    route: &TunnelRoute,
+    dialer: &dyn TunnelDialer,
+    end: Instant,
+) -> Result<(Conn, Held<'a>), HttpError> {
+    if request.cancel.is_some_and(Cancel::is_closed) {
+        return Err(HttpError::Connect);
+    }
+    let DestinationUrl::Https { host, .. } = &url.destination else {
+        return Err(HttpError::Connect);
+    };
+    let pipe = dialer.dial(route, end)?;
+    let close = pipe.closer();
+    let mut held = Held(None);
+    if let Some(cancel) = request.cancel {
+        let number = cancel.hold_pipe(Arc::clone(&close))?;
+        held = Held(Some((cancel, number)));
+    }
+    let stall = time_left(request.deadline, STALL_TIMEOUT, HttpError::Connect)?;
+    let header = time_left(Some(end), HEADER_TIMEOUT, HttpError::Connect)?;
+    if pipe.set_write_timeout(stall).is_err() || pipe.set_read_timeout(header).is_err() {
+        close();
+        return Err(HttpError::Connect);
+    }
+    let mut stream = handshake(
+        pinned.client_config(),
+        host,
+        CountingPipe { pipe, sent: 0 },
+        true,
+    )?;
+    stream.sock.sent = 0;
+    // The handshake had the connect time; the answer has the header time.
+    let header = time_left(request.deadline, HEADER_TIMEOUT, HttpError::Connect)?;
+    stream
+        .sock
+        .pipe
+        .set_read_timeout(header)
+        .map_err(|_| HttpError::Connect)?;
+    Ok((Conn::Tunnel(Box::new(stream)), held))
+}
+
+/// Whether the direct destinations of the pinned address `url` reach the node now: a
+/// TCP connection and the pinned TLS handshake within `timeout`, with no request byte
+/// and no token. A dialer uses it to come back from the dial to the tailnet.
+/// [`HttpError::PinMismatch`] for another certificate.
+pub fn probe_direct(url: &RelayUrl, timeout: Duration) -> Result<(), HttpError> {
+    let pin = url.pin().ok_or(HttpError::Connect)?;
+    let pinned = TlsClient::pinned(&pin).map_err(|_| HttpError::Connect)?;
+    let end = Instant::now() + timeout.min(CONNECT_LIMIT);
+    let mut request = Request::new("GET", "/".to_owned(), None);
+    request.deadline = Some(end);
+    let direct = url.direct_only();
+    connect_direct(&direct, &request, Some(&pinned), end).map(|_| ())
 }
 
 fn valid_header_text(text: &str) -> bool {
     !text.is_empty() && text.bytes().all(|byte| (0x20..0x7f).contains(&byte))
 }
 
-/// The request head in one buffer of the exact size.
-fn request_head(url: &RelayUrl, request: &Request<'_>) -> Result<Zeroizing<Vec<u8>>, HttpError> {
+/// The request head in one buffer of the exact size. `close`: it asks for
+/// `Connection: close` (every request but one on a connection that may be kept,
+/// [`KeptDials`]).
+fn request_head(
+    url: &RelayUrl,
+    request: &Request<'_>,
+    close: bool,
+) -> Result<Zeroizing<Vec<u8>>, HttpError> {
     if !request.path.starts_with('/') || request.path.bytes().any(|b| !(0x21..0x7f).contains(&b)) {
         return Err(HttpError::Protocol);
     }
@@ -1031,7 +1662,9 @@ fn request_head(url: &RelayUrl, request: &Request<'_>) -> Result<Zeroizing<Vec<u
         lines.push((name, value));
     }
     lines.push(("User-Agent", "apassy-sync/1"));
-    lines.push(("Connection", "close"));
+    if close {
+        lines.push(("Connection", "close"));
+    }
     let size = request.method.len()
         + 1
         + request.path.len()
@@ -1056,33 +1689,117 @@ fn request_head(url: &RelayUrl, request: &Request<'_>) -> Result<Zeroizing<Vec<u
     Ok(head)
 }
 
-/// Send the request. Returns the connection and whether the whole request went out.
-/// The body always goes out whole: a relay that answers early (a `412` or a `413`)
-/// reads the rest anyway, and the caller then reads that answer. A request with a
-/// [`Cancel`] registers its socket there; a body write stops at the deadline.
-fn send<'a>(url: &RelayUrl, request: &Request<'a>) -> Result<(Conn, bool, Held<'a>), HttpError> {
-    if request.cancel.is_some_and(Cancel::is_closed) {
+/// A request that went out on its connection.
+struct Sent<'a> {
+    conn: Conn,
+    /// The whole request went out (an early answer can come before the end of a body).
+    complete: bool,
+    held: Held<'a>,
+    /// Where the connection may go after a complete answer ([`KeptDials`]).
+    slot: Option<KeepSlot>,
+    /// The connection was kept from an earlier request.
+    reused: bool,
+}
+
+/// The place of a request's connection in the [`KeptDials`] of its host.
+#[derive(Clone)]
+struct KeepSlot {
+    dials: KeptDials,
+    /// The node: its origin, its pin, and its Connect route.
+    key: String,
+    /// [`KeptDials::clear`] after this: the connection is not kept.
+    epoch: u64,
+}
+
+impl Sent<'_> {
+    /// The answer was read whole and `keeps` the connection: it goes back to the kept
+    /// dials of its node. Otherwise it closes, as it always did.
+    fn finish(self, keeps: bool) {
+        let Sent {
+            conn,
+            complete,
+            held,
+            slot,
+            ..
+        } = self;
+        drop(held);
+        if let (true, Some(slot), Conn::Tunnel(tls)) = (keeps && complete, slot, conn) {
+            slot.dials.put(slot.key, slot.epoch, tls);
+        }
+    }
+}
+
+/// A GET or HEAD without a body: the only requests that are sent again when a kept
+/// connection ended after they went out and before any byte of the answer.
+fn repeatable(request: &Request<'_>) -> bool {
+    matches!(request.method, "GET" | "HEAD") && matches!(request.body, Body::None)
+}
+
+/// The kept dials of the host of `url` and the slot of `request` there: a request
+/// through the Connect route of a pinned address whose dialer keeps connections, that
+/// is not a long poll. `None` for every other request.
+fn keep_slot(url: &RelayUrl, request: &Request<'_>) -> Option<KeepSlot> {
+    if !request.wait.is_zero() || local_route(url).is_some() {
+        return None;
+    }
+    let (Some(route), Some(dialer), Some(pin)) = (&url.tunnel, &url.dialer, url.pin()) else {
+        return None;
+    };
+    let dials = dialer.0.kept()?;
+    let epoch = dials.epoch();
+    Some(KeepSlot {
+        dials,
+        key: format!("{} {} {}", url.as_str(), pin.text(), route.text()),
+        epoch,
+    })
+}
+
+/// The kept connection of `slot` for `request`, unless the direct destinations come
+/// first now: in the [`Cancel`] of the request, with its timeouts. The dialer learns
+/// that the node was reached through the dial.
+fn take_kept<'a>(
+    url: &RelayUrl,
+    request: &Request<'a>,
+    slot: &KeepSlot,
+) -> Result<Option<(Conn, Held<'a>)>, HttpError> {
+    let Some(dialer) = &url.dialer else {
+        return Ok(None);
+    };
+    if dialer.0.direct_first(url) {
+        return Ok(None);
+    }
+    let Some(mut tls) = slot.dials.take(&slot.key) else {
+        return Ok(None);
+    };
+    tls.sock.sent = 0;
+    let mut held = Held(None);
+    if let Some(cancel) = request.cancel {
+        let number = cancel.hold_pipe(tls.sock.pipe.closer())?;
+        held = Held(Some((cancel, number)));
+    }
+    let stall = time_left(request.deadline, STALL_TIMEOUT, HttpError::Connect)?;
+    let header = time_left(request.deadline, HEADER_TIMEOUT, HttpError::Connect)?;
+    if tls.sock.pipe.set_write_timeout(stall).is_err()
+        || tls.sock.pipe.set_read_timeout(header).is_err()
+    {
         return Err(HttpError::Connect);
     }
-    time_left(request.deadline, CONNECT_TIMEOUT, HttpError::Connect)?;
-    let head = request_head(url, request)?;
-    let mut file = match &request.body {
-        Body::File(path, size) => {
-            let file = File::open(path).map_err(|_| HttpError::Protocol)?;
-            let actual = file.metadata().map_err(|_| HttpError::Protocol)?.len();
-            if actual != *size {
-                return Err(HttpError::Protocol);
-            }
-            Some(file)
-        }
-        _ => None,
-    };
-    let (mut conn, held) = connect(url, request)?;
-    if conn.write_all(&head).is_err() {
+    dialer.0.reached(url, NodeRoute::Tunnel);
+    Ok(Some((Conn::Tunnel(tls), held)))
+}
+
+/// Write `head` and the body of `request` to `conn`, and flush. `Ok(false)`: a write of
+/// the body or the flush failed (the caller reads an early answer anyway).
+fn write_request(
+    conn: &mut Conn,
+    head: &[u8],
+    request: &Request<'_>,
+    file: Option<&mut File>,
+) -> Result<bool, HttpError> {
+    if conn.write_all(head).is_err() {
         return Err(HttpError::Broken);
     }
-    drop(head);
-    let complete = match (&request.body, file.as_mut()) {
+    let complete = match (&request.body, file) {
         (Body::Json(bytes), _) => conn.write_all(bytes).is_ok(),
         (Body::File(..), Some(file)) => {
             let mut buffer = vec![0u8; CHUNK];
@@ -1104,8 +1821,151 @@ fn send<'a>(url: &RelayUrl, request: &Request<'a>) -> Result<(Conn, bool, Held<'
         }
         _ => true,
     };
-    let flushed = complete && conn.flush().is_ok();
-    Ok((conn, flushed, held))
+    Ok(complete && conn.flush().is_ok())
+}
+
+/// Send the request. Returns the connection and whether the whole request went out.
+/// The body always goes out whole: a relay that answers early (a `412` or a `413`)
+/// reads the rest anyway, and the caller then reads that answer. A request with a
+/// [`Cancel`] registers its socket there; a body write stops at the deadline.
+///
+/// A request through the dial of a host that keeps connections ([`keep_slot`]) first
+/// takes the kept connection of its node, if any (`kept`), and never asks for
+/// `Connection: close` on a dial. When nothing of the request reached the pipe of the
+/// kept connection, it goes out on a fresh connection instead.
+fn send<'a>(url: &RelayUrl, request: &Request<'a>, kept: bool) -> Result<Sent<'a>, HttpError> {
+    if request.cancel.is_some_and(Cancel::is_closed) {
+        return Err(HttpError::Connect);
+    }
+    time_left(request.deadline, CONNECT_TIMEOUT, HttpError::Connect)?;
+    let head = request_head(url, request, true)?;
+    let mut file = match &request.body {
+        Body::File(path, size) => {
+            let file = File::open(path).map_err(|_| HttpError::Protocol)?;
+            let actual = file.metadata().map_err(|_| HttpError::Protocol)?.len();
+            if actual != *size {
+                return Err(HttpError::Protocol);
+            }
+            Some(file)
+        }
+        _ => None,
+    };
+    let slot = keep_slot(url, request);
+    if kept
+        && let Some(slot) = &slot
+        && let Some((mut conn, held)) = take_kept(url, request, slot)?
+    {
+        let open = request_head(url, request, false)?;
+        let written = write_request(&mut conn, &open, request, file.as_mut());
+        drop(open);
+        let nothing_sent = matches!(&conn, Conn::Tunnel(tls) if tls.sock.sent == 0);
+        match written {
+            Ok(complete) if complete || !nothing_sent => {
+                return Ok(Sent {
+                    conn,
+                    complete,
+                    held,
+                    slot: Some(slot.clone()),
+                    reused: true,
+                });
+            }
+            // A part of the request may have reached the node.
+            Err(error) if !nothing_sent && !repeatable(request) => return Err(error),
+            // Nothing reached the node, or a read that may go again: a fresh connection.
+            _ => {}
+        }
+        drop(conn);
+        drop(held);
+        if let Some(file) = file.as_mut() {
+            file.seek(io::SeekFrom::Start(0))
+                .map_err(|_| HttpError::Broken)?;
+        }
+    }
+    let (mut conn, held) = connect(url, request)?;
+    let keeps = slot.is_some() && matches!(conn, Conn::Tunnel(_));
+    let head = if keeps {
+        drop(head);
+        request_head(url, request, false)?
+    } else {
+        head
+    };
+    let complete = write_request(&mut conn, &head, request, file.as_mut())?;
+    drop(head);
+    Ok(Sent {
+        conn,
+        complete,
+        held,
+        slot: slot.filter(|_| keeps),
+        reused: false,
+    })
+}
+
+/// Why no byte of an answer came.
+enum NoAnswer {
+    /// The connection ended or failed first.
+    Ended,
+    /// The time ran out.
+    Late,
+}
+
+/// When the answer head must be there: the header time, and a long poll's wait, within
+/// the request's deadline.
+fn head_deadline(request: &Request<'_>) -> Instant {
+    let deadline = Instant::now() + HEADER_TIMEOUT + request.wait;
+    request
+        .deadline
+        .map_or(deadline, |overall| deadline.min(overall))
+}
+
+/// The first bytes of the answer, before `deadline`.
+fn first_bytes(conn: &mut Conn, deadline: Instant) -> Result<Zeroizing<Vec<u8>>, NoAnswer> {
+    let left = deadline.saturating_duration_since(Instant::now());
+    if left.is_zero() {
+        return Err(NoAnswer::Late);
+    }
+    conn.set_read_timeout(left.min(STALL_TIMEOUT))
+        .map_err(|_| NoAnswer::Ended)?;
+    let mut chunk = Zeroizing::new([0u8; 8192]);
+    match conn.read(chunk.as_mut()) {
+        Ok(0) => Err(NoAnswer::Ended),
+        Ok(read) => {
+            let mut buffer = Zeroizing::new(Vec::with_capacity(ANSWER_CAPACITY));
+            buffer.extend_from_slice(&chunk[..read]);
+            Ok(buffer)
+        }
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ) =>
+        {
+            Err(NoAnswer::Late)
+        }
+        Err(_) => Err(NoAnswer::Ended),
+    }
+}
+
+/// Send `request` and wait for the first bytes of its answer. A kept connection that
+/// ended before any byte of the answer sends a [`repeatable`] request once more on a
+/// fresh connection; any other request then fails with [`HttpError::Broken`], as a
+/// connection that breaks after the request started always does.
+fn send_and_await<'a>(
+    url: &RelayUrl,
+    request: &Request<'a>,
+) -> Result<(Sent<'a>, Zeroizing<Vec<u8>>, Instant), HttpError> {
+    let mut sent = send(url, request, true)?;
+    let deadline = head_deadline(request);
+    match first_bytes(&mut sent.conn, deadline) {
+        Ok(start) => Ok((sent, start, deadline)),
+        Err(NoAnswer::Ended) if sent.reused && repeatable(request) => {
+            drop(sent);
+            let mut sent = send(url, request, false)?;
+            let deadline = head_deadline(request);
+            let start = first_bytes(&mut sent.conn, deadline).map_err(|_| HttpError::Broken)?;
+            Ok((sent, start, deadline))
+        }
+        Err(_) => Err(HttpError::Broken),
+    }
 }
 
 /// Bytes from the connection with a buffer in front. The buffer is erased on drop.
@@ -1184,6 +2044,15 @@ struct BodyReader<'a> {
     done: bool,
 }
 
+impl BodyReader<'_> {
+    /// The body was read to its end, it had a length or chunks (not "until the
+    /// connection closes"), and no byte came after it: the connection may carry another
+    /// request.
+    fn whole(&self) -> bool {
+        self.done && !matches!(self.kind, BodyKind::UntilClose) && self.source.pending().is_empty()
+    }
+}
+
 impl Read for BodyReader<'_> {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
         if self.done || out.is_empty() {
@@ -1249,22 +2118,31 @@ struct Head<'a> {
     status: u16,
     headers: Headers,
     source: Source<'a>,
+    /// The answer may leave its connection open: HTTP/1.1 without `Connection: close`.
+    keeps: bool,
 }
 
-/// Read the answer head. Interim `1xx` answers are skipped. Every read of the answer
-/// ends by `overall`, when the request has a deadline.
+/// True when the `connection` headers of an answer carry the token `close`.
+fn asks_close(headers: &[(String, String)]) -> bool {
+    headers
+        .iter()
+        .filter(|(name, _)| name == "connection")
+        .flat_map(|(_, value)| value.split(','))
+        .any(|token| token.trim().eq_ignore_ascii_case("close"))
+}
+
+/// Read the answer head, after its first bytes `start` ([`first_bytes`]), by
+/// `deadline`. Interim `1xx` answers are skipped. Every read of the answer ends by
+/// `overall`, when the request has a deadline.
 fn read_head(
     conn: &mut Conn,
-    wait: Duration,
+    start: Zeroizing<Vec<u8>>,
+    deadline: Instant,
     overall: Option<Instant>,
 ) -> Result<Head<'_>, HttpError> {
-    let mut deadline = Instant::now() + HEADER_TIMEOUT + wait;
-    if let Some(overall) = overall {
-        deadline = deadline.min(overall);
-    }
     let mut source = Source {
         conn,
-        buffer: Zeroizing::new(Vec::with_capacity(ANSWER_CAPACITY)),
+        buffer: start,
         start: 0,
         deadline: None,
     };
@@ -1311,10 +2189,12 @@ fn read_head(
         }
         source.conn.set_read_timeout(STALL_TIMEOUT)?;
         source.deadline = overall;
+        let keeps = version == "HTTP/1.1" && !asks_close(&headers);
         return Ok(Head {
             status,
             headers,
             source,
+            keeps,
         });
     }
 }
@@ -1388,12 +2268,13 @@ pub fn post_json(
 }
 
 fn exchange_tcp(url: &RelayUrl, request: &Request<'_>) -> Result<Answer, HttpError> {
-    let (mut conn, _complete, _held) = send(url, request)?;
+    let (mut sent, start, deadline) = send_and_await(url, request)?;
     let Head {
         status,
         headers,
         source,
-    } = read_head(&mut conn, request.wait, request.deadline)?;
+        keeps,
+    } = read_head(&mut sent.conn, start, deadline, request.deadline)?;
     let kind = body_kind(status, &headers)?;
     let mut reader = BodyReader {
         source,
@@ -1402,6 +2283,9 @@ fn exchange_tcp(url: &RelayUrl, request: &Request<'_>) -> Result<Answer, HttpErr
         done: false,
     };
     let body = read_limited(&mut reader, MAX_JSON_ANSWER)?;
+    let keeps = keeps && reader.whole();
+    drop(reader);
+    sent.finish(keeps);
     Ok(Answer {
         status,
         headers,
@@ -1430,12 +2314,13 @@ pub(crate) fn download(
     if external().is_some() {
         return Err(HttpError::Protocol);
     }
-    let (mut conn, _complete, _held) = send(url, request)?;
+    let (mut sent, start, deadline) = send_and_await(url, request)?;
     let Head {
         status,
         headers,
         source,
-    } = read_head(&mut conn, request.wait, request.deadline)?;
+        keeps,
+    } = read_head(&mut sent.conn, start, deadline, request.deadline)?;
     let kind = body_kind(status, &headers)?;
     let mut reader = BodyReader {
         source,
@@ -1445,6 +2330,9 @@ pub(crate) fn download(
     };
     if status != 200 {
         let body = read_limited(&mut reader, MAX_JSON_ANSWER)?;
+        let keeps = keeps && reader.whole();
+        drop(reader);
+        sent.finish(keeps);
         return Ok((
             Answer {
                 status,
@@ -1470,7 +2358,10 @@ pub(crate) fn download(
         dest.write_all(&buffer[..read])
             .map_err(|_| HttpError::Broken)?;
     }
+    let keeps = keeps && reader.whole();
+    drop(reader);
     dest.sync_all().map_err(|_| HttpError::Broken)?;
+    sent.finish(keeps);
     let mut sha256 = [0u8; 32];
     sha256.copy_from_slice(hash.finish().as_ref());
     Ok((
@@ -2378,5 +3269,620 @@ mod tests {
             1,
             "no alternative after a wrong certificate"
         );
+    }
+
+    // ---- The Connect route (node-pairing-v1 section 7a, plan s7 unit I2). ----
+
+    const ROUTE: &str = "wss://apassy-relay.wyderka.cc/v1/tunnel/dial/node_k7m2q4x3ca";
+
+    #[test]
+    fn a_connect_route_has_one_form_and_is_the_last_alternative() {
+        let route = TunnelRoute::parse(ROUTE).unwrap();
+        assert_eq!(route.text(), ROUTE);
+        assert_eq!(route.node(), "node_k7m2q4x3ca");
+        assert_eq!(route.connect_host(), "apassy-relay.wyderka.cc");
+        assert_eq!(route.dial_path(), "/v1/tunnel/dial/node_k7m2q4x3ca");
+        assert!(route.is_through("https://apassy-relay.wyderka.cc"));
+        assert!(!route.is_through("https://apassy-relay.wyderka.cc:8443"));
+        assert!(!route.is_through("https://connect.example.com"));
+        assert_eq!(
+            TunnelRoute::new("https://apassy-relay.wyderka.cc", "node_k7m2q4x3ca").unwrap(),
+            route
+        );
+        // A loopback Connect of the tests: its host and port.
+        let local = TunnelRoute::new("http://127.0.0.1:8787", "node_k7m2q4x3ca").unwrap();
+        assert_eq!(
+            local.text(),
+            "wss://127.0.0.1:8787/v1/tunnel/dial/node_k7m2q4x3ca"
+        );
+        assert!(local.is_through("http://127.0.0.1:8787"));
+        for bad in [
+            "ws://apassy-relay.wyderka.cc/v1/tunnel/dial/node_k7m2q4x3ca",
+            "wss://apassy-relay.wyderka.cc:443/v1/tunnel/dial/node_k7m2q4x3ca",
+            "wss://Apassy-relay.wyderka.cc/v1/tunnel/dial/node_k7m2q4x3ca",
+            "wss://apassy-relay.wyderka.cc/v1/tunnel/dial/node_k7m2q4x3ca/",
+            "wss://apassy-relay.wyderka.cc/v1/tunnel/dial/node_k7m2q4x3c",
+            "wss://apassy-relay.wyderka.cc/x/v1/tunnel/dial/node_k7m2q4x3ca",
+            "wss://u@apassy-relay.wyderka.cc/v1/tunnel/dial/node_k7m2q4x3ca",
+        ] {
+            assert!(TunnelRoute::parse(bad).is_none(), "{bad}");
+        }
+        assert!(TunnelRoute::new("https://apassy-relay.wyderka.cc", "node_1").is_err());
+
+        // The stored form: the tailnet alternatives, then the route.
+        let url = RelayUrl::parse_with_trust("https://100.64.0.7:8444", contract_pin())
+            .unwrap()
+            .alternatives(&["apassy-mini.tail0123.ts.net".to_owned(), ROUTE.to_owned()])
+            .unwrap();
+        assert_eq!(url.tunnel(), Some(&route));
+        assert_eq!(
+            url.alternative_list(),
+            ["apassy-mini.tail0123.ts.net:8444", ROUTE]
+        );
+        assert_eq!(url.destinations().count(), 2, "the route is no destination");
+        let back = RelayUrl::parse_with_trust("https://100.64.0.7:8444", contract_pin())
+            .unwrap()
+            .alternatives(&url.alternative_list())
+            .unwrap();
+        assert_eq!(back, url);
+        assert!(back.clone().alternatives(&[]).unwrap().tunnel().is_none());
+        // One route, four entries in all, and a pin.
+        let pinned = RelayUrl::parse_with_trust("https://100.64.0.7:8444", contract_pin()).unwrap();
+        for bad in [
+            vec![ROUTE.to_owned(), ROUTE.to_owned()],
+            vec![
+                "a.example.com".to_owned(),
+                "b.example.com".to_owned(),
+                "c.example.com".to_owned(),
+                "d.example.com".to_owned(),
+                ROUTE.to_owned(),
+            ],
+            vec!["wss://apassy-relay.wyderka.cc/v1/tunnel/node".to_owned()],
+        ] {
+            assert_eq!(
+                pinned.clone().alternatives(&bad),
+                Err(SyncError::InvalidRelayAddress),
+                "{bad:?}"
+            );
+        }
+        let hosted = RelayUrl::parse("https://apassy-relay.wyderka.cc").unwrap();
+        assert!(hosted.clone().with_tunnel(Some(route.clone())).is_err());
+        assert!(hosted.with_tunnel(None).is_ok());
+        assert!(url.with_trust(TlsTrust::System).is_err());
+    }
+
+    /// A pipe over a TCP connection, for the dial of the tests.
+    struct TcpPipe(TcpStream);
+
+    impl Read for TcpPipe {
+        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            self.0.read(out)
+        }
+    }
+
+    impl Write for TcpPipe {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.write(bytes)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            self.0.flush()
+        }
+    }
+
+    impl TunnelPipe for TcpPipe {
+        fn set_read_timeout(&self, timeout: Duration) -> io::Result<()> {
+            self.0.set_read_timeout(Some(timeout))
+        }
+        fn set_write_timeout(&self, timeout: Duration) -> io::Result<()> {
+            self.0.set_write_timeout(Some(timeout))
+        }
+        fn closer(&self) -> Arc<dyn Fn() + Send + Sync> {
+            let socket = self.0.try_clone().unwrap();
+            Arc::new(move || {
+                let _ = socket.shutdown(Shutdown::Both);
+            })
+        }
+        /// Open with nothing to read: a peek that does not block finds no byte and no end.
+        fn is_idle_open(&self) -> bool {
+            if self.0.set_nonblocking(true).is_err() {
+                return false;
+            }
+            let mut byte = [0u8; 1];
+            let idle = matches!(
+                self.0.peek(&mut byte),
+                Err(ref error) if error.kind() == io::ErrorKind::WouldBlock
+            );
+            self.0.set_nonblocking(false).is_ok() && idle
+        }
+    }
+
+    /// A dialer that connects its dials to `to` and writes down what the client did.
+    struct FakeDialer {
+        to: Mutex<Option<SocketAddr>>,
+        direct_first: AtomicBool,
+        events: Mutex<Vec<String>>,
+        kept: Option<KeptDials>,
+    }
+
+    impl FakeDialer {
+        fn new(to: Option<SocketAddr>, direct_first: bool) -> Arc<Self> {
+            Arc::new(Self {
+                to: Mutex::new(to),
+                direct_first: AtomicBool::new(direct_first),
+                events: Mutex::new(Vec::new()),
+                kept: None,
+            })
+        }
+
+        /// A dialer of the tailnet-down state that keeps its connections, as the iPhone's.
+        fn keeping(to: SocketAddr) -> Arc<Self> {
+            Arc::new(Self {
+                to: Mutex::new(Some(to)),
+                direct_first: AtomicBool::new(false),
+                events: Mutex::new(Vec::new()),
+                kept: Some(KeptDials::new()),
+            })
+        }
+
+        fn dials(&self) -> usize {
+            self.events()
+                .iter()
+                .filter(|event| event.starts_with("dial "))
+                .count()
+        }
+
+        fn events(&self) -> Vec<String> {
+            self.events.lock().unwrap().clone()
+        }
+    }
+
+    impl TunnelDialer for FakeDialer {
+        fn direct_first(&self, _url: &RelayUrl) -> bool {
+            self.direct_first.load(Ordering::SeqCst)
+        }
+        fn reached(&self, _url: &RelayUrl, route: NodeRoute) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("reached {route:?}"));
+        }
+        fn direct_failed(&self, _url: &RelayUrl) {
+            self.events.lock().unwrap().push("direct failed".to_owned());
+        }
+        fn kept(&self) -> Option<KeptDials> {
+            self.kept.clone()
+        }
+        fn dial(
+            &self,
+            route: &TunnelRoute,
+            _deadline: Instant,
+        ) -> Result<Box<dyn TunnelPipe>, HttpError> {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("dial {}", route.node()));
+            let to = (*self.to.lock().unwrap()).ok_or(HttpError::Connect)?;
+            let tcp = TcpStream::connect(to).map_err(|_| HttpError::Connect)?;
+            Ok(Box::new(TcpPipe(tcp)))
+        }
+    }
+
+    /// A pinned address at a closed port with the Connect route and `dialer`.
+    fn routed(origin_port: u16, pin: Pin, dialer: Arc<FakeDialer>) -> RelayUrl {
+        RelayUrl::parse_with_trust(
+            &format!("https://127.0.0.1:{origin_port}"),
+            TlsTrust::Pinned(pin),
+        )
+        .unwrap()
+        .alternatives(&[ROUTE.to_owned()])
+        .unwrap()
+        .with_dialer(dialer)
+    }
+
+    #[test]
+    fn a_closed_tailnet_goes_through_the_dial_with_the_same_pinned_tls_and_bytes() {
+        let (config, pin) = node_tls();
+        let node = TcpListener::bind("127.0.0.1:0").unwrap();
+        let [closed, _] = closed_ports(&node);
+        let dialer = FakeDialer::new(Some(node.local_addr().unwrap()), true);
+        let url = routed(closed, pin, Arc::clone(&dialer));
+        let server = serve_tls_once(node, config.clone());
+        let request = Request::new(
+            "POST",
+            "/v1/questions/abc/answers".to_owned(),
+            Some("apassy_acc_synthetic"),
+        );
+        assert_eq!(exchange(&url, &request).unwrap().body.as_slice(), b"{}");
+        let through_dial = server.join().unwrap();
+        assert_eq!(
+            dialer.events(),
+            ["direct failed", "dial node_k7m2q4x3ca", "reached Tunnel"]
+        );
+        // The bytes inside the pinned TLS of the dial are those of the tailnet route.
+        let direct_node = TcpListener::bind("127.0.0.1:0").unwrap();
+        let direct = RelayUrl::parse_with_trust(
+            &format!("https://127.0.0.1:{closed}"),
+            TlsTrust::Pinned(pin),
+        )
+        .unwrap()
+        .alternatives(&[format!("127.0.0.1:{}", port_of(&direct_node))])
+        .unwrap();
+        let server = serve_tls_once(direct_node, config);
+        assert_eq!(exchange(&direct, &request).unwrap().body.as_slice(), b"{}");
+        assert_eq!(server.join().unwrap(), through_dial);
+        let head = String::from_utf8(through_dial).unwrap();
+        assert!(head.starts_with("POST /v1/questions/abc/answers HTTP/1.1\r\n"));
+        assert!(head.contains(&format!("Host: 127.0.0.1:{closed}\r\n")));
+    }
+
+    #[test]
+    fn a_wrong_certificate_through_the_dial_stops_before_any_request_byte() {
+        let (wrong, _) = node_tls();
+        let (_, pin) = node_tls();
+        let node = TcpListener::bind("127.0.0.1:0").unwrap();
+        let [closed, _] = closed_ports(&node);
+        let dialer = FakeDialer::new(Some(node.local_addr().unwrap()), true);
+        let url = routed(closed, pin, Arc::clone(&dialer));
+        let server = serve_tls_once(node, wrong);
+        let request = Request::new(
+            "GET",
+            "/v1/questions".to_owned(),
+            Some("apassy_acc_synthetic"),
+        );
+        assert_eq!(
+            exchange(&url, &request).unwrap_err(),
+            HttpError::PinMismatch
+        );
+        assert!(server.join().unwrap().is_empty(), "no request byte");
+        assert!(
+            !dialer
+                .events()
+                .iter()
+                .any(|event| event.starts_with("reached"))
+        );
+    }
+
+    #[test]
+    fn the_dialer_puts_the_dial_first_and_the_tailnet_is_the_last_resort() {
+        let (config, pin) = node_tls();
+        // The dial does not connect; the tailnet does.
+        let node = TcpListener::bind("127.0.0.1:0").unwrap();
+        let dialer = FakeDialer::new(None, false);
+        let url = routed(port_of(&node), pin, Arc::clone(&dialer));
+        let server = serve_tls_once(node, config.clone());
+        let request = Request::new("GET", "/healthz".to_owned(), None);
+        assert_eq!(exchange(&url, &request).unwrap().body.as_slice(), b"{}");
+        server.join().unwrap();
+        assert_eq!(dialer.events(), ["dial node_k7m2q4x3ca", "reached Direct"]);
+
+        // A tailnet that works comes first and never dials.
+        let node = TcpListener::bind("127.0.0.1:0").unwrap();
+        let dialer = FakeDialer::new(None, true);
+        let url = routed(port_of(&node), pin, Arc::clone(&dialer));
+        let server = serve_tls_once(node, config);
+        assert_eq!(exchange(&url, &request).unwrap().body.as_slice(), b"{}");
+        server.join().unwrap();
+        assert_eq!(dialer.events(), ["reached Direct"]);
+    }
+
+    #[test]
+    fn without_a_dialer_the_route_is_kept_and_never_dialled() {
+        let (_, pin) = node_tls();
+        let live = TcpListener::bind("127.0.0.1:0").unwrap();
+        let [closed, _] = closed_ports(&live);
+        let url = RelayUrl::parse_with_trust(
+            &format!("https://127.0.0.1:{closed}"),
+            TlsTrust::Pinned(pin),
+        )
+        .unwrap()
+        .alternatives(&[ROUTE.to_owned()])
+        .unwrap();
+        let request = Request::new("GET", "/healthz".to_owned(), None);
+        assert_eq!(exchange(&url, &request).unwrap_err(), HttpError::Connect);
+        // A probe of the direct route needs no request and no token.
+        assert_eq!(
+            probe_direct(&url, Duration::from_secs(2)).unwrap_err(),
+            HttpError::Connect
+        );
+    }
+
+    #[test]
+    fn a_cancel_ends_a_long_poll_through_the_dial() {
+        let (config, pin) = node_tls();
+        let node = TcpListener::bind("127.0.0.1:0").unwrap();
+        let [closed, _] = closed_ports(&node);
+        let dialer = FakeDialer::new(Some(node.local_addr().unwrap()), true);
+        let url = routed(closed, pin, dialer);
+        // The node finishes the handshake and never answers.
+        let server = std::thread::spawn(move || {
+            let (tcp, _) = node.accept().unwrap();
+            let conn = rustls::ServerConnection::new(config).unwrap();
+            let mut tls = StreamOwned::new(conn, tcp);
+            let mut buf = [0u8; 1024];
+            while tls.read(&mut buf).is_ok_and(|read| read > 0) {}
+        });
+        let cancel = Arc::new(Cancel::default());
+        let closer = {
+            let cancel = Arc::clone(&cancel);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(300));
+                cancel.close();
+            })
+        };
+        let mut request = Request::new("GET", "/v1/questions?wait=25".to_owned(), None);
+        request.wait = Duration::from_secs(25);
+        request.cancel = Some(&cancel);
+        let started = Instant::now();
+        assert!(exchange(&url, &request).is_err());
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the cancel ended the dial"
+        );
+        closer.join().unwrap();
+        server.join().unwrap();
+    }
+
+    /// What a node that keeps its connections does with the `n`-th request (from 1) of a
+    /// connection.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Turn {
+        /// Answer `{}` and keep the connection (close after a request that asks for it).
+        Answer,
+        /// Read the request and close the connection without a byte: a kept connection
+        /// that turns out dead.
+        Drop,
+        /// Answer `{}` without `Connection: close`, then close: an idle limit that
+        /// passed while the client kept the connection.
+        AnswerAndClose,
+    }
+
+    /// The requests of each connection of a [`keeping_node`].
+    type Connections = Arc<Mutex<Vec<Vec<Vec<u8>>>>>;
+
+    /// A node behind the dial that serves sequential requests on one TLS connection, as
+    /// the tailnet listener does for a stream of the tunnel. `turn(n)` says what it does
+    /// with the `n`-th request of each connection.
+    fn keeping_node(
+        listener: TcpListener,
+        config: Arc<rustls::ServerConfig>,
+        turn: fn(usize) -> Turn,
+    ) -> Connections {
+        let connections: Connections = Arc::default();
+        let log = Arc::clone(&connections);
+        std::thread::spawn(move || {
+            for tcp in listener.incoming() {
+                let Ok(tcp) = tcp else { return };
+                let config = Arc::clone(&config);
+                let index = {
+                    let mut log = log.lock().unwrap();
+                    log.push(Vec::new());
+                    log.len() - 1
+                };
+                let log = Arc::clone(&log);
+                std::thread::spawn(move || {
+                    tcp.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+                    let conn = rustls::ServerConnection::new(config).unwrap();
+                    let mut tls = StreamOwned::new(conn, tcp);
+                    let mut pending = Vec::new();
+                    let mut buf = [0u8; 4096];
+                    for n in 1.. {
+                        let end = loop {
+                            if let Some(end) = pending.windows(4).position(|w| w == b"\r\n\r\n") {
+                                break end + 4;
+                            }
+                            match tls.read(&mut buf) {
+                                Ok(0) | Err(_) => return,
+                                Ok(read) => pending.extend_from_slice(&buf[..read]),
+                            }
+                        };
+                        let head = String::from_utf8_lossy(&pending[..end]).to_ascii_lowercase();
+                        let length: usize = head
+                            .lines()
+                            .find_map(|line| line.strip_prefix("content-length:"))
+                            .map_or(0, |value| value.trim().parse().unwrap());
+                        while pending.len() < end + length {
+                            match tls.read(&mut buf) {
+                                Ok(0) | Err(_) => return,
+                                Ok(read) => pending.extend_from_slice(&buf[..read]),
+                            }
+                        }
+                        let request: Vec<u8> = pending.drain(..end + length).collect();
+                        log.lock().unwrap()[index].push(request);
+                        let turn = turn(n);
+                        if turn == Turn::Drop {
+                            let _ = tls.sock.shutdown(Shutdown::Both);
+                            return;
+                        }
+                        let close = head.contains("connection: close");
+                        let answer: &[u8] = if close {
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
+                        } else {
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}"
+                        };
+                        if tls.write_all(answer).and_then(|()| tls.flush()).is_err() {
+                            return;
+                        }
+                        if close || turn == Turn::AnswerAndClose {
+                            tls.conn.send_close_notify();
+                            let _ = tls.conn.complete_io(&mut tls.sock);
+                            let _ = tls.sock.shutdown(Shutdown::Both);
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        connections
+    }
+
+    fn requests_of(connections: &Connections) -> Vec<Vec<String>> {
+        connections
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|requests| {
+                requests
+                    .iter()
+                    .map(|bytes| String::from_utf8(bytes.clone()).unwrap())
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn json_post(path: &str) -> Request<'static> {
+        let mut request = Request::new("POST", path.to_owned(), Some("apassy_acc_synthetic"));
+        request.body = Body::Json(Zeroizing::new(b"{\"v\":1}".to_vec()));
+        request
+    }
+
+    #[test]
+    fn requests_that_follow_each_other_share_one_dial_and_a_long_poll_has_its_own() {
+        let (config, pin) = node_tls();
+        let node = TcpListener::bind("127.0.0.1:0").unwrap();
+        let [closed, _] = closed_ports(&node);
+        let dialer = FakeDialer::keeping(node.local_addr().unwrap());
+        let url = routed(closed, pin, Arc::clone(&dialer));
+        let connections = keeping_node(node, config, |_| Turn::Answer);
+        let get = Request::new("GET", "/v1/feed".to_owned(), Some("apassy_acc_synthetic"));
+        for _ in 0..5 {
+            assert_eq!(exchange(&url, &get).unwrap().body.as_slice(), b"{}");
+        }
+        assert_eq!(
+            exchange(&url, &json_post("/v1/questions/abc/answers"))
+                .unwrap()
+                .status,
+            200
+        );
+        assert_eq!(exchange(&url, &get).unwrap().status, 200);
+        assert_eq!(dialer.dials(), 1, "{:?}", dialer.events());
+        let seen = requests_of(&connections);
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].len(), 7);
+        for request in &seen[0] {
+            assert!(!request.contains("Connection: close"), "{request}");
+            assert!(
+                request.contains("User-Agent: apassy-sync/1\r\n"),
+                "{request}"
+            );
+        }
+        // The head of a kept request is the head of the same request on a connection that
+        // closes, without the line `Connection: close`, and nothing else.
+        let closing = request_head(&url, &get, true).unwrap();
+        let open = request_head(&url, &get, false).unwrap();
+        assert_eq!(
+            String::from_utf8(closing.to_vec())
+                .unwrap()
+                .replace("Connection: close\r\n", ""),
+            String::from_utf8(open.to_vec()).unwrap()
+        );
+        assert_eq!(seen[0][0].as_bytes(), open.as_slice());
+        // A long poll dials for itself, asks to close, and is not kept.
+        let mut poll = Request::new("GET", "/v1/questions?wait=1".to_owned(), None);
+        poll.wait = Duration::from_secs(1);
+        assert_eq!(exchange(&url, &poll).unwrap().status, 200);
+        assert_eq!(dialer.dials(), 2);
+        let seen = requests_of(&connections);
+        assert_eq!(seen.len(), 2);
+        assert!(
+            seen[1][0].contains("Connection: close\r\n"),
+            "{}",
+            seen[1][0]
+        );
+        // The kept dial is still there for the next request.
+        assert_eq!(exchange(&url, &get).unwrap().status, 200);
+        assert_eq!(dialer.dials(), 2);
+        assert_eq!(requests_of(&connections)[0].len(), 8);
+        assert_eq!(dialer.kept.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_dead_kept_dial_sends_a_read_again_once_and_never_a_post() {
+        let (config, pin) = node_tls();
+        let node = TcpListener::bind("127.0.0.1:0").unwrap();
+        let [closed, _] = closed_ports(&node);
+        let dialer = FakeDialer::keeping(node.local_addr().unwrap());
+        let url = routed(closed, pin, Arc::clone(&dialer));
+        // Every second request of a connection meets a dead connection.
+        let connections =
+            keeping_node(
+                node,
+                config,
+                |n| {
+                    if n == 2 { Turn::Drop } else { Turn::Answer }
+                },
+            );
+        let get = Request::new("GET", "/v1/feed".to_owned(), Some("apassy_acc_synthetic"));
+        assert_eq!(exchange(&url, &get).unwrap().status, 200);
+        assert_eq!(dialer.dials(), 1);
+        // The kept dial is dead after the read went out: the read goes once more on a
+        // fresh dial.
+        assert_eq!(exchange(&url, &get).unwrap().status, 200);
+        assert_eq!(dialer.dials(), 2);
+        // The POST meets the same on the second dial: it may have reached the node, so
+        // it fails and is not sent again.
+        let post = json_post("/v1/questions/abc/answers");
+        assert_eq!(exchange(&url, &post).unwrap_err(), HttpError::Broken);
+        assert_eq!(dialer.dials(), 2, "no dial for the POST");
+        let seen = requests_of(&connections);
+        let posts = seen
+            .iter()
+            .flatten()
+            .filter(|request| request.starts_with("POST "))
+            .count();
+        assert_eq!(posts, 1, "the POST went out once: {seen:?}");
+        assert_eq!(seen.len(), 2);
+        assert!(dialer.kept.as_ref().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_kept_dial_that_the_node_closed_is_not_used() {
+        let (config, pin) = node_tls();
+        let node = TcpListener::bind("127.0.0.1:0").unwrap();
+        let [closed, _] = closed_ports(&node);
+        let dialer = FakeDialer::keeping(node.local_addr().unwrap());
+        let url = routed(closed, pin, Arc::clone(&dialer));
+        let connections = keeping_node(node, config, |_| Turn::AnswerAndClose);
+        let get = Request::new("GET", "/v1/feed".to_owned(), Some("apassy_acc_synthetic"));
+        assert_eq!(exchange(&url, &get).unwrap().status, 200);
+        std::thread::sleep(Duration::from_millis(200));
+        // The node closed the kept connection while it waited: a POST takes a fresh dial
+        // before any byte, so it goes out once and succeeds.
+        let post = json_post("/v1/questions/abc/answers");
+        assert_eq!(exchange(&url, &post).unwrap().status, 200);
+        assert_eq!(dialer.dials(), 2);
+        let seen = requests_of(&connections);
+        assert_eq!(seen.iter().map(Vec::len).collect::<Vec<_>>(), [1, 1]);
+    }
+
+    #[test]
+    fn a_clear_and_the_idle_limit_close_the_kept_dials() {
+        let (config, pin) = node_tls();
+        let node = TcpListener::bind("127.0.0.1:0").unwrap();
+        let [closed, _] = closed_ports(&node);
+        let dialer = FakeDialer::keeping(node.local_addr().unwrap());
+        let kept = dialer.kept.clone().unwrap();
+        let url = routed(closed, pin, Arc::clone(&dialer));
+        let _connections = keeping_node(node, config, |_| Turn::Answer);
+        let get = Request::new("GET", "/v1/feed".to_owned(), Some("apassy_acc_synthetic"));
+        assert_eq!(exchange(&url, &get).unwrap().status, 200);
+        assert_eq!(kept.len(), 1);
+        // A lock: the kept dial closes, and the next request dials again.
+        kept.clear();
+        assert!(kept.is_empty());
+        assert_eq!(exchange(&url, &get).unwrap().status, 200);
+        assert_eq!(dialer.dials(), 2);
+        // Without a request for the idle time, the kept dial closes by itself.
+        kept.set_idle(Duration::from_millis(200));
+        let until = Instant::now() + Duration::from_secs(5);
+        while !kept.is_empty() {
+            assert!(Instant::now() < until, "the idle dial closed");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(exchange(&url, &get).unwrap().status, 200);
+        assert_eq!(dialer.dials(), 3);
+        // A request that started before a clear does not keep its connection.
+        let slot = keep_slot(&url, &get).unwrap();
+        kept.clear();
+        assert_ne!(slot.epoch, kept.epoch());
     }
 }

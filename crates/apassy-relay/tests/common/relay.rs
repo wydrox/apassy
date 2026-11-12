@@ -153,6 +153,7 @@ pub fn test_config(dir: &std::path::Path, upstream: UpstreamOptions) -> RelayCon
         tailnet_listen: None,
         tailnet_agents: false,
         public_url: format!("http://127.0.0.1:{port}"),
+        public_origins: Vec::new(),
         sign_in_origins: Vec::new(),
         edge: EdgeMode::Required(SecretString::new(EDGE_SECRET.to_string())),
         master_key: SecretString::new(VAULT_KEY.to_string()),
@@ -169,9 +170,11 @@ pub fn test_config(dir: &std::path::Path, upstream: UpstreamOptions) -> RelayCon
         connect_teams_per_day: 200,
         connect_teams_max: 1000,
         connect_sync_bytes: 0,
+        free_connect: true,
         auth_limiter: false,
         operator_socket: true,
         oauth: None,
+        connect: Default::default(),
     }
 }
 
@@ -183,7 +186,14 @@ pub fn start_with(config: impl FnOnce(&mut RelayConfig), upstream: UpstreamOptio
     let dir = tempfile::tempdir().expect("temp dir");
     let mut cfg = test_config(dir.path(), upstream);
     config(&mut cfg);
-    let owner = Relay::init(&cfg, "Test Team", "owner").expect("init");
+    // `connect` mode has no operator team (docs/SPEC.md section 37): an empty relay, and
+    // the handle has no owner token.
+    let owner = if cfg.connect.plain_files() {
+        Relay::init_empty(&cfg).expect("init");
+        None
+    } else {
+        Some(Relay::init(&cfg, "Test Team", "owner").expect("init"))
+    };
     let running = start_on_free_port(&mut cfg);
     TestRelay {
         url: running.url(),
@@ -192,10 +202,45 @@ pub fn start_with(config: impl FnOnce(&mut RelayConfig), upstream: UpstreamOptio
             .secret()
             .map(|secret| secret.expose().to_string())
             .unwrap_or_default(),
-        team_id: team_of(owner.expose()),
-        owner_token: owner.expose().to_string(),
+        team_id: owner
+            .as_ref()
+            .map_or_else(no_team, |owner| team_of(owner.expose())),
+        owner_token: owner
+            .map(|owner| owner.expose().to_string())
+            .unwrap_or_default(),
         dir,
         config: cfg,
+        running: Some(running),
+        book: Mutex::new(HashMap::new()),
+    }
+}
+
+/// The `team_id` of a handle without an operator team: an id that no relay makes.
+fn no_team() -> TeamId {
+    TeamId::parse("t_aaaaaaaaaa").expect("team id")
+}
+
+/// Starts a relay on the data directory of `config` as it is, without `init`: after a
+/// cutover, a restore, or a change of mode. The handle has `team` as its team and
+/// `owner_token` (either may be empty or a placeholder: `no_team`).
+pub fn start_existing(
+    mut config: RelayConfig,
+    dir: tempfile::TempDir,
+    team: Option<TeamId>,
+    owner_token: &str,
+) -> TestRelay {
+    let running = start_on_free_port(&mut config);
+    TestRelay {
+        url: running.url(),
+        edge_secret: config
+            .edge
+            .secret()
+            .map(|secret| secret.expose().to_string())
+            .unwrap_or_default(),
+        team_id: team.unwrap_or_else(no_team),
+        owner_token: owner_token.to_string(),
+        dir,
+        config,
         running: Some(running),
         book: Mutex::new(HashMap::new()),
     }

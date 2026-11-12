@@ -11,6 +11,9 @@ use super::owner_tests::unlocked_app_with_item;
 use super::{Sheet, draw, kit};
 use crate::desktop::{DesktopApp, Place};
 
+/// The sidebar shortcut of this platform: ⌃⌘S on macOS, F9 on Linux.
+const SIDEBAR: (Modifiers, Key) = kit::SIDEBAR_SHORTCUT;
+
 const SIZE: Vec2 = Vec2::new(1180.0, 760.0);
 /// The frames after a key press until the focus and its scroll settle.
 const SETTLE_FRAMES: usize = 8;
@@ -881,8 +884,14 @@ fn shortcuts_switch_places_open_settings_go_back_and_lock() {
     let mut window = Window::new();
     window.idle(&mut app);
     window.press(&mut app, Key::OpenBracket, Modifiers::COMMAND);
-    assert!(app.place.is_credentials(), "⌘[ stays in the list");
-    assert_eq!(app.selected_item_id, None, "⌘[ leaves the credential");
+    assert!(
+        app.place.is_credentials(),
+        concat!(crate::back_shortcut!(), " stays in the list")
+    );
+    assert_eq!(
+        app.selected_item_id, None,
+        concat!(crate::back_shortcut!(), " leaves the credential")
+    );
     for (key, place, text) in [
         (Key::Num2, Place::Overview, "Last 7 days"),
         (Key::Num3, Place::Decisions, "Decisions"),
@@ -901,7 +910,11 @@ fn shortcuts_switch_places_open_settings_go_back_and_lock() {
         );
     }
     window.press(&mut app, Key::Comma, Modifiers::COMMAND);
-    assert_eq!(app.place, Place::Settings, "⌘, opens Settings");
+    assert_eq!(
+        app.place,
+        Place::Settings,
+        concat!(crate::shortcut!(","), " opens Settings")
+    );
     assert!(window.text.contains("Security"), "{}", window.text);
     assert!(
         window.focused().is_some(),
@@ -913,7 +926,10 @@ fn shortcuts_switch_places_open_settings_go_back_and_lock() {
     window.press(&mut app, Key::Comma, Modifiers::COMMAND);
     assert_eq!(app.place, Place::Settings);
     window.press(&mut app, Key::L, Modifiers::COMMAND);
-    assert!(app.owner_ui.session.is_locked(), "⌘L locks");
+    assert!(
+        app.owner_ui.session.is_locked(),
+        concat!(crate::shortcut!("L"), " locks")
+    );
 }
 
 /// Tab through Settings > Updates with the keyboard shortcuts shown, which is longer
@@ -1145,20 +1161,26 @@ fn control_command_s_collapses_the_sidebar_and_floats_it_in_a_narrow_window() {
     assert!(window.text.contains("Personal"), "{}", window.text);
     // The open vault has a name for VoiceOver, with where it lives.
     assert!(
-        window
-            .names
-            .values()
-            .any(|name| name.starts_with("Vault ") && name.ends_with("On this Mac")),
+        window.names.values().any(|name| name.starts_with("Vault ")
+            && name.ends_with(concat!("On this ", crate::computer!()))),
         "{:?}",
         window.names.values().collect::<Vec<_>>()
     );
     let has_name = |window: &Window, wanted: &str| window.names.values().any(|name| name == wanted);
-    assert!(has_name(&window, "Hide sidebar  ⌃⌘S"));
-    window.press(&mut app, Key::S, Modifiers::COMMAND | Modifiers::CTRL);
+    assert!(has_name(
+        &window,
+        concat!("Hide sidebar  ", crate::sidebar_shortcut!())
+    ));
+    window.press(&mut app, SIDEBAR.1, SIDEBAR.0);
     assert!(app.ui.sidebar_hidden);
     assert!(!window.text.contains("Personal"), "{}", window.text);
     // The rail keeps each place, with its name for VoiceOver.
-    for name in ["Overview  ⌘2", "Decisions  ⌘3", "Agents  ⌘4", "Logs  ⌘5"] {
+    for name in [
+        concat!("Overview  ", crate::shortcut!("2")),
+        concat!("Decisions  ", crate::shortcut!("3")),
+        concat!("Agents  ", crate::shortcut!("4")),
+        concat!("Logs  ", crate::shortcut!("5")),
+    ] {
         assert!(
             has_name(&window, name),
             "{name}: {:?}",
@@ -1167,7 +1189,7 @@ fn control_command_s_collapses_the_sidebar_and_floats_it_in_a_narrow_window() {
     }
     window.press(&mut app, Key::Num4, Modifiers::COMMAND);
     assert_eq!(app.place, Place::Agents);
-    window.press(&mut app, Key::S, Modifiers::COMMAND | Modifiers::CTRL);
+    window.press(&mut app, SIDEBAR.1, SIDEBAR.0);
     assert!(!app.ui.sidebar_hidden);
     assert!(window.text.contains("Personal"), "{}", window.text);
 
@@ -1176,7 +1198,7 @@ fn control_command_s_collapses_the_sidebar_and_floats_it_in_a_narrow_window() {
     window.size = Vec2::new(900.0, 600.0);
     window.idle(&mut app);
     assert!(!window.text.contains("Personal"), "{}", window.text);
-    window.press(&mut app, Key::S, Modifiers::COMMAND | Modifiers::CTRL);
+    window.press(&mut app, SIDEBAR.1, SIDEBAR.0);
     assert!(app.ui.sidebar_float);
     assert!(!app.ui.sidebar_hidden, "the float is not kept");
     assert!(window.text.contains("Personal"), "{}", window.text);
@@ -1185,7 +1207,7 @@ fn control_command_s_collapses_the_sidebar_and_floats_it_in_a_narrow_window() {
     assert!(!app.ui.sidebar_float, "a choice closes the sidebar");
     assert!(!window.text.contains("Personal"), "{}", window.text);
     // A click outside closes it too.
-    window.press(&mut app, Key::S, Modifiers::COMMAND | Modifiers::CTRL);
+    window.press(&mut app, SIDEBAR.1, SIDEBAR.0);
     assert!(app.ui.sidebar_float);
     window.click_at(&mut app, Pos2::new(700.0, 300.0));
     assert!(!app.ui.sidebar_float, "a click outside closes the sidebar");
@@ -1323,7 +1345,11 @@ fn welcome_choices_and_second_mac_passphrase_work_with_the_keyboard() {
     assert_eq!(app.ui.start, super::start::Step::Create);
     window.tab_to(&mut app, "Back", 20);
     window.press(&mut app, Key::Enter, Modifiers::NONE);
-    window.tab_to(&mut app, "Use a vault from another Mac", 20);
+    window.tab_to(
+        &mut app,
+        concat!("Use a vault from another ", crate::computer!()),
+        20,
+    );
     window.press(&mut app, Key::Enter, Modifiers::NONE);
     assert_eq!(app.ui.start, super::start::Step::OpenSynced);
     let file = dir.path().join("Team.apassy");
@@ -1387,7 +1413,7 @@ fn wrong_synced_passphrase_shows_clear_error_and_allows_keyboard_retry() {
     app.sync.offered = true;
     super::sync::begin_open(&mut app);
     app.sync_select_open_file(file.clone(), false, None);
-    app.vault_list.name_input = "Team on this Mac".to_owned();
+    app.vault_list.name_input = concat!("Team on this ", crate::computer!()).to_owned();
     let mut window = Window::new();
     window.idle(&mut app);
     window.press(&mut app, Key::Tab, Modifiers::NONE);
@@ -1421,7 +1447,10 @@ fn wrong_synced_passphrase_shows_clear_error_and_allows_keyboard_retry() {
     );
     assert!(app.owner_ui.passphrase.is_empty());
     assert_eq!(app.sync.open_pick, Some(file));
-    assert_eq!(app.vault_list.name_input, "Team on this Mac");
+    assert_eq!(
+        app.vault_list.name_input,
+        concat!("Team on this ", crate::computer!())
+    );
     assert!(app.vault_list.registry.is_empty());
     window.frame(
         &mut app,
@@ -1431,7 +1460,7 @@ fn wrong_synced_passphrase_shows_clear_error_and_allows_keyboard_retry() {
     assert!(!app.owner_ui.session.is_locked(), "{}", app.status_text);
     assert_eq!(
         app.current_vault_name().as_deref(),
-        Some("Team on this Mac")
+        Some(concat!("Team on this ", crate::computer!()))
     );
 }
 

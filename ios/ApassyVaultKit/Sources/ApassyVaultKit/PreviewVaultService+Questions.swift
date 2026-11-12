@@ -47,6 +47,8 @@ public struct PreviewQuestions: Sendable {
 
     var history: [RequestHistoryVault] = []
     var enabled = false
+    /// The hosted relay ended the questions of the selected vault's team (410, plan s7 R3).
+    var relayEnded = false
     var reportVaultScope = false
     var questions: [RemoteQuestion] = []
     var answerKey: Data?
@@ -173,6 +175,10 @@ extension PreviewVaultService {
     /// `unreachable`, the node does not answer: the list of the selected vault alone fails with
     /// `relay_unreachable`, as the core's when every vault failed; with other vaults, the vault
     /// has that error.
+    /// As the core after a 410 `free_connect_ended` or `hosted_retired`: the status of the selected
+    /// vault says so, and the push token goes there no more.
+    public func setQuestionsRelayEnded(_ ended: Bool) { questionsState.relayEnded = ended }
+
     public func setQuestionsNode(_ node: NodeInfo?, unreachable: Bool = false) {
         questionsState.node = node
         questionsState.nodeUnreachable = node != nil && unreachable
@@ -302,6 +308,7 @@ extension PreviewVaultService {
             answerKey: questionsState.answerKey, hasKey: questionsState.enabled,
             registered: questionsState.enabled && questionsState.registered,
             removed: questionsState.enabled && questionsState.removed,
+            relayEnded: questionsState.enabled && questionsState.relayEnded,
             node: questionsState.enabled ? questionsState.node : nil)
     }
 
@@ -508,6 +515,11 @@ extension PreviewVaultService {
 
     public func pushTokenSet(token: Data, environment: PushEnvironment) async throws {
         if questionsState.others.isEmpty { try requireQuestions() }
+        if questionsState.others.isEmpty, questionsState.relayEnded {
+            throw VaultError(
+                .relayEnded,
+                "Approvals through this relay have ended. Pair this iPhone again from Apassy on your Mac.")
+        }
         if questionsState.enabled { questionsState.pushToken = token }
         for at in questionsState.others.indices where questionsState.others[at].open {
             questionsState.others[at].pushToken = token

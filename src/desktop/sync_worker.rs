@@ -79,6 +79,28 @@
 //! notification through the hook of the app ([`SyncWorker::set_stuck_notifier`]). A
 //! sync that works ends the streak (docs/operations/sync.md, section 7).
 //!
+//! A vault store of Apassy Connect (plan s7 unit M3) has the plan states of its account
+//! ([`ConnectState`]): "Connect: past due" while the grace lasts (sync works), and
+//! "Connect: read-only until <date>" once Connect refuses pushes with `403
+//! plan_required`. Then the pulls go on (the waiter's new versions and every
+//! [`RELAY_PULL_EVERY`]), each merge is kept, a change of this Mac stays on this Mac and
+//! does not ask the relay every few seconds, and the next sync that pushes ends the
+//! state. A store whose account is signed out on this Mac waits with "Connect: signed
+//! out" until Settings › Connect signs in.
+//!
+//! A relay copy on the hosted relay whose free path ended (`410 free_connect_ended`, or
+//! `410 hosted_retired` once the hosted relay serves Apassy Connect only; plan s7 unit
+//! M5) stops at the first refusal: the worker and the waiter ask that relay nothing more
+//! for this sync ([`ConnectState::HostedEnded`]), the vault on this Mac stays as it is,
+//! and the window offers the choices of the notice (your own node, or Apassy Connect).
+//! Another sync of the vault (a move) starts again.
+//!
+//! A vault store that Apassy Connect deleted when an account was recovered
+//! ([`crate::sync::RelaySync::store_deleted`], which the window sets from the account file)
+//! stops the same way: the worker and the waiter ask Connect nothing more for it, its row
+//! shows [`ConnectState::StoreDeleted`] for every vault of the list, and the window says it
+//! once ([`deleted_copy_words`]). The vault on this Mac stays as it is.
+//!
 //! The waiter thread never takes the op lock or the schedule mutex. It takes the plan
 //! mutex for a copy, then the vault mutex alone and only to see whether the vault is
 //! unlocked. It waits on the relay with no lock held, then sets the pull flag and takes
@@ -97,8 +119,10 @@ use eframe::egui;
 use crate::broker::SharedVault;
 use crate::desktop::sync_health::{LogDetails, StuckNotice, SyncHealth, SyncKind};
 use crate::native::SyncStuckReason;
+use crate::relay::membership::PathEnded;
 use crate::sync::{
-    FileStatus, FolderSync, RelayPoll, RelayRefusal, RelaySync, SyncError, SyncOutcome, VaultSync,
+    FileStatus, FolderSync, RelayPoll, RelayRefusal, RelaySync, StoreDeleted, StorePlan, SyncError,
+    SyncOutcome, VaultSync, is_plan_refusal, waits_for_account,
 };
 use crate::vault::{Vault, VaultErrorKind};
 
@@ -139,6 +163,13 @@ const STOP_WAIT: Duration = Duration::from_secs(5);
 pub(crate) const BEFORE_LOCK_LIMIT: Duration = Duration::from_secs(10);
 /// The most events that wait for a frame. A hidden window can draw none for hours.
 const MAX_EVENTS: usize = 32;
+/// How often the worker adds the newer verified devices of the Connect account to the
+/// vault stores of the list (plan s7 unit M5; connect-account-v1 sections 7.5 and 8).
+pub(crate) const REGISTER_EVERY: Duration = Duration::from_secs(5 * 60);
+
+/// The Connect account of this Mac as the window hands it to the worker: the account in
+/// memory, which the worker locks only for its Connect calls.
+pub(crate) type AccountSlot = crate::connect::AccountSlot;
 
 /// The lock around each sync operation that changes files. Take it before the vault
 /// mutex.
@@ -165,6 +196,80 @@ pub(crate) enum UiStatus {
     Damaged,
     /// Another problem, in words.
     Problem(String),
+    /// A vault store of Apassy Connect in a plan state of its account.
+    Connect(ConnectState),
+}
+
+/// The plan state of a vault store of Apassy Connect, for its status (plan s7 unit M3,
+/// connect-billing-v1 section 8). Times are Unix seconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConnectState {
+    /// `past_due` within its grace: the sync works until `grace_until`. `last` is the
+    /// time of the last sync.
+    PastDue {
+        last: Option<u64>,
+        grace_until: Option<u64>,
+    },
+    /// Connect refuses pushes; pulls work until `until`.
+    ReadOnly { until: Option<u64> },
+    /// Connect refuses pulls too; the copy goes at `delete_at`.
+    Suspended { delete_at: Option<u64> },
+    /// The account of this Mac is signed out: the sync waits for "Sign In…".
+    SignedOut,
+    /// The hosted relay ended this free relay copy (`410`, plan s7 unit M5): Apassy asks
+    /// it nothing more, and the vault on this Mac is safe. The choices: your own node, or
+    /// Apassy Connect.
+    HostedEnded(PathEnded),
+    /// Apassy Connect deleted the vault store of this vault when an account was recovered
+    /// (connect-account-v1 section 9): Apassy asks it nothing more, and the vault on this
+    /// Mac is safe. The choice: a new vault store for the vault.
+    StoreDeleted(StoreDeleted),
+}
+
+/// The state of a vault store that Apassy Connect deleted at a recovery, in a sentence.
+pub(crate) fn deleted_copy_words(why: StoreDeleted) -> &'static str {
+    match why {
+        StoreDeleted::Recovered => {
+            "The copy of this vault at Apassy Connect was deleted when the account was recovered."
+        }
+        StoreDeleted::OwnerRecovered => {
+            "The copy of this vault at Apassy Connect was deleted when the person who shares it with you recovered their account."
+        }
+    }
+}
+
+/// The state of a free relay copy whose path the hosted relay ended, in a sentence: the
+/// vault on this Mac is safe, and the two choices of the notice (plan s7 unit M5; plans
+/// section 5: relay sync is not the paid feature, Apassy Connect is).
+pub(crate) fn ended_copy_words(why: PathEnded) -> String {
+    let head = match why {
+        PathEnded::FreeEnded => format!(
+            "Relay sync on apassy-relay.wyderka.cc ended with Apassy {}.",
+            crate::relay::membership::FREE_RELAY_PATHS_END_VERSION
+        ),
+        PathEnded::Retired => "apassy-relay.wyderka.cc no longer keeps relay copies.".to_owned(),
+    };
+    format!(
+        concat!(
+            "{} The vault on this ",
+            crate::computer!(),
+            " is safe and does not change. Make your own ",
+            crate::computer!(),
+            " or Linux node the sync home (free), or move the copy to Apassy Connect."
+        ),
+        head
+    )
+}
+
+impl ConnectState {
+    /// The state after a refused push of a store, from the plan the window read last.
+    pub(crate) fn refused(plan: Option<StorePlan>) -> Self {
+        match plan {
+            Some(StorePlan::Suspended { delete_at }) => Self::Suspended { delete_at },
+            Some(StorePlan::ReadOnly { until }) => Self::ReadOnly { until },
+            _ => Self::ReadOnly { until: None },
+        }
+    }
 }
 
 impl UiStatus {
@@ -216,6 +321,9 @@ struct Plan {
     names: BTreeMap<String, String>,
     /// The vault slot of the session.
     vault: Option<SharedVault>,
+    /// The Connect account of this Mac while the app has an account session
+    /// ([`SyncWorker::set_account`]).
+    account: Option<AccountSlot>,
 }
 
 /// The schedule. Only a step holds it.
@@ -233,6 +341,12 @@ struct Schedule {
     /// Relay syncs that failed in a row, and when the next one may run.
     relay_failures: u32,
     relay_retry_at: Option<Instant>,
+    /// Connect refuses the pushes of the open vault store (read-only): a change of this
+    /// Mac waits for a pull, which tries the push once more, instead of its own sync.
+    read_only: bool,
+    /// When the worker adds the newer devices of the account to the vault stores next.
+    /// `None`: at the first step with an account.
+    next_register: Option<Instant>,
 }
 
 /// What the window reads.
@@ -252,6 +366,20 @@ impl Output {
             self.events.remove(0);
         }
         self.events.push(event);
+    }
+
+    /// The status of a vault store that was deleted at a recovery for `id`, with its note
+    /// when the status is new. Returns whether it changed.
+    fn show_deleted(&mut self, id: &str, why: StoreDeleted) -> bool {
+        let status = UiStatus::Connect(ConnectState::StoreDeleted(why));
+        let changed = self.statuses.insert(id.to_owned(), status.clone()) != Some(status);
+        if changed {
+            self.push(SyncEvent::Failure {
+                id: id.to_owned(),
+                text: deleted_copy_words(why).to_owned(),
+            });
+        }
+        changed
     }
 }
 
@@ -274,6 +402,10 @@ struct Shared {
     /// Wakes the waiter: a stop, or another open vault. The waiter resets it.
     waiter_wake: Mutex<bool>,
     waiter_woken: Condvar,
+    /// The relay syncs whose hosted relay ended their free path (`410`), by the state
+    /// path of their [`crate::sync::RelayConfig`]: the worker and the waiter call them no
+    /// more. Another relay sync of the same vault has another state path.
+    ended: Mutex<BTreeMap<PathBuf, PathEnded>>,
     /// The sync log and the streaks of failures.
     health: Mutex<SyncHealth>,
     /// The notification of a vault that does not sync.
@@ -281,10 +413,21 @@ struct Shared {
     /// The download requests of the worker, for the tests.
     #[cfg(test)]
     downloads_asked: std::sync::atomic::AtomicUsize,
+    /// The account devices that the worker added to vault stores, for the tests.
+    #[cfg(test)]
+    registered: std::sync::atomic::AtomicUsize,
+    /// The one Apassy Connect account session of the app (plan s7 unit M5b): a vault
+    /// store signs with its key, and with none while it is closed or removed.
+    connect: Mutex<Option<Arc<crate::connect::AccountSession>>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Whether the hosted relay ended the free path of `relay` (`410`).
+fn ended_of(shared: &Shared, relay: &RelaySync) -> Option<PathEnded> {
+    lock(&shared.ended).get(&relay.config().state_path).copied()
 }
 
 fn is_unlocked(vault: &SharedVault) -> bool {
@@ -301,6 +444,7 @@ fn same_vault(sync: &VaultSync, vault: &Vault) -> bool {
 fn kind_of(sync: &VaultSync) -> SyncKind {
     match sync {
         VaultSync::Folder(_) => SyncKind::Folder,
+        VaultSync::Relay(relay) if relay.uses_account_key() => SyncKind::Connect,
         VaultSync::Relay(_) => SyncKind::Relay,
     }
 }
@@ -396,6 +540,7 @@ impl Shared {
             *schedule = Schedule {
                 generation,
                 downloads: std::mem::take(&mut schedule.downloads),
+                next_register: schedule.next_register,
                 ..Schedule::default()
             };
             self.relay_backoff.store(false, Ordering::SeqCst);
@@ -429,6 +574,14 @@ impl Shared {
         {
             self.show_removed(id);
         }
+        // A relay copy whose free path ended asks nothing more (plan s7 unit M5), nor does
+        // a vault store that Connect deleted at a recovery.
+        let ended = relay.and_then(|relay| ended_of(self, relay));
+        let deleted = relay.and_then(RelaySync::store_deleted);
+        if let (Some(why), Some((id, _))) = (deleted, &open) {
+            self.show_deleted(id, why);
+        }
+        let removed = removed || ended.is_some() || deleted.is_some();
         if removed {
             self.pull.store(false, Ordering::SeqCst);
         }
@@ -478,6 +631,7 @@ impl Shared {
         if settled
             && unlocked
             && relay_due
+            && !schedule.read_only
             && let (Some((id, sync)), Some(vault)) = (&open, &vault)
         {
             self.sync_open(now, &mut schedule, id, sync, vault);
@@ -485,6 +639,7 @@ impl Shared {
         if schedule.next_check.is_none_or(|at| now >= at) {
             self.check(now, &mut schedule, open.as_ref(), vault.as_ref());
         }
+        let register = self.register_step(now, &mut schedule);
         let unlocked = vault.as_ref().is_some_and(is_unlocked);
         let local = schedule
             .next_local_check
@@ -506,6 +661,7 @@ impl Shared {
             relay_pull,
             removed_try,
             lock_check,
+            register,
         ]
         .into_iter()
         .flatten()
@@ -601,6 +757,13 @@ impl Shared {
         sync: &VaultSync,
         vault: &SharedVault,
     ) {
+        // A vault store takes the account key of the session now (plan s7 unit M5b).
+        if let (Some(relay), Some(session)) = (sync.as_relay(), lock(&self.connect).clone())
+            && relay.uses_account_key()
+            && session.store().is_some()
+        {
+            relay.set_account_signer(session.signer());
+        }
         let result = match sync {
             VaultSync::Relay(_) => sync.sync_shared(vault, |open| same_vault(sync, open)),
             VaultSync::Folder(_) => {
@@ -608,11 +771,58 @@ impl Shared {
                 sync.sync_shared(vault, |open| same_vault(sync, open))
             }
         };
+        if let (Err(err), Some(relay)) = (&result, sync.as_relay())
+            && waits_for_account(relay, *err)
+        {
+            // A vault store whose account is signed out on this Mac: it waits for
+            // "Sign In…" in Settings › Connect, and says so once.
+            schedule.next_relay_pull = Some(now + RELAY_PULL_EVERY);
+            let status = UiStatus::Connect(ConnectState::SignedOut);
+            let changed = lock(&self.out)
+                .statuses
+                .insert(id.to_owned(), status.clone())
+                != Some(status);
+            if changed {
+                self.repaint();
+            }
+            return;
+        }
         if result == Err(SyncError::Vault(VaultErrorKind::Locked)) {
             // The vault locked or changed: nothing to tell.
             return;
         }
+        if let (Err(SyncError::StoreDeleted), Some(relay)) = (&result, sync.as_relay())
+            && let Some(why) = relay.store_deleted()
+        {
+            // The vault store went at a recovery: as an ended copy, one state and one note,
+            // no retry.
+            self.relay_backoff.store(true, Ordering::SeqCst);
+            schedule.relay_failures = 0;
+            schedule.relay_retry_at = None;
+            schedule.next_relay_pull = None;
+            schedule.changed_since = None;
+            lock(&self.out).change_waits = false;
+            self.show_deleted(id, why);
+            return;
+        }
+        if let (Err(err), Some(relay)) = (&result, sync.as_relay())
+            && let Some(why) = PathEnded::of_sync(*err)
+        {
+            // The hosted relay ended this free relay copy: no back-off and no retry, one
+            // state and one note. The vault on this Mac does not change.
+            self.relay_backoff.store(true, Ordering::SeqCst);
+            schedule.relay_failures = 0;
+            schedule.relay_retry_at = None;
+            schedule.next_relay_pull = None;
+            schedule.changed_since = None;
+            lock(&self.out).change_waits = false;
+            self.show_ended(id, relay, why);
+            return;
+        }
         let relay = sync.as_relay().is_some();
+        let store = sync.as_relay().filter(|relay| relay.uses_account_key());
+        let read_only = matches!(result, Err(err) if is_plan_refusal(err)) && store.is_some();
+        schedule.read_only = read_only;
         if relay {
             match result {
                 Ok(_) => {
@@ -620,6 +830,14 @@ impl Shared {
                     schedule.relay_retry_at = None;
                     schedule.next_relay_pull = Some(now + RELAY_PULL_EVERY);
                     self.relay_backoff.store(false, Ordering::SeqCst);
+                }
+                Err(_) if read_only => {
+                    // Read-only: the pulls keep their times, and the step before a lock
+                    // does not push. Nothing waits for a back-off.
+                    self.relay_backoff.store(true, Ordering::SeqCst);
+                    schedule.relay_failures = 0;
+                    schedule.relay_retry_at = None;
+                    schedule.next_relay_pull = Some(now + RELAY_PULL_EVERY);
                 }
                 Err(SyncError::RemovedFromRelay)
                     if sync.as_relay().is_some_and(RelaySync::is_removed) =>
@@ -651,16 +869,38 @@ impl Shared {
                 .flatten()
                 .and_then(|state| state.last_sync_at)
         });
-        self.record(now, id, sync, &result);
+        if !read_only {
+            // A read-only plan is a state of the account, not a sync that is stuck.
+            self.record(now, id, sync, &result);
+        }
         let id = id.to_owned();
         {
             let mut out = lock(&self.out);
             out.change_waits = false;
             match result {
                 Ok(outcome) => {
-                    out.statuses
-                        .insert(id.clone(), UiStatus::UpToDate(last.flatten()));
+                    let status = match store.and_then(RelaySync::store_plan) {
+                        Some(StorePlan::PastDue { grace_until }) => {
+                            UiStatus::Connect(ConnectState::PastDue {
+                                last: last.flatten(),
+                                grace_until,
+                            })
+                        }
+                        _ => UiStatus::UpToDate(last.flatten()),
+                    };
+                    out.statuses.insert(id.clone(), status);
                     out.push(SyncEvent::Synced { id, outcome });
+                }
+                Err(_) if read_only => {
+                    let plan = store.and_then(RelaySync::store_plan);
+                    let status = UiStatus::Connect(ConnectState::refused(plan));
+                    let before = out.statuses.insert(id.clone(), status.clone());
+                    if before.as_ref() != Some(&status) {
+                        out.push(SyncEvent::Failure {
+                            id,
+                            text: "Sync: Apassy Connect takes no changes from this account now. Apassy still downloads the changes of your other devices, and keeps the changes of this Mac here until the plan is active again.".to_owned(),
+                        });
+                    }
                 }
                 Err(err) => {
                     let status = UiStatus::from_error(err);
@@ -673,10 +913,13 @@ impl Shared {
                                 out.push(SyncEvent::NeedsPassphrase(id));
                             }
                             SyncError::Damaged => out.push(SyncEvent::Damaged(id)),
+                            // A head whose signer is not verified yet: the window
+                            // reads the lists again, and its status line says so.
                             SyncError::FolderUnavailable
                             | SyncError::NotDownloaded
                             | SyncError::RelayUnreachable
-                            | SyncError::RelayBusy => {}
+                            | SyncError::RelayBusy
+                            | SyncError::ChecksDeviceList => {}
                             other => out.push(SyncEvent::Failure {
                                 id,
                                 text: format!("Sync: {other}."),
@@ -687,6 +930,88 @@ impl Shared {
             }
         }
         self.repaint();
+    }
+
+    /// Every [`REGISTER_EVERY`] while the app has a Connect account session: the newer
+    /// devices of the account join each vault store of the list
+    /// (`RelaySync::register_account_devices`; only verified devices, connect-account-v1
+    /// section 7.5, `ConnectAccount::register_own_store_device`), without the owner
+    /// opening Settings. No owner check, as at the start of a store. An account that a
+    /// call of the window holds waits for the next round. Returns the next time.
+    fn register_step(&self, now: Instant, schedule: &mut Schedule) -> Option<Instant> {
+        let (account, stores) = {
+            let plan = lock(&self.plan);
+            let stores: Vec<RelaySync> = plan
+                .synced
+                .iter()
+                .filter_map(|(_, sync)| sync.as_relay())
+                .filter(|relay| relay.uses_account_key())
+                .cloned()
+                .collect();
+            (plan.account.clone(), stores)
+        };
+        let account = account?;
+        if stores.is_empty() {
+            return None;
+        }
+        if schedule.next_register.is_some_and(|at| now < at) {
+            return schedule.next_register;
+        }
+        schedule.next_register = Some(now + REGISTER_EVERY);
+        let added = match account.try_lock() {
+            Ok(mut guard) => match guard.as_mut() {
+                Some(account) => stores
+                    .iter()
+                    .filter_map(|relay| relay.register_account_devices(account).ok())
+                    .map(|names| names.len())
+                    .sum(),
+                None => 0,
+            },
+            Err(_) => {
+                // The window uses the account now: the next round tries again soon.
+                schedule.next_register = Some(now + CHECK_EVERY);
+                0
+            }
+        };
+        #[cfg(test)]
+        self.registered
+            .fetch_add(added, std::sync::atomic::Ordering::SeqCst);
+        #[cfg(not(test))]
+        let _ = added;
+        schedule.next_register
+    }
+
+    /// The hosted relay ended the free path of `relay`, the relay sync of the vault `id`
+    /// (`410`): it gets no call any more, its row shows [`ConnectState::HostedEnded`], and
+    /// the window says it once ([`ended_copy_words`]).
+    fn show_ended(&self, id: &str, relay: &RelaySync, why: PathEnded) {
+        lock(&self.ended).insert(relay.config().state_path.clone(), why);
+        let status = UiStatus::Connect(ConnectState::HostedEnded(why));
+        let changed = {
+            let mut out = lock(&self.out);
+            let before = out.statuses.insert(id.to_owned(), status.clone());
+            let changed = before.as_ref() != Some(&status);
+            if changed {
+                out.push(SyncEvent::Failure {
+                    id: id.to_owned(),
+                    text: ended_copy_words(why),
+                });
+            }
+            changed
+        };
+        if changed {
+            self.repaint();
+        }
+    }
+
+    /// The vault store of the vault `id` was deleted at a recovery
+    /// ([`RelaySync::store_deleted`]): its row shows [`ConnectState::StoreDeleted`], and the
+    /// window says it once ([`deleted_copy_words`]).
+    fn show_deleted(&self, id: &str, why: StoreDeleted) {
+        let changed = lock(&self.out).show_deleted(id, why);
+        if changed {
+            self.repaint();
+        }
     }
 
     /// Tell [`SyncHealth`] the result of a sync of the vault `id`, and post its notice.
@@ -763,11 +1088,16 @@ impl Shared {
         let previous = lock(&self.out).statuses.clone();
         let mut statuses = BTreeMap::new();
         let mut observed = None;
+        // The vault stores that were deleted at a recovery: each says it once.
+        let mut deleted = Vec::new();
         for (id, sync) in synced {
             let kept = previous.get(&id).filter(|status| {
                 matches!(
                     status,
-                    UiStatus::NeedsPassphrase | UiStatus::Damaged | UiStatus::Problem(_)
+                    UiStatus::NeedsPassphrase
+                        | UiStatus::Damaged
+                        | UiStatus::Problem(_)
+                        | UiStatus::Connect(_)
                 )
             });
             let status = match &sync {
@@ -808,11 +1138,21 @@ impl Shared {
                 }
                 // The relay status needs the key: the last known state, or the result
                 // of the last sync of the worker.
-                VaultSync::Relay(sync) => match (kept, sync.state()) {
-                    (Some(kept), Ok(Some(_))) => kept.clone(),
-                    (_, Ok(Some(state))) => UiStatus::UpToDate(state.last_sync_at),
-                    (_, Ok(None)) => UiStatus::from_error(SyncError::NotEnabled),
-                    (_, Err(err)) => UiStatus::from_error(err),
+                VaultSync::Relay(sync) => match (sync.store_deleted(), kept, sync.state()) {
+                    (Some(why), _, Ok(Some(_))) => {
+                        deleted.push((id.clone(), why));
+                        UiStatus::Connect(ConnectState::StoreDeleted(why))
+                    }
+                    // The mark went (the window found the store again): the next sync says.
+                    (
+                        None,
+                        Some(UiStatus::Connect(ConnectState::StoreDeleted(_))),
+                        Ok(Some(state)),
+                    ) => UiStatus::UpToDate(state.last_sync_at),
+                    (_, Some(kept), Ok(Some(_))) => kept.clone(),
+                    (_, _, Ok(Some(state))) => UiStatus::UpToDate(state.last_sync_at),
+                    (_, _, Ok(None)) => UiStatus::from_error(SyncError::NotEnabled),
+                    (_, _, Err(err)) => UiStatus::from_error(err),
                 },
             };
             statuses.insert(id, status);
@@ -827,6 +1167,15 @@ impl Shared {
             }
             let changed = out.statuses != statuses;
             out.statuses = statuses;
+            for (id, why) in deleted {
+                let status = UiStatus::Connect(ConnectState::StoreDeleted(why));
+                if previous.get(&id) != Some(&status) {
+                    out.push(SyncEvent::Failure {
+                        id,
+                        text: deleted_copy_words(why).to_owned(),
+                    });
+                }
+            }
             changed
         };
         if changed {
@@ -874,10 +1223,12 @@ fn wait_for_relay(shared: &Shared) {
                 plan.vault.clone(),
             )
         };
-        let ready = open
-            .as_ref()
-            .is_some_and(|(_, relay)| relay.has_session() && !relay.is_removed())
-            && vault.as_ref().is_some_and(is_unlocked);
+        let ready = open.as_ref().is_some_and(|(_, relay)| {
+            relay.has_session()
+                && !relay.is_removed()
+                && ended_of(shared, relay).is_none()
+                && relay.store_deleted().is_none()
+        }) && vault.as_ref().is_some_and(is_unlocked);
         let Some((id, relay)) = open.filter(|_| ready) else {
             signalled = None;
             if !shared.waiter_sleep(RELAY_IDLE) {
@@ -903,6 +1254,14 @@ fn wait_for_relay(shared: &Shared) {
                 signalled = None;
                 // A full long poll is the normal answer; an early one is not.
                 started.elapsed() >= RELAY_WAIT / 2
+            }
+            Err(error) if PathEnded::of_sync(error).is_some() => {
+                // The hosted relay ended this free relay copy: the worker shows it at its
+                // next step, and the waiter asks no more.
+                if let Some(why) = PathEnded::of_sync(error) {
+                    shared.show_ended(&id, &relay, why);
+                }
+                false
             }
             Err(SyncError::RemovedFromRelay) if relay.is_removed() => {
                 // The relay refused this device: the window shows it now, and the next
@@ -1076,6 +1435,21 @@ impl SyncWorker {
         }
     }
 
+    /// The Connect account of this Mac while the app has an account session (plan s7
+    /// unit M5): the worker adds the newer verified devices of the account to the vault
+    /// stores every [`REGISTER_EVERY`]. `None` after a sign-out.
+    pub(crate) fn set_account(&self, account: Option<AccountSlot>) {
+        let mut plan = lock(&self.shared.plan);
+        let same = match (&plan.account, &account) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            plan.account = account;
+        }
+    }
+
     /// The window synced, or the step before a lock did: the schedule starts again, and
     /// no change waits.
     pub(crate) fn reset(&self) {
@@ -1101,6 +1475,11 @@ impl SyncWorker {
     /// no log.
     pub(crate) fn set_log(&self, log: Option<PathBuf>) {
         lock(&self.shared.health).set_log(log);
+    }
+
+    /// The account session whose key the vault stores of Apassy Connect sign with.
+    pub(crate) fn set_connect(&self, session: Arc<crate::connect::AccountSession>) {
+        *lock(&self.shared.connect) = Some(session);
     }
 
     /// The name of each vault of the list, by list ID, for a notification.
@@ -1574,6 +1953,131 @@ mod tests {
             assert_eq!(
                 b.sync(lock(&vault).as_mut().unwrap()).unwrap_err(),
                 SyncError::StaleCopy
+            );
+        }
+
+        /// Plan s7 unit M5: the hosted relay ends a free relay copy (`410 hosted_retired`
+        /// on every sync route). The worker and the waiter stop at the first refusal: no
+        /// back-off loop, one state with the choices, one note, and the vault on this Mac
+        /// as it was.
+        #[test]
+        fn a_relay_copy_that_the_hosted_relay_ended_stops_at_the_first_410() {
+            use crate::desktop::fake_relay::HOSTED_RETIRED;
+            let root = tempfile::TempDir::new().expect("dir");
+            let relay = FakeRelay::start();
+            let (_a, _vault_a, b, mut vault_b) = pair(root.path(), &relay);
+            vault_b.add(item("Beta")).expect("add");
+            let items = vault_b.search("").expect("search").len();
+            relay.fail_next("GET /v1/sync", 1_000, HOSTED_RETIRED);
+            relay.fail_next("PUT /v1/sync", 1_000, HOSTED_RETIRED);
+            relay.fail_next("POST /v1/sync", 1_000, HOSTED_RETIRED);
+            let vault: SharedVault = Arc::new(Mutex::new(Some(vault_b)));
+            let before = relay.count("GET /v1/sync") + relay.count("PUT /v1/sync");
+            // The vault is in the list too, as in the app: the statuses of the list keep
+            // the state.
+            let mut worker = SyncWorker::default();
+            worker.set_synced_all(vec![("b".to_owned(), VaultSync::Relay(b.clone()))]);
+            worker.track_sync(
+                Some(("b".to_owned(), VaultSync::Relay(b.clone()))),
+                Arc::clone(&vault),
+            );
+            worker.start(&egui::Context::default());
+            std::thread::sleep(Duration::from_secs(4));
+            let asked = relay.count("GET /v1/sync") + relay.count("PUT /v1/sync") - before;
+            let status = worker.statuses().get("b").cloned();
+            let events = worker.take_events();
+            drop(worker);
+            assert!(
+                (1..=3).contains(&asked),
+                "{asked} sync requests in 4 s: {:?}",
+                relay.log()
+            );
+            assert_eq!(
+                status,
+                Some(UiStatus::Connect(ConnectState::HostedEnded(
+                    PathEnded::Retired
+                ))),
+                "{events:?} {:?}",
+                relay.log()
+            );
+            let notes: Vec<_> = events
+                .iter()
+                .filter(|event| matches!(event, SyncEvent::Failure { .. }))
+                .collect();
+            assert_eq!(notes.len(), 1, "one note: {events:?}");
+            assert_eq!(
+                lock(&vault)
+                    .as_ref()
+                    .unwrap()
+                    .search("")
+                    .expect("search")
+                    .len(),
+                items,
+                "nothing local is lost"
+            );
+        }
+
+        /// A vault store that Connect deleted at a recovery (the window marked its relay
+        /// sync) is asked nothing: no sync of the worker, no long poll of the waiter, no
+        /// push at a change; its row (also of a vault that is not open) says it, and one
+        /// note says it once.
+        #[test]
+        fn a_store_deleted_at_a_recovery_is_asked_nothing_and_said_once() {
+            let root = tempfile::TempDir::new().expect("dir");
+            let relay = FakeRelay::start();
+            let (a, _vault_a, b, mut vault_b) = pair(root.path(), &relay);
+            vault_b.add(item("Beta")).expect("add");
+            b.set_store_deleted(Some(StoreDeleted::Recovered));
+            a.set_store_deleted(Some(StoreDeleted::OwnerRecovered));
+            let vault: SharedVault = Arc::new(Mutex::new(Some(vault_b)));
+            let before = relay.log().len();
+            let mut worker = SyncWorker::default();
+            worker.set_synced_all(vec![
+                ("a".to_owned(), VaultSync::Relay(a.clone())),
+                ("b".to_owned(), VaultSync::Relay(b.clone())),
+            ]);
+            worker.track_sync(
+                Some(("b".to_owned(), VaultSync::Relay(b.clone()))),
+                Arc::clone(&vault),
+            );
+            worker.start(&egui::Context::default());
+            // Past the settle time of the change of B.
+            std::thread::sleep(SETTLE + Duration::from_secs(2));
+            worker.refresh();
+            let statuses = worker.statuses();
+            let events = worker.take_events();
+            drop(worker);
+            assert_eq!(relay.log().len(), before, "asked: {:?}", relay.log());
+            assert_eq!(
+                statuses.get("b"),
+                Some(&UiStatus::Connect(ConnectState::StoreDeleted(
+                    StoreDeleted::Recovered
+                ))),
+                "{events:?}"
+            );
+            assert_eq!(
+                statuses.get("a"),
+                Some(&UiStatus::Connect(ConnectState::StoreDeleted(
+                    StoreDeleted::OwnerRecovered
+                )))
+            );
+            let notes: Vec<&String> = events
+                .iter()
+                .filter_map(|event| match event {
+                    SyncEvent::Failure { id, text } if id == "b" => Some(text),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                notes,
+                [&deleted_copy_words(StoreDeleted::Recovered).to_owned()],
+                "one note: {events:?}"
+            );
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, SyncEvent::Damaged(_))),
+                "{events:?}"
             );
         }
 

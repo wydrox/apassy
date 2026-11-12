@@ -39,8 +39,18 @@ async function fixture(t: TestContext, mode: string) {
     node[filename] = { sha256, size: blob.length };
     sums.push(`${sha256}  ${filename}`);
   }
+  const vault: Record<string, { sha256: string; size: number }> = {};
+  for (const filename of ['apassy-vault-0.5.8-linux-x86_64.tar.gz', 'apassy-vault-0.5.8-linux-aarch64.tar.gz',
+    'apassy-vault_0.5.8_amd64.deb', 'apassy-vault_0.5.8_arm64.deb']) {
+    if (mode === 'no-vault' && filename.endsWith('_amd64.deb')) continue;
+    const blob = Buffer.from(filename);
+    const sha256 = createHash('sha256').update(blob).digest('hex');
+    files.set('/dl/' + filename, blob);
+    vault[filename] = { sha256, size: blob.length };
+    sums.push(`${sha256}  ${filename}`);
+  }
   files.set('/dl/SHA256SUMS', Buffer.from(sums.join('\n') + '\n'));
-  files.set('/dl/release.json', Buffer.from(JSON.stringify({ version: '0.5.8', commit, artifacts, node })));
+  files.set('/dl/release.json', Buffer.from(JSON.stringify({ version: '0.5.8', commit, artifacts, node, vault })));
   files.set('/install.sh', Buffer.from('installer'));
   files.set('/guide', Buffer.from('guide'));
   for (const [path, blob] of files) {
@@ -100,15 +110,22 @@ test('reproduces urllib 403/1010 and verifies every file with an application use
   assert.match(legacy.stdout, /403 error code: 1010/);
   const result = await f.run();
   assert.match(result.stdout, /PASS public delivery: 0.5.8/);
-  assert.equal(f.requests.length, 11);
+  assert.equal(f.requests.length, 15);
   assert.ok(f.requests.slice(1).every(r => r.ua === 'apassy-release-check/0.5.8' && r.method === 'GET'));
   assert.ok(f.requests.some(r => r.path === '/dl/apassy_0.5.8_arm64.deb'));
-  assert.equal(readdirSync(f.evidence).length, 10);
+  assert.ok(f.requests.some(r => r.path === '/dl/apassy-vault_0.5.8_arm64.deb'));
+  assert.equal(readdirSync(f.evidence).length, 14);
 });
 
 test('a staging without one of the Linux node packages is refused before any request', async t => {
   const f = await fixture(t, 'no-node');
   await assert.rejects(f.run(), /apassy_0\.5\.8_arm64\.deb/);
+  assert.equal(f.requests.length, 0);
+});
+
+test('a staging without one of the Linux vault packages is refused before any request', async t => {
+  const f = await fixture(t, 'no-vault');
+  await assert.rejects(f.run(), /apassy-vault_0\.5\.8_amd64\.deb/);
   assert.equal(f.requests.length, 0);
 });
 

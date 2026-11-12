@@ -110,6 +110,14 @@ impl Hold {
 /// The failure of a scripted `403 feed_rate` ([`FakeRelay::rate_feed_reads`]): no real
 /// status, so `fail_next` keeps its plain statuses.
 const FEED_RATE: u16 = 1403;
+/// Scripted `410 free_connect_ended` for [`FakeRelay::fail_next`] (plan s7 unit M5): the
+/// hosted relay ended the free path of a team.
+#[allow(dead_code)]
+pub const FREE_CONNECT_ENDED: u16 = 1410;
+/// Scripted `410 hosted_retired` for [`FakeRelay::fail_next`]: the hosted relay serves
+/// Apassy Connect only.
+#[allow(dead_code)]
+pub const HOSTED_RETIRED: u16 = 2410;
 
 #[derive(Clone)]
 struct Device {
@@ -174,6 +182,9 @@ struct Team {
     /// setting when it was made; `None` for a team of a team code (the relay's
     /// `max_bytes`). `Some(0)`: a push and a receipt are 403 `plan_required`.
     sync_bytes: Option<u64>,
+    /// The head view serves no head below this version in its chain (a relay that cut
+    /// the history it serves, [`FakeRelay::cut_chain_below`]).
+    cut_below: u64,
 }
 
 /// The feed of one device: the envelope as the text that came.
@@ -309,7 +320,18 @@ struct Relay {
     feed_not_newer: bool,
     /// The next feed reads (`GET /v1/feed`) get `403 feed_rate` (a scripted answer).
     feed_rate_next: usize,
+    /// The vault stores of Apassy Connect ([`FakeRelay::add_store_team`]): relay-sync-v1
+    /// teams of kind `account` that the fake Connect makes.
+    store_teams: std::collections::BTreeSet<String>,
+    /// Whether a device link of a store may add the key (connect-account-v1 section 8:
+    /// a device of the same account, or of a member of the same group). `false` is
+    /// `403 not_in_group` at the confirmation.
+    store_guard: Option<StoreGuard>,
 }
+
+/// The check of [`FakeRelay::set_store_guard`]: the store, the key of the device that a
+/// link would add, and the device id it would get.
+pub type StoreGuard = Arc<dyn Fn(&str, &[u8], u64) -> bool + Send + Sync>;
 
 /// A running fake relay. It stops when dropped.
 pub struct FakeRelay {
@@ -399,6 +421,107 @@ impl FakeRelay {
             .expect("team")
             .sync_bytes = Some(bytes);
     }
+    /// A vault store of Apassy Connect (plan s7 unit M3): a relay-sync-v1 team `team_id`
+    /// (the id that the client made) named `name` with the account key `public_key` as
+    /// its device 1 of its kind, made by the fake Connect on `POST /v1/account/vaults`.
+    /// Returns the device id.
+    pub fn add_store_team(
+        &self,
+        team_id: &str,
+        name: &str,
+        device_name: &str,
+        public_key: &[u8],
+    ) -> u64 {
+        let mut relay = lock(&self.shared.0);
+        let team_id = team_id.to_owned();
+        let device_id = relay.next_device;
+        relay.next_device += 1;
+        relay.teams.insert(
+            team_id.clone(),
+            Team {
+                name: name.to_owned(),
+                devices: vec![Device {
+                    id: device_id,
+                    name: device_name.to_owned(),
+                    public_key: public_key.to_vec(),
+                    live: true,
+                }],
+                ..Team::default()
+            },
+        );
+        relay.store_teams.insert(team_id);
+        device_id
+    }
+
+    /// Add the account key `public_key` to the store `team_id` (`POST
+    /// /v1/account/vaults/{team}/devices` of the fake Connect). Returns its device id.
+    pub fn add_store_device(&self, team_id: &str, device_name: &str, public_key: &[u8]) -> u64 {
+        let mut relay = lock(&self.shared.0);
+        let device_id = relay.next_device;
+        relay.next_device += 1;
+        relay
+            .teams
+            .get_mut(team_id)
+            .expect("store")
+            .devices
+            .push(Device {
+                id: device_id,
+                name: device_name.to_owned(),
+                public_key: public_key.to_vec(),
+                live: true,
+            });
+        device_id
+    }
+
+    /// The device ids and keys of the live devices of `team_id`.
+    pub fn team_devices(&self, team_id: &str) -> Vec<(u64, Vec<u8>)> {
+        lock(&self.shared.0)
+            .teams
+            .get(team_id)
+            .map(|team| {
+                team.devices
+                    .iter()
+                    .filter(|device| device.live)
+                    .map(|device| (device.id, device.public_key.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Delete the store `team_id` with its heads and snapshots.
+    pub fn remove_team(&self, team_id: &str) {
+        let mut relay = lock(&self.shared.0);
+        relay.teams.remove(team_id);
+        relay.store_teams.remove(team_id);
+    }
+
+    /// Whether `team_id` is a team of this relay.
+    pub fn has_team(&self, team_id: &str) -> bool {
+        lock(&self.shared.0).teams.contains_key(team_id)
+    }
+
+    /// The current version of the team `team_id` (0 without a copy or without the team).
+    pub fn version_of(&self, team_id: &str) -> u64 {
+        lock(&self.shared.0)
+            .teams
+            .get(team_id)
+            .map_or(0, Team::version)
+    }
+
+    /// The heads of the team `team_id`, oldest first.
+    pub fn heads_of(&self, team_id: &str) -> Vec<StoredHead> {
+        lock(&self.shared.0)
+            .teams
+            .get(team_id)
+            .map(|team| team.heads.clone())
+            .unwrap_or_default()
+    }
+
+    /// The check of a device link of a store ([`StoreGuard`]).
+    pub fn set_store_guard(&self, guard: StoreGuard) {
+        lock(&self.shared.0).store_guard = Some(guard);
+    }
+
     /// The ids of the Connect teams that the relay made.
     pub fn connect_teams(&self) -> Vec<String> {
         lock(&self.shared.0)
@@ -550,6 +673,34 @@ impl FakeRelay {
         lock(&self.shared.0).teams[&id].heads.clone()
     }
 
+    /// The store `team_id` serves the chain of its head view only from `version` on: the
+    /// heads below are kept, and no device can read them.
+    pub fn cut_chain_below(&self, team_id: &str, version: u64) {
+        lock(&self.shared.0)
+            .teams
+            .get_mut(team_id)
+            .expect("store")
+            .cut_below = version;
+    }
+
+    /// The store `team_id` after the relay dropped its heads below `version`, as the
+    /// maintenance of a long-lived store does: the head answer starts its chain and its
+    /// `kept_from` there.
+    pub fn prune_store_below(&self, team_id: &str, version: u64) {
+        let mut relay = lock(&self.shared.0);
+        let team = relay.teams.get_mut(team_id).expect("store");
+        team.heads.retain(|head| head.version >= version);
+        team.snapshots.retain(|stored, _| *stored >= version);
+    }
+
+    /// The store `team_id` restored from an older backup: every head after `version` goes.
+    pub fn roll_back_store(&self, team_id: &str, version: u64) {
+        let mut relay = lock(&self.shared.0);
+        let team = relay.teams.get_mut(team_id).expect("store");
+        team.heads.retain(|head| head.version <= version);
+        team.snapshots.retain(|stored, _| *stored <= version);
+    }
+
     /// A relay restored from an older backup: every head after `version` goes.
     pub fn roll_back_to(&self, version: u64) {
         let id = self.team_id();
@@ -566,6 +717,21 @@ impl FakeRelay {
         let first = heads.first().expect("a head").0.version;
         let mut relay = lock(&self.shared.0);
         let team = relay.teams.get_mut(&id).expect("team");
+        team.heads.retain(|head| head.version < first);
+        team.snapshots.retain(|stored, _| *stored < first);
+        for (head, bytes) in heads {
+            team.snapshots.insert(head.version, bytes);
+            team.heads.push(head);
+        }
+        self.shared.1.notify_all();
+    }
+
+    /// A forged history of the store `team_id`: the heads from `heads[0].version` on are
+    /// replaced, with their snapshots. The heads are trusted as they are.
+    pub fn replace_store_from(&self, team_id: &str, heads: Vec<(StoredHead, Vec<u8>)>) {
+        let first = heads.first().expect("a head").0.version;
+        let mut relay = lock(&self.shared.0);
+        let team = relay.teams.get_mut(team_id).expect("store");
         team.heads.retain(|head| head.version < first);
         team.snapshots.retain(|stored, _| *stored < first);
         for (head, bytes) in heads {
@@ -1016,6 +1182,8 @@ fn handle(shared: &Arc<(Mutex<Relay>, Condvar)>, mut stream: TcpStream) {
         }
         Some(503) => fail(503, "busy"),
         Some(FEED_RATE) => fail(403, "feed_rate"),
+        Some(FREE_CONNECT_ENDED) => fail(410, "free_connect_ended"),
+        Some(HOSTED_RETIRED) => fail(410, "hosted_retired"),
         Some(status) => fail(status, "relay_error"),
         None => route(shared, &request),
     };
@@ -1093,7 +1261,7 @@ fn head_view(team: &Team, since: u64) -> Value {
     let page: Vec<&StoredHead> = team
         .heads
         .iter()
-        .filter(|head| head.version > since)
+        .filter(|head| head.version > since && head.version >= team.cut_below)
         .take(1000)
         .collect();
     let mut signed: Vec<u64> = page.iter().map(|head| head.device_id).collect();
@@ -1117,8 +1285,11 @@ fn head_view(team: &Team, since: u64) -> Value {
         "receipts": receipts,
         "signers": signers(team, &signed),
     });
-    if let Some(first) = team.heads.iter().find(|head| head.version > since) {
+    if let Some(first) = page.first() {
         view["chain_from"] = json!(first.version);
+    }
+    if let Some(oldest) = team.heads.first() {
+        view["kept_from"] = json!(oldest.version);
     }
     view
 }
@@ -1438,6 +1609,12 @@ fn route(shared: &Arc<(Mutex<Relay>, Condvar)>, request: &Incoming) -> Outgoing 
                         None => fail(404, "not_found"),
                     }
                 }
+                // A vault store of an account serves relay sync only, as the relay does
+                // (connect-account-v1 section 8): its devices come from the account, never
+                // from a device link.
+                (_, ["devices", "links", ..]) if relay.store_teams.contains(&team_id) => {
+                    fail(403, "forbidden")
+                }
                 ("POST", ["devices", "links"]) => {
                     relay.next_secret += 1;
                     let code = format!("apassy_lnk_{team_id}_{}", secret_hex(relay.next_secret));
@@ -1471,6 +1648,19 @@ fn route(shared: &Arc<(Mutex<Relay>, Condvar)>, request: &Incoming) -> Outgoing 
                         .unwrap_or_default()
                         .to_owned();
                     let next = relay.next_device;
+                    // A store adds only a device of the account or of its group.
+                    let refused = relay
+                        .store_guard
+                        .clone()
+                        .filter(|_| relay.store_teams.contains(&team_id))
+                        .zip(
+                            relay.teams[&team_id]
+                                .links
+                                .iter()
+                                .find(|link| link.id == id)
+                                .map(|link| link.public_key.clone()),
+                        )
+                        .is_some_and(|(guard, key)| !guard(&team_id, &key, next));
                     let team = relay.teams.get_mut(&team_id).expect("team");
                     let Some(link) = team
                         .links
@@ -1485,6 +1675,9 @@ fn route(shared: &Arc<(Mutex<Relay>, Condvar)>, request: &Incoming) -> Outgoing 
                     }
                     if words != link.safety {
                         return fail(409, "conflict");
+                    }
+                    if refused {
+                        return fail(403, "not_in_group");
                     }
                     link.state = LinkState::Confirmed;
                     let device = Device {

@@ -342,6 +342,9 @@ fn directory_teams(config: &RelayConfig) -> RelayResult<Vec<TeamRow>> {
 /// file key is derived once per file (PBKDF2), so the teams are read on up to 8 threads,
 /// no more than the cores.
 pub fn check(config: &RelayConfig) -> RelayResult<Vec<TeamRollback>> {
+    // A rollback to schema 5 compares keyed files with their `.pre-v6` copies; a relay in
+    // `connect` mode has plain files and no such copies (docs/SPEC.md section 37).
+    config.refuse_connect_mode("`apassy-relay rollback-check`")?;
     let rows = directory_teams(config)?;
     let threads = std::thread::available_parallelism()
         .map_or(1, std::num::NonZeroUsize::get)
@@ -405,6 +408,7 @@ pub struct Downgraded {
 /// another version is left as it is. One team that fails does not stop the others: its
 /// `error` says why.
 pub fn downgrade_to_6(config: &RelayConfig) -> RelayResult<Vec<Downgraded>> {
+    config.refuse_connect_mode("`apassy-relay downgrade-schema-6`")?;
     downgrade_each(config, |store, now| {
         if matches!(store.user_version()?, 7 | 8) {
             return store.downgrade_to_v6(now);
@@ -419,6 +423,7 @@ pub fn downgrade_to_6(config: &RelayConfig) -> RelayResult<Vec<Downgraded>> {
 /// for the next start of schema 8 (`Store::downgrade_to_v7`). A file of another version
 /// is left as it is. One team that fails does not stop the others.
 pub fn downgrade_to_7(config: &RelayConfig) -> RelayResult<Vec<Downgraded>> {
+    config.refuse_connect_mode("`apassy-relay downgrade-schema-7`")?;
     downgrade_each(config, |store, _| {
         if store.user_version()? == 8 {
             store.downgrade_to_v7()?;
@@ -621,6 +626,8 @@ mod tests {
             limits: crate::server::directory::TeamLimits::default(),
             kind: TeamKind::Operator,
             suspend_reason: None,
+            account_id: None,
+            vault_id: None,
         };
         unread(&row)
     }

@@ -91,6 +91,149 @@ pub(crate) fn page_text(text: &str) -> String {
     dialog_cut(clean.trim())
 }
 
+/// The owner action of a request of a shared vault ([`OwnerRequest::from_share_action`]).
+fn share_request_action(request: OwnerRequest) -> OwnerAction {
+    match request {
+        OwnerRequest::ShareConnectVault {
+            account_id,
+            peer_account,
+            peer_name,
+            peer_hint,
+            fingerprint,
+            team_id,
+            vault_name,
+            words,
+            entries,
+        } => OwnerAction::ShareConnectVault {
+            account_id,
+            peer_account,
+            peer_name,
+            peer_hint,
+            fingerprint,
+            team_id,
+            vault_name,
+            words,
+            entries,
+        },
+        OwnerRequest::AcceptConnectShare {
+            account_id,
+            peer_account,
+            peer_name,
+            peer_hint,
+            fingerprint,
+            words,
+            entries,
+        } => OwnerAction::AcceptConnectShare {
+            account_id,
+            peer_account,
+            peer_name,
+            peer_hint,
+            fingerprint,
+            words,
+            entries,
+        },
+        OwnerRequest::RepinConnectPeer {
+            account_id,
+            peer_account,
+            peer_name,
+            peer_hint,
+            old_fingerprint,
+            fingerprint,
+            words,
+            ends,
+            team_id,
+            vault_name,
+            entries,
+        } => OwnerAction::RepinConnectPeer {
+            account_id,
+            peer_account,
+            peer_name,
+            peer_hint,
+            old_fingerprint,
+            fingerprint,
+            words,
+            ends,
+            team_id,
+            vault_name,
+            entries,
+        },
+        OwnerRequest::JoinConnectShare {
+            account_id,
+            peer_account,
+            peer_name,
+            peer_hint,
+            fingerprint,
+            team_id,
+            vault_name,
+            entries,
+            vault_hint,
+        } => OwnerAction::JoinConnectShare {
+            account_id,
+            peer_account,
+            peer_name,
+            peer_hint,
+            fingerprint,
+            team_id,
+            vault_name,
+            entries,
+            vault_hint,
+        },
+        OwnerRequest::EndConnectShare {
+            account_id,
+            peer_account,
+            peer_name,
+            peer_hint,
+            fingerprint,
+            team_id,
+            vault_name,
+            leave,
+            entries,
+        } => OwnerAction::EndConnectShare {
+            account_id,
+            peer_account,
+            peer_name,
+            peer_hint,
+            fingerprint,
+            team_id,
+            vault_name,
+            leave,
+            entries,
+        },
+        OwnerRequest::ClaimConnectStore {
+            account_id,
+            team_id,
+            vault_name,
+            people,
+            entries,
+        } => OwnerAction::ClaimConnectStore {
+            account_id,
+            team_id,
+            vault_name,
+            people,
+            entries,
+        },
+        other => other.action(),
+    }
+}
+
+/// A person of another Connect account in an owner check: the name that its verified
+/// device list signed, the short fingerprint of its pinned root, and its name at Connect
+/// beside them as a hint only.
+fn person_text(name: &str, hint: &str, fingerprint: &str) -> String {
+    let (name, hint) = (page_text(name), page_text(hint));
+    // The key that the owner compares stays on one line.
+    let fingerprint = page_text(fingerprint).replace(' ', "\u{a0}");
+    // One form, as the rows of Shared Vaults: the verified name, then the name at
+    // Connect and the key in brackets, so no clause ends the question.
+    match (name.is_empty(), hint.is_empty() || hint == name) {
+        (true, _) => "an account that this device has not verified yet".to_owned(),
+        (false, true) => format!("\u{201c}{name}\u{201d} (account key {fingerprint})"),
+        (false, false) => {
+            format!("\u{201c}{name}\u{201d} ({hint}, account key {fingerprint})")
+        }
+    }
+}
+
 /// The credentials of a question for the dialog: their names, or else the variables.
 fn question_items(run: &PendingRun) -> String {
     let names: Vec<String> = run
@@ -205,11 +348,16 @@ pub struct PasskeyAccount {
     pub user_name: String,
     pub user_display_name: String,
     pub credential_id: Vec<u8>,
+    /// When its login was added ([`crate::vault::passkey::PasskeyInfo::added`]). The
+    /// chooser shows it, so two passkeys of one account differ.
+    pub added: Option<u64>,
 }
 
 /// The `chosen` value of a passkey request with several accounts that the owner has not
 /// chosen from yet. It is no index of the list: the request has no account, no action
-/// that a proof can name, and no check starts.
+/// that a proof can name, and no check starts. A browser request for passkeys of
+/// different accounts starts this way; for several passkeys of one account it selects
+/// the newest. The dialog and the controller treat any index outside the list this way.
 pub(crate) const NO_ACCOUNT: usize = usize::MAX;
 
 /// The WebAuthn extensions of an assertion request, before the owner chooses an
@@ -362,8 +510,9 @@ pub enum OwnerRequest {
         field: String,
         origin: String,
     },
-    /// Sign in with a passkey: one assertion for the account `accounts[chosen]`. With
-    /// several accounts `chosen` is [`NO_ACCOUNT`] until the owner chooses one, and the
+    /// Sign in with a passkey: one assertion for the account `accounts[chosen]`. The
+    /// browser request lists the accounts newest first and selects the newest (index 0);
+    /// a `chosen` outside the list waits until the owner chooses one. The
     /// owner can choose another account of the list before the check.
     SignPasskey {
         request: PasskeyRequest,
@@ -665,16 +814,53 @@ pub enum OwnerRequest {
         account_id: String,
         device_id: String,
         device_name: String,
+        /// The short fingerprint of the key that the signed removal names.
+        fingerprint: String,
         this_device: bool,
     },
     /// Delete the Apassy Connect account (section 6).
     DeleteConnectAccount {
         account_id: String,
     },
+    /// "New Recovery Code…" of the Apassy Connect account (section 9.1).
+    NewRecoveryCode {
+        account_id: String,
+    },
+    /// "Recover…" of the sheet that recovers an Apassy Connect account (section 9).
+    RecoverConnectAccount {
+        account_id: String,
+    },
+    /// Forget an account file of an earlier version of Apassy on this Mac, with its key.
+    ForgetOldConnectAccount,
     /// Delete the vault store (relay copy) `team_id` of the vault `vault_name` at Apassy
     /// Connect (section 8).
     DeleteVaultStore {
         team_id: String,
+        vault_name: String,
+    },
+    /// Take the copy that the device "`device_name`" left on the vault store `team_id` of
+    /// the vault `vault_name` (the head `head` of version `version`) once, or replace it
+    /// with this device's vault (`replace`; connect-account-v1 section 7.5).
+    TakeDepartedCopy {
+        team_id: String,
+        version: u64,
+        head: String,
+        replace: bool,
+        device_name: String,
+        vault_name: String,
+        /// The start screen: no vault of this device holds the vault yet; the copy becomes
+        /// the vault on this device.
+        start: bool,
+    },
+    /// "Use the relay copy…" of the vault store `team_id` of the vault `vault_name`: take
+    /// the current head `head` of version `version`, which "`device_name`" signed at `time`
+    /// (by its own clock), and replace what this device had merged (section 7.5).
+    UseRelayCopy {
+        team_id: String,
+        version: u64,
+        head: String,
+        device_name: String,
+        time: u64,
         vault_name: String,
     },
     /// Add the device `device_id` ("`device_name`") of the account `account_id` to the
@@ -691,6 +877,92 @@ pub enum OwnerRequest {
         account_id: String,
         group_id: String,
         change: crate::broker::approvals::ConnectGroupChange,
+    },
+    /// Share the vault store `team_id` with another account (connect-account-v1 section
+    /// 16): the words that both devices showed, empty for an account pinned already. The
+    /// fields are those of `OwnerAction::ShareConnectVault`.
+    ShareConnectVault {
+        account_id: String,
+        peer_account: String,
+        peer_name: String,
+        peer_hint: String,
+        fingerprint: String,
+        team_id: String,
+        vault_name: String,
+        words: String,
+        entries: Vec<crate::broker::approvals::ShareEntry>,
+    },
+    /// "The Words Match" of a share code of another account.
+    AcceptConnectShare {
+        account_id: String,
+        peer_account: String,
+        peer_name: String,
+        peer_hint: String,
+        fingerprint: String,
+        words: String,
+        entries: Vec<crate::broker::approvals::ShareEntry>,
+    },
+    /// A new pin of an account that was reset, with what ends first.
+    RepinConnectPeer {
+        account_id: String,
+        peer_account: String,
+        peer_name: String,
+        peer_hint: String,
+        old_fingerprint: String,
+        fingerprint: String,
+        words: String,
+        ends: Vec<String>,
+        team_id: Option<String>,
+        vault_name: Option<String>,
+        entries: Vec<crate::broker::approvals::ShareEntry>,
+    },
+    /// "Join" of a store that another account shares: the vault by its name on this
+    /// computer when one syncs the store, else as "a vault shared by" the person, with the
+    /// name that Connect gives the store as a hint.
+    JoinConnectShare {
+        account_id: String,
+        peer_account: String,
+        peer_name: String,
+        peer_hint: String,
+        fingerprint: String,
+        team_id: String,
+        vault_name: String,
+        entries: Vec<crate::broker::approvals::ShareEntry>,
+        vault_hint: String,
+    },
+    /// "Stop Sharing with <name>…" or "Leave This Shared Vault…".
+    EndConnectShare {
+        account_id: String,
+        peer_account: String,
+        peer_name: String,
+        peer_hint: String,
+        fingerprint: String,
+        team_id: String,
+        vault_name: String,
+        leave: bool,
+        entries: Vec<crate::broker::approvals::ShareEntry>,
+    },
+    /// "Count Its Shares Again…" of a vault store made before the `store` entry existed:
+    /// the shares with `people` count again.
+    ClaimConnectStore {
+        account_id: String,
+        team_id: String,
+        vault_name: String,
+        people: Vec<String>,
+        entries: Vec<crate::broker::approvals::ShareEntry>,
+    },
+    /// "Take This Copy Without Its Earlier History…" of the first download of the vault
+    /// store `team_id` (the vault `vault_name`): the head `head` of version `version`, which
+    /// "`device_name`" signed at `time` (by its own clock). `start`: the start screen, where
+    /// the copy becomes the vault on this device.
+    TakeCopyWithoutHistory {
+        team_id: String,
+        version: u64,
+        head: String,
+        device_name: String,
+        time: u64,
+        vault_name: String,
+        start: bool,
     },
     /// Turn the tailnet route of this Mac's node on or off (Settings > Devices, plan
     /// S2–S3, unit N7). The node checks nothing itself: the caller asks first.
@@ -767,6 +1039,132 @@ impl OwnerRequest {
             } => accounts.get(*chosen),
             _ => None,
         }
+    }
+
+    /// The request of an owner action of a shared vault (connect-account-v1 section 16):
+    /// the same fields, so the prompt shows exactly what the account checks.
+    pub(crate) fn from_share_action(action: OwnerAction) -> Option<Self> {
+        Some(match action {
+            OwnerAction::ShareConnectVault {
+                account_id,
+                peer_account,
+                peer_name,
+                peer_hint,
+                fingerprint,
+                team_id,
+                vault_name,
+                words,
+                entries,
+            } => Self::ShareConnectVault {
+                account_id,
+                peer_account,
+                peer_name,
+                peer_hint,
+                fingerprint,
+                team_id,
+                vault_name,
+                words,
+                entries,
+            },
+            OwnerAction::AcceptConnectShare {
+                account_id,
+                peer_account,
+                peer_name,
+                peer_hint,
+                fingerprint,
+                words,
+                entries,
+            } => Self::AcceptConnectShare {
+                account_id,
+                peer_account,
+                peer_name,
+                peer_hint,
+                fingerprint,
+                words,
+                entries,
+            },
+            OwnerAction::RepinConnectPeer {
+                account_id,
+                peer_account,
+                peer_name,
+                peer_hint,
+                old_fingerprint,
+                fingerprint,
+                words,
+                ends,
+                team_id,
+                vault_name,
+                entries,
+            } => Self::RepinConnectPeer {
+                account_id,
+                peer_account,
+                peer_name,
+                peer_hint,
+                old_fingerprint,
+                fingerprint,
+                words,
+                ends,
+                team_id,
+                vault_name,
+                entries,
+            },
+            OwnerAction::JoinConnectShare {
+                account_id,
+                peer_account,
+                peer_name,
+                peer_hint,
+                fingerprint,
+                team_id,
+                vault_name,
+                entries,
+                vault_hint,
+            } => Self::JoinConnectShare {
+                account_id,
+                peer_account,
+                peer_name,
+                peer_hint,
+                fingerprint,
+                team_id,
+                vault_name,
+                entries,
+                vault_hint,
+            },
+            OwnerAction::EndConnectShare {
+                account_id,
+                peer_account,
+                peer_name,
+                peer_hint,
+                fingerprint,
+                team_id,
+                vault_name,
+                leave,
+                entries,
+            } => Self::EndConnectShare {
+                account_id,
+                peer_account,
+                peer_name,
+                peer_hint,
+                fingerprint,
+                team_id,
+                vault_name,
+                leave,
+                entries,
+            },
+            OwnerAction::ClaimConnectStore {
+                account_id,
+                team_id,
+                vault_name,
+                people,
+                entries,
+            } => Self::ClaimConnectStore {
+                account_id,
+                team_id,
+                vault_name,
+                people,
+                entries,
+            },
+            _ => return None,
+        })
     }
 
     /// The action that the proof must name.
@@ -1153,17 +1551,58 @@ impl OwnerRequest {
                 account_id,
                 device_id,
                 device_name,
+                fingerprint,
                 ..
             } => OwnerAction::RevokeConnectDevice {
                 account_id: account_id.clone(),
                 device_id: device_id.clone(),
                 device_name: device_name.clone(),
+                fingerprint: fingerprint.clone(),
             },
             Self::DeleteConnectAccount { account_id } => OwnerAction::DeleteConnectAccount {
                 account_id: account_id.clone(),
             },
+            Self::NewRecoveryCode { account_id } => OwnerAction::NewRecoveryCode {
+                account_id: account_id.clone(),
+            },
+            Self::RecoverConnectAccount { account_id } => OwnerAction::RecoverConnectAccount {
+                account_id: account_id.clone(),
+            },
+            Self::ForgetOldConnectAccount => OwnerAction::ForgetOldConnectAccount,
             Self::DeleteVaultStore { team_id, .. } => OwnerAction::DeleteVaultStore {
                 team_id: team_id.clone(),
+            },
+            Self::TakeDepartedCopy {
+                team_id,
+                version,
+                head,
+                replace,
+                ..
+            } => OwnerAction::TakeDepartedCopy {
+                team_id: team_id.clone(),
+                version: *version,
+                head: head.clone(),
+                replace: *replace,
+            },
+            Self::UseRelayCopy {
+                team_id,
+                version,
+                head,
+                ..
+            } => OwnerAction::UseRelayCopy {
+                team_id: team_id.clone(),
+                version: *version,
+                head: head.clone(),
+            },
+            Self::TakeCopyWithoutHistory {
+                team_id,
+                version,
+                head,
+                ..
+            } => OwnerAction::TakeCopyWithoutHistory {
+                team_id: team_id.clone(),
+                version: *version,
+                head: head.clone(),
             },
             Self::AddStoreDevice {
                 team_id,
@@ -1184,6 +1623,12 @@ impl OwnerRequest {
                 group_id: group_id.clone(),
                 change: change.clone(),
             },
+            share @ (Self::ShareConnectVault { .. }
+            | Self::AcceptConnectShare { .. }
+            | Self::RepinConnectPeer { .. }
+            | Self::JoinConnectShare { .. }
+            | Self::EndConnectShare { .. }
+            | Self::ClaimConnectStore { .. }) => share_request_action(share.clone()),
             Self::SetTailnetRoute { on } => OwnerAction::SetTailnetRoute { on: *on },
             Self::RevokeNodeDevice(request) => request.action(),
             Self::AllowConnect {
@@ -1219,7 +1664,17 @@ impl OwnerRequest {
             Self::RegisterSetupAgent { name } => format!("Connect {} and let it see all credential names without values? Its token goes to the command line; the bouncer decides each use.", page_text(name)),
             Self::RegisterAgent { name } => format!("Register {} and issue its agent token to the command line?",page_text(name)),
             Self::BrowserDebugging { identity, scope, request_label, .. } => format!("{} asks to {}. Request: {}. Other programs can control all its profiles.", identity.description(), match scope { Some(crate::browser::bypass::BypassScope::Once) => "allow only the exact refused passkey or code request once", Some(crate::browser::bypass::BypassScope::FiveMinutes) => "allow owner passkeys and codes for 5 minutes across this instance", None => "trust this instance for agent fills with remote debugging" }, request_label),
-            Self::ChangeOwnerFrequency { new, .. } => format!("Change how often Apassy asks for Touch ID to {} on this Mac?", new.label()),
+            Self::ChangeOwnerFrequency { new, .. } if cfg!(target_os = "linux") => format!("Change how often Apassy asks for the owner check to {} on this computer?", new.label()),
+            Self::ChangeOwnerFrequency { new, .. } => format!(
+                concat!(
+                    "Change how often Apassy asks for ",
+                    crate::touch_id!(),
+                    " to {} on this ",
+                    crate::computer!(),
+                    "?"
+                ),
+                new.label()
+            ),
             Self::Reveal { .. } => "Show the secret values of this item for 30 seconds.".to_owned(),
             Self::CliCode { copy, .. } => format!("{} the current one-time code for the command line.", if *copy { "Copy" } else { "Show" }),
             Self::ShowCode { field, .. } => format!(
@@ -1331,9 +1786,16 @@ impl OwnerRequest {
                         "For {origin}: create a passkey for {} with the account {account}, and save it {place}. The page names the account; check it. The page gets the new public key.",
                         request.rp_id
                     ),
+                    #[cfg(not(target_os = "linux"))]
                     None => format!(
                         "macOS asks to create a passkey for {} with the account {account}, and save it {place}. The request comes from an app or a website through the macOS passkey sheet; macOS checked that it is for {}. If you did not ask for it just now, click Cancel.",
                         request.rp_id, request.rp_id
+                    ),
+                    // Linux has no system passkey sheet: a request without a page.
+                    #[cfg(target_os = "linux")]
+                    None => format!(
+                        "An app on this computer asks to create a passkey for {} with the account {account}, and save it {place}. The request has no page address, so Apassy cannot check where it comes from. If you did not ask for it just now, click Cancel.",
+                        request.rp_id
                     ),
                 }
             }
@@ -1538,7 +2000,7 @@ impl OwnerRequest {
             Self::SetTokenLifetime { days } => {
                 format!("Set the token lifetime to {} days.", days.trim())
             }
-            Self::OpenCliSession => "Start a command-line session. apassy commands in your terminal can then list, add, and change credentials and agents for 30 idle minutes. Owner actions, including showing one-time codes, follow your Touch ID frequency setting.".to_owned(),
+            Self::OpenCliSession => "Start a command-line session. apassy commands in your terminal can then list, add, and change credentials and agents for 30 idle minutes. Owner actions, including showing one-time codes, follow your \"How often to ask\" setting.".to_owned(),
             Self::BindVariables { variables } => match variables.len() {
                 1 => "Bind 1 credential to the environment variable below. Programs get the real value.".to_owned(),
                 count => format!(
@@ -1570,21 +2032,31 @@ impl OwnerRequest {
                     )
                 } else {
                     format!(
-                        "Add the Mac \"{name}\" to the questions of this vault through the Apassy relay. It can then see the questions of your agents and answer them after Touch ID on it. It gets no vault and no secret value through the relay."
-                    )
+                        concat!("Add the ", crate::computer!(), " \"{name}\" to the questions of this vault through the Apassy relay. It can then see the questions of your agents and answer them after ", crate::touch_id_on_it!(), ". It gets no vault and no secret value through the relay.")
+                    , name = name)
                 }
             }
             Self::EnableRelayQuestions {
                 relay_url,
                 team_id: Some(_),
             } => format!(
-                "Send the questions of this vault through the Apassy relay at {relay_url}. Your other devices of this vault can then answer them, and an Allow there needs Face ID or Touch ID. The relay sees no command and no credential."
+                concat!(
+                    "Send the questions of this vault through the Apassy relay at {relay_url}. Your other devices of this vault can then answer them, and ",
+                    crate::allow_there!(),
+                    ". The relay sees no command and no credential."
+                ),
+                relay_url = relay_url
             ),
             Self::EnableRelayQuestions {
                 relay_url,
                 team_id: None,
             } => format!(
-                "Connect this vault to the Apassy relay at {relay_url} for iPhone approvals. No account or subscription is needed. Your other devices of this vault can then answer the questions, and an Allow there needs Face ID or Touch ID. The relay sees no command and no credential."
+                concat!(
+                    "Connect this vault to the Apassy relay at {relay_url} for iPhone approvals. No account or subscription is needed. Your other devices of this vault can then answer the questions, and ",
+                    crate::allow_there!(),
+                    ". The relay sees no command and no credential."
+                ),
+                relay_url = relay_url
             ),
             Self::AnswerRemoteQuestion { choice, action, .. } => {
                 let (agent, asker) = match action {
@@ -1592,10 +2064,10 @@ impl OwnerRequest {
                         answer.run().map_or("the agent", |run| run.agent.as_str()),
                         asker.as_str(),
                     ),
-                    _ => ("the agent", "another Mac"),
+                    _ => ("the agent", concat!("another ", crate::computer!())),
                 };
                 format!(
-                    "Answer \"{}\" to the question of {} on {}. Apassy signs the answer with the key of this Mac and sends it, end-to-end encrypted, through the relay.",
+                    concat!("Answer \"{}\" to the question of {} on {}. Apassy signs the answer with the key of this ", crate::computer!(), " and sends it, end-to-end encrypted, through the relay."),
                     choice_words(choice),
                     page_text(agent),
                     page_text(asker)
@@ -1610,20 +2082,93 @@ impl OwnerRequest {
             ),
             Self::RevokeConnectDevice {
                 device_name,
+                fingerprint,
                 this_device: true,
                 ..
             } => format!(
-                "Forget this Mac (\"{}\") in your Apassy Connect account? It leaves every vault store of the account and signs out. Your vaults stay on this Mac.",
-                page_text(device_name)
+                concat!("Forget this ", crate::computer!(), " (\u{201c}{}\u{201d}, key {}) in your Apassy Connect account? It leaves every vault copy at Connect and signs out. Your vaults stay on this ", crate::computer!(), "."),
+                page_text(device_name),
+                page_text(fingerprint).replace(' ', "\u{a0}")
             ),
-            Self::RevokeConnectDevice { device_name, .. } => format!(
-                "Remove \"{}\" from your Apassy Connect account? It signs out at once and leaves every vault store of the account.",
-                page_text(device_name)
+            Self::RevokeConnectDevice {
+                device_name,
+                fingerprint,
+                ..
+            } => format!(
+                "Revoke \u{201c}{}\u{201d} (key {})? It leaves your Apassy Connect account and every vault copy at Connect, and signs out at once. Its key fingerprint is shown in Settings › Connect on that device.",
+                page_text(device_name),
+                page_text(fingerprint).replace(' ', "\u{a0}")
             ),
             Self::DeleteConnectAccount { .. } => "Delete your Apassy Connect account? The subscription ends now, and every vault store, device, and link of the account is deleted at Connect. Your vaults stay on your devices.".to_owned(),
+            Self::NewRecoveryCode { .. } => "Make a new recovery code for your Apassy Connect account? Apassy shows the new code once. The old recovery code stops working.".to_owned(),
+            Self::RecoverConnectAccount { account_id } => format!(
+                concat!(
+                    "Recover the Apassy Connect account {}? This ",
+                    crate::computer!(),
+                    " becomes its first device, the copies of your vaults at Connect are deleted, and a new recovery code replaces the old one. The vaults on your devices stay."
+                ),
+                page_text(account_id)
+            ),
+            Self::ForgetOldConnectAccount => concat!("Forget the Apassy Connect account on this ", crate::computer!(), "? This version of Apassy cannot read its account file. The file and the account key go from this ", crate::computer!(), "; nothing changes at Connect, and your vaults stay. Then join the account again from another device of the account.").to_owned(),
             Self::DeleteVaultStore { vault_name, .. } => format!(
                 "Delete the relay copy of \"{}\" at Apassy Connect? Its snapshots go, and your devices stop syncing this vault through Connect. The vault stays on your devices.",
                 page_text(vault_name)
+            ),
+            Self::TakeDepartedCopy {
+                replace: false,
+                device_name,
+                vault_name,
+                start,
+                ..
+            } => format!(
+                concat!(
+                    "Use the copy of \"{vault}\" that {device} left on the relay? This copy comes from a device that was removed from the account. Do not use it if that device was lost or stolen. ",
+                    "Ask on another device of the account instead, or replace the copy from a device you trust. {then}"
+                ),
+                vault = page_text(vault_name),
+                device = page_text(device_name),
+                then = if *start {
+                    concat!("The vault on this ", crate::computer!(), " starts from this copy.")
+                } else {
+                    concat!(
+                        "Apassy merges it with the vault on this ",
+                        crate::computer!(),
+                        " once, and uploads the result."
+                    )
+                },
+            ),
+            Self::TakeDepartedCopy {
+                replace: true,
+                device_name,
+                vault_name,
+                ..
+            } => format!(
+                concat!(
+                    "Replace the copy of \"{}\" that {} left on the relay with the vault on this ",
+                    crate::computer!(),
+                    "? Changes that only that copy had are lost."
+                ),
+                page_text(vault_name),
+                page_text(device_name)
+            ),
+            Self::UseRelayCopy {
+                version,
+                device_name,
+                time,
+                vault_name,
+                ..
+            } => format!(
+                concat!(
+                    "Use the copy of \"{vault}\" on the relay as it is now? Apassy takes version {version}, which {device} saved on {day}, and merges it with the vault on this ",
+                    crate::computer!(),
+                    ". This ",
+                    crate::computer!(),
+                    "'s record of the copies it had merged is replaced by that version."
+                ),
+                vault = page_text(vault_name),
+                version = version,
+                device = page_text(device_name),
+                day = crate::desktop::ui::kit::day_month_year(*time),
             ),
             Self::AddStoreDevice {
                 device_name,
@@ -1633,6 +2178,168 @@ impl OwnerRequest {
                 "Let \"{}\" sync the relay copy of \"{}\" at Apassy Connect? It can then read and change the encrypted copy; it still needs the passphrase to open the vault.",
                 page_text(device_name),
                 page_text(vault_name)
+            ),
+            Self::ShareConnectVault {
+                peer_name,
+                peer_hint,
+                fingerprint,
+                vault_name,
+                words,
+                ..
+            } if words.is_empty() => format!(
+                "Share \u{201c}{}\u{201d} with {} through Apassy Connect? Their devices can then read and change the encrypted copy; they still need the passphrase to open the vault.",
+                page_text(vault_name),
+                person_text(peer_name, peer_hint, fingerprint)
+            ),
+            Self::ShareConnectVault {
+                peer_name,
+                peer_hint,
+                fingerprint,
+                vault_name,
+                words,
+                ..
+            } => format!(
+                "Share \u{201c}{}\u{201d} with {} through Apassy Connect? Both devices show: {}. Their devices can then read and change the encrypted copy of this vault; they still need its passphrase.",
+                page_text(vault_name),
+                person_text(peer_name, peer_hint, fingerprint),
+                page_text(words)
+            ),
+            Self::AcceptConnectShare {
+                peer_name,
+                peer_hint,
+                fingerprint,
+                words,
+                ..
+            } => format!(
+                "Accept the vaults that {} shares with you through Apassy Connect? Both devices show: {}. Each vault is joined on its own later.",
+                person_text(peer_name, peer_hint, fingerprint),
+                page_text(words)
+            ),
+            Self::RepinConnectPeer {
+                peer_name,
+                peer_hint,
+                old_fingerprint,
+                fingerprint,
+                words,
+                ends,
+                vault_name,
+                ..
+            } => {
+                let ends = if ends.is_empty() {
+                    "No vault is shared with the old account now.".to_owned()
+                } else {
+                    format!(
+                        "Sharing these vaults with the old account ends first: {}.",
+                        ends.iter()
+                            .map(|name| format!("\"{}\"", page_text(name)))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                };
+                let share = vault_name.as_deref().map_or_else(String::new, |vault| {
+                    format!(" Then \"{}\" is shared with the new account.", page_text(vault))
+                });
+                format!(
+                    "{} reset the account (old account key {}). Verify the new account key? Both devices show: {}. {}{}",
+                    person_text(peer_name, peer_hint, fingerprint),
+                    page_text(old_fingerprint),
+                    page_text(words),
+                    ends,
+                    share
+                )
+            }
+            Self::JoinConnectShare {
+                peer_name,
+                peer_hint,
+                fingerprint,
+                vault_name,
+                vault_hint,
+                ..
+            } if vault_name.is_empty() => {
+                let hint = if vault_hint.is_empty() {
+                    String::new()
+                } else {
+                    format!(" Apassy Connect calls it \u{201c}{}\u{201d}.", page_text(vault_hint))
+                };
+                format!(
+                    "Join a vault shared by {}?{hint} This device downloads the shared copy and syncs it; you need the passphrase of the vault to open it.",
+                    person_text(peer_name, peer_hint, fingerprint)
+                )
+            }
+            Self::JoinConnectShare {
+                peer_name,
+                peer_hint,
+                fingerprint,
+                vault_name,
+                ..
+            } => format!(
+                "Join \u{201c}{}\u{201d}, shared by {}, again? This device syncs the shared copy again.",
+                page_text(vault_name),
+                person_text(peer_name, peer_hint, fingerprint)
+            ),
+            Self::EndConnectShare {
+                peer_name,
+                peer_hint,
+                fingerprint,
+                vault_name,
+                leave: false,
+                ..
+            } => format!(
+                "Stop sharing \u{201c}{}\u{201d} with {}? Their devices leave the shared copy now.",
+                page_text(vault_name),
+                person_text(peer_name, peer_hint, fingerprint)
+            ),
+            Self::EndConnectShare {
+                peer_name,
+                peer_hint,
+                fingerprint,
+                vault_name,
+                leave: true,
+                ..
+            } => format!(
+                "Leave \u{201c}{}\u{201d}, shared by {}? This device stops syncing the shared copy; the vault stays here.",
+                page_text(vault_name),
+                person_text(peer_name, peer_hint, fingerprint)
+            ),
+            Self::ClaimConnectStore {
+                vault_name, people, ..
+            } => {
+                // Each name is a label already (the verified name in quotes, with the
+                // name that Connect gives beside it).
+                let people: Vec<String> = people.iter().map(|person| page_text(person)).collect();
+                format!(
+                    "Confirm that this account made \u{201c}{}\u{201d}? It was shared before Apassy recorded which account made a vault, so its shares do not count yet. After this, the shares of this vault count again: {} can sync it.",
+                    page_text(vault_name),
+                    if people.is_empty() {
+                        "the people you shared it with".to_owned()
+                    } else {
+                        people.join(", ")
+                    }
+                )
+            }
+            Self::TakeCopyWithoutHistory {
+                version,
+                device_name,
+                time,
+                vault_name,
+                start,
+                ..
+            } => format!(
+                concat!(
+                    "Take the copy of \u{201c}{vault}\u{201d} on the relay without its earlier history? Version {version} was saved by {device} on {day}. ",
+                    "Some earlier versions were saved by devices that this ",
+                    crate::computer!(),
+                    " cannot verify (a person who shares the vault reset their account), so Apassy does not check them. {then}"
+                ),
+                vault = page_text(vault_name),
+                version = version,
+                device = page_text(device_name),
+                day = crate::desktop::ui::kit::day_month_year(*time),
+                then = if *start {
+                    concat!("The vault on this ", crate::computer!(), " starts from this copy.")
+                } else {
+                    "Apassy takes this copy as it is now."
+                },
             ),
             Self::ChangeConnectGroup { change, .. } => match change {
                 crate::broker::approvals::ConnectGroupChange::ConfirmMember { name, .. } => format!(
@@ -1647,10 +2354,10 @@ impl OwnerRequest {
                     "Change your Apassy Connect plan to {quantity} people or seats? Stripe charges the difference."
                 ),
             },
-            Self::SetTailnetRoute { on: true } => "Make this Mac reachable on your tailnet. Your iPhone and Macs then reach it directly over Tailscale. Only devices on your tailnet can connect, and each signs in with its own key.".to_owned(),
-            Self::SetTailnetRoute { on: false } => "Stop the tailnet route of this Mac. Approvals then go through Apassy relay.".to_owned(),
+            Self::SetTailnetRoute { on: true } => concat!("Make this ", crate::computer!(), " reachable on your tailnet. Your iPhone and ", crate::computers!(), " then reach it directly over Tailscale. Only devices on your tailnet can connect, and each signs in with its own key.").to_owned(),
+            Self::SetTailnetRoute { on: false } => concat!("Stop the tailnet route of this ", crate::computer!(), ". Approvals then go through Apassy relay.").to_owned(),
             Self::RevokeNodeDevice(request) if request.linux_vault.is_some() => format!(
-                "Revoke \"{}\". This Mac stops syncing through it. Its copy stays there.",
+                concat!("Revoke \"{}\". This ", crate::computer!(), " stops syncing through it. Its copy stays there."),
                 page_text(&request.device_name)
             ),
             Self::RevokeNodeDevice(request) => format!(
@@ -1668,7 +2375,7 @@ impl OwnerRequest {
                 let local = redirect_host.is_empty()
                     || crate::questions::envelope::is_local_redirect_host(redirect_host);
                 format!(
-                    "Connect {} to this Mac as a new agent? {}.{} Allow only if the page in your browser shows this code: {}. The name comes from the agent and is not verified. It sees no credential until you choose some, and every run asks you.",
+                    concat!("Connect {} to this ", crate::computer!(), " as a new agent? {}.{} Allow only if the page in your browser shows this code: {}. The name comes from the agent and is not verified. It sees no credential until you choose some, and every run asks you."),
                     page_text(client_name),
                     page_text(&crate::questions::envelope::connect_returns_to(redirect_host)),
                     if local {
@@ -1683,7 +2390,7 @@ impl OwnerRequest {
                 "Add the remote agent {} and issue its token to the command line? The token works for {days} days. The agent sees no credential until you choose some, and every run asks you.",
                 page_text(name)
             ),
-            Self::TurnOnRemoteAccess => "Turn on remote access? Remote agents can then reach this Mac through Tailscale Funnel while it is awake and the vault is unlocked. The name of this Mac appears in public certificate logs. Every remote run still asks you.".to_owned(),
+            Self::TurnOnRemoteAccess => concat!("Turn on remote access? Remote agents can then reach this ", crate::computer!(), " through Tailscale Funnel while it is awake and the vault is unlocked. The name of this ", crate::computer!(), " appears in public certificate logs. Every remote run still asks you.").to_owned(),
             Self::ChooseAgentItems {
                 agent_name, add, ..
             } => format!(
@@ -1704,12 +2411,23 @@ impl OwnerRequest {
 fn hosting_words(change: &crate::vault::BouncerHostChange) -> String {
     use crate::vault::BouncerHostKind;
     let url = page_text(&change.normalized_url());
-    let sent = "Each bouncer request goes there: the user request, purpose, and shell command, with item values masked and project and home paths shortened. The bouncer heads trained on your decisions go there too: numbers, no text. No secret value, the vault, or a full path of your project or home folder leaves this Mac, and the bouncer gate still decides on this Mac.";
+    let sent = concat!(
+        "Each bouncer request goes there: the user request, purpose, and shell command, with item values masked and project and home paths shortened. The bouncer heads trained on your decisions go there too: numbers, no text. No secret value, the vault, or a full path of your project or home folder leaves this ",
+        crate::computer!(),
+        ", and the bouncer gate still decides on this ",
+        crate::computer!(),
+        "."
+    );
     let trust = crate::desktop::brain_hosting_ui::TRUST_WARNING;
     match change.kind {
-        BouncerHostKind::ThisMac => {
-            "Run the bouncer brain on this Mac again. Bouncer requests stay on this Mac.".to_owned()
-        }
+        BouncerHostKind::ThisMac => concat!(
+            "Run the bouncer brain on this ",
+            crate::computer!(),
+            " again. Bouncer requests stay on this ",
+            crate::computer!(),
+            "."
+        )
+        .to_owned(),
         BouncerHostKind::OwnServer => {
             format!("Use the bouncer brain on your server at {url}. {sent} {trust}")
         }
@@ -1758,10 +2476,14 @@ fn training_words(change: &crate::vault::BouncerHostChange) -> String {
     let url = page_text(&change.normalized_url());
     let sent = "For each training, the training examples go there: your past decisions with their requests, without secret values. A new head set always starts in shadow mode, and only you promote it.";
     match change.kind {
-        BouncerHostKind::ThisMac => {
-            "Train the bouncer brain on this Mac again. Training examples stay on this Mac."
-                .to_owned()
-        }
+        BouncerHostKind::ThisMac => concat!(
+            "Train the bouncer brain on this ",
+            crate::computer!(),
+            " again. Training examples stay on this ",
+            crate::computer!(),
+            "."
+        )
+        .to_owned(),
         BouncerHostKind::OwnServer => {
             format!("Train the bouncer brain on your server at {url}. {sent}")
         }
@@ -1825,9 +2547,15 @@ fn describe_sign(
                 "For {origin}: sign in to {} with a passkey. The page gets one signature.{extras} Choose the account before you confirm.",
                 request.rp_id
             ),
+            #[cfg(not(target_os = "linux"))]
             None => format!(
                 "macOS asks to sign in to {} with a passkey. The request comes from an app or a website through the macOS passkey sheet; macOS checked that it is for {}.{extras} Choose the account before you confirm. If you did not just sign in, click Cancel.",
                 request.rp_id, request.rp_id
+            ),
+            #[cfg(target_os = "linux")]
+            None => format!(
+                "An app on this computer asks to sign in to {} with a passkey. The request has no page address, so Apassy cannot check where it comes from.{extras} Choose the account before you confirm. If you did not just sign in, click Cancel.",
+                request.rp_id
             ),
         };
     };
@@ -1839,9 +2567,15 @@ fn describe_sign(
             "For {origin}: sign in to {} as {who} with the passkey of the login \"{login}\". The page gets one signature.{extras}",
             request.rp_id
         ),
+        #[cfg(not(target_os = "linux"))]
         None => format!(
             "macOS asks to sign in to {} as {who} with the passkey of the login \"{login}\". The request comes from an app or a website through the macOS passkey sheet; macOS checked that it is for {}.{extras} If you did not just sign in, click Cancel.",
             request.rp_id, request.rp_id
+        ),
+        #[cfg(target_os = "linux")]
+        None => format!(
+            "An app on this computer asks to sign in to {} as {who} with the passkey of the login \"{login}\". The request has no page address, so Apassy cannot check where it comes from.{extras} If you did not just sign in, click Cancel.",
+            request.rp_id
         ),
     };
     let others: Vec<String> = accounts
@@ -1927,6 +2661,9 @@ pub struct OwnerFlows {
     /// `None` in tests and when the app cannot find its own executable.
     pub(crate) helper: Option<NativeHelper>,
     pub(crate) lifecycle: Option<crate::native::owner_lifecycle::OwnerLifecycle>,
+    /// Linux: screen lock, sleep and session observation (D-Bus), the counterpart of
+    /// `lifecycle`. Empty on macOS and in tests.
+    pub(crate) session: crate::desktop::session_watch::SessionWatch,
     pub(crate) frequency_read:
         Option<Task<Result<crate::broker::approvals::OwnerFrequency, String>>>,
     pub(crate) frequency_write:
@@ -1956,19 +2693,15 @@ pub struct OwnerFlows {
 impl OwnerFlows {
     /// Take the proof of the last Connect account check, once: the slot is empty after
     /// it, also when the account call then fails (B-L1).
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the Connect view of plan s7 unit M2 takes the proof"
-        )
-    )]
     pub(crate) fn take_connect_proof(&mut self) -> Option<OwnerProof> {
         self.connect_proof.take()
     }
 
     /// Text about Touch ID for the owner check. `None` when Touch ID can run.
     pub(crate) fn touch_id_note(&self) -> Option<String> {
+        if cfg!(target_os = "linux") {
+            return Some("Confirm with your vault passphrase. System authentication is optional and requires an installed polkit policy.".to_owned());
+        }
         if self.helper.is_none() {
             return Some(
                 "Touch ID is not available: this build has no Touch ID helper. Touch ID works only in Apassy.app. Type the passphrase to confirm.".to_owned(),
@@ -2002,8 +2735,27 @@ impl DesktopApp {
 
     /// Start the helper probe and the notification center. The window calls this once.
     pub(crate) fn start_native(&mut self, ctx: &egui::Context) {
-        let helper = NativeHelper::locate().ok();
+        // Apple helpers must never become an accidental Linux authentication path.
+        let helper = if cfg!(target_os = "macos") {
+            NativeHelper::locate().ok()
+        } else {
+            None
+        };
         self.owner.helper = helper.clone();
+        // Linux: the D-Bus observer feeds the owner window and auto-lock, and the two
+        // device settings live in a private file (no helper, no keychain).
+        #[cfg(target_os = "linux")]
+        {
+            use crate::desktop::session_watch::{SessionWatch, store};
+            self.owner.session = SessionWatch::start(
+                self.owner_ui.session.owner_window.clone(),
+                self.auto_lock.source.clone(),
+                ctx.clone(),
+            );
+            self.start_auto_lock_task(ctx, store::read_auto_lock);
+            self.owner.frequency_read =
+                Some(Task::spawn(Some(ctx.clone()), store::read_owner_frequency));
+        }
         if let Some(helper) = &helper {
             self.owner.lifecycle = crate::native::owner_lifecycle::OwnerLifecycle::start(
                 helper,
@@ -2059,11 +2811,19 @@ impl DesktopApp {
 
     /// The owner-authorization gate for this app.
     pub(crate) fn owner_gate(&self) -> OwnerGate {
-        OwnerGate::new(
+        let gate = OwnerGate::new(
             self.owner_ui.session.shared_vault(),
             self.owner.helper.clone(),
         )
-        .with_window(self.owner_ui.session.owner_window.clone())
+        .with_window(self.owner_ui.session.owner_window.clone());
+        // The start screen's Apassy Connect path confirms its few steps while no vault is
+        // unlocked (`OwnerAction::allowed_without_vault`), bound to its session.
+        #[cfg(feature = "vault")]
+        let gate = {
+            let session = self.connect_session();
+            gate.with_start_session(std::sync::Arc::new(move || session.start_epoch()))
+        };
+        gate
     }
 
     /// Ask the owner to confirm `request` (goal item A4). Nothing happens before the
@@ -2297,7 +3057,7 @@ impl DesktopApp {
                 } else {
                     self.browser.trusted_instances = None;
                     let Some(epoch) = session.epoch() else { return; };
-                    match crate::browser::trust::add(&identity, proof, epoch) { Ok(()) => self.set_ok("Instance trusted on this Mac."), Err(e) => self.set_err(e) }
+                    match crate::browser::trust::add(&identity, proof, epoch) { Ok(()) => self.set_ok(concat!("Instance trusted on this ", crate::computer!(), ".")), Err(e) => self.set_err(e) }
                 }
             }
             OwnerRequest::BackupVault { path } => self.complete_fresh_backup(&path, proof),
@@ -2731,9 +3491,21 @@ impl DesktopApp {
             OwnerRequest::ConfirmConnectDevice { .. }
             | OwnerRequest::RevokeConnectDevice { .. }
             | OwnerRequest::DeleteConnectAccount { .. }
+            | OwnerRequest::NewRecoveryCode { .. }
+            | OwnerRequest::RecoverConnectAccount { .. }
+            | OwnerRequest::ForgetOldConnectAccount
             | OwnerRequest::DeleteVaultStore { .. }
+            | OwnerRequest::TakeDepartedCopy { .. }
+            | OwnerRequest::UseRelayCopy { .. }
             | OwnerRequest::AddStoreDevice { .. }
-            | OwnerRequest::ChangeConnectGroup { .. } => {
+            | OwnerRequest::ChangeConnectGroup { .. }
+            | OwnerRequest::ShareConnectVault { .. }
+            | OwnerRequest::AcceptConnectShare { .. }
+            | OwnerRequest::RepinConnectPeer { .. }
+            | OwnerRequest::JoinConnectShare { .. }
+            | OwnerRequest::EndConnectShare { .. }
+            | OwnerRequest::ClaimConnectStore { .. }
+            | OwnerRequest::TakeCopyWithoutHistory { .. } => {
                 self.owner.connect_proof = Some(proof);
             }
             OwnerRequest::SetTailnetRoute { on } => self.devices_set_route(on, proof),
@@ -3231,8 +4003,17 @@ impl DesktopApp {
             return;
         };
         self.owner.unlock.check_generation = Some(self.owner_ui.session.owner_window.generation());
+        // The Apassy Connect key of this Mac comes with the same Touch ID: the account
+        // session opens with this unlock and asks for nothing more (plan s7 unit M5b).
+        let connect = self.connect_session();
+        let also = self.connect_key_with_unlock();
+        connect.drop_offered();
         self.owner.unlock.unlocking = Some(Task::spawn(Some(ctx.clone()), move || {
-            unlock::read_unlock_key(&helper, &path)
+            let (key, account_key) = unlock::read_unlock_key_with(&helper, &path, also)?;
+            if let Some(account_key) = account_key {
+                connect.offer_key(account_key);
+            }
+            Ok(key)
         }));
     }
 
@@ -3354,11 +4135,13 @@ impl DesktopApp {
         if !self.owner_ui.session.is_locked() {
             self.owner.unlock.check_generation = None;
             drop(result); // Zeroizing erases a late key; errors are stale too.
+            self.connect_session().drop_offered();
             return;
         }
         let key = match result {
             Ok(key) => key,
             Err(err) => {
+                self.connect_session().drop_offered();
                 self.owner_ui.session.owner_window.invalidate();
                 if matches!(
                     err,
@@ -3373,6 +4156,7 @@ impl DesktopApp {
             }
         };
         let Some(generation) = self.owner.unlock.check_generation.take() else {
+            self.connect_session().drop_offered();
             self.owner_ui.session.owner_window.invalidate();
             self.set_err("The unlock check ended. Confirm again.");
             return;
@@ -3383,6 +4167,11 @@ impl DesktopApp {
             crate::broker::approvals::CheckMethod::TouchId,
         );
         drop(key);
+        // The account session opens with the key of the same Touch ID, or never.
+        if result.is_ok() {
+            self.connect_after_unlock();
+        }
+        self.connect_session().drop_offered();
         // Sync before the owner sees the list (ADR 0020).
         let loaded = if result.is_ok() {
             self.sync_after_unlock()
@@ -3445,6 +4234,8 @@ impl DesktopApp {
         self.forget_remote_feeds();
         // A Connect proof of this session is worthless after the lock.
         self.owner.connect_proof = None;
+        // The Connect account session closes with the vault: its key and token go.
+        self.connect_lock();
         self.erase_typed_secrets(ctx);
     }
 
@@ -3492,6 +4283,7 @@ impl DesktopApp {
             .session
             .lock_ending_runs(approvals.as_deref(), ENDED_BY_QUIT);
         self.stop_companion();
+        self.connect_lock();
         self.erase_typed_secrets(None);
         if let Some(mut center) = self.owner.notifications.take() {
             center.stop();
@@ -3581,6 +4373,57 @@ mod connect_proof_tests {
         assert!(flows.take_connect_proof().is_none());
     }
 
+    /// K2, K4: "Take This Copy Without Its Earlier History…" names the store, the head, its
+    /// version, its device, and its time; "Count Its Shares Again…" names the vault and the
+    /// people whose shares count again, each name once in its quotes.
+    #[test]
+    fn the_copy_without_history_and_the_store_claim_name_their_actions() {
+        let team = "t_7k2m5q4x3c".to_owned();
+        let take = OwnerRequest::TakeCopyWithoutHistory {
+            team_id: team.clone(),
+            version: 7,
+            head: "a".repeat(64),
+            device_name: "\u{201c}Synthetic iMac\u{201d}".to_owned(),
+            time: 1_790_000_000,
+            vault_name: "Personal".to_owned(),
+            start: true,
+        };
+        assert_eq!(
+            take.action(),
+            OwnerAction::TakeCopyWithoutHistory {
+                team_id: team.clone(),
+                version: 7,
+                head: "a".repeat(64),
+            }
+        );
+        assert!(take.action().allowed_without_vault());
+        let text = take.describe();
+        assert!(text.contains("Version 7"), "{text}");
+        assert!(text.contains("\u{201c}Synthetic iMac\u{201d}"), "{text}");
+        assert!(!text.contains(&team), "{text}");
+        let entries = vec![crate::broker::approvals::ShareEntry::new(
+            "store",
+            None,
+            Some(&team),
+        )];
+        let action = OwnerAction::ClaimConnectStore {
+            account_id: "acc_k7m2q4x3ca".to_owned(),
+            team_id: team.clone(),
+            vault_name: "Family".to_owned(),
+            people: vec!["\u{201c}Ola\u{201d}".to_owned()],
+            entries,
+        };
+        let claim = OwnerRequest::from_share_action(action.clone()).expect("a share request");
+        assert_eq!(claim.action(), action);
+        assert!(!action.allowed_without_vault());
+        let text = claim.describe();
+        assert!(text.contains("\u{201c}Family\u{201d}"), "{text}");
+        assert!(
+            text.contains(": \u{201c}Ola\u{201d} can sync it."),
+            "{text}"
+        );
+    }
+
     /// B-M1: the store requests name their exact actions, and their texts name the vault
     /// and the device, never an id.
     #[test]
@@ -3643,13 +4486,18 @@ mod connect_prompt_tests {
             "{text}"
         );
         assert!(
-            text.starts_with(
-                "Connect Grok Bot to this Mac as a new agent? Returns to grok.example. Allow only"
-            ),
+            text.starts_with(concat!(
+                "Connect Grok Bot to this ",
+                crate::computer!(),
+                " as a new agent? Returns to grok.example. Allow only"
+            )),
             "{text}"
         );
         assert!(!text.contains("page of the agent"), "{text}");
-        assert!(!text.contains("A program on this Mac"), "{text}");
+        assert!(
+            !text.contains(concat!("A program on this ", crate::computer!())),
+            "{text}"
+        );
     }
 
     /// Review 0.5.16: the node's listener is on the loopback, so any program of this Mac
@@ -3665,7 +4513,11 @@ mod connect_prompt_tests {
             };
             let text = request.describe();
             assert!(
-                text.contains("A program on this Mac can start this request."),
+                text.contains(concat!(
+                    "A program on this ",
+                    crate::computer!(),
+                    " can start this request."
+                )),
                 "{host}: {text}"
             );
             assert!(text.contains("K7Q-4MD"), "{text}");

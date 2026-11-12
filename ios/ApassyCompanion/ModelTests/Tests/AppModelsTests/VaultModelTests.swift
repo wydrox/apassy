@@ -641,5 +641,24 @@ struct VaultModelTests {
         #expect(VaultModel.waitsForOwner(.forkedCopy))
         #expect(!VaultModel.waitsForOwner(.ok))
         #expect(!VaultModel.waitsForOwner(.offline))
+        // Another device of the account syncs, and then this iPhone goes on: the loop waits on.
+        #expect(!VaultModel.waitsForOwner(.waitsForDevice))
+    }
+
+    @Test("a sync that waits for another device of the account is a plain line, not a problem")
+    func waitsForDeviceIsPlain() {
+        #expect(SyncStatusLook.of(.waitsForDevice) == .plain)
+        #expect(!SyncStatusLook.of(.waitsForDevice).isProblem)
+        #expect(SyncStatusLook.of(nil) == .plain)
+        #expect(SyncStatusLook.of(.ok) == .ok)
+        #expect(SyncStatusLook.of(.busy) == .busy && !SyncStatusLook.of(.busy).isProblem)
+        #expect(SyncStatusLook.of(.needsPassphrase) == .attention && SyncStatusLook.of(.needsPassphrase).isProblem)
+        #expect(SyncStatusLook.of(.offline) == .attention && SyncStatusLook.of(.offline).isProblem)
+        for state: SyncStatus.State in [.removed, .damaged, .staleCopy, .forkedCopy, .error] {
+            #expect(SyncStatusLook.of(state) == .critical && SyncStatusLook.of(state).isProblem, "\(state)")
+        }
+        for state: SyncStatus.State in [.off, .never, .pending] {
+            #expect(SyncStatusLook.of(state) == .plain, "\(state)")
+        }
     }
 }

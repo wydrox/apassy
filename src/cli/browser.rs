@@ -11,6 +11,7 @@ use super::args::{Args, usage};
 use super::{Failure, Outcome};
 use crate::browser::install::{self, BROWSERS, Browser, Install, State};
 
+#[cfg(not(target_os = "linux"))]
 pub const HELP: &str = "\
 apassy setup browser [--browser NAME] [--remove]
 
@@ -30,15 +31,34 @@ Each fill asks for Touch ID or the passphrase in Apassy. The extension gets no
 password without it.
 ";
 
+#[cfg(target_os = "linux")]
+pub const HELP: &str = "apassy setup browser [--browser chrome|chromium] [--remove]
+
+Connect Google Chrome or Chromium (from a .deb) to the installed Apassy browser host.
+Settings > Tools > Browser extension in the app does the same.
+The root-owned host is /usr/lib/apassy/apassy-browser-host; the extension is in
+/usr/share/apassy/browser-extension. --browser selects one browser even before its
+profile exists. Add the extension from the Chrome Web Store, or load that folder with
+Developer mode on the extensions page of the browser. A snap or Flatpak browser is not
+supported: it cannot start the host.
+Each fill and passkey request asks for the vault passphrase or system authentication,
+in the Apassy window or in the terminal of apassy owner serve. The passphrase works
+without a keyring, screen lock or biometric reader.
+--remove deletes native messaging manifests; remove the extension in the browser too.
+";
+
 /// What happened in one browser.
 #[derive(Debug, PartialEq, Eq)]
 enum Change {
     Wrote(std::path::PathBuf),
     Removed(std::path::PathBuf),
-    /// The browser folder is not there, so the browser is not on this Mac.
+    /// The browser folder is not there, so the browser is no browser profile found.
     Missing,
     /// `--remove` found no manifest.
     Absent,
+    /// Linux: a snap, a Flatpak or an unknown build. Nothing was written. The text
+    /// gives the reason and the alternative; the code names the reason for JSON.
+    Unsupported(String, &'static str),
 }
 
 /// Write or remove the manifest in each selected browser under `home`.
@@ -47,6 +67,19 @@ fn apply(
     host: &Path,
     only: Option<&Browser>,
     remove: bool,
+) -> Result<Vec<(&'static str, Change)>, Failure> {
+    apply_with(home, host, only, remove, |browser| {
+        install::state(home, browser, host)
+    })
+}
+
+/// [`apply`] with the state of each browser from `state`.
+fn apply_with(
+    home: &Path,
+    host: &Path,
+    only: Option<&Browser>,
+    remove: bool,
+    state: impl Fn(&Browser) -> State,
 ) -> Result<Vec<(&'static str, Change)>, Failure> {
     let mut changes = Vec::new();
     for browser in BROWSERS
@@ -63,9 +96,19 @@ fn apply(
             changes.push((browser.name, change));
             continue;
         }
-        if only.is_none() && install::state(home, browser, host) == State::Missing {
-            changes.push((browser.name, Change::Missing));
-            continue;
+        match state(browser) {
+            State::Missing if only.is_none() => {
+                changes.push((browser.name, Change::Missing));
+                continue;
+            }
+            State::Unsupported(kind) => {
+                changes.push((
+                    browser.name,
+                    Change::Unsupported(kind.explain(browser), kind.code()),
+                ));
+                continue;
+            }
+            _ => {}
         }
         let file = install::connect(home, browser, host)?;
         changes.push((browser.name, Change::Wrote(file)));
@@ -82,6 +125,9 @@ fn changes_json(changes: &[(&str, Change)]) -> Vec<serde_json::Value> {
                 Change::Removed(path) => ("removed", Some(path)),
                 Change::Missing => ("browser_missing", None),
                 Change::Absent => ("manifest_absent", None),
+                Change::Unsupported(message, reason) => {
+                    return serde_json::json!({"browser": name, "state": "unsupported", "reason": reason, "message": message});
+                }
             };
             serde_json::json!({"browser": name, "state": state, "path": path})
         })
@@ -112,15 +158,11 @@ pub fn run_with_json(mut args: Args, json: bool) -> Outcome {
     let home = install::home().ok_or_else(|| Failure::Other("HOME is not set.".to_owned()))?;
     // The agent profile denies a change in the app bundle, not in a source tree.
     let Some(app) = Install::current() else {
-        return Err(Failure::Other(
-            "Use the apassy program inside Apassy.app: /Applications/Apassy.app/Contents/MacOS/apassy setup browser. A source build is not protected from agents: an agent could change target/debug/apassy-browser-host or extension/, and the browser runs them outside the sandbox."
-                .to_owned(),
-        ));
+        return Err(Failure::Other(crate::browser_source_build!().to_owned()));
     };
     if !app.host().is_file() {
         return Err(Failure::Other(
-            "apassy-browser-host is not in this Apassy.app. Install the current Apassy.app."
-                .to_owned(),
+            "apassy-browser-host is missing. Reinstall the Apassy package.".to_owned(),
         ));
     }
     let changes = if json {
@@ -158,6 +200,7 @@ pub fn run_with_json(mut args: Args, json: bool) -> Outcome {
         apply(&home, &app.host(), only, remove)?
     };
     let mut wrote = false;
+    let mut unsupported = false;
     for (name, change) in &changes {
         match change {
             Change::Wrote(file) => {
@@ -165,8 +208,12 @@ pub fn run_with_json(mut args: Args, json: bool) -> Outcome {
                 println!("{name}: wrote {}", file.display());
             }
             Change::Removed(file) => println!("{name}: removed {}", file.display()),
-            Change::Missing => println!("{name}: not on this Mac"),
+            Change::Missing => println!("{name}: no browser profile found"),
             Change::Absent => println!("{name}: no manifest"),
+            Change::Unsupported(message, _) => {
+                unsupported = true;
+                println!("{name}: not supported. {message}");
+            }
         }
     }
     if remove {
@@ -174,18 +221,23 @@ pub fn run_with_json(mut args: Args, json: bool) -> Outcome {
         return Ok(());
     }
     if !wrote {
-        return Err(Failure::Other(
-            "No browser was found. Use --browser NAME to select one.".to_owned(),
-        ));
+        return Err(Failure::Other(if unsupported {
+            format!(
+                "No supported browser was found. {}",
+                install::UNSUPPORTED_ALTERNATIVE
+            )
+        } else {
+            "No browser was found. Use --browser NAME to select one.".to_owned()
+        }));
     }
     let extension = app.extension_dir();
     if extension.join("manifest.json").is_file() {
         println!("The extension folder: {}", extension.display());
     } else {
-        println!(
-            "The extension folder is missing in this Apassy.app. Install the current Apassy.app."
-        );
+        println!("The extension folder is missing. Reinstall the Apassy package.");
     }
+    // macOS only: the Linux package is always at /usr/lib/apassy, without a sandbox profile.
+    #[cfg(not(target_os = "linux"))]
     if !app.is_installed_app() {
         println!(
             "This Apassy.app is not /Applications/Apassy.app. The agent profile protects it only when agents start with the apassy-sandbox of this app, or with --app-build."
@@ -196,7 +248,9 @@ pub fn run_with_json(mut args: Args, json: bool) -> Outcome {
         install::STORE_URL
     );
     println!("Or load the folder above with Developer mode on the extensions page of the browser.");
-    println!("Each fill asks for Touch ID or the passphrase in Apassy.");
+    println!(
+        "Each fill requires owner confirmation in Apassy. The vault passphrase is always available."
+    );
     Ok(())
 }
 
@@ -207,39 +261,79 @@ mod tests {
     use super::*;
 
     #[test]
-    fn setup_writes_only_for_browsers_on_this_mac_and_removes() {
+    #[cfg(not(target_os = "linux"))]
+    fn setup_writes_only_for_existing_profiles_and_removes() {
         let home = tempfile::tempdir().unwrap();
-        let support = home.path().join("Library/Application Support");
-        fs::create_dir_all(support.join("net.imput.helium")).unwrap();
-        fs::create_dir_all(support.join("Arc/User Data")).unwrap();
+        let first = &BROWSERS[0];
+        let second = &BROWSERS[1];
+        let first_file = install::manifest_path(home.path(), first);
+        let second_file = install::manifest_path(home.path(), second);
+        fs::create_dir_all(first_file.parent().unwrap().parent().unwrap()).unwrap();
         let host = Path::new("/x/apassy-browser-host");
-
         let changes = apply(home.path(), host, None, false).unwrap();
-        let helium = support.join("net.imput.helium/NativeMessagingHosts/com.wydrox.apassy.json");
-        let arc = support.join("Arc/User Data/NativeMessagingHosts/com.wydrox.apassy.json");
-        assert!(changes.contains(&("Helium", Change::Wrote(helium.clone()))));
-        assert!(changes.contains(&("Arc", Change::Wrote(arc.clone()))));
-        assert!(changes.contains(&("Google Chrome", Change::Missing)));
-        assert!(
-            !support.join("Google").exists(),
-            "no folder for a missing browser"
-        );
+        assert!(changes.contains(&(first.name, Change::Wrote(first_file.clone()))));
+        assert!(changes.contains(&(second.name, Change::Missing)));
+        assert!(!second_file.exists());
         let value: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&helium).unwrap()).unwrap();
+            serde_json::from_str(&fs::read_to_string(&first_file).unwrap()).unwrap();
         assert_eq!(value["path"], "/x/apassy-browser-host");
-
-        // A selected browser gets its folder.
-        let changes = apply(home.path(), host, install::find("chrome"), false).unwrap();
+        let changes = apply(home.path(), host, Some(second), false).unwrap();
         assert_eq!(changes.len(), 1);
-        assert!(
-            support
-                .join("Google/Chrome/NativeMessagingHosts/com.wydrox.apassy.json")
-                .is_file()
-        );
-
+        assert!(second_file.is_file());
         let changes = apply(home.path(), host, None, true).unwrap();
-        assert!(changes.contains(&("Helium", Change::Removed(helium.clone()))));
-        assert!(changes.contains(&("Brave", Change::Absent)));
-        assert!(!helium.exists() && !arc.exists());
+        assert!(changes.contains(&(first.name, Change::Removed(first_file.clone()))));
+        assert!(!first_file.exists() && !second_file.exists());
+    }
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn setup_refuses_uninstalled_hosts_and_can_remove_existing_manifests() {
+        let home = tempfile::tempdir().unwrap();
+        let chrome = install::find("chrome").unwrap();
+        let file = install::manifest_path(home.path(), chrome);
+        let host = Path::new("/tmp/apassy-browser-host");
+        let error = apply(home.path(), host, Some(chrome), false).unwrap_err();
+        assert!(format!("{error:?}").contains("installed Apassy host"));
+        assert!(!file.exists());
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, install::manifest(host)).unwrap();
+        let changes = apply(home.path(), host, Some(chrome), true).unwrap();
+        assert_eq!(changes, vec![(chrome.name, Change::Removed(file.clone()))]);
+        assert!(!file.exists());
+    }
+
+    /// A snap or Flatpak browser is reported with its reason and the alternative, and
+    /// gets no manifest, also when `--browser` names it.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn setup_reports_unsupported_browsers_and_writes_nothing_for_them() {
+        use crate::browser::install::Unsupported;
+        let home = tempfile::tempdir().unwrap();
+        let chromium = install::find("chromium").unwrap();
+        let host = Path::new("/usr/lib/apassy/apassy-browser-host");
+        let snap = |_: &Browser| State::Unsupported(Unsupported::Snap);
+        for only in [None, Some(chromium)] {
+            let changes = apply_with(home.path(), host, only, false, snap).unwrap();
+            assert!(changes.iter().all(|(_, change)| matches!(
+                change,
+                Change::Unsupported(message, "snap")
+                    if message.ends_with("Use Google Chrome, or Chromium from a .deb.")
+            )));
+        }
+        assert!(!install::manifest_path(home.path(), chromium).exists());
+        let json = changes_json(&[(
+            chromium.name,
+            Change::Unsupported(Unsupported::Flatpak.explain(chromium), "flatpak"),
+        )]);
+        assert_eq!(json[0]["state"], "unsupported");
+        assert_eq!(json[0]["reason"], "flatpak");
+        // --remove still deletes a stale manifest of an unsupported browser.
+        let file = install::manifest_path(home.path(), chromium);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, install::manifest(host)).unwrap();
+        let changes = apply_with(home.path(), host, Some(chromium), true, snap).unwrap();
+        assert_eq!(
+            changes,
+            vec![(chromium.name, Change::Removed(file.clone()))]
+        );
     }
 }

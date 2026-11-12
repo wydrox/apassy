@@ -233,6 +233,7 @@ mod tests {
                 data_dir: dir.path().join("node"),
                 master_key: NodeSecret::new("synthetic master key 0123456789".to_owned()),
                 public_url: "https://mac.example-tailnet.ts.net:8443".to_owned(),
+                public_origins: Vec::new(),
                 public_listen: None,
             })
             .unwrap();

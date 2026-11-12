@@ -14,6 +14,10 @@ case "$(uname -s)-$(uname -m)" in
     target=x86_64-unknown-linux-gnu
     sha=b0959bc64232974224cf9fb22c915845398c0e8668fa7831eb5b43fb1eef781f
     ;;
+  Linux-aarch64)
+    target=aarch64-unknown-linux-gnu
+    sha=9164568e9840c6509177086828ac7d3178c2d8feb0658b4d2bff62fa620e98c8
+    ;;
   Darwin-arm64 | Darwin-x86_64)
     target=universal-apple-darwin
     sha=82a759b4d218d38359424196ab244c470e8f7c7d149c814fbbeef4d67c3c301a

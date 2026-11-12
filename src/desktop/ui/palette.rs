@@ -376,6 +376,7 @@ pub(crate) mod fixed {
     pub(crate) const SETTINGS_VAULT: Color32 = rgb(0, 122, 255);
     pub(crate) const SETTINGS_SECURITY: Color32 = rgb(88, 86, 214);
     pub(crate) const SETTINGS_DEVICES: Color32 = rgb(48, 160, 200);
+    pub(crate) const SETTINGS_CONNECT: Color32 = rgb(52, 199, 89);
     pub(crate) const SETTINGS_BOUNCER: Color32 = rgb(175, 82, 222);
     pub(crate) const SETTINGS_TOOLS: Color32 = rgb(99, 99, 102);
     pub(crate) const SETTINGS_UPDATES: Color32 = rgb(142, 142, 147);

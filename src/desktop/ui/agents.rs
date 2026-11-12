@@ -24,8 +24,8 @@ use eframe::egui::{self, Label};
 
 use super::agent_onboarding::{self, ConnectHost};
 use super::agents_page::{
-    self, AccessProblem, AccessView, Action, AgentPage, AgentsView, CanSee, LocalFacts,
-    ProblemButton, SeeKind, SeeRow,
+    self, AccessProblem, AccessView, Action, AgentPage, AgentsView, CanSee, ConnectRow,
+    ConnectState, LocalFacts, ProblemButton, SeeKind, SeeRow,
 };
 use super::bouncer::{self, AgentRef, DeviceScope};
 use super::kit::{self, Font, Icon, Style, Tone};
@@ -355,6 +355,7 @@ fn access_view(app: &DesktopApp) -> Option<AccessView> {
             problem: None,
             no_remote_agents: false,
             reading: true,
+            connect: None,
         });
     };
     Some(access_of(status, app.remote_agents_cached().is_empty()))
@@ -388,7 +389,50 @@ pub(super) fn access_of(status: &crate::node::NodeStatus, no_remote_agents: bool
         problem,
         no_remote_agents: status.route_on && no_remote_agents,
         reading: false,
+        connect: connect_row(&status.connect, status.route_on),
     }
+}
+
+/// The "Apassy Connect" row for the route of the node (plan s7 unit M4). `None`: this
+/// build has no Connect account seam and the route is off (nothing to show).
+pub(super) fn connect_row(
+    connect: &crate::node::ConnectRouteStatus,
+    remote_access_on: bool,
+) -> Option<ConnectRow> {
+    use crate::node::tunnel::{CertState, TunnelState};
+    if !connect.available && !connect.on {
+        return Some(ConnectRow {
+            on: false,
+            state: ConnectState::NotOnConnect,
+            address: None,
+            no_certificate: None,
+        });
+    }
+    let tunnel = connect.tunnel.as_ref();
+    let state = match tunnel.map(|tunnel| &tunnel.state) {
+        _ if !connect.on => ConnectState::Off,
+        _ if !connect.available => ConnectState::NotOnConnect,
+        None | Some(TunnelState::Off) if connect.running => ConnectState::Off,
+        None | Some(TunnelState::Off | TunnelState::Connecting) => ConnectState::Connecting,
+        Some(TunnelState::On) => ConnectState::On,
+        Some(TunnelState::NotOnConnect) => ConnectState::NotOnConnect,
+        Some(TunnelState::Reconnecting { why }) => ConnectState::Reconnecting(why.clone()),
+    };
+    let address = connect
+        .public_name
+        .as_ref()
+        .filter(|_| connect.on && remote_access_on && state != ConnectState::NotOnConnect)
+        .map(|name| format!("https://{name}/mcp"));
+    let no_certificate = match tunnel.map(|tunnel| &tunnel.certificate) {
+        Some(CertState::Missing(reason)) if connect.on && remote_access_on => Some(reason.clone()),
+        _ => None,
+    };
+    Some(ConnectRow {
+        on: connect.on,
+        state,
+        address,
+        no_certificate,
+    })
 }
 
 /// Do what the owner chose.
@@ -402,6 +446,7 @@ fn apply(app: &mut DesktopApp, ctx: &egui::Context, action: Action) {
             app.remote_access_off();
             app.node_changed();
         }
+        Action::ConnectRoute(on) => app.set_connect_route(on),
         Action::CopyAddress(address) => {
             // The address is no secret: it names this Mac, not a credential.
             ctx.copy_text(address);
@@ -684,7 +729,10 @@ pub(super) fn choose_sheet(
                 });
             let (add, _) = choose_changes(choosing);
             if !add.is_empty() {
-                kit::note(ui, "Adding credentials asks for Touch ID.");
+                kit::note(
+                    ui,
+                    concat!("Adding credentials asks for ", crate::touch_id!(), "."),
+                );
             }
         });
         kit::sheet_buttons(
@@ -800,9 +848,21 @@ pub(super) fn next_steps_panel(app: &mut DesktopApp, ui: &mut egui::Ui) -> bool 
                 .filter(|item| !archived.contains_key(&item.id))
                 .count();
             if count == 1 {
-                "The vault is open. 1 active credential is available on this Mac.".to_owned()
+                concat!(
+                    "The vault is open. 1 active credential is available on this ",
+                    crate::computer!(),
+                    "."
+                )
+                .to_owned()
             } else {
-                format!("The vault is open. {count} active credentials are available on this Mac.")
+                format!(
+                    concat!(
+                        "The vault is open. {count} active credentials are available on this ",
+                        crate::computer!(),
+                        "."
+                    ),
+                    count = count
+                )
             }
         }
         _ => "The vault is open. Check Credentials for the available items.".to_owned(),
@@ -810,34 +870,43 @@ pub(super) fn next_steps_panel(app: &mut DesktopApp, ui: &mut egui::Ui) -> bool 
     let mut host = None;
     let mut skip = false;
     let mut cli = app.ui.is_expanded("next-step-cli");
-    kit::section(ui, Some("Use this vault on this Mac"), Some(&intro), |s| {
-        s.row(|ui| {
-            kit::note(
-                ui,
-                "Agents stay on this Mac. Connect them here before an agent can use a credential.",
-            );
-        });
-        s.row(|ui| {
-            ui.horizontal_wrapped(|ui| {
-                if kit::button(ui, "Claude Code", Style::Bordered).clicked() {
-                    host = Some(0);
-                }
-                if kit::button(ui, "Codex", Style::Bordered).clicked() {
-                    host = Some(1);
-                }
-                if kit::button(ui, "CLI", Style::Bordered).clicked() {
-                    cli = !cli;
-                }
-                skip = kit::button(ui, "Skip", Style::Link).clicked();
+    kit::section(
+        ui,
+        Some(concat!("Use this vault on this ", crate::computer!())),
+        Some(&intro),
+        |s| {
+            s.row(|ui| {
+                kit::note(
+                    ui,
+                    concat!(
+                        "Agents stay on this ",
+                        crate::computer!(),
+                        ". Connect them here before an agent can use a credential."
+                    ),
+                );
             });
-        });
-        s.row(|ui| {
-            kit::note(
-                ui,
-                "You can do these steps later in Agents or Settings > Agents > Command line.",
-            );
-        });
-    });
+            s.row(|ui| {
+                ui.horizontal_wrapped(|ui| {
+                    if kit::button(ui, "Claude Code", Style::Bordered).clicked() {
+                        host = Some(0);
+                    }
+                    if kit::button(ui, "Codex", Style::Bordered).clicked() {
+                        host = Some(1);
+                    }
+                    if kit::button(ui, "CLI", Style::Bordered).clicked() {
+                        cli = !cli;
+                    }
+                    skip = kit::button(ui, "Skip", Style::Link).clicked();
+                });
+            });
+            s.row(|ui| {
+                kit::note(
+                    ui,
+                    "You can do these steps later in Agents or Settings > Agents > Command line.",
+                );
+            });
+        },
+    );
     app.ui.set_expanded("next-step-cli", cli);
     if cli {
         connection_progress(app, ui, true);
@@ -996,27 +1065,32 @@ fn setup_guidance(state: &mut super::UiState, ui: &mut egui::Ui) {
         "3. In your project folder, start the host with this command. A question waits up to 5 minutes for you, so the host waits at least 330 seconds for a tool.",
     );
     kit::code_block(ui, &agent_onboarding::launch_command(selected), 2);
-    let sandbox = std::path::Path::new(&cli_path())
-        .parent()
-        .map(|p| p.join("apassy-sandbox").display().to_string())
-        .unwrap_or_else(|| "apassy-sandbox".to_owned());
-    let protected = if host == "claude" {
-        format!(
-            "{} {} -- claude --settings '{{\"sandbox\":{{\"enabled\":false}}}}'",
-            agent_onboarding::CLAUDE_TOOL_TIMEOUT,
-            shell_word(&sandbox)
-        )
-    } else {
-        format!(
-            "{} -- codex -c sandbox_mode=danger-full-access",
-            shell_word(&sandbox)
-        )
-    };
-    kit::note(
-        ui,
-        "Optional, more protection: start the host in the Apassy sandbox. It uses the Apassy sandbox instead of the host's inner sandbox. Your host approval prompts stay active.",
-    );
-    kit::code_block(ui, &protected, 2);
+    // The Apassy sandbox launcher is macOS only (Seatbelt): Linux shows no sandboxed start.
+    if !cfg!(target_os = "linux") {
+        let sandbox = std::path::Path::new(&cli_path())
+            .parent()
+            .map(|p| p.join("apassy-sandbox").display().to_string())
+            .unwrap_or_else(|| "apassy-sandbox".to_owned());
+        let protected = if host == "claude" {
+            format!(
+                "{} {} -- claude --settings '{{\"sandbox\":{{\"enabled\":false}}}}'",
+                agent_onboarding::CLAUDE_TOOL_TIMEOUT,
+                shell_word(&sandbox)
+            )
+        } else {
+            format!(
+                "{} -- codex -c sandbox_mode=danger-full-access",
+                shell_word(&sandbox)
+            )
+        };
+        kit::note(
+            ui,
+            "Optional, more protection: start the host in the Apassy sandbox. It uses the Apassy sandbox instead of the host's inner sandbox. Your host approval prompts stay active.",
+        );
+        kit::code_block(ui, &protected, 2);
+    }
+    #[cfg(target_os = "linux")]
+    kit::note(ui, crate::agents_unconfined!());
     kit::note(
         ui,
         "4. Ask the agent to use a credential. The bouncer decides; when it asks you, the question shows in Decisions.",
@@ -1136,7 +1210,7 @@ pub(super) fn draw_fresh_token(app: &mut DesktopApp, ctx: &egui::Context) {
                 );
                 if busy {
                     ui.horizontal(|ui| {
-                        ui.spinner();
+                        kit::spinner(ui, 16.0);
                         kit::note(ui, "Please wait. Apassy saves the host settings.");
                     });
                 }

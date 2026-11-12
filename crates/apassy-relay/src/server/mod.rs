@@ -9,30 +9,41 @@
 //! The public interface below is fixed by the skeleton: the `apassy-relay`
 //! binary and the tests use `Relay::init` and `Relay::start`.
 
+pub mod account;
 pub mod admin;
 pub mod approvals;
 pub mod audit;
 pub mod auth;
+pub mod billing;
+pub mod billing_store;
 pub mod connect;
+pub mod cutover;
 pub mod decide;
 pub mod devices;
 pub mod directory;
+pub mod entitlement;
 pub mod env;
 pub mod feed;
+pub mod group;
 pub mod host;
 pub mod http;
 pub mod hub;
+pub mod ingress;
 pub mod joins;
 pub mod mcp;
 pub mod oauth;
 pub mod operator;
+pub mod peers;
 pub mod push;
 pub mod questions;
 pub mod rollback;
 pub mod runkeys;
 pub mod sessions;
 pub mod store;
+pub mod stripe;
 pub mod sync;
+pub mod tunnel;
+pub mod tunnel_routes;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -56,6 +67,24 @@ use crate::server::runkeys::RunKeys;
 use crate::server::sessions::SessionTable;
 use crate::server::store::Store;
 use crate::session::SessionSource;
+
+/// How long a device stream of the Connect tunnel waits on the tailnet listener for the
+/// first byte of its next request (docs/SPEC.md section 35.6). Below the TLS front's idle
+/// limit (120 s, `FrontLimits::idle`) and Connect's (15 minutes for a stream without a
+/// byte); above the iPhone's 30 s for a kept dial (`apassy::sync::KEPT_DIAL_IDLE`), so
+/// that the client closes first and never sends into a connection that the relay closes.
+pub const TUNNEL_KEEP_IDLE: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// Sequential requests on the tailnet listener, only on device streams of the Connect
+/// tunnel: the TLS front of this process writes each one down
+/// (`apassy::net::front_peers::is_tunnel`), never a header. Every other connection
+/// serves one request.
+fn tunnel_keep_alive() -> tiny_http::KeepAlive {
+    tiny_http::KeepAlive {
+        idle: TUNNEL_KEEP_IDLE,
+        allow: Arc::new(apassy::net::front_peers::is_tunnel),
+    }
+}
 
 /// The state of one team that every request handler of that team shares. A handler
 /// gets exactly one `Core`, chosen by the hub from the team id of the request.
@@ -158,11 +187,34 @@ pub struct Core {
 }
 
 impl Core {
+    /// A team that anyone may make without the operator: a Connect team, or a vault store
+    /// of an account (connect-account-v1). Its outside refusals go to the relay audit, and
+    /// its long polls and requests have the Connect bounds.
+    pub fn hosted(&self) -> bool {
+        matches!(
+            self.kind,
+            crate::api::TeamKind::Connect | crate::api::TeamKind::Account
+        )
+    }
+
     pub fn limits(&self) -> TeamLimits {
         *self
             .team_limits
             .read()
             .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The largest snapshot this team may push now: its `sync_bytes`, or 0 for a free
+    /// Connect team once free relay sync is over (`RelayConfig::free_sync_ended`, the
+    /// transition before the cutover). 0 is relay-sync-v1's 403 `plan_required` on a push
+    /// and a receipt; pulls and downloads still work. Operator teams and vault stores
+    /// keep their limit.
+    pub fn sync_bytes(&self) -> u64 {
+        if self.kind == crate::api::TeamKind::Connect && self.config.free_sync_ended() {
+            0
+        } else {
+            self.limits().sync_bytes
+        }
     }
 
     /// Writes at most one audit row per limit kind per ten seconds. Call on the
@@ -240,7 +292,7 @@ impl Core {
         action: &str,
         detail: &serde_json::Value,
     ) {
-        if self.kind != crate::api::TeamKind::Connect {
+        if !self.hosted() {
             self.audit.refusal(&self.store, now, kind, action, detail);
             return;
         }
@@ -265,7 +317,7 @@ impl Core {
     /// (`limit_error_on`), for a Connect team with that row in the relay audit
     /// (`outside_refusal`). Call it with no lock of the team's store held.
     pub fn outside_limit(&self, now: u64, kind: &'static str) -> RelayError {
-        if self.kind != crate::api::TeamKind::Connect {
+        if !self.hosted() {
             return self
                 .store
                 .with(|conn| self.limit_error_on(conn, now, kind))
@@ -284,7 +336,7 @@ impl Core {
     /// `Limits::connect_long_polls`, or `None` when they are all held (the poll then
     /// answers at once).
     pub fn poll_seat(&self) -> Option<connect::PollSeat<'_>> {
-        if self.kind != crate::api::TeamKind::Connect {
+        if !self.hosted() {
             return Some(connect::PollSeat::free());
         }
         connect::PollSeat::take(&self.connect_polls, self.config.limits.connect_long_polls)
@@ -294,7 +346,7 @@ impl Core {
     /// of `Limits::connect_feed_long_polls`, apart from the seats of `poll_seat`, or
     /// `None` when they are all held (the poll then answers at once).
     pub fn feed_poll_seat(&self) -> Option<connect::PollSeat<'_>> {
-        if self.kind != crate::api::TeamKind::Connect {
+        if !self.hosted() {
             return Some(connect::PollSeat::free());
         }
         connect::PollSeat::take(
@@ -309,7 +361,7 @@ impl Core {
     /// is not counted.
     pub fn take_request(&self, now: u64) -> Result<(), (RelayError, u64)> {
         self.last_request.store(now, Ordering::Relaxed);
-        if self.kind != crate::api::TeamKind::Connect {
+        if !self.hosted() {
             return Ok(());
         }
         let per_minute = connect::REQUESTS_PER_MINUTE.saturating_mul(self.limits().members.max(1));
@@ -360,6 +412,11 @@ pub struct RunningRelay {
     tailnet_handle: Option<JoinHandle<RelayResult<()>>>,
     tailnet_local_handle: Option<JoinHandle<RelayResult<()>>>,
     operator: Option<JoinHandle<()>>,
+    /// The Connect tunnel (with the account routes only): the broker, the ingress, and
+    /// the usage writer.
+    tunnel: Option<tunnel_routes::TunnelRuntime>,
+    /// A `Proxy` was built: never in `connect` mode (docs/SPEC.md section 37).
+    proxy_built: bool,
 }
 
 impl RunningRelay {
@@ -383,9 +440,33 @@ impl RunningRelay {
         self.hub.clone()
     }
 
+    /// The bound address of the tunnel's SNI ingress (`APASSY_CONNECT_INGRESS_LISTEN`).
+    pub fn tunnel_ingress_addr(&self) -> Option<SocketAddr> {
+        self.tunnel
+            .as_ref()
+            .and_then(|tunnel| tunnel.ingress_addr())
+    }
+
+    /// The bound address of the tunnel's ACME listener (`APASSY_CONNECT_ACME_LISTEN`).
+    pub fn tunnel_acme_addr(&self) -> Option<SocketAddr> {
+        self.tunnel.as_ref().and_then(|tunnel| tunnel.acme_addr())
+    }
+
     /// The teams of this relay.
     pub fn hub(&self) -> Arc<Hub> {
         self.hub.clone()
+    }
+
+    /// True when this relay built the proxy of `/p/`: never in `connect` mode, where `/p/`
+    /// is 410 `hosted_retired` and no proxy exists.
+    pub fn proxy_built(&self) -> bool {
+        self.proxy_built
+    }
+
+    /// True when this relay started its push senders (`push::Push::start` with a push
+    /// configuration): never in `connect` mode, which refuses the push settings.
+    pub fn push_on(&self) -> bool {
+        self.hub.push.enabled()
     }
 
     /// Blocks until the server stops. An error when the listener died (`http::serve`):
@@ -419,6 +500,10 @@ impl RunningRelay {
         }
         if let Some(handle) = self.operator.take() {
             let _ = handle.join();
+        }
+        // The usage of the month reaches `relay.db` before the data directory unlocks.
+        if let Some(tunnel) = self.tunnel.take() {
+            tunnel.stop();
         }
         self.hub.close_all();
     }
@@ -479,6 +564,11 @@ impl Relay {
     /// Creates a new relay with one team and its owner. Returns the owner token once.
     /// Refuses if the relay exists.
     pub fn init(config: &RelayConfig, team: &str, owner: &str) -> RelayResult<SecretString> {
+        if config.connect.plain_files() {
+            return Err(RelayError::invalid(
+                "APASSY_RELAY_MODE=connect has no operator team: run `apassy-relay init` without --team and --owner.",
+            ));
+        }
         let _lock = hub::lock_data_dir(config)?;
         refuse_existing(config)?;
         // The names are checked before any file is made.
@@ -516,6 +606,7 @@ impl Relay {
     /// this team. The original file stays as `team.db.pre-teams`: it opens with the old
     /// key only. Returns the team id.
     pub fn migrate(config: &RelayConfig, old_key: &SecretString) -> RelayResult<TeamId> {
+        config.refuse_connect_mode("`apassy-relay migrate`")?;
         let _lock = hub::lock_data_dir(config)?;
         let legacy = config.legacy_vault_path();
         if std::fs::symlink_metadata(config.directory_path()).is_ok() {
@@ -625,16 +716,39 @@ impl Relay {
     /// (`RelayConfig::check_listeners`).
     pub fn start(config: RelayConfig) -> RelayResult<RunningRelay> {
         config.check_listeners()?;
+        config.check_mode()?;
         let stop = Arc::new(AtomicBool::new(false));
         let hub = Hub::open(config, stop.clone())?;
-        let source: Arc<dyn SessionSource> = hub.clone();
-        let proxy = Arc::new(Proxy::new(&hub.config.upstream, source)?);
-        let bind = |listen: SocketAddr| {
-            let server = tiny_http::Server::http_with_deadlines(
+        // Connect billing: the price cache is filled at start, on a thread of its own, so
+        // a Stripe outage never delays or stops the start (`GET /v1/plans` asks again).
+        if let Some(billing) = hub.billing().cloned() {
+            let warm = std::thread::Builder::new()
+                .name("relay-stripe-prices".to_string())
+                .spawn(move || {
+                    if billing.prices(crate::now_unix()).is_err() {
+                        eprintln!("apassy-relay: the Stripe prices could not be read at start");
+                    }
+                });
+            if warm.is_err() {
+                eprintln!("apassy-relay: the Stripe price thread cannot start");
+            }
+        }
+        // `connect` mode serves no proxy: `/p/` is 410 `hosted_retired` before it would
+        // reach one, and none is built (docs/SPEC.md section 37).
+        let proxy = if hub.config.connect.plain_files() {
+            None
+        } else {
+            let source: Arc<dyn SessionSource> = hub.clone();
+            Some(Arc::new(Proxy::new(&hub.config.upstream, source)?))
+        };
+        let proxy_built = proxy.is_some();
+        let bind_keeping = |listen: SocketAddr, keep: Option<tiny_http::KeepAlive>| {
+            let server = tiny_http::Server::http_with_deadlines_and_keep_alive(
                 listen,
                 std::time::Duration::from_secs(10),
                 hub.config.request_read_timeout,
                 hub.config.request_handle_timeout,
+                keep,
             )
             .map_err(|_| RelayError::internal(format!("Cannot listen on {listen}.")))?;
             let addr = server
@@ -643,9 +757,15 @@ impl Relay {
                 .ok_or_else(|| RelayError::internal("The listener has no IP address."))?;
             Ok::<_, RelayError>((server, addr))
         };
+        let bind = |listen: SocketAddr| bind_keeping(listen, None);
         let (server, addr) = bind(hub.config.listen)?;
         let public = hub.config.public_listen.map(bind).transpose()?;
-        let tailnet = hub.config.tailnet_listen.map(bind).transpose()?;
+        // The device streams of the tunnel reach this listener only (docs/SPEC.md 35.3).
+        let tailnet = hub
+            .config
+            .tailnet_listen
+            .map(|listen| bind_keeping(listen, Some(tunnel_keep_alive())))
+            .transpose()?;
         let tailnet_local = hub
             .config
             .tailnet_listen
@@ -657,6 +777,19 @@ impl Relay {
             // A socket that an older version left answers nothing: remove it.
             let _ = operator::remove_stale(&hub.config.admin_socket_path());
             None
+        };
+        // The tunnel exists only with the account routes; dropped on any error below, it
+        // stops again.
+        let tunnel = match tunnel_routes::start(&hub) {
+            Ok(tunnel) => tunnel,
+            Err(error) => {
+                stop.store(true, Ordering::Relaxed);
+                if let Some(operator) = operator {
+                    let _ = operator.join();
+                }
+                hub.close_all();
+                return Err(error);
+            }
         };
         let serving = http::Serving {
             hub: hub.clone(),
@@ -787,6 +920,8 @@ impl Relay {
             tailnet_handle,
             tailnet_local_handle,
             operator,
+            tunnel,
+            proxy_built,
         })
     }
 }

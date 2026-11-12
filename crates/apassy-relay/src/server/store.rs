@@ -17,6 +17,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 use zeroize::Zeroizing;
 
 use crate::api::Policy;
+use crate::config::RelayConfig;
 use crate::error::{RelayError, RelayResult, codes};
 use crate::ids::{AgentId, CollectionId, ItemId, MemberId};
 use crate::secret::SecretString;
@@ -383,15 +384,169 @@ impl Store {
         })
     }
 
+    /// Creates a new plain file with `schema` (`connect` mode only, `plain_allowed`).
+    /// Refuses when the file exists.
+    pub fn create_plain(path: &Path, config: &RelayConfig, schema: &str) -> RelayResult<Self> {
+        plain_allowed(config)?;
+        if let Some(parent) = path.parent() {
+            prepare_dir(parent)?;
+        }
+        let created = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path);
+        match created {
+            Ok(file) => drop(file),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                return Err(RelayError::new(
+                    codes::CONFLICT,
+                    "The file already exists. Refusing to create it again.",
+                ));
+            }
+            Err(_) => return Err(RelayError::internal("The file cannot be created.")),
+        }
+        let made = open_plain_conn(path).and_then(|conn| {
+            conn.execute_batch(schema).map_err(db)?;
+            Ok(conn)
+        });
+        match made {
+            Ok(conn) => Ok(Self {
+                conn: Mutex::new(conn),
+            }),
+            Err(error) => {
+                let _ = fs::remove_file(path);
+                Err(error)
+            }
+        }
+    }
+
+    /// Opens an existing plain file (`connect` mode only, `plain_allowed`). An encrypted
+    /// file is refused. The caller checks the schema version.
+    pub fn open_plain(path: &Path, config: &RelayConfig) -> RelayResult<Self> {
+        plain_allowed(config)?;
+        if let Some(parent) = path.parent() {
+            prepare_dir(parent)?;
+        }
+        let meta = fs::symlink_metadata(path)
+            .map_err(|_| RelayError::internal("The file does not exist."))?;
+        if !meta.is_file() {
+            return Err(RelayError::internal("The file is not a regular file."));
+        }
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .map_err(|_| RelayError::internal("The file mode cannot be set to 0600."))?;
+        Ok(Self {
+            conn: Mutex::new(open_plain_conn(path)?),
+        })
+    }
+
+    /// Opens an existing plain file to read it only (`connect` mode only, `plain_allowed`):
+    /// the plain form of `open_read_only`, for a backup of a closed vault store and the
+    /// restore check.
+    pub fn open_read_only_plain(path: &Path, config: &RelayConfig) -> RelayResult<Self> {
+        plain_allowed(config)?;
+        let meta = fs::symlink_metadata(path)
+            .map_err(|_| RelayError::internal("The file does not exist."))?;
+        if !meta.is_file() {
+            return Err(RelayError::internal("The file is not a regular file."));
+        }
+        Ok(Self {
+            conn: Mutex::new(open_plain_conn_with(
+                path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | rusqlite::OpenFlags::SQLITE_OPEN_URI
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )?),
+        })
+    }
+
+    /// Opens a plain file to read it only (`SQLITE_OPEN_READ_ONLY`), without
+    /// `plain_allowed`: for `connect-cutover`, which checks the plain copies it wrote while
+    /// the relay is stopped and still has its master key (its dry run included), and for the
+    /// start check of a finished cutover (`cutover::check_start`). Never writes a byte;
+    /// never used to serve.
+    pub(crate) fn open_plain_read_only_unchecked(path: &Path) -> RelayResult<Self> {
+        let meta = fs::symlink_metadata(path)
+            .map_err(|_| RelayError::internal("The file does not exist."))?;
+        if !meta.is_file() {
+            return Err(RelayError::internal("The file is not a regular file."));
+        }
+        Ok(Self {
+            conn: Mutex::new(open_plain_conn_with(
+                path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | rusqlite::OpenFlags::SQLITE_OPEN_URI
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )?),
+        })
+    }
+
+    /// Writes a plain copy of this keyed file to `dest`, a new file of mode 0600, with
+    /// SQLCipher's `sqlcipher_export` and the same `user_version` (the export does not copy
+    /// it). The SQLite backup API cannot do it: SQLCipher refuses a backup between an
+    /// encrypted and a plain file ("backup is not supported with encrypted databases").
+    /// The copy is synced. For `connect-cutover` only; the caller holds `relay.lock`.
+    pub(crate) fn export_plain(&self, dest: &Path) -> RelayResult<()> {
+        let created = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(dest);
+        match created {
+            Ok(file) => drop(file),
+            Err(_) => return Err(RelayError::internal("The plain copy cannot be created.")),
+        }
+        let path = dest
+            .to_str()
+            .ok_or_else(|| RelayError::internal("The plain copy has no UTF-8 path."))?
+            .to_string();
+        let exported = self.with(|conn| {
+            let version: i64 = conn
+                .pragma_query_value(None, "user_version", |row| row.get(0))
+                .map_err(db)?;
+            conn.execute("ATTACH DATABASE ?1 AS cutover_plain KEY ''", params![path])
+                .map_err(db)?;
+            let copied = conn
+                .query_row("SELECT sqlcipher_export('cutover_plain')", [], |_| Ok(()))
+                .map_err(db)
+                .and_then(|()| {
+                    conn.pragma_update(Some("cutover_plain"), "user_version", version)
+                        .map_err(db)
+                });
+            let detached = conn
+                .execute_batch("DETACH DATABASE cutover_plain")
+                .map_err(db);
+            copied.and(detached)
+        });
+        if let Err(error) = exported {
+            let _ = fs::remove_file(dest);
+            return Err(error);
+        }
+        fs::File::open(dest)
+            .and_then(|file| file.sync_all())
+            .map_err(|_| RelayError::internal("The plain copy cannot be synced."))
+    }
+
+    /// Creates the plain file of one vault store (`connect` mode, the team schema).
+    pub fn create_team_plain(path: &Path, config: &RelayConfig) -> RelayResult<Self> {
+        Self::create_plain(path, config, &team_schema())
+    }
+
+    /// Opens the plain file of one vault store. It is always of the current schema: a
+    /// plain file is made new in `connect` mode, so there is nothing to migrate.
+    pub fn open_team_plain(path: &Path, config: &RelayConfig) -> RelayResult<Self> {
+        let store = Self::open_plain(path, config)?;
+        if store.user_version()? != SCHEMA_VERSION {
+            return Err(RelayError::internal(
+                "A plain team file has another schema version than this relay.",
+            ));
+        }
+        Ok(store)
+    }
+
     /// Creates the file of one team (the team schema).
     pub fn create_team(path: &Path, key: &SecretString) -> RelayResult<Self> {
-        Self::create_at(
-            path,
-            key,
-            &format!(
-                "{SCHEMA}{DEVICE_SCHEMA}{SYNC_SCHEMA}{QUESTION_SCHEMA}{FEED_SCHEMA}{AGENT_ITEMS_SCHEMA}{PUSH_HANDLE_SCHEMA}PRAGMA user_version = 8;"
-            ),
-        )
+        Self::create_at(path, key, &team_schema())
     }
 
     /// Opens the file of one team and checks its schema version.
@@ -671,6 +826,63 @@ impl Store {
             .map_err(|_| RelayError::internal("The backup cannot be read."))
     }
 
+    /// `snapshot_on` for a plain file (`connect` mode only, `plain_allowed`): SQLite's
+    /// backup API from a plain connection to a new plain file of mode 0600, synced.
+    pub fn snapshot_plain_on(
+        conn: &Connection,
+        dest: &Path,
+        config: &RelayConfig,
+    ) -> RelayResult<u64> {
+        plain_allowed(config)?;
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(dest)
+            .map_err(|_| RelayError::internal("The backup file cannot be created."))?;
+        let mut target = open_plain_conn(dest)?;
+        rusqlite::backup::Backup::new(conn, &mut target)
+            .map_err(db)?
+            .run_to_completion(128, std::time::Duration::from_millis(1), None)
+            .map_err(db)?;
+        drop(target);
+        let file =
+            fs::File::open(dest).map_err(|_| RelayError::internal("The backup cannot be read."))?;
+        file.sync_all()
+            .map_err(|_| RelayError::internal("The backup cannot be synced."))?;
+        file.metadata()
+            .map(|m| m.len())
+            .map_err(|_| RelayError::internal("The backup cannot be read."))
+    }
+
+    /// Opens a team or directory file read-only as this relay keeps it: with `key`, or
+    /// plain in `connect` mode (where `key` is empty and unused).
+    pub fn open_read_only_for(
+        config: &RelayConfig,
+        path: &Path,
+        key: &SecretString,
+    ) -> RelayResult<Self> {
+        if config.connect.plain_files() {
+            Self::open_read_only_plain(path, config)
+        } else {
+            Self::open_read_only(path, key)
+        }
+    }
+
+    /// `snapshot_on` or `snapshot_plain_on`, as this relay keeps its files.
+    pub fn snapshot_for(
+        config: &RelayConfig,
+        conn: &Connection,
+        dest: &Path,
+        key: &SecretString,
+    ) -> RelayResult<u64> {
+        if config.connect.plain_files() {
+            Self::snapshot_plain_on(conn, dest, config)
+        } else {
+            Self::snapshot_on(conn, dest, key)
+        }
+    }
+
     /// Caps the file at `bytes` (`PRAGMA max_page_count`, rounded up to whole pages);
     /// `None` lifts the cap. A write past it fails with `SQLITE_FULL`, which `db` turns
     /// into 403 `team_limit`. SQLite never sets the cap below the pages the file has.
@@ -887,6 +1099,12 @@ fn open_keyed_with(
             "The vault has unexpected cipher parameters.",
         ));
     }
+    finish_open(conn)
+}
+
+/// The settings of every open file, keyed or plain: secure delete, foreign keys, and
+/// journal mode DELETE.
+fn finish_open(conn: Connection) -> RelayResult<Connection> {
     conn.pragma_update(None, "secure_delete", "ON")
         .map_err(db)?;
     conn.pragma_update(None, "foreign_keys", "ON").map_err(db)?;
@@ -899,6 +1117,77 @@ fn open_keyed_with(
         ));
     }
     Ok(conn)
+}
+
+/// The schema of a new team file.
+fn team_schema() -> String {
+    format!(
+        "{SCHEMA}{DEVICE_SCHEMA}{SYNC_SCHEMA}{QUESTION_SCHEMA}{FEED_SCHEMA}{AGENT_ITEMS_SCHEMA}{PUSH_HANDLE_SCHEMA}PRAGMA user_version = 8;"
+    )
+}
+
+/// Refuses a plain (unencrypted) file unless the relay runs in `connect` mode without a
+/// master key: `APASSY_RELAY_MODE=connect`, an empty `master_key`, and neither
+/// `APASSY_RELAY_KEY` nor `APASSY_RELAY_KEY_FILE` in the environment (ADR 0037 stage 7:
+/// Connect keeps no secret, so its files need no key; a relay with a key keeps every
+/// file encrypted).
+pub fn plain_allowed(config: &RelayConfig) -> RelayResult<()> {
+    let refused = |why: &str| {
+        RelayError::internal(format!(
+            "A plain file is opened only in APASSY_RELAY_MODE=connect without a master key: {why}"
+        ))
+    };
+    if !config.connect.plain_files() {
+        return Err(refused("the relay is not in connect mode."));
+    }
+    if !config.master_key.is_empty() {
+        return Err(refused("a master key is set."));
+    }
+    if std::env::var_os("APASSY_RELAY_KEY").is_some()
+        || std::env::var_os("APASSY_RELAY_KEY_FILE").is_some()
+    {
+        return Err(refused("APASSY_RELAY_KEY or APASSY_RELAY_KEY_FILE is set."));
+    }
+    Ok(())
+}
+
+/// True when `path` is a plain SQLite file of this build (it reads without a key). An
+/// encrypted file, a missing file, or anything else is false. Read-only: nothing changes.
+pub(crate) fn is_plain_file(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file())
+        && open_plain_conn_with(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .is_ok()
+}
+
+/// Opens a plain SQLite file with the checks of a keyed one, but no key.
+fn open_plain_conn(path: &Path) -> RelayResult<Connection> {
+    open_plain_conn_with(path, rusqlite::OpenFlags::default())
+}
+
+/// `open_plain_conn` with `flags` (read-only for a backup or a check).
+fn open_plain_conn_with(path: &Path, flags: rusqlite::OpenFlags) -> RelayResult<Connection> {
+    let conn = Connection::open_with_flags(path, flags)
+        .map_err(|_| RelayError::internal("The file cannot be opened."))?;
+    require_build_options(&conn)?;
+    let defensive = conn
+        .set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)
+        .map_err(db)?;
+    if !defensive {
+        return Err(RelayError::internal(
+            "SQLite defensive mode is not available.",
+        ));
+    }
+    conn.pragma_update(None, "temp_store", "MEMORY")
+        .map_err(db)?;
+    // The first read fails on an encrypted file: a plain open never reads a keyed one.
+    conn.query_row("SELECT count(*) FROM sqlite_master", [], |row| {
+        row.get::<_, i64>(0)
+    })
+    .map_err(|_| RelayError::internal("The file is not a plain SQLite file of the relay."))?;
+    finish_open(conn)
 }
 
 fn pragma_i64(conn: &Connection, name: &str) -> RelayResult<i64> {

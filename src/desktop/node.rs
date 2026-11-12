@@ -84,8 +84,12 @@ pub(crate) const RETRY_INTERVAL: Duration = Duration::from_secs(60);
 /// worker thread: it runs the Tailscale command line).
 pub(crate) const ACCESS_READ_INTERVAL: Duration = Duration::from_secs(10);
 /// The note when a close keeps the app open.
+#[cfg(not(target_os = "linux"))]
 pub(crate) const KEPT_OPEN: &str =
     "Apassy stays open for your cloud agents: the window is in the Dock. Quit Apassy to stop them.";
+/// The note when a close keeps the app open: Linux has no Dock and no menu bar.
+#[cfg(target_os = "linux")]
+pub(crate) const KEPT_OPEN: &str = "Apassy stays open for your cloud agents: the window is minimized. Press Ctrl+Q to quit Apassy and stop them.";
 
 /// A start of the node on a worker thread.
 struct Starting {
@@ -143,10 +147,18 @@ pub(crate) struct NodeFlows {
 }
 
 impl NodeFlows {
-    /// The node of the product, for `backend` (the embedded relay of the app crate).
-    pub(crate) fn platform(backend: Option<Arc<dyn NodeBackend>>) -> Self {
+    /// The node of the product, for `backend` (the embedded relay of the app crate). Its
+    /// "Apassy Connect" route signs in with `connect`, the one account session of the
+    /// app (plan s7 units M4 and M5b).
+    pub(crate) fn platform(
+        backend: Option<Arc<dyn NodeBackend>>,
+        connect: Arc<crate::connect::AccountSession>,
+    ) -> Self {
         let node = backend.map(|backend| Arc::new(Node::new(NodeOptions::platform(backend))));
         if let Some(node) = &node {
+            node.set_connect(Some(crate::node::tunnel::ConnectSetup::for_session(
+                connect,
+            )));
             // Before any vault opens: a start waits for it (the start lock).
             let node = Arc::clone(node);
             let _ = std::thread::Builder::new()
@@ -207,11 +219,11 @@ impl DesktopApp {
         self.owner_ui
             .session
             .with_vault(|vault| {
-                let allowed = Node::may_run(vault);
+                let allowed = node.may_run_here(vault);
                 if allowed.is_some() && node.serves().is_some() && node.serves() != allowed {
                     node.adopt(vault);
                 }
-                (Node::wanted(vault), allowed)
+                (node.wanted_here(vault), allowed)
             })
             .unwrap_or((None, None))
     }
@@ -364,7 +376,10 @@ impl DesktopApp {
     /// the cloud agents. eframe quits when no `CancelClose` comes in the frame of the
     /// request. Quit Apassy (⌘Q) does not ask to close the window, so it still quits.
     pub(crate) fn keep_open_for_node(&mut self, ctx: &egui::Context) {
-        if !ctx.input(|input| input.viewport().close_requested()) || !self.node_running() {
+        if !ctx.input(|input| input.viewport().close_requested())
+            || !self.node_running()
+            || super::quit_requested(ctx)
+        {
             return;
         }
         ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
@@ -556,7 +571,11 @@ impl DesktopApp {
         }
         match node.allow_connect(&self.owner_ui.session.shared_vault(), id) {
             Ok(agent) => self.set_ok(format!(
-                "{} is connected to this Mac. It sees no credential until you choose some in Agents.",
+                concat!(
+                    "{} is connected to this ",
+                    crate::computer!(),
+                    ". It sees no credential until you choose some in Agents."
+                ),
                 agent.name
             )),
             Err(error) => self.set_err(error.message),
@@ -609,7 +628,34 @@ impl DesktopApp {
         match node.set_route(&self.owner_ui.session.shared_vault(), false) {
             Ok(()) => {
                 self.stop_node();
-                self.set_ok("Remote access is off. No remote agent reaches this Mac.");
+                self.set_ok(concat!(
+                    "Remote access is off. No remote agent reaches this ",
+                    crate::computer!(),
+                    "."
+                ));
+            }
+            Err(error) => self.set_err(error.message),
+        }
+    }
+
+    /// The "Apassy Connect" switch of the remote access block (plan s7 unit M4). No owner
+    /// check either way: devices still authenticate inside the pinned TLS, and cloud
+    /// agents reach the public listener only while remote access is on (which needed
+    /// one), where each connect asks the owner. The node starts again with the route.
+    pub(crate) fn set_connect_route(&mut self, on: bool) {
+        let Some(node) = self.node.node.clone() else {
+            self.set_err("This build of Apassy has no remote access.");
+            return;
+        };
+        match node.set_connect_route(on) {
+            Ok(()) => {
+                self.stop_node();
+                self.node_changed();
+                self.set_ok(if on {
+                    "Apassy Connect is on. This Mac connects to it while the vault is unlocked."
+                } else {
+                    "Apassy Connect is off. Nothing reaches this Mac through it."
+                });
             }
             Err(error) => self.set_err(error.message),
         }

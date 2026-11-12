@@ -1,6 +1,8 @@
 //! Relay sync of the selected vault (contract section 5.5) and removing a vault from
 //! this iPhone (section 5.6). The engine is the Mac's (`apassy::sync::RelaySync`): the
-//! same merge, the same signed heads, the same checks of the chain.
+//! same merge, the same signed heads, the same checks of the chain. Its layout takes the
+//! transport of the core (`Transport::config`, section 5.15), so a vault on a node with a
+//! Connect route syncs through the dial when the tailnet is not there.
 
 use std::fs;
 use std::path::PathBuf;
@@ -94,6 +96,9 @@ fn state_of(error: &CoreError) -> &'static str {
         "damaged" => "damaged",
         "stale_copy" => "stale_copy",
         "forked_copy" => "forked_copy",
+        // A vault store of Apassy Connect waits for another device of the account: a
+        // plain state of the sync, not an error.
+        "waits_for_device" => "waits_for_device",
         "busy" => "busy",
         _ => "error",
     }
@@ -383,5 +388,29 @@ impl Core {
             self.select_relay()?;
         }
         Ok(ok(&Removed { left_relay }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A vault store of Apassy Connect that waits for another device of the account to
+    /// sync has its own state, so the app shows it as a plain line and not as an error.
+    #[test]
+    fn a_sync_that_waits_for_a_device_of_the_account_has_its_own_state() {
+        let error = CoreError::from(SyncError::WaitsForAccountDevice);
+        assert_eq!(error.code, "waits_for_device");
+        assert_eq!(state_of(&error), "waits_for_device");
+        assert_eq!(
+            error.message,
+            "Waiting for another device of this account to sync. Nothing was changed."
+        );
+        // The other states stay as they were.
+        assert_eq!(state_of(&CoreError::from(SyncError::Damaged)), "damaged");
+        assert_eq!(
+            state_of(&CoreError::from(SyncError::RelayUnreachable)),
+            "offline"
+        );
     }
 }

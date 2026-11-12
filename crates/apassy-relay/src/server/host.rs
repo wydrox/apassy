@@ -258,8 +258,9 @@ fn deny_invalid(
 }
 
 /// Makes the session of a released run with `values[i]` for `items[i]`, sets the run
-/// `ready`, and writes `run_released` (by `actor`) and `session_started`. `created` gets
-/// the handle of the session as soon as it exists, so the caller removes it when the
+/// `ready`, and writes `run_released` (by `actor`) and `session_started`. The base URLs
+/// of the session start with `origin`, a public origin of the relay. `created` gets the
+/// handle of the session as soon as it exists, so the caller removes it when the
 /// transaction does not commit.
 #[allow(clippy::too_many_arguments)]
 fn start_session(
@@ -271,13 +272,14 @@ fn start_session(
     suggestion: Suggestion,
     reason: Option<&str>,
     actor: &str,
+    origin: &str,
     created: &mut Option<TokenHash>,
     now: u64,
 ) -> RelayResult<RunView> {
     let expires_at = now + run.ttl_secs;
     let env_items = decide::env_items(items, values)?;
     let (_, hash) = core.sessions.create(
-        &core.config.public_url,
+        origin,
         run.id,
         run.agent_id,
         run.member_id,
@@ -396,6 +398,7 @@ pub fn release(
             pending.suggestion,
             reason.as_deref(),
             &actor,
+            &core.config.public_url,
             &mut created,
             now,
         )
@@ -417,6 +420,19 @@ pub fn release_values(
     run_id: RunId,
     values: Vec<SecretString>,
     reason: Option<&str>,
+    now: u64,
+) -> RelayResult<RunView> {
+    release_values_at(core, run_id, values, reason, &core.config.public_url, now)
+}
+
+/// `release_values` with the base URLs of the session on `origin`, the public origin
+/// that the agent of the run uses (docs/SPEC.md section 31.2; `oauth::agent_origin`).
+pub fn release_values_at(
+    core: &Core,
+    run_id: RunId,
+    values: Vec<SecretString>,
+    reason: Option<&str>,
+    origin: &str,
     now: u64,
 ) -> RelayResult<RunView> {
     let reason = checked_reason(reason)?;
@@ -452,6 +468,7 @@ pub fn release_values(
             suggestion,
             reason.as_deref(),
             EMBEDDED_HOST_ACTOR,
+            origin,
             &mut created,
             now,
         )

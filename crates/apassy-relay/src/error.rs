@@ -115,6 +115,41 @@ pub mod codes {
     /// agent on a relay with `APASSY_RELAY_TEAM_VAULTS=0`. 410: the feature is gone here,
     /// and a retry does not help.
     pub const TEAM_VAULTS_RETIRED: &str = "team_vaults_retired";
+    // The end of the free hosted paths and the Connect-only mode (connect-account-v1
+    // section 14, ADR 0037 stage 7, D14).
+    /// `POST /v1/connect` and its recovery challenge, and the questions, feed, and push
+    /// routes of a free Connect team, on a relay with `APASSY_RELAY_FREE_CONNECT=0`. 410:
+    /// the free path is over here, and a retry does not help.
+    pub const FREE_CONNECT_ENDED: &str = "free_connect_ended";
+    /// A route of the relay that Apassy Connect does not serve, in `APASSY_RELAY_MODE=connect`:
+    /// answered before any body is read.
+    pub const HOSTED_RETIRED: &str = "hosted_retired";
+    // Apassy Connect accounts (connect-account-v1 section 4, docs/SPEC.md "Connect accounts").
+    /// A Connect route that needs a live account device, called with a relay-sync team
+    /// token, or for a store that is not a vault store.
+    pub const ACCOUNT_REQUIRED: &str = "account_required";
+    /// A device of another account, and the two accounts share no group; a group route
+    /// or call by an account that is not in the group.
+    pub const NOT_IN_GROUP: &str = "not_in_group";
+    /// A count limit of the account: devices, vault stores, nodes.
+    pub const ACCOUNT_LIMIT: &str = "account_limit";
+    /// A signed sign-in of a key that was a device of the account and is not any more
+    /// (revoked, or the account was deleted). Only the device's own signature gets it.
+    pub const DEVICE_REMOVED: &str = "device_removed";
+    /// An account creation names an account id that Connect holds or held: an id is used
+    /// once, also after its account was deleted. The device makes a new id.
+    pub const ACCOUNT_ID_TAKEN: &str = "account_id_taken";
+    // Connect billing and groups (docs/contracts/connect-billing-v1.md).
+    /// A count of people or seats outside `1 ≤ n ≤ max` of the plan, or below the
+    /// active members of the group.
+    pub const SEAT_LIMIT: &str = "seat_limit";
+    // The Connect tunnel (docs/contracts/connect-tunnel-v1.md).
+    /// A dial or a grant names a node that does not exist.
+    pub const NODE_UNKNOWN: &str = "node_unknown";
+    /// Open streams, dials a minute, or the monthly byte budget of the account.
+    pub const TUNNEL_LIMIT: &str = "tunnel_limit";
+    /// The node exists and has no open tunnel.
+    pub const TUNNEL_OFFLINE: &str = "tunnel_offline";
     // Anything else.
     pub const RELAY_ERROR: &str = "relay_error";
 }
@@ -152,19 +187,23 @@ pub fn status_of(code: &str) -> u16 {
         | PLAN_REQUIRED
         | FEED_LIMIT
         | FEED_RATE
-        | TOO_MANY_ACTIONS => 403,
-        NOT_FOUND => 404,
+        | TOO_MANY_ACTIONS
+        | ACCOUNT_REQUIRED
+        | NOT_IN_GROUP
+        | ACCOUNT_LIMIT
+        | DEVICE_REMOVED => 403,
+        NOT_FOUND | NODE_UNKNOWN => 404,
         METHOD_NOT_ALLOWED => 405,
         CONFLICT | RUN_NOT_PENDING | QUESTION_SETTLED | QUESTION_EXPIRED | PUSH_UNAVAILABLE
         | PUSH_GATEWAY_REFUSED | CONNECT_KEY_USED | SEQ_NOT_NEWER | ACTION_SETTLED
-        | ACTION_EXPIRED => 409,
-        TEAM_VAULTS_RETIRED => 410,
+        | ACTION_EXPIRED | SEAT_LIMIT | ACCOUNT_ID_TAKEN => 409,
+        TEAM_VAULTS_RETIRED | FREE_CONNECT_ENDED | HOSTED_RETIRED => 410,
         PRECONDITION_FAILED => 412,
         PAYLOAD_TOO_LARGE => 413,
-        RATE_LIMITED => 429,
+        RATE_LIMITED | TUNNEL_LIMIT => 429,
         NOT_SUPPORTED => 501,
         UPSTREAM_FAILED | ENCODED_RESPONSE => 502,
-        BUSY => 503,
+        BUSY | TUNNEL_OFFLINE => 503,
         _ => 500,
     }
 }
@@ -253,6 +292,7 @@ mod tests {
             codes::FEED_LIMIT,
             codes::FEED_RATE,
             codes::TOO_MANY_ACTIONS,
+            codes::DEVICE_REMOVED,
         ] {
             assert_eq!(RelayError::new(code, "x").status(), 403);
         }
@@ -273,6 +313,16 @@ mod tests {
             412
         );
         assert_eq!(RelayError::new(codes::RATE_LIMITED, "x").status(), 429);
+        assert_eq!(RelayError::new(codes::NODE_UNKNOWN, "x").status(), 404);
+        assert_eq!(RelayError::new(codes::TUNNEL_LIMIT, "x").status(), 429);
+        assert_eq!(RelayError::new(codes::TUNNEL_OFFLINE, "x").status(), 503);
+        for code in [
+            codes::TEAM_VAULTS_RETIRED,
+            codes::FREE_CONNECT_ENDED,
+            codes::HOSTED_RETIRED,
+        ] {
+            assert_eq!(RelayError::new(code, "x").status(), 410);
+        }
         assert_eq!(RelayError::internal("x").status(), 500);
         assert_eq!(status_of("something_new"), 500);
     }

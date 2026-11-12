@@ -1137,8 +1137,21 @@ fn the_directory_moves_from_1002_to_1005_and_keeps_its_teams() {
     relay.edit_offline(|config| {
         edit_directory(
             config,
-            "ALTER TABLE team DROP COLUMN kind;
-             ALTER TABLE team DROP COLUMN suspend_reason;
+            "DROP TABLE account_peer_join; DROP TABLE account_peer_link; DROP TABLE account_join; DROP TABLE account_link; DROP TABLE account_store_device; DROP TABLE account_store_removal;
+             DROP TABLE account_list; DROP TABLE account_device; DROP TABLE account; DROP TABLE account_key; DROP TABLE account_id_used; DROP TABLE account_share_void; DROP TABLE account_join_share;
+             DROP TABLE brain_event; DROP TABLE \"group\"; DROP TABLE group_member;
+             DROP TABLE group_invite; DROP TABLE stripe_customer; DROP TABLE stripe_subscription;
+             DROP TABLE stripe_event; DROP TABLE billing_problem; DROP TABLE billing_clock; DROP TABLE tunnel_node; DROP TABLE tunnel_grant;
+             DROP TABLE tunnel_usage; DROP TABLE entitlement_key;
+             CREATE TABLE team_1002 (
+               id TEXT PRIMARY KEY, name TEXT NOT NULL, file_key TEXT NOT NULL,
+               state TEXT NOT NULL CHECK (state IN ('active','suspended')),
+               legacy INTEGER NOT NULL DEFAULT 0 CHECK (legacy IN (0, 1)),
+               created_at INTEGER NOT NULL, suspended_at INTEGER, limits TEXT);
+             INSERT INTO team_1002 SELECT id, name, file_key, state, legacy, created_at, suspended_at, limits FROM team;
+             DROP TABLE team;
+             ALTER TABLE team_1002 RENAME TO team;
+             CREATE UNIQUE INDEX team_legacy ON team(legacy) WHERE legacy = 1;
              ALTER TABLE team_code DROP COLUMN kind;
              DROP INDEX connect_key_created;
              DROP TABLE connect_key;
@@ -1148,14 +1161,14 @@ fn the_directory_moves_from_1002_to_1005_and_keeps_its_teams() {
              PRAGMA user_version = 1002;",
         );
     });
-    // The restart above moved it to 1005 again.
+    // The restart above moved it to the current version again.
     let conn = rusqlite::Connection::open(relay.config.directory_path()).unwrap();
     conn.execute_batch(&format!("PRAGMA key = '{VAULT_KEY}';"))
         .unwrap();
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 1005);
+    assert_eq!(version, apassy_relay::server::directory::DIRECTORY_VERSION);
     let kinds: Vec<String> = conn
         .prepare("SELECT kind FROM team ORDER BY created_at")
         .unwrap()

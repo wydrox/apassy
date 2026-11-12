@@ -60,6 +60,22 @@ pub fn on_hosted_relay(url: &str) -> bool {
     RelayUrl::parse(url).is_ok_and(|url| url.as_str() == crate::sync::DEFAULT_RELAY_URL)
 }
 
+/// The sync membership of `vault` when it is a vault store of Apassy Connect (plan s7
+/// unit M3, connect-account-v1 section 8): a membership whose device key is the Connect
+/// account device key of this Mac. Its row keeps the public key of that key and no
+/// private key (schema 34, `key_source = 'account'`); the account signs its sign-ins and
+/// heads (`crate::sync::RelaySync::set_account_signer`). `None` for a vault that syncs
+/// another way or with a key of its own.
+pub fn connect_store_membership(vault: &Vault) -> VaultResult<Option<crate::vault::RelayDevice>> {
+    Ok(vault.relay_device()?.filter(|row| row.uses_account_key()))
+}
+
+/// Whether `membership` signs with the Connect account key: its row holds no private key
+/// (only an account row of schema 34 has none).
+pub fn signs_with_account_key(membership: &RelayMembership) -> bool {
+    membership.key_pkcs8.is_empty()
+}
+
 /// A new team on the relay: its ID and the device number of its first device.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CreatedTeam {
@@ -142,12 +158,181 @@ pub enum QuestionsAvailability {
 }
 
 /// The membership with the purpose `questions`, or `None`. At most one is used: the
-/// first by team.
+/// membership of the questions team that the vault names (`Vault::questions_team`), else
+/// the first by team. During "Move Approvals to Connect" the vault keeps the hosted
+/// membership beside the node one until the first round trip
+/// ([`move_questions_keeping_hosted`]); the named team is the node team then.
 pub fn questions_membership(vault: &Vault) -> VaultResult<Option<RelayMembership>> {
-    Ok(vault
+    let mut asking: Vec<RelayMembership> = vault
         .relay_memberships()?
         .into_iter()
-        .find(|membership| membership.purposes.contains(&MembershipPurpose::Questions)))
+        .filter(|membership| membership.purposes.contains(&MembershipPurpose::Questions))
+        .collect();
+    if asking.len() > 1
+        && let Some(team) = vault.questions_team()?
+        && let Some(at) = asking
+            .iter()
+            .position(|membership| membership.team_id == team)
+    {
+        return Ok(Some(asking.swap_remove(at)));
+    }
+    Ok(asking.into_iter().next())
+}
+
+/// The hosted membership that "Move Approvals to Connect" keeps until the first question
+/// went round through the node team (plan s7 unit M5, section 5): a membership with the
+/// purpose `questions` that is not the questions team of the vault. `None` when no move
+/// waits.
+pub fn retiring_questions_membership(vault: &Vault) -> VaultResult<Option<RelayMembership>> {
+    let Some(team) = vault.questions_team()? else {
+        return Ok(None);
+    };
+    Ok(vault.relay_memberships()?.into_iter().find(|membership| {
+        membership.purposes.contains(&MembershipPurpose::Questions) && membership.team_id != team
+    }))
+}
+
+/// "Move Approvals to Connect", the vault step after a device joined the node team
+/// through a code with the Connect route: the node team becomes the questions team of
+/// the vault and this Mac registers with the key of `node`, but the membership of
+/// `hosted_team` stays as it is ([`retiring_questions_membership`]): the old path keeps
+/// working, also after a quit, until [`finish_move_to_connect`] (the first question went
+/// round through the new route) or [`undo_move_to_connect`] (a failure). `NotEnabled`:
+/// the questions of the vault are not on `hosted_team`. `InvalidRelayAddress`: `node`
+/// has no pin.
+pub fn move_questions_keeping_hosted(
+    vault: &mut Vault,
+    node: &RelayMembership,
+    hosted_team: &str,
+    device_name: &str,
+) -> Result<TrustedDevice, SyncError> {
+    if vault.is_locked() {
+        return Err(SyncError::Vault(VaultErrorKind::Locked));
+    }
+    if node.pin.is_none() || node.team_id == hosted_team {
+        return Err(SyncError::InvalidRelayAddress);
+    }
+    questions_membership(vault)?
+        .filter(|membership| membership.team_id == hosted_team)
+        .ok_or(SyncError::NotEnabled)?;
+    if vault.trusted_key_removed(&node.public_key)? {
+        return Err(SyncError::Vault(VaultErrorKind::AlreadyExists));
+    }
+    vault.add_relay_membership(node)?;
+    let kept = (|| -> VaultResult<TrustedDevice> {
+        vault.set_questions_team(&node.team_id)?;
+        vault.ensure_question_key()?;
+        register_this_device(vault, node, device_name)
+    })();
+    kept.map_err(|error| {
+        let _ = vault.set_questions_team(hosted_team);
+        let _ = vault.remove_relay_membership(&node.team_id);
+        SyncError::Vault(error.kind())
+    })
+}
+
+/// The end of "Move Approvals to Connect" after the first question went round through
+/// the node team: the kept hosted membership loses the purpose `questions` (a
+/// notifications-only one goes with its key; relay sync never changes). The caller took
+/// its devices off the hosted relay first ([`leave_hosted_team`]). Returns the membership
+/// that went, or `None` when no move waited.
+pub fn finish_move_to_connect(vault: &mut Vault) -> VaultResult<Option<RelayMembership>> {
+    let Some(hosted) = retiring_questions_membership(vault)? else {
+        return Ok(None);
+    };
+    let mut rest = hosted.purposes.clone();
+    rest.remove(&MembershipPurpose::Questions);
+    if rest.is_empty() {
+        vault.remove_relay_membership(&hosted.team_id)?;
+    } else {
+        vault.set_membership_purposes(&hosted.team_id, &rest)?;
+    }
+    Ok(Some(hosted))
+}
+
+/// Undo "Move Approvals to Connect" before its first round trip: the kept hosted team is
+/// the questions team of the vault again, and the node membership goes (its trusted
+/// device rows stay, so an answer on its way still verifies). Returns the hosted team, or
+/// `None` when no move waited.
+pub fn undo_move_to_connect(vault: &mut Vault) -> VaultResult<Option<String>> {
+    let Some(hosted) = retiring_questions_membership(vault)? else {
+        return Ok(None);
+    };
+    let node = vault.questions_team()?;
+    vault.set_questions_team(&hosted.team_id)?;
+    if let Some(node) = node {
+        vault.remove_relay_membership(&node)?;
+    }
+    Ok(Some(hosted.team_id))
+}
+
+/// Take the devices of the notifications-only team of `hosted` off its relay
+/// (`DELETE /v1/devices/{id}`): first the other devices, then this Mac's own, which the
+/// relay may refuse for the last owner (its key goes anyway). Best effort: returns
+/// whether every other device left. A relay sync team keeps its devices: `false`, no
+/// call.
+pub fn leave_hosted_team(hosted: &RelayMembership) -> bool {
+    if !questions_only(hosted) {
+        return false;
+    }
+    let Ok(client) = crate::questions::QuestionsClient::from_membership(hosted) else {
+        return false;
+    };
+    let own = hosted.device_id;
+    let others: Option<Vec<u64>> = client.devices().ok().map(|devices| {
+        devices
+            .into_iter()
+            .filter(|device| device.id != own && !device.current)
+            .map(|device| device.id)
+            .collect()
+    });
+    let mut all = others.is_some();
+    for device in others.unwrap_or_default() {
+        all &= client.remove_device(device).is_ok();
+    }
+    let _ = client.remove_device(own);
+    client.close();
+    all
+}
+
+/// Why the hosted relay refuses a path for good (`410`, connect-account-v1 section 4):
+/// the app stops calling it, shows one state with the choices of the notice, and keeps
+/// every local thing (plan s7 unit M5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PathEnded {
+    /// `410 free_connect_ended`: the free questions, feed, and push of a free Connect
+    /// team, or `POST /v1/connect`, after Apassy [`FREE_RELAY_PATHS_END_VERSION`].
+    FreeEnded,
+    /// `410 hosted_retired`: the hosted relay serves Apassy Connect only.
+    Retired,
+}
+
+impl PathEnded {
+    /// The refusal of an error envelope: `410` with one of the two codes.
+    pub fn of_answer(status: u16, code: &str) -> Option<Self> {
+        match (status, code) {
+            (410, "free_connect_ended") => Some(Self::FreeEnded),
+            (410, "hosted_retired") => Some(Self::Retired),
+            _ => None,
+        }
+    }
+
+    /// The refusal of a relay sync or a relay call.
+    pub fn of_sync(error: SyncError) -> Option<Self> {
+        match error {
+            SyncError::Relay(RelayRefusal::FreeEnded) => Some(Self::FreeEnded),
+            SyncError::Relay(RelayRefusal::HostedRetired) => Some(Self::Retired),
+            _ => None,
+        }
+    }
+
+    /// The code of the envelope.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::FreeEnded => "free_connect_ended",
+            Self::Retired => "hosted_retired",
+        }
+    }
 }
 
 /// What "Send questions through the relay" can do for the open vault. Off by default:
@@ -248,6 +433,11 @@ pub fn enable_questions(vault: &mut Vault, device_name: &str) -> Result<TrustedD
         return Ok(register_this_device(vault, &membership, device_name)?);
     }
     let sync = vault.relay_device()?.ok_or(SyncError::NotEnabled)?;
+    // A vault store of Apassy Connect has no key of its own here (schema 34): its store
+    // keeps no questions (connect-account-v1 section 8). A notifications-only team does.
+    if sync.uses_account_key() {
+        return Err(SyncError::NotEnabled);
+    }
     if vault.trusted_key_removed(&sync.public_key)? {
         return Err(SyncError::Vault(VaultErrorKind::AlreadyExists));
     }
@@ -520,18 +710,26 @@ pub fn questions_only(membership: &RelayMembership) -> bool {
 /// notifications-only membership goes with its key. Relay sync is never touched. The
 /// trusted device row stays, so an answer that is on its way still verifies. Returns
 /// whether they were on.
+///
+/// During "Move Approvals to Connect" the kept hosted membership loses the purpose too,
+/// so off never falls back to the old path.
 pub fn disable_questions(vault: &mut Vault) -> VaultResult<bool> {
-    let Some(membership) = questions_membership(vault)? else {
-        return Ok(false);
-    };
-    let mut rest = membership.purposes.clone();
-    rest.remove(&MembershipPurpose::Questions);
-    if rest.is_empty() {
-        vault.remove_relay_membership(&membership.team_id)?;
-    } else {
-        vault.set_membership_purposes(&membership.team_id, &rest)?;
+    let mut any = false;
+    // At most the node team and the kept hosted team; the bound guards a loop.
+    for _ in 0..4 {
+        let Some(membership) = questions_membership(vault)? else {
+            break;
+        };
+        let mut rest = membership.purposes.clone();
+        rest.remove(&MembershipPurpose::Questions);
+        if rest.is_empty() {
+            vault.remove_relay_membership(&membership.team_id)?;
+        } else {
+            vault.set_membership_purposes(&membership.team_id, &rest)?;
+        }
+        any = true;
     }
-    Ok(true)
+    Ok(any)
 }
 
 /// The trusted device row of this Mac for `membership`: the live Mac row with the
@@ -885,5 +1083,144 @@ mod tests {
                 team_id: "t_7k2m5q4x3c".to_owned()
             }
         );
+    }
+
+    fn membership(team: &str, url: &str, pin: bool) -> RelayMembership {
+        let key = DeviceKey::generate().unwrap();
+        RelayMembership {
+            team_id: team.to_owned(),
+            relay_url: url.to_owned(),
+            device_id: 1,
+            public_key: key.public_key().to_vec(),
+            key_pkcs8: key.pkcs8().unwrap().clone(),
+            purposes: BTreeSet::from([MembershipPurpose::Questions]),
+            created_at: 0,
+            pin: pin.then(|| crate::net::pin::Pin::of_certificate(b"synthetic node").text()),
+            alt: Vec::new(),
+        }
+    }
+
+    /// Plan s7 unit M5, "Move Approvals to Connect": the hosted membership stays in the
+    /// vault beside the node team until the first round trip; the node team carries the
+    /// questions at once; undo puts the hosted team back; the end removes only the hosted
+    /// membership. A quit in between keeps both (the rows are in the vault).
+    #[test]
+    fn the_move_to_connect_keeps_the_hosted_path_until_the_first_round_trip() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("c.db");
+        let mut vault = Vault::create(&path, "synthetic-move-pass").unwrap();
+        vault.unlock("synthetic-move-pass").unwrap();
+        let hosted = membership("t_hostedaaaa", crate::sync::DEFAULT_RELAY_URL, false);
+        adopt_questions_team(&mut vault, &hosted, "Synthetic Mac").unwrap();
+        assert!(retiring_questions_membership(&vault).unwrap().is_none());
+        assert!(undo_move_to_connect(&mut vault).unwrap().is_none());
+        assert!(finish_move_to_connect(&mut vault).unwrap().is_none());
+
+        let node = membership("t_nodebbbbbb", "https://100.64.0.7:8444", true);
+        // A node team without a pin, or the same team, is refused; nothing changes.
+        let unpinned = membership("t_nodecccccc", "https://100.64.0.7:8444", false);
+        assert!(move_questions_keeping_hosted(&mut vault, &unpinned, "t_hostedaaaa", "M").is_err());
+        assert!(matches!(
+            move_questions_keeping_hosted(&mut vault, &node, "t_otherdddd", "M"),
+            Err(SyncError::NotEnabled)
+        ));
+        assert_eq!(
+            questions_membership(&vault).unwrap().unwrap().team_id,
+            "t_hostedaaaa"
+        );
+
+        move_questions_keeping_hosted(&mut vault, &node, "t_hostedaaaa", "Synthetic Mac").unwrap();
+        assert_eq!(
+            questions_membership(&vault).unwrap().unwrap().team_id,
+            "t_nodebbbbbb",
+            "the node team carries the questions"
+        );
+        assert_eq!(
+            retiring_questions_membership(&vault)
+                .unwrap()
+                .unwrap()
+                .team_id,
+            "t_hostedaaaa",
+            "the hosted path stays"
+        );
+        // The notice of N1 is gone: the questions membership is not on the hosted relay.
+        assert!(!on_hosted_relay(
+            &questions_membership(&vault).unwrap().unwrap().relay_url
+        ));
+        // After a quit and an unlock: the same two memberships.
+        drop(vault);
+        let mut vault = Vault::open(&path).unwrap();
+        vault.unlock("synthetic-move-pass").unwrap();
+        assert_eq!(
+            retiring_questions_membership(&vault)
+                .unwrap()
+                .unwrap()
+                .team_id,
+            "t_hostedaaaa"
+        );
+
+        // A failure before the round trip: undo, the hosted path as before.
+        assert_eq!(
+            undo_move_to_connect(&mut vault).unwrap().as_deref(),
+            Some("t_hostedaaaa")
+        );
+        assert_eq!(
+            questions_membership(&vault).unwrap().unwrap().team_id,
+            "t_hostedaaaa"
+        );
+        assert!(vault.relay_membership("t_nodebbbbbb").unwrap().is_none());
+        assert!(retiring_questions_membership(&vault).unwrap().is_none());
+
+        // Off during the move: neither path asks any more.
+        let node_off = membership("t_nodeffffff", "https://100.64.0.7:8444", true);
+        move_questions_keeping_hosted(&mut vault, &node_off, "t_hostedaaaa", "Synthetic Mac")
+            .unwrap();
+        assert!(disable_questions(&mut vault).unwrap());
+        assert!(questions_membership(&vault).unwrap().is_none());
+        assert!(retiring_questions_membership(&vault).unwrap().is_none());
+        let hosted = membership("t_hostedaaaa", crate::sync::DEFAULT_RELAY_URL, false);
+        vault.add_relay_membership(&hosted).unwrap();
+        vault.set_questions_team("t_hostedaaaa").unwrap();
+
+        // Again, and the first round trip ends it: only the hosted membership goes.
+        let node = membership("t_nodeeeeeee", "https://100.64.0.7:8444", true);
+        move_questions_keeping_hosted(&mut vault, &node, "t_hostedaaaa", "Synthetic Mac").unwrap();
+        let gone = finish_move_to_connect(&mut vault).unwrap().unwrap();
+        assert_eq!(gone.team_id, "t_hostedaaaa");
+        assert!(vault.relay_membership("t_hostedaaaa").unwrap().is_none());
+        assert_eq!(
+            questions_membership(&vault).unwrap().unwrap().team_id,
+            "t_nodeeeeeee"
+        );
+        assert!(retiring_questions_membership(&vault).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_410_of_the_hosted_relay_is_an_end_and_never_passes() {
+        assert_eq!(
+            PathEnded::of_answer(410, "free_connect_ended"),
+            Some(PathEnded::FreeEnded)
+        );
+        assert_eq!(
+            PathEnded::of_answer(410, "hosted_retired"),
+            Some(PathEnded::Retired)
+        );
+        assert_eq!(PathEnded::of_answer(410, "gone"), None);
+        assert_eq!(PathEnded::of_answer(404, "hosted_retired"), None);
+        for why in [PathEnded::FreeEnded, PathEnded::Retired] {
+            let error = crate::sync::relay::sync_error(crate::sync::relay::ApiError::Relay {
+                status: 410,
+                code: why.code().to_owned(),
+                retry_after: None,
+            });
+            assert_eq!(PathEnded::of_sync(error), Some(why));
+            assert!(!crate::sync::relay::is_transient(error), "no retry storm");
+            let questions = crate::questions::QuestionsError::Relay {
+                status: 410,
+                code: why.code().to_owned(),
+            };
+            assert_eq!(questions.path_ended(), Some(why));
+            assert!(!questions.can_pass());
+        }
     }
 }

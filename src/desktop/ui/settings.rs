@@ -54,6 +54,7 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui, section: SettingsSec
         }
         SettingsSection::Security => security_section(app, ui),
         SettingsSection::Devices => devices_section(app, ui),
+        SettingsSection::Connect => super::connect::section(app, ui),
         SettingsSection::Bouncer => broker_section(app, ui),
         SettingsSection::Tools => {
             command_line_section(app, ui);
@@ -94,6 +95,7 @@ pub(super) fn status_line(app: &DesktopApp, section: SettingsSection) -> String 
             }
         }
         SettingsSection::Devices => super::devices::status_line(app),
+        SettingsSection::Connect => super::connect::status_line(app),
         SettingsSection::Bouncer => app.model_server.as_ref().map_or_else(
             || "Every run waits for you".to_owned(),
             |server| {
@@ -160,12 +162,22 @@ fn devices_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
 pub(super) fn notification_rows(app: &DesktopApp, g: &mut rows::Group<'_>) -> Option<NotifyAction> {
     let mut notify_action = None;
     let Some(view) = app.owner.notifications.as_ref().map(|center| center.view()) else {
+        // Linux has no notifier yet (the macOS one is a signed helper app).
+        let (value, note) = if cfg!(target_os = "linux") {
+            (
+                "Not available",
+                "Apassy on Linux shows no desktop notifications yet. Questions wait in Decisions.",
+            )
+        } else {
+            (
+                "Not running",
+                "They start with the broker. Questions still wait in Decisions.",
+            )
+        };
         g.line_note(
             "Notifications",
-            Some(rows::value("Not running")),
-            Some(rows::note(
-                "They start with the broker. Questions still wait in Decisions.",
-            )),
+            Some(rows::value(value)),
+            Some(rows::note(note)),
             |_| {},
         );
         return None;
@@ -271,7 +283,11 @@ fn security_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
         .unwrap_or(false);
     let mut action = None;
     rows::group(ui, Some("Unlock"), |g| {
-        action = touch_id_rows(app, g, &mut setup);
+        if cfg!(target_os = "linux") {
+            g.note_row("Use your vault passphrase to unlock. Optional Secret Service storage can be enabled with apassy owner keyring-enable; other programs running as your user can read an unlocked keyring item.");
+        } else {
+            action = touch_id_rows(app, g, &mut setup);
+        }
         g.line("Passphrase", None, |ui| {
             change = kit::small_button(ui, "Change passphrase…", Style::Bordered)
                 .on_hover_text("Old backups still need the old passphrase.")
@@ -281,29 +297,42 @@ fn security_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let policy = app.owner_ui.session.owner_window.policy();
     let mut selected = policy;
     rows::group(ui, Some("Owner checks"), |g| {
-        g.field("How often to ask for Touch ID", |ui| {
-            let options: Vec<_> = crate::broker::approvals::OwnerFrequency::ALL
-                .into_iter()
-                .map(|value| (value, value.label().to_owned()))
-                .collect();
-            ui.add_enabled_ui(
-                app.owner.helper.is_some()
-                    && app.owner.frequency_read.is_none()
-                    && app.owner.frequency_write.is_none(),
-                |ui| {
-                    kit::picker(
-                        ui,
-                        "owner-check-frequency",
-                        &mut selected,
-                        &options,
-                        policy.label(),
-                        260.0,
-                    )
-                },
-            )
-            .inner
+        g.field(
+            if cfg!(target_os = "linux") {
+                "How often to ask"
+            } else {
+                "How often to ask for Touch ID"
+            },
+            |ui| {
+                let options: Vec<_> = crate::broker::approvals::OwnerFrequency::ALL
+                    .into_iter()
+                    .map(|value| (value, value.label().to_owned()))
+                    .collect();
+                ui.add_enabled_ui(
+                    (app.owner.helper.is_some()
+                        || (cfg!(target_os = "linux")
+                            && app.owner.session.observation().lock_observed()))
+                        && app.owner.frequency_read.is_none()
+                        && app.owner.frequency_write.is_none(),
+                    |ui| {
+                        kit::picker(
+                            ui,
+                            "owner-check-frequency",
+                            &mut selected,
+                            &options,
+                            policy.label(),
+                            260.0,
+                        )
+                    },
+                )
+                .inner
+            },
+        );
+        g.note_row(if cfg!(target_os = "linux") {
+            crate::desktop::session_watch::owner_note(&app.owner.session.observation())
+        } else {
+            concat!("After you confirm with Touch ID or your passphrase, Apassy doesn't ask again for anything until this time is up. The window ends when your ", crate::computer!(), " locks or sleeps.").to_owned()
         });
-        g.note_row("After you confirm with Touch ID or your passphrase, Apassy doesn't ask again for anything until this time is up. The window ends when your Mac locks or sleeps.");
     });
     if let Some(note) = &app.owner.frequency_note {
         rows::footnote(ui, note);
@@ -316,7 +345,7 @@ fn security_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 .into_iter()
                 .map(|value| (value, value.label().to_owned()))
                 .collect();
-            ui.add_enabled_ui(app.owner.helper.is_some() && !app.auto_lock.busy(), |ui| {
+            ui.add_enabled_ui(app.auto_lock_storable() && !app.auto_lock.busy(), |ui| {
                 kit::picker(
                     ui,
                     "auto-lock",
@@ -328,7 +357,11 @@ fn security_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
             })
             .inner
         });
-        g.note_row("Agents can't use your credentials while the vault is locked.");
+        g.note_row(if cfg!(target_os = "linux") {
+            crate::desktop::session_watch::lock_note(&app.owner.session.observation())
+        } else {
+            "Agents can't use your credentials while the vault is locked.".to_owned()
+        });
     });
     if let Some(note) = &app.auto_lock.note {
         rows::footnote(ui, note);
@@ -490,21 +523,34 @@ fn backup_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     }
 }
 
-/// The keyboard shortcuts of the window.
-const SHORTCUTS: [(&str, &str); 15] = [
+/// The keyboard shortcuts of the window, with the modifier names of the platform.
+const SHORTCUTS: &[(&str, &str)] = &[
     (
-        "⌘1 to ⌘5",
+        concat!(crate::shortcut!("1"), " to ", crate::shortcut!("5")),
         "All credentials, Overview, Decisions, Agents, Logs",
     ),
-    ("⌘,", "Settings"),
-    ("⌘[", "Back to the list"),
-    ("⌘N", "New credential"),
-    ("⌘F", "Search credentials"),
-    ("⌘L", "Lock the vault"),
-    ("⌃⌘S", "Hide or show the sidebar"),
-    ("Return, ⌘S", "The default action of the open sheet"),
-    ("⌘⇧H", "Show or hide the secret values"),
-    ("Tab, ⇧Tab", "Next or previous control"),
+    (crate::shortcut!(","), "Settings"),
+    (crate::back_shortcut!(), "Back to the list"),
+    (crate::shortcut!("N"), "New credential"),
+    (crate::shortcut!("F"), "Search credentials"),
+    (crate::shortcut!("L"), "Lock the vault"),
+    (crate::sidebar_shortcut!(), "Hide or show the sidebar"),
+    (
+        concat!("Return, ", crate::shortcut!("S")),
+        "The default action of the open sheet",
+    ),
+    (
+        crate::shortcut_shift!("H"),
+        "Show or hide the secret values",
+    ),
+    #[cfg(target_os = "linux")]
+    (crate::shortcut!("W"), "Close the window"),
+    #[cfg(target_os = "linux")]
+    (crate::shortcut!("Q"), "Quit Apassy"),
+    (
+        concat!("Tab, ", crate::shift_key!(), "Tab"),
+        "Next or previous control",
+    ),
     ("← → ↑ ↓", "Nearest control"),
     ("Space", "Press the control, or the next option"),
     ("← → on a picker", "Previous or next option"),
@@ -523,13 +569,15 @@ fn shortcuts_section(ui: &mut egui::Ui) {
             show_more_button(ui, id, open, "keyboard shortcuts");
         });
         if open {
-            for (keys, action) in SHORTCUTS {
+            for &(keys, action) in SHORTCUTS {
                 g.line(
                     action,
                     Some(kit::text(keys, Font::Mono).color(kit::palette().secondary)),
                     |_| {},
                 );
             }
+            // macOS only: its app menu owns ⌘H. Linux has no such menu.
+            #[cfg(not(target_os = "linux"))]
             g.note_row(
                 "⌘H stays the macOS shortcut for \"Hide Apassy\", so showing values uses ⌘⇧H.",
             );
@@ -1196,22 +1244,12 @@ fn launch_agent_rows(g: &mut rows::Group<'_>, status: &Status) -> Option<ModelAc
 /// all", and a socket that failed.
 fn command_line_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let open = app.cli_sessions_open();
-    let installed = super::cli_tools::installed();
+    let row = super::cli_tools::place().row();
     let mut end = false;
     let mut install = false;
-    let footer = if installed {
-        "In Terminal: add ~/.local/bin to PATH, then run eval \"$(apassy login)\"."
-    } else {
-        "Commands never show a secret value."
-    };
-    rows::section(ui, Some("Command line"), Some(footer), |g| {
-        let place = if installed {
-            "~/.local/bin"
-        } else {
-            "Not installed"
-        };
-        g.line("apassy", Some(rows::value(place)), |ui| {
-            if !installed {
+    rows::section(ui, Some("Command line"), Some(row.footer), |g| {
+        g.line("apassy", Some(rows::value(row.value)), |ui| {
+            if row.install {
                 install = kit::small_button(ui, "Install tools…", Style::Bordered)
                     .on_hover_text(
                         "Install links in ~/.local/bin. Existing commands are not replaced.",
@@ -1324,7 +1362,7 @@ pub(super) fn passphrase_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> boo
             |_| {},
             |ui| {
                 change = kit::button(ui, "Change passphrase", Style::Prominent)
-                    .on_hover_text("⌘S")
+                    .on_hover_text(crate::shortcut!("S"))
                     .clicked();
                 cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();
             },
@@ -1440,7 +1478,7 @@ pub(super) fn backup_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
             |_| {},
             |ui| {
                 backup |= kit::button(ui, "Back up", Style::Prominent)
-                    .on_hover_text("⌘S")
+                    .on_hover_text(crate::shortcut!("S"))
                     .clicked();
                 cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();
             },
@@ -1478,7 +1516,7 @@ pub(super) fn restore_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
             |_| {},
             |ui| {
                 restore |= kit::button(ui, "Restore", Style::Prominent)
-                    .on_hover_text("⌘S")
+                    .on_hover_text(crate::shortcut!("S"))
                     .clicked();
                 cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();
             },

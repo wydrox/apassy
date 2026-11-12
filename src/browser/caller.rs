@@ -4,9 +4,12 @@
 //! but any local process can start the host with that argument. So the origin argument
 //! is not an authenticator. Before the host passes a [guarded
 //! command](super::wire::GUARDED_COMMANDS) to the app, and before the app answers one,
-//! the signed Swift guard `apassy-browser-guard` in the same Apassy.app checks the
+//! on macOS the signed Swift guard `apassy-browser-guard` in the same Apassy.app checks the
 //! callers from the operating system: audit tokens and code signatures
-//! (`native/ApassyBrowserGuard/main.swift`).
+//! (`native/ApassyBrowserGuard/main.swift`). Linux uses kernel peer credentials and
+//! a root-owned direct browser executable; see ADR 0045 and `caller_linux.rs` for
+//! its explicitly narrower hardened-peer guarantee. Linux refuses unsafe browser
+//! switches without offering the macOS signed-instance bypass.
 //!
 //! - [`check_browser_parent`] (host): the guard checks that its parent is the signed
 //!   `apassy-browser-host` of this app, and that the parent of the host is a known
@@ -27,14 +30,25 @@
 //! The process
 //! that set the switch already knows it; this reveals nothing about the vault.
 
+#[cfg(any(not(target_os = "linux"), test))]
 use std::io::Read;
+#[cfg(not(target_os = "linux"))]
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
+#[cfg(any(not(target_os = "linux"), test))]
 use std::path::{Path, PathBuf};
+#[cfg(any(not(target_os = "linux"), test))]
 use std::process::{Child, Command, Stdio};
+#[cfg(any(not(target_os = "linux"), test))]
 use std::time::{Duration, Instant};
 
 use super::wire::WireError;
+
+// Linux verifies the browser using procfs and kernel socket credentials. Its
+// limitations differ from the signed macOS chain; see ADR 0045.
+#[cfg(any(target_os = "linux", test))]
+#[path = "caller_linux.rs"]
+pub(super) mod linux;
 
 /// The guard, relative to the `Contents` folder of Apassy.app.
 pub const GUARD_FROM_CONTENTS: &str = "MacOS/apassy-browser-guard";
@@ -49,20 +63,26 @@ pub const APASSY_TEAM: &str = "7S3F9767BM";
 /// without a team signature.
 pub const GUARD_ENV: &str = "APASSY_BROWSER_GUARD";
 
+#[cfg(not(target_os = "linux"))]
 const CODESIGN: &str = "/usr/bin/codesign";
 /// The guard answers in milliseconds. The limit covers a slow, loaded Mac.
+#[cfg(not(target_os = "linux"))]
 const GUARD_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(not(target_os = "linux"))]
 const CODESIGN_TIMEOUT: Duration = Duration::from_secs(10);
 /// The only answer of the guard that means yes.
+#[cfg(any(not(target_os = "linux"), test))]
 const GUARD_OK: &[u8] = b"ok\n";
 
 /// The check that the guard runs.
+#[cfg(not(target_os = "linux"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Check {
     BrowserParent,
     SocketPeer,
 }
 
+#[cfg(not(target_os = "linux"))]
 impl Check {
     fn arg(self) -> &'static str {
         match self {
@@ -72,28 +92,86 @@ impl Check {
     }
 }
 
-/// Host side: the parent of this process is a known signed browser, and this process
-/// is the signed `apassy-browser-host` of its Apassy.app.
+/// Host side: verify the installed host and its direct browser parent using the
+/// platform boundary described above.
 pub fn check_browser_parent() -> Result<(), WireError> {
-    run_guard(Check::BrowserParent, Stdio::null())
+    #[cfg(target_os = "linux")]
+    {
+        linux::check_browser_parent()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        run_guard(Check::BrowserParent, Stdio::null())
+    }
 }
 
-/// App side: the peer of `stream` (an accepted connection of `browser.sock`) is the
-/// signed `apassy-browser-host` of this Apassy.app, started by a known signed browser.
-/// The stream stays open and unread.
+/// App side: verify the socket peer using macOS signing or Linux kernel peer
+/// credentials and its direct browser parent. The stream stays open and unread.
 pub fn check_peer(stream: &UnixStream) -> Result<(), WireError> {
-    let copy = stream.try_clone().map_err(|_| refused())?;
-    run_guard(Check::SocketPeer, Stdio::from(OwnedFd::from(copy)))
+    #[cfg(target_os = "linux")]
+    {
+        linux::check_peer(stream).map(drop)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let copy = stream.try_clone().map_err(|_| refused())?;
+        run_guard(Check::SocketPeer, Stdio::from(OwnedFd::from(copy)))
+    }
 }
 
-/// Verify the signed chain while retaining an unsafe browser's exact identity.
+/// Verify the platform boundary, retaining a signed unsafe instance on macOS only.
 pub fn peer_identity(
     stream: &UnixStream,
 ) -> Result<Option<super::trust::InstanceIdentity>, WireError> {
-    let copy = stream.try_clone().map_err(|_| refused())?;
-    match run_guard(Check::SocketPeer, Stdio::from(OwnedFd::from(copy))) {
-        Ok(()) => Ok(None),
-        Err(e) => unsafe_identity(&e).map(Some).ok_or(e),
+    peer_identity_seen(stream).map(|(identity, _)| identity)
+}
+
+/// What the app's check saw of the socket peer, for [`check_same_peer`] after the owner
+/// answered. On Linux: the kernel's identity of the peer and of its browser parent. On
+/// macOS it holds nothing: the signed guard checked the peer, and the app does not ask
+/// it again.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PeerSeen {
+    #[cfg(target_os = "linux")]
+    linux: Option<linux::Seen>,
+}
+
+/// [`peer_identity`] and what the check saw of the peer.
+pub fn peer_identity_seen(
+    stream: &UnixStream,
+) -> Result<(Option<super::trust::InstanceIdentity>, PeerSeen), WireError> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::check_peer(stream).map(|seen| (None, PeerSeen { linux: Some(seen) }))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let copy = stream.try_clone().map_err(|_| refused())?;
+        match run_guard(Check::SocketPeer, Stdio::from(OwnedFd::from(copy))) {
+            Ok(()) => Ok((None, PeerSeen::default())),
+            Err(e) => unsafe_identity(&e)
+                .map(|identity| (Some(identity), PeerSeen::default()))
+                .ok_or(e),
+        }
+    }
+}
+
+/// After the owner answered a checked request, before its answer is written: on Linux
+/// the peer check runs again and must see the same peer process and the same browser
+/// parent ([`linux::check_same_peer`]); a request that the check did not see passes.
+/// On macOS nothing is checked again.
+pub fn check_same_peer(stream: &UnixStream, seen: &PeerSeen) -> Result<(), WireError> {
+    #[cfg(target_os = "linux")]
+    {
+        match &seen.linux {
+            Some(seen) => linux::check_same_peer(stream, seen),
+            None => Ok(()),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (stream, seen);
+        Ok(())
     }
 }
 
@@ -122,6 +200,28 @@ fn refused() -> WireError {
     )
 }
 
+/// Linux: the browser runs in another mount or user namespace than Apassy. The
+/// explanation is the one of the "Not supported" state of a snap or Flatpak
+/// ([`super::install::Unsupported::explain`]).
+#[cfg(any(target_os = "linux", test))]
+fn sandboxed() -> WireError {
+    WireError::new("unsupported", super::install::sandboxed_browser())
+}
+
+/// Linux: the browser was started with `switch`, which turns off its sandbox or its
+/// site isolation (`caller_linux.rs`, `WEAKENING_SWITCHES`). The message names the
+/// switch, never its value, and what to do.
+#[cfg(any(target_os = "linux", test))]
+fn weakened(switch: &str) -> WireError {
+    WireError::new(
+        "unsupported",
+        format!(
+            "This browser was started with {switch}, which turns off how it keeps websites apart, so the browser handles this request itself. Start the browser again without {switch}."
+        ),
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
 fn missing() -> WireError {
     WireError::new(
         "unsupported",
@@ -129,6 +229,7 @@ fn missing() -> WireError {
     )
 }
 
+#[cfg(not(target_os = "linux"))]
 fn run_guard(check: Check, stdin: Stdio) -> Result<(), WireError> {
     let guard = locate()?;
     if guard.verify {
@@ -145,6 +246,7 @@ fn run_guard(check: Check, stdin: Stdio) -> Result<(), WireError> {
     parse_answer(finish(child, GUARD_TIMEOUT))
 }
 
+#[cfg(any(not(target_os = "linux"), test))]
 fn parse_answer(answer: Option<(Option<i32>, Vec<u8>)>) -> Result<(), WireError> {
     match answer {
         Some((Some(0), output)) if output == GUARD_OK => Ok(()),
@@ -176,12 +278,14 @@ fn parse_answer(answer: Option<(Option<i32>, Vec<u8>)>) -> Result<(), WireError>
 }
 
 /// The guard to start, and whether its signature must be checked first.
+#[cfg(not(target_os = "linux"))]
 #[derive(Debug, PartialEq, Eq)]
 struct Guard {
     path: PathBuf,
     verify: bool,
 }
 
+#[cfg(not(target_os = "linux"))]
 fn locate() -> Result<Guard, WireError> {
     #[cfg(debug_assertions)]
     if let Some(path) = std::env::var_os(GUARD_ENV).filter(|path| !path.is_empty()) {
@@ -200,6 +304,7 @@ fn locate() -> Result<Guard, WireError> {
 /// The guard of the Apassy.app that holds `exe` in `Contents/MacOS`. `None` for a
 /// program outside an app bundle, or when the guard is missing, is not a regular file,
 /// or resolves to a place outside the bundle.
+#[cfg(any(not(target_os = "linux"), test))]
 fn guard_for_executable(exe: &Path) -> Option<PathBuf> {
     let contents = super::install::bundle_contents(exe.parent()?)?;
     let guard = std::fs::canonicalize(contents.join(GUARD_FROM_CONTENTS)).ok()?;
@@ -212,6 +317,7 @@ fn guard_for_executable(exe: &Path) -> Option<PathBuf> {
 }
 
 /// The designated requirement that the guard must satisfy.
+#[cfg(any(not(target_os = "linux"), test))]
 fn guard_requirement() -> String {
     format!(
         "=anchor apple generic and identifier \"{GUARD_IDENTIFIER}\" and certificate leaf[subject.OU] = \"{APASSY_TEAM}\""
@@ -219,6 +325,7 @@ fn guard_requirement() -> String {
 }
 
 /// `codesign --verify --strict` of the guard against [`guard_requirement`].
+#[cfg(not(target_os = "linux"))]
 fn verify_guard(path: &Path) -> Result<(), WireError> {
     let child = Command::new(CODESIGN)
         .args(["--verify", "--strict", "-R"])
@@ -238,6 +345,7 @@ fn verify_guard(path: &Path) -> Result<(), WireError> {
 
 /// Wait for `child` until `timeout`. Returns its exit code and at most 1040 bytes of its
 /// standard output, or `None` when it did not exit in time (it is then killed).
+#[cfg(any(not(target_os = "linux"), test))]
 fn finish(mut child: Child, timeout: Duration) -> Option<(Option<i32>, Vec<u8>)> {
     let start = Instant::now();
     let status = loop {

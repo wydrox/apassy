@@ -24,19 +24,29 @@ impl DesktopApp {
             self.set_err("The owner check changed. Try changing the setting again.");
             return;
         }
-        let Some(helper) = self.owner.helper.clone() else {
-            window.configure(OwnerFrequency::EveryTime);
-            self.set_err(
-                "This build cannot save a protected owner-check setting. Every time is active.",
-            );
-            return;
-        };
-        self.owner.frequency_write = Some(Task::spawn(None, move || {
-            helper
-                .owner_policy_write(new)
-                .map(|()| new)
-                .map_err(|e| e.to_string())
-        }));
+        // Linux: the private device settings file (native::device_policy).
+        #[cfg(target_os = "linux")]
+        {
+            self.owner.frequency_write = Some(Task::spawn(None, move || {
+                crate::desktop::session_watch::store::write_owner_frequency(new)
+            }));
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let Some(helper) = self.owner.helper.clone() else {
+                window.configure(OwnerFrequency::EveryTime);
+                self.set_err(
+                    "This build cannot save a protected owner-check setting. Every time is active.",
+                );
+                return;
+            };
+            self.owner.frequency_write = Some(Task::spawn(None, move || {
+                helper
+                    .owner_policy_write(new)
+                    .map(|()| new)
+                    .map_err(|e| e.to_string())
+            }));
+        }
     }
     pub(crate) fn poll_owner_frequency(&mut self, ctx: &egui::Context) {
         let writing = self.owner.frequency_write.is_some();
@@ -64,7 +74,11 @@ impl DesktopApp {
                 self.owner_ui.session.owner_window.configure(policy);
                 self.owner.frequency_note = None;
                 if writing {
-                    self.set_ok("Saved for this Mac.");
+                    self.set_ok(if cfg!(target_os = "linux") {
+                        "Saved for this computer."
+                    } else {
+                        concat!("Saved for this ", crate::computer!(), ".")
+                    });
                 }
             }
             Err(_) => {
@@ -72,7 +86,12 @@ impl DesktopApp {
                     .session
                     .owner_window
                     .configure(OwnerFrequency::EveryTime);
-                let note = "The setting could not be verified or saved. Every time is active. Try again in Apassy.app.".to_owned();
+                let note = if cfg!(target_os = "linux") {
+                    "The setting could not be verified or saved. Every time is active."
+                } else {
+                    "The setting could not be verified or saved. Every time is active. Try again in Apassy.app."
+                }
+                .to_owned();
                 self.owner.frequency_note = Some(note.clone());
                 if writing {
                     self.set_err(note);

@@ -99,6 +99,10 @@ struct Relay {
     action_seq: u64,
     /// The next feed reads that get `403 feed_rate` (a scripted answer).
     feed_rate_next: usize,
+    /// The hosted relay ended the free paths (docs/operations/connect.md): the questions,
+    /// the feed, the actions, and the push answer 410 with this code; `hosted_retired`
+    /// also the sign-in.
+    ended: Option<String>,
 }
 
 /// The feed of a device as the relay stores it (relay-feed-v1 section 13.1).
@@ -452,6 +456,12 @@ impl QuestionsRelay {
 
     /// The next `count` feed reads (`GET /v1/feed`) get `403 feed_rate`, as from a relay
     /// whose read budget of the minute the device used up (relay-feed-v1 section 10.2).
+    /// Answer the free paths with 410 `code` (`free_connect_ended` or `hosted_retired`),
+    /// or serve them again (`None`).
+    pub fn end_free_paths(&self, code: Option<&str>) {
+        lock(&self.shared.0).ended = code.map(str::to_owned);
+    }
+
     pub fn rate_feed_reads(&self, count: usize) {
         lock(&self.shared.0).feed_rate_next = count;
     }
@@ -837,7 +847,11 @@ fn handle(shared: &Arc<(Mutex<Relay>, Condvar)>, mut stream: TcpStream) {
     lock(&shared.0)
         .log
         .push(format!("{} {}", request.method, request.path));
-    let (status, body) = route(shared, &request);
+    let ended = lock(&shared.0).ended.clone();
+    let (status, body) = match ended {
+        Some(code) if ended_path(&request.path, &code) => fail(410, &code),
+        _ => route(shared, &request),
+    };
     // Test-only sentinel: acceptance happened, but the client gets no HTTP reply.
     if status == 0 {
         return;
@@ -856,6 +870,14 @@ fn handle(shared: &Arc<(Mutex<Relay>, Condvar)>, mut stream: TcpStream) {
     let _ = stream.write_all(head.as_bytes());
     let _ = stream.write_all(&body);
     let _ = stream.flush();
+}
+
+/// Whether the hosted relay that ended its free paths with `code` refuses `path`.
+fn ended_path(path: &str, code: &str) -> bool {
+    ["/v1/questions", "/v1/feed", "/v1/actions", "/v1/push"]
+        .iter()
+        .any(|prefix| path.starts_with(prefix))
+        || code == "hosted_retired" && path.starts_with("/v1/")
 }
 
 fn question_view(question: &StoredQuestion) -> Value {

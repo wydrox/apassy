@@ -141,23 +141,46 @@ fn cases() -> [(
         ),
         (
             SettingsSection::Security,
-            &[
-                "Unlock",
-                "Touch ID",
-                "Owner checks use",
-                "Lock after inactivity",
-                "Never",
-                "Agents can't use your credentials while the vault is locked.",
-                "How often to ask for Touch ID",
-                "Every time",
-                "Change passphrase…",
-            ],
-            &["Back up now…", "Install tools…"],
+            if cfg!(target_os = "linux") {
+                &[
+                    "Unlock",
+                    "Passphrase",
+                    "Owner checks",
+                    "How often to ask",
+                    "Lock after inactivity",
+                    "Never",
+                    "Agents cannot use credentials while the vault is locked.",
+                    "Every time",
+                    "Change passphrase…",
+                ]
+            } else {
+                &[
+                    "Unlock",
+                    "Touch ID",
+                    "Owner checks use",
+                    "Lock after inactivity",
+                    "Never",
+                    "Agents can't use your credentials while the vault is locked.",
+                    "How often to ask for Touch ID",
+                    "Every time",
+                    "Change passphrase…",
+                ]
+            },
+            if cfg!(target_os = "linux") {
+                &[
+                    "Back up now…",
+                    "Install tools…",
+                    "Touch ID",
+                    "Owner checks use",
+                ]
+            } else {
+                &["Back up now…", "Install tools…", "Owner confirmation"]
+            },
         ),
         (
             SettingsSection::Devices,
             &[
-                "This Mac",
+                concat!("This ", crate::computer!()),
                 ROUTE_SWITCH,
                 "Notifications",
                 ADD_DEVICE,
@@ -168,7 +191,7 @@ fn cases() -> [(
                 "Pair an iPhone",
                 "Allow the iPhone app on this network",
                 WIFI_GROUP,
-                "Other Macs",
+                concat!("Other ", crate::computers!()),
                 "Questions reach every device.",
                 "Get approvals on your iPhone",
                 "None paired",
@@ -193,6 +216,8 @@ fn cases() -> [(
             &[
                 "Command line",
                 "apassy",
+                // The Linux package brings the command: Settings offers no install there.
+                #[cfg(not(target_os = "linux"))]
                 "Install tools…",
                 "Browser extension",
             ],
@@ -311,7 +336,11 @@ fn the_gear_and_command_comma_open_settings_and_the_sidebar_leaves_it() {
 
     // ⌘, comes back to the section that was open last; ⌘1 leaves.
     press(&ctx, &mut app, Key::Comma, Modifiers::COMMAND);
-    assert_eq!(app.place, Place::Settings, "⌘, opens Settings");
+    assert_eq!(
+        app.place,
+        Place::Settings,
+        concat!(crate::shortcut!(","), " opens Settings")
+    );
     assert_eq!(app.ui.settings_section, SettingsSection::Security);
     press(&ctx, &mut app, Key::Num1, Modifiers::COMMAND);
     assert_eq!(app.place, Place::CREDENTIALS);
@@ -422,6 +451,8 @@ fn frame_one() -> DevicesView {
         problem: None,
         locked: false,
         can_move: false,
+        can_move_connect: false,
+        connect_pending: false,
         devices: vec![
             entry(
                 "Mac mini (office)",
@@ -506,7 +537,7 @@ fn devices_frame_one_draws_the_mockup() {
     assert_eq!(view.status_line(), "Tailnet on · 6 devices");
     let text = view_texts(&view);
     for expected in [
-        "This Mac",
+        concat!("This ", crate::computer!()),
         ROUTE_SWITCH,
         ROUTE_ON,
         "Address",
@@ -520,12 +551,12 @@ fn devices_frame_one_draws_the_mockup() {
         "Devices",
         "6",
         "Mac mini (office)",
-        "Mac · Hosts approvals",
+        concat!(crate::computer_cap!(), " · Hosts approvals"),
         "iPhone · Approves runs",
         "Apple Watch · Sees requests",
-        "Mac · Syncs Personal",
+        concat!(crate::computer_cap!(), " · Syncs Personal"),
         "Linux node · Syncs Acme team",
-        "via your Mac",
+        concat!("via your ", crate::computer!()),
         "via Apassy relay",
         "Tailnet",
         "Now",
@@ -595,7 +626,11 @@ fn devices_node_states_draw_the_mockup() {
         (
             "3c",
             with(NodeState::Off, None),
-            vec![ROUTE_OFF, "Notifications", "via your Mac"],
+            vec![
+                ROUTE_OFF,
+                "Notifications",
+                concat!("via your ", crate::computer!()),
+            ],
             vec!["Address", "Port", "Node Words"],
         ),
         (
@@ -712,7 +747,10 @@ fn devices_node_states_draw_the_mockup() {
         node: NodeState::Missing,
         ..frame_one()
     };
-    assert_eq!(first_run.status_line(), "This Mac only");
+    assert_eq!(
+        first_run.status_line(),
+        concat!("This ", crate::computer!(), " only")
+    );
     let off = DevicesView {
         node: NodeState::Off,
         ..frame_one()
@@ -746,7 +784,10 @@ fn devices_words_follow_the_mockup() {
     device.roles.push("Asks for approvals".to_owned());
     assert_eq!(
         device.subline(),
-        "Mac · Syncs Personal · Asks for approvals"
+        concat!(
+            crate::computer_cap!(),
+            " · Syncs Personal · Asks for approvals"
+        )
     );
     assert_eq!(device.button(), None);
     assert_eq!(origin_host("https://100.101.7.12:8444"), "100.101.7.12");
@@ -756,7 +797,12 @@ fn devices_words_follow_the_mockup() {
     );
     assert_eq!(
         [Route::Mac, Route::Relay, Route::Tailnet, Route::Wifi].map(Route::words),
-        ["via your Mac", "via Apassy relay", "Tailnet", "Wi-Fi"]
+        [
+            concat!("via your ", crate::computer!()),
+            "via Apassy relay",
+            "Tailnet",
+            "Wi-Fi"
+        ]
     );
 }
 
@@ -825,7 +871,11 @@ fn devices_sheets_draw_the_mockup() {
     for expected in [
         "Revoke MacBook Pro?",
         "It stops syncing Personal and seeing approvals.",
-        "Its copy of the vault stays on that Mac.",
+        concat!(
+            "Its copy of the vault stays on that ",
+            crate::computer!(),
+            "."
+        ),
     ] {
         assert!(text.contains(expected), "5b shows {expected}: {text}");
     }
@@ -847,11 +897,19 @@ fn devices_sheets_draw_the_mockup() {
     for (tailnet, way) in [
         (
             true,
-            "The iPhone app now reaches this Mac through your tailnet.",
+            concat!(
+                "The iPhone app now reaches this ",
+                crate::computer!(),
+                " through your tailnet."
+            ),
         ),
         (
             false,
-            "The iPhone app now reaches this Mac through Apassy relay.",
+            concat!(
+                "The iPhone app now reaches this ",
+                crate::computer!(),
+                " through Apassy relay."
+            ),
         ),
     ] {
         let text = sheet_texts(DevicesSheet::WifiNotice { tailnet });
@@ -894,6 +952,9 @@ fn devices_relay_group_restores_the_relay_and_the_other_macs() {
             feed_shown: true,
             other_macs,
             free_end: free.then(|| "0.5.20".to_owned()),
+            ended: None,
+            can_move: false,
+            can_move_connect: false,
         }),
         ..frame_one()
     };
@@ -990,6 +1051,60 @@ fn devices_relay_group_restores_the_relay_and_the_other_macs() {
     assert!(text.contains(OLD_RELAY_ENTRY), "{text}");
 }
 
+/// A route that is off says "Approvals go through Apassy relay." only while the
+/// questions of the vault go through it (or the vault is locked); otherwise they stay on
+/// this Mac. The own row of the list carries the title-case badge "This Mac", and the
+/// move button reads "Move Approvals to This Mac…" in title case.
+#[test]
+fn devices_route_off_line_follows_the_questions() {
+    let with = |questions: Option<Questions>| DevicesView {
+        node: NodeState::Off,
+        relay: questions.map(|questions| RelayView {
+            questions,
+            feed_shown: true,
+            other_macs: None,
+            free_end: None,
+            ended: None,
+            can_move: false,
+            can_move_connect: false,
+        }),
+        ..frame_one()
+    };
+    for (questions, line) in [
+        (None, ROUTE_OFF),
+        (Some(Questions::On), ROUTE_OFF),
+        (Some(Questions::Locked), ROUTE_OFF),
+        (Some(Questions::NeedsTeam), devices::ROUTE_OFF_HERE),
+        (Some(Questions::CanTurnOn), devices::ROUTE_OFF_HERE),
+        (Some(Questions::JoinTeam), devices::ROUTE_OFF_HERE),
+        (Some(Questions::Removed), devices::ROUTE_OFF_HERE),
+        (Some(Questions::RemovedSync), devices::ROUTE_OFF_HERE),
+        (Some(Questions::Ended), devices::ROUTE_OFF_HERE),
+    ] {
+        let text = view_texts(&with(questions));
+        assert!(text.contains(line), "{questions:?}: {line}: {text}");
+        let other = if line == ROUTE_OFF {
+            devices::ROUTE_OFF_HERE
+        } else {
+            ROUTE_OFF
+        };
+        assert!(!text.contains(other), "{questions:?}: {other}: {text}");
+    }
+    let text = view_texts(&frame_one());
+    assert!(
+        text.contains(concat!("This ", crate::computer_cap!())),
+        "the badge in title case: {text}"
+    );
+    assert_eq!(
+        devices::MOVE_APPROVALS,
+        concat!("Move Approvals to This ", crate::computer_cap!(), "…")
+    );
+    assert_eq!(
+        devices::MOVE_TITLE,
+        concat!("Move Approvals to This ", crate::computer_cap!())
+    );
+}
+
 /// The texts of the steps of the add and move sheets, inside a sheet.
 fn step_texts(draw: impl Fn(&mut egui::Ui)) -> String {
     joined(&step_rects(draw))
@@ -1061,7 +1176,7 @@ fn devices_route_chip_sits_under_the_qr_code() {
     });
     for (frame, texts) in [("2a", &add), ("4b", &moving)] {
         let qr = rect_of(texts, "QR");
-        let chip = rect_of(texts, "via your Mac");
+        let chip = rect_of(texts, concat!("via your ", crate::computer!()));
         assert!(
             chip.top() > qr.bottom() + 40.0,
             "{frame}: the chip is under the QR code: {chip:?} {qr:?}"
@@ -1081,7 +1196,7 @@ fn devices_route_chip_sits_under_the_qr_code() {
     });
     assert!(!joined(&texts).contains("QR"), "{}", joined(&texts));
     assert!(
-        joined(&texts).contains("via your Mac"),
+        joined(&texts).contains(concat!("via your ", crate::computer!())),
         "{}",
         joined(&texts)
     );
@@ -1092,7 +1207,7 @@ fn devices_route_chip_sits_under_the_qr_code() {
 #[test]
 fn devices_rows_follow_their_label_as_under_this_mac() {
     let texts = view_rects(&frame_one());
-    let this_mac = rect_of(&texts, "This Mac");
+    let this_mac = rect_of(&texts, concat!("This ", crate::computer!()));
     let reachable = rect_of(&texts, devices::ROUTE_SWITCH);
     let first = rect_of(&texts, "Mac mini (office)");
     // The group label: the last "Devices" above the first row.
@@ -1128,13 +1243,13 @@ fn devices_add_and_move_sheets_use_the_mockup_texts() {
     for expected in [
         "Add a Device",
         "Scan with the Apassy app on the iPhone.",
-        "via your Mac",
+        concat!("via your ", crate::computer!()),
         "Link",
         "https://100.101.7.12:8444/link#…",
         "Copy",
         "Expires In",
         "9:41",
-        "On a Mac, paste the link instead.",
+        concat!("On a ", crate::computer!(), ", paste the link instead."),
         "Cancel",
     ] {
         assert!(text.contains(expected), "2a: {expected}: {text}");
@@ -1150,7 +1265,10 @@ fn devices_add_and_move_sheets_use_the_mockup_texts() {
         devices::link_step(ui, &hosted, |_| {}, |_| {});
     });
     assert!(text.contains("via Apassy relay"), "{text}");
-    for gone in ["Copy", "On a Mac, paste the link instead."] {
+    for gone in [
+        "Copy",
+        concat!("On a ", crate::computer!(), ", paste the link instead."),
+    ] {
         assert!(!text.contains(gone), "{gone}: {text}");
     }
     // 2a expired: "The link expired." and New Link only.
@@ -1189,7 +1307,7 @@ fn devices_add_and_move_sheets_use_the_mockup_texts() {
         "Kind",
         "iPhone",
         "Route",
-        "via your Mac",
+        concat!("via your ", crate::computer!()),
         "Refuse",
         "Confirm…",
     ] {
@@ -1197,7 +1315,11 @@ fn devices_add_and_move_sheets_use_the_mockup_texts() {
     }
     assert_eq!(
         devices::join_lead(Kind::Mac),
-        "Confirm only if the Mac shows these words."
+        concat!(
+            "Confirm only if the ",
+            crate::computer!(),
+            " shows these words."
+        )
     );
     // 2c: the Tailscale line only for a node device.
     let text = step_texts(|ui| {
@@ -1205,8 +1327,12 @@ fn devices_add_and_move_sheets_use_the_mockup_texts() {
     });
     for expected in [
         "Rafal's iPhone Added",
-        "It approves runs through this Mac.",
-        "The iPhone needs Tailscale on to reach this Mac.",
+        concat!("It approves runs through this ", crate::computer!(), "."),
+        concat!(
+            "The iPhone needs Tailscale on to reach this ",
+            crate::computer!(),
+            "."
+        ),
         "Done",
     ] {
         assert!(text.contains(expected), "2c: {expected}: {text}");
@@ -1227,13 +1353,17 @@ fn devices_add_and_move_sheets_use_the_mockup_texts() {
         );
     });
     for expected in [
-        "Move Approvals to This Mac",
-        "Your iPhone pairs again, with this Mac.",
+        concat!("Move Approvals to This ", crate::computer_cap!()),
+        concat!(
+            "Your iPhone pairs again, with this ",
+            crate::computer!(),
+            "."
+        ),
         "Approvals team made here",
         "Scan with Rafal's iPhone",
         "Then check the words on both.",
         "Remove from Apassy relay",
-        "via your Mac",
+        concat!("via your ", crate::computer!()),
         "Cancel",
     ] {
         assert!(text.contains(expected), "4b: {expected}: {text}");
@@ -1261,9 +1391,9 @@ fn devices_add_and_move_sheets_use_the_mockup_texts() {
     });
     for expected in [
         "Approvals Moved",
-        "Questions now go through this Mac.",
+        concat!("Questions now go through this ", crate::computer!(), "."),
         "Rafal's iPhone",
-        "via your Mac",
+        concat!("via your ", crate::computer!()),
         "Removed from Apassy relay",
         "Pair Rafal's Apple Watch again from the iPhone.",
         "Done",
@@ -1285,7 +1415,7 @@ fn devices_add_and_move_sheets_use_the_mockup_texts() {
     });
     for expected in [
         "Old Entry Still on Relay",
-        "Approvals already use this Mac.",
+        concat!("Approvals already use this ", crate::computer!(), "."),
         "Apassy relay did not answer the removal.",
         "Later",
     ] {
@@ -1451,8 +1581,11 @@ fn the_route_switch_and_revoke_name_their_owner_check() {
     let on = OwnerRequest::SetTailnetRoute { on: true };
     assert_eq!(on.action(), OwnerAction::SetTailnetRoute { on: true });
     assert!(
-        on.describe()
-            .starts_with("Make this Mac reachable on your tailnet."),
+        on.describe().starts_with(concat!(
+            "Make this ",
+            crate::computer!(),
+            " reachable on your tailnet."
+        )),
         "{}",
         on.describe()
     );
@@ -1482,7 +1615,7 @@ fn the_route_switch_and_revoke_name_their_owner_check() {
     );
     assert_eq!(
         OwnerAction::SetTailnetRoute { on: true }.touch_id_title(),
-        "Reach this Mac on your tailnet"
+        concat!("Reach this ", crate::computer!(), " on your tailnet")
     );
     assert!(
         !OwnerAction::SetTailnetRoute { on: true }
@@ -1522,9 +1655,11 @@ fn devices_of_a_vault_without_a_team_show_this_mac_and_the_add_button() {
     let (mut app, _) = unlocked_app_with_item(&dir);
     super::super::open_settings(&mut app, SettingsSection::Devices);
     let (text, _) = frames(&mut app, TALL);
+    // The questions do not go through the relay: the switch says where they stay.
+    assert!(!text.contains(ROUTE_OFF), "{text}");
     for expected in [
         ROUTE_SWITCH,
-        ROUTE_OFF,
+        devices::ROUTE_OFF_HERE,
         "Tailscale is not installed.",
         ONLY_THIS_MAC,
         ADD_DEVICE,
@@ -1533,7 +1668,7 @@ fn devices_of_a_vault_without_a_team_show_this_mac_and_the_add_button() {
     }
     assert_eq!(
         super::status_line(&app, SettingsSection::Devices),
-        "This Mac only"
+        concat!("This ", crate::computer!(), " only")
     );
     // The switch is disabled: no Tailscale, no route.
     let ctx = egui::Context::default();
@@ -1642,7 +1777,7 @@ fn devices_list_the_team_and_revoke_needs_the_owner_check() {
     }
     let (text, _) = frames(&mut app, TALL);
     assert!(
-        text.contains("This Mac") && text.contains(ADD_DEVICE),
+        text.contains(concat!("This ", crate::computer!())) && text.contains(ADD_DEVICE),
         "{text}"
     );
 
@@ -1772,10 +1907,17 @@ fn device_rows_say_how_each_device_answers() {
         updated_by: String::new(),
     };
     let mac = device(TrustedDeviceKind::Mac, None);
-    assert_eq!(device_words(&mac, true, None), "This Mac");
+    assert_eq!(
+        device_words(&mac, true, None),
+        concat!("This ", crate::computer!())
+    );
     assert_eq!(
         device_words(&mac, false, None),
-        "Mac · answers after Touch ID"
+        concat!(
+            crate::computer_cap!(),
+            " · answers after ",
+            crate::touch_id!()
+        )
     );
     let phone = device(TrustedDeviceKind::Iphone, Some(vec![4; 65]));
     assert_eq!(
@@ -1944,18 +2086,145 @@ fn security_owner_frequency_defaults_every_time_and_names_covered_actions() {
     app.place = Place::Settings;
     app.ui.settings_section = SettingsSection::Security;
     let (text, _) = frames(&mut app, TALL);
-    // The 2026-11-02 owner decision covers all manual actions globally.
-    for expected in [
-        "Lock after inactivity",
-        "Never",
-        "Agents can't use your credentials while the vault is locked.",
-        "How often to ask for Touch ID",
-        "Every time",
-        "After you confirm with Touch ID or your passphrase",
-        "Apassy doesn't ask again for anything until this time is up",
-        "Mac locks or sleeps",
-    ] {
+    for expected in ["Lock after inactivity", "Never", "Every time"] {
         assert!(text.contains(expected), "missing {expected}: {text}");
+    }
+    // Linux: with no observer (this test starts none) nothing is observed, so reuse is
+    // off and the texts say why; macOS can reuse its owner window.
+    let expected: &[&str] = if cfg!(target_os = "linux") {
+        &[
+            "How often to ask",
+            "Each sensitive action requires fresh confirmation with the vault passphrase or optional system authentication.",
+            "Approval reuse is off: Apassy cannot observe the screen lock here.",
+            "Lock the vault manually when you finish.",
+            "Inactivity counts only input in the Apassy window",
+            "Agents cannot use credentials while the vault is locked.",
+        ]
+    } else {
+        &[
+            "Agents can't use your credentials while the vault is locked.",
+            "How often to ask for Touch ID",
+            "After you confirm with Touch ID or your passphrase",
+            "Apassy doesn't ask again for anything until this time is up",
+            concat!(crate::computer!(), " locks or sleeps"),
+        ]
+    };
+    for expected in expected {
+        assert!(text.contains(expected), "missing {expected}: {text}");
+    }
+    // The lock note does not repeat what the note of "How often to ask" lists.
+    if cfg!(target_os = "linux") {
+        assert!(!text.contains("Screen lock is not observed here"), "{text}");
+    }
+    if cfg!(target_os = "linux") {
+        for unavailable in [
+            "Touch ID",
+            "Apassy doesn't ask again for anything until this time is up",
+            concat!(crate::computer!(), " locks or sleeps"),
+            "unavailable on Linux",
+        ] {
+            assert!(
+                !text.contains(unavailable),
+                "unexpected {unavailable}: {text}"
+            );
+        }
+    }
+}
+
+/// The Security texts for full and partial observation (Linux renders them; the text
+/// functions themselves are tested on every platform in `session_watch`).
+#[test]
+fn security_lock_texts_follow_the_observed_sources() {
+    use crate::native::session_lock::Observation;
+    if !cfg!(target_os = "linux") {
+        return;
+    }
+    let full = Observation {
+        session_bus: true,
+        logind: true,
+        logind_session: true,
+        screen_saver: true,
+        idle_hint: true,
+        sleep_inhibitor: true,
+    };
+    let partial = Observation {
+        screen_saver: false,
+        idle_hint: false,
+        ..full
+    };
+    for (obs, expected, absent) in [
+        (
+            full,
+            &[
+                "Apassy doesn't ask again for anything until this time is up",
+                "The window ends when the screen locks, the computer sleeps, or you switch user.",
+                "observed through systemd-logind and the screen saver service",
+                "while the desktop reports the session idle",
+            ][..],
+            &["Approval reuse is off", "Not observed", "manually"][..],
+        ),
+        (
+            partial,
+            &[
+                "The window ends at every lock and sleep that Apassy observes.",
+                "Not observed: No screen saver service answers on the session bus",
+                "Apassy observes only part of this session.",
+                "Inactivity counts only input in the Apassy window",
+            ][..],
+            &["Approval reuse is off", "manually"][..],
+        ),
+    ] {
+        let dir = TempDir::new().unwrap();
+        let (mut app, _) = unlocked_app_with_item(&dir);
+        app.place = Place::Settings;
+        app.ui.settings_section = SettingsSection::Security;
+        app.owner.session.fixed = Some(obs);
+        let (text, _) = frames(&mut app, TALL);
+        for expected in expected {
+            assert!(text.contains(expected), "missing {expected}: {text}");
+        }
+        for absent in absent {
+            assert!(!text.contains(absent), "unexpected {absent}: {text}");
+        }
+    }
+}
+
+/// A fake signal source drives the real app: a screen lock ends the owner window and,
+/// under "When the screen locks", locks the vault; a sleep locks it too.
+#[test]
+fn security_observed_lock_and_sleep_lock_the_vault_and_end_reuse() {
+    use crate::broker::approvals::{CheckMethod, OwnerFrequency};
+    use crate::desktop::auto_lock::LockPolicy;
+    use crate::desktop::session_watch::Applier;
+    use crate::native::session_lock::{Observation, SessionEvent};
+    let full = Observation {
+        session_bus: true,
+        logind: true,
+        logind_session: true,
+        screen_saver: true,
+        idle_hint: false,
+        sleep_inhibitor: false,
+    };
+    for event in [SessionEvent::ScreenLocked, SessionEvent::Sleep] {
+        let dir = TempDir::new().unwrap();
+        let (mut app, _) = unlocked_app_with_item(&dir);
+        let window = app.owner_ui.session.owner_window.clone();
+        window.configure(OwnerFrequency::UntilLock);
+        let applier = Applier::new(window.clone(), app.auto_lock.source.clone(), full);
+        applier.apply(SessionEvent::ScreenUnlocked);
+        applier.apply(SessionEvent::SessionActive);
+        let epoch = app.owner_ui.session.epoch().unwrap();
+        window.seed(epoch, CheckMethod::Passphrase, window.generation());
+        let (proof, _) = window.ticket(epoch).expect("reuse while observed");
+        app.auto_lock.policy = LockPolicy::Session;
+        let ctx = egui::Context::default();
+        app.poll_auto_lock(&ctx);
+        assert!(!app.owner_ui.session.is_locked());
+        applier.apply(event);
+        assert!(!proof.valid(), "{event:?}");
+        assert!(window.ticket(epoch).is_none(), "{event:?}");
+        app.poll_auto_lock(&ctx);
+        assert!(app.owner_ui.session.is_locked(), "{event:?}");
     }
 }
 
@@ -1992,7 +2261,10 @@ fn the_runs_on_row_starts_on_this_mac() {
     super::super::open_settings(&mut app, SettingsSection::Bouncer);
     let (text, _) = frames(&mut app, TALL);
     assert!(text.contains(RUNS_ON), "{text}");
-    assert!(text.contains("This Mac"), "{text}");
+    assert!(
+        text.contains(concat!("This ", crate::computer!())),
+        "{text}"
+    );
     assert!(!text.contains(GATE_STAYS), "{text}");
     assert!(!text.contains(FALLBACK_HEADLINE), "{text}");
     assert_eq!(stored_hosting(&app), None);
@@ -2175,7 +2447,12 @@ fn a_host_that_cannot_be_used_shows_the_fallback_and_the_return_needs_the_check(
         text.contains("needs the Connect sign-in, which this version does not have yet."),
         "{text}"
     );
-    assert_eq!(text.matches("runs on this Mac").count(), 1, "{text}");
+    assert_eq!(
+        text.matches(concat!("runs on this ", crate::computer!()))
+            .count(),
+        1,
+        "{text}"
+    );
 
     hosting::apply(&mut app, RunsOnAction::ThisMac, None);
     let request = app
@@ -2217,4 +2494,215 @@ fn a_remote_brain_state_waits_for_the_owner_and_names_no_address() {
     );
     let (words, _, _) = super::remote_server_words(None, None);
     assert_eq!(words, "Checking");
+}
+
+/// Plan s7 unit M5, mockup frames 9a to 9e (`docs/design/devices-settings-mockup.html`):
+/// the move to Apassy Connect beside the move to this Mac, the move that waits for its
+/// first approval through Connect with "Undo", the approvals that the hosted relay ended
+/// (`410`) with the two choices of the notice, and the route word of a device that
+/// reaches a node with only the Connect route.
+#[test]
+fn devices_connect_frames_draw_the_mockup() {
+    use super::super::devices::{
+        CONNECT_PENDING, CONNECT_PENDING_NOTE, CONNECT_UNDO, Ended, MOVE_APPROVALS,
+        MOVE_TO_CONNECT, RELAY_QUESTIONS_ENDED, ended_line,
+    };
+    // 9a: both moves, the move to this Mac is the blue button.
+    let both = DevicesView {
+        can_move: true,
+        can_move_connect: true,
+        ..frame_one()
+    };
+    let text = view_texts(&both);
+    for wanted in [
+        MOVE_APPROVALS,
+        MOVE_TO_CONNECT,
+        "Move them here: over your tailnet, or through Apassy Connect.",
+    ] {
+        assert!(text.contains(wanted), "9a has {wanted}: {text}");
+    }
+    // The text spans the row; the two buttons sit on their own row below it, the move to
+    // Connect on the right.
+    let rects = view_rects(&both);
+    let note = rect_of(
+        &rects,
+        "Move them here: over your tailnet, or through Apassy Connect.",
+    );
+    let to_mac = rect_of(&rects, MOVE_APPROVALS);
+    let to_connect = rect_of(&rects, MOVE_TO_CONNECT);
+    assert!(
+        note.width() > 250.0,
+        "9a: the note is not a column: {note:?}"
+    );
+    assert!(to_mac.top() > note.bottom(), "{to_mac:?} under {note:?}");
+    assert!((to_mac.center().y - to_connect.center().y).abs() < 2.0);
+    assert!(
+        to_connect.left() > to_mac.right(),
+        "{to_connect:?} {to_mac:?}"
+    );
+    // 9b: without Tailscale, the move to Connect alone.
+    let connect_only = DevicesView {
+        node: NodeState::Off,
+        can_move: false,
+        can_move_connect: true,
+        ..frame_one()
+    };
+    let text = view_texts(&connect_only);
+    assert!(text.contains(MOVE_TO_CONNECT), "{text}");
+    assert!(!text.contains(MOVE_APPROVALS), "{text}");
+    assert!(text.contains("without Tailscale"), "{text}");
+    // Neither: no move row.
+    let text = view_texts(&frame_one());
+    assert!(!text.contains(MOVE_TO_CONNECT), "{text}");
+    // 9c: the move waits for its first approval through Connect.
+    let text = view_texts(&DevicesView {
+        connect_pending: true,
+        ..frame_one()
+    });
+    for wanted in [CONNECT_PENDING, CONNECT_PENDING_NOTE, CONNECT_UNDO] {
+        assert!(text.contains(wanted), "9c has {wanted}: {text}");
+    }
+    // 9d: the hosted relay ended the approvals; the line replaces the notice and offers
+    // the moves this Mac can make; the switch says that questions wait here.
+    let ended = |can_move, can_move_connect| DevicesView {
+        relay: Some(RelayView {
+            questions: Questions::Ended,
+            feed_shown: true,
+            other_macs: None,
+            free_end: Some("0.5.20".to_owned()),
+            ended: Some((Ended::Free, "0.5.20".to_owned())),
+            can_move,
+            can_move_connect,
+        }),
+        ..frame_one()
+    };
+    let text = view_texts(&ended(true, true));
+    assert!(text.contains(&ended_line(Ended::Free, "0.5.20")), "{text}");
+    // The line spans the row, and the moves sit on a row below it, once: the This Mac
+    // group has no move row of its own while they are ended.
+    for ended_why in [Ended::Free, Ended::Retired] {
+        let mut view = DevicesView {
+            can_move: true,
+            can_move_connect: true,
+            ..ended(true, true)
+        };
+        if let Some(relay) = view.relay.as_mut() {
+            relay.ended = Some((ended_why, "0.5.20".to_owned()));
+        }
+        let rects = view_rects(&view);
+        let text = joined(&rects);
+        assert_eq!(text.matches(MOVE_APPROVALS).count(), 1, "{text}");
+        assert_eq!(text.matches(MOVE_TO_CONNECT).count(), 1, "{text}");
+        assert!(
+            !text.contains("Approvals go through Apassy relay"),
+            "{text}"
+        );
+        let line = rect_of(&rects, &ended_line(ended_why, "0.5.20"));
+        let to_mac = rect_of(&rects, MOVE_APPROVALS);
+        assert!(
+            line.width() > 250.0,
+            "9d: the line is not a column: {line:?}"
+        );
+        assert!(to_mac.top() > line.bottom(), "{to_mac:?} under {line:?}");
+    }
+    assert!(text.contains(RELAY_QUESTIONS_ENDED), "{text}");
+    assert!(text.contains(MOVE_TO_CONNECT), "{text}");
+    assert!(text.contains(MOVE_APPROVALS), "{text}");
+    assert!(
+        !text.contains(&devices::free_end_line("0.5.20")),
+        "one state, not the notice too: {text}"
+    );
+    assert!(
+        !text.contains(super::super::devices::SHOW_AGENTS),
+        "no feed switch while ended: {text}"
+    );
+    let text = view_texts(&ended(false, false));
+    assert!(
+        text.contains("Turn on “Reachable on Your Tailnet” above, or Apassy Connect"),
+        "{text}"
+    );
+    assert!(!text.contains(MOVE_TO_CONNECT), "{text}");
+    let retired = ended_line(Ended::Retired, "0.5.20");
+    assert!(retired.contains("no longer carries"), "{retired}");
+    // 9e: the route word of a device through Connect, with its last contact.
+    let mut view = frame_one();
+    view.devices[1].route = Some(Route::Connect);
+    let text = view_texts(&view);
+    assert!(text.contains("via Apassy Connect"), "{text}");
+    assert!(text.contains("10 s ago") || text.contains("Now"), "{text}");
+}
+
+/// The new texts of plan s7 unit M5 follow plans section 5: relay sync and shared vaults
+/// are never the paid feature, the paid part is Apassy Connect, the hosted relay is not
+/// for teams, and "free" without a limit is only what is free when self-hosted.
+#[test]
+fn connect_move_texts_follow_the_rules_of_plans_section_5() {
+    use super::super::devices::{
+        CONNECT_PENDING, CONNECT_PENDING_NOTE, Ended, MOVE_TO_CONNECT, RELAY_QUESTIONS_ENDED,
+        ended_line,
+    };
+    use super::super::sync::questions::CONNECT_MOVE_WAITS;
+    use super::super::sync::relay::{
+        CONNECT_OPEN_EMPTY, CONNECT_OPEN_JOIN, CONNECT_OPEN_LEAD, CONNECT_OPEN_LOADING,
+        CONNECT_OPEN_OLD_FILE, CONNECT_OPEN_SIGNING_IN, CONNECT_SIGN_IN,
+    };
+    use crate::desktop::sync_worker::ended_copy_words;
+    use crate::questions::worker::ended_text;
+    use crate::relay::membership::PathEnded;
+    let mut texts: Vec<String> = [
+        CONNECT_PENDING,
+        CONNECT_PENDING_NOTE,
+        MOVE_TO_CONNECT,
+        RELAY_QUESTIONS_ENDED,
+        CONNECT_MOVE_WAITS,
+        CONNECT_OPEN_EMPTY,
+        CONNECT_OPEN_LEAD,
+        CONNECT_OPEN_JOIN,
+        CONNECT_OPEN_OLD_FILE,
+        CONNECT_OPEN_SIGNING_IN,
+        CONNECT_OPEN_LOADING,
+        CONNECT_SIGN_IN,
+    ]
+    .iter()
+    .map(|text| (*text).to_owned())
+    .collect();
+    for why in [PathEnded::FreeEnded, PathEnded::Retired] {
+        texts.push(ended_text(why));
+        texts.push(ended_copy_words(why));
+    }
+    for ended in [Ended::Free, Ended::Retired] {
+        texts.push(ended_line(ended, "0.5.20"));
+    }
+    for text in &texts {
+        let lower = text.to_lowercase();
+        for banned in [
+            "paid relay sync",
+            "relay sync (paid)",
+            "shared vaults (paid)",
+            "for teams",
+            "stays free",
+        ] {
+            assert!(!lower.contains(banned), "{banned} in {text}");
+        }
+        if lower.contains("paid") {
+            assert!(text.contains("Apassy Connect (paid)"), "{text}");
+        }
+        // "free" names the self-hosted path only: this Mac or your own node.
+        if lower.contains("free") && !lower.contains("free approvals") {
+            assert!(
+                lower.contains("node") || lower.contains("free path"),
+                "free without the self-hosted path: {text}"
+            );
+        }
+    }
+    // The ended state of a relay copy names both choices.
+    for why in [PathEnded::FreeEnded, PathEnded::Retired] {
+        let words = ended_copy_words(why);
+        assert!(words.contains("Linux node the sync home (free)"), "{words}");
+        assert!(words.contains("Apassy Connect"), "{words}");
+        assert!(words.contains("is safe"), "{words}");
+        let text = ended_text(why);
+        assert!(text.contains("Questions wait on this"), "{text}");
+        assert!(text.contains("Apassy Connect"), "{text}");
+    }
 }

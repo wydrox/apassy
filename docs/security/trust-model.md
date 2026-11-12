@@ -138,43 +138,216 @@ questions, the feed, the access requests, and relay sync use their contracts unc
 | `tailscaled` and the tailnet | WireGuard keys | Which devices talk to the node, sizes, times | Traffic: TLS runs end to end between the device and the node |
 | Push gateway | The APNs key and its handle key | Handles, node addresses, times | Tokens are sealed under the gateway's key; the node never sees them. A node that held a handle can push the fixed notification within the limits until the handle expires (180 days). Making a handle needs no proof of the device: whoever knows a device's APNs token can make handles for it and push the fixed notification, but at most 10 handles a day and 30 pushes an hour per token, over all its handles and addresses ([N8-3](../reviews/node-tailnet-2026-11/n8-panel.md)) |
 
-## Apassy Connect (ADR 0037 stage 7, planned)
+## Apassy Connect (ADR 0037 stage 7, implemented, not released)
 
 The paid hosted service of stage 7 ([plan](../design/implementation-plan-s7-connect.md); contracts
 [connect-account-v1](../contracts/connect-account-v1.md),
 [connect-billing-v1](../contracts/connect-billing-v1.md),
-[connect-tunnel-v1](../contracts/connect-tunnel-v1.md)). Not implemented yet: this section says what
-the contracts allow, and it becomes true when units C1 to C5 ship. The security review Q1 updates it.
+[connect-tunnel-v1](../contracts/connect-tunnel-v1.md)). Implemented on the relay and in the apps, not
+released: this section says what the contracts allow and the code does. The security review Q1 updates
+it.
 
 | Part | Holds | Sees | Cannot see or do |
 | --- | --- | --- | --- |
-| Account directory (`relay.db`) | Account ids, person names, device names, platforms, device public keys, the hashes of link and recovery codes, the last-seen hour of each device, groups and roles, vault store ids and vault names, nodes (names, certificate pins, public names), tunnel grants, the public keys of the entitlement signing key | — | Private keys, link codes, recovery codes, tokens (memory only), passphrases, vault keys |
+| Account directory (`relay.db`) | Account ids (every id that Connect ever made, kept so that an id is used once: a new account never meets the Stripe customer or other records of a deleted account of that id), person names, device names, platforms, device public keys, the signed device list of each account (each change signed by a device of the list), the hashes of link codes, the public recovery key of each account, the last-seen hour of each device, groups and roles, vault store ids and vault names, nodes (names, certificate pins, public names), tunnel grants, the public keys of the entitlement signing key | — | Private keys, link codes, recovery codes, tokens (memory only), passphrases, vault keys |
 | Plain files at rest | In `APASSY_RELAY_MODE=connect` there is no master key: `relay.db` and the vault store files are plain SQLite. They hold the directory above and, in the stores, SQLCipher snapshots under the user's passphrase, signed heads, and receipts | — | Nothing in them opens a vault. Disk encryption of the host is the owner's choice; backups go through the encrypted pull of today |
 | Vault stores (blind sync store) | One relay-sync-v1 team for each vault: the current and the previous snapshot | Ciphertext, sizes, times, which device pushed | Vault contents. The passphrase never reaches Connect |
-| Account sign-in and the safety words | Public keys and signed challenges; a 15-minute account token in memory | Which device signs in, and when | It cannot add a device: a new device needs the confirmation of a live device with six safety words and an owner check. Connect never sees the link code, so it cannot compute the words or make a key that matches them |
+| Account sign-in, the device list, and the safety words | Public keys, signed challenges, and the signed device list; a 15-minute account token in memory | Which device signs in, and when | It cannot add or remove a device for an Apassy client, or rename one: each change of the device list is an entry signed by a device of the list over the hash of the entry before (an `add` also over the new device's name), back to the account's first key, which each client pinned when it made or joined the account and which signed its own name, and each client pins the highest version it verified that holds its own key. A row that Connect adds, a key it swaps, or a removed device it lists again is not in the list: the client shows it as "Not verified" and never uses it as an account device (no store, no sync head, no later confirmation). A list older than the pinned one, or another history, verifies no device. A device that Connect only hides stays a device until a device of the list signs its removal. The joining device chooses its own name and signs it in its join request (one canonical form on both sides: trimmed, 1 to 64 bytes, no control character, never `-`); the confirming device shows, and signs into the list, only a name whose join signature verifies, and the joining device pins only a list whose `add` names it as it asked, so Connect can neither choose nor change the name of a device. A new device needs the confirmation of a verified device with six safety words and an owner check; the link code names the confirming device's key and the account's first key, and Connect never sees the code, so it can neither compute the words nor answer with other keys. Connect can refuse a sign-in, but a refusal never removes a device: the device forgets its key only when its owner confirms on it |
 | The email | A copy of the Stripe customer's email, for the devices list and support | — | Connect sends no mail in stage 7. Account deletion deletes the copy |
 | Stripe (payment processor) | The customer: email, billing address, payment method, tax id; subscriptions and invoices (kept for legal retention) | The checkout and portal sessions, and the account id in `client_reference_id` and metadata | A device key, a token, a vault id, a device name, a value. Connect never sees card data or the address |
 | The webhook | Event ids for 30 days | Stripe events, checked with the endpoint secret | A forged or replayed event changes nothing: signature, 300 s tolerance, idempotency by event id |
-| The tunnel (byte relay) | Nodes and grants; for each account and month the counts of dials and streams and the bytes | TLS records, sizes, times; the client address of a WebSocket in memory | Requests, tokens, values: TLS ends on the node, pinned for devices. It logs no stream content |
-| The SNI ingress (ports 443 and 80 of the Connect host, DNS-only, not through Cloudflare) | — | The server name `<node>.node.apassy.wyderka.cc`, the client address in memory only (never logged), the TLS records, and the plain ACME HTTP-01 challenge requests on port 80 | The cloud agent's requests, its token, session keys, placeholders, values: TLS ends on the node with its own Let's Encrypt certificate, whose key never leaves the node |
+| The tunnel (byte relay) | Nodes and grants; for each account and month the counts of dials and streams and the bytes (also apart for the ingress and for each other account that dials its nodes), 13 months | TLS records, sizes, times; the client address of a WebSocket in memory | A device's requests, tokens, values: its TLS ends on the node and is pinned to the node's own certificate, which no CA issues. It logs no stream content |
+| The SNI ingress (ports 443 and 80 of the Connect host, DNS-only, not through Cloudflare) | — | The server name `<node>.node.apassy.wyderka.cc`, the client address in memory only (never logged), the TLS records, and the plain ACME HTTP-01 challenge requests on port 80 | Run as specified, the cloud agent's requests, its token, session keys, placeholders, values: TLS ends on the node with its own Let's Encrypt certificate, whose key never leaves the node. This holds only as long as nobody else gets a certificate for the node's public name (below) |
 | Certificate Transparency logs | The node certificates | The public node names, for ever, once a node gets a certificate | Traffic |
 | The Cloudflare Worker (edge) | — | The account and billing requests (public keys, names, signed messages, Stripe events) and the WebSocket upgrades; after an upgrade, the tunnel's TLS records | Values, vault contents |
 | The entitlement token | The Mac keeps it in memory (24 hours) | Account id, plan, group, features, times; it is signed by Connect | It is not a credential for Connect. A service accepts it only for the account of the device that signed in to that service |
 | Bouncer brain service, through Connect (ADR 0035; the row above) | Its own token after the device sign-in `apassy-bouncer sign-in v1`; the entitlement token | What the row above says; from Connect only `account`, the two entitlements, and `revoked` for a device (I-3), and `revoke` and `forget` events (I-4) | The account token: the Mac never sends it to the brain (I-2). Connect does not call the brain for a request |
 | Fallback F1 (not chosen) | — | If the owner chose it, Cloudflare and Connect would end the cloud agent's TLS and see its requests (the bearer token, placeholders, session keys), never values | Not in effect. Choosing it changes this table and the Funnel parity of the ingress row |
 
+**The public name of a node is Web PKI trust, as a Tailscale Funnel name.** A cloud agent checks the
+node's public certificate as any HTTPS client checks a name. A CA issues a certificate for
+`<node>.node.apassy.wyderka.cc` to whoever passes its challenge for that name. Whoever operates
+Connect (it answers port 80 of those names and runs the zone's records), or whoever controls the DNS
+of the zone or that port 80, can therefore obtain a certificate of their own for a node's public name,
+end a cloud agent's TLS with it, and see that agent's requests, its token, session keys, and the
+placeholders. It is the same trust that Tailscale Funnel needs for a Funnel name. Such a certificate is
+visible in the Certificate Transparency logs. The device route is different: a device dials the node
+through Connect with TLS pinned to the node's own certificate (the pin of the pairing), so neither
+Connect nor a CA can stand in for the node there.
+
+**What a `device` stream reaches.** A dial reaches the node's device routes (`Scope::Tailnet`, relay
+SPEC 32.1 and 35.3), the same routes as the tailnet. Every device of the node's account, every device
+of an account with a grant, and Connect itself (which can open any stream on a node's WebSocket) can
+open one. TLS has no client authentication there, so each route's own token decides: without one only
+the sign-in steps, a device link (a one-use link code and the owner's confirmation with the safety
+words), and the health check answer. Through a stream of the tunnel the node refuses the routes of team
+codes, invites, and joins (`404`), which no device needs through Connect.
+
 The iPhone shows the plan only; it has no purchase, link, or price (connect-billing-v1 section 10).
 
 **The account device key** (connect-account-v1 section 5) is a software P-256 key in the Keychain of
-each device (this device only, not synchronizable, behind Touch ID), not a Secure Enclave key yet.
-Apassy reads it into memory only to sign the seven messages of section 5, and drops it from memory
-when the vault locks and at a sign-out. A change of the Touch ID fingerprints deletes it: the device
+each Mac and iPhone (this device only, not synchronizable, behind Touch ID), not a Secure Enclave key yet.
+On Linux it is a private file of the user (`connect/device-key` in the data directory, 0600, never a
+symlink, outside every vault; ADR 0045, "The Apassy Connect key on Linux"): another program of the
+same user can read it there and act at Connect as that computer without the app's owner checks, which
+run in Apassy (for example confirm a device of its own, change the vault stores, or delete the
+account), but it gains no vault content: the vault stores hold ciphertext under the passphrase. Apassy reads it into memory only to sign the eleven messages of sections 5 and 16, and drops it from memory
+when the vault locks and at a sign-out. **One account session for the app** (plan s7 unit M5b): the
+vault unlock opens it, and Settings › Connect, the sync of the vault stores, and the node's tunnel use
+its one key and token; no part reads the key store on its own. It closes at a lock, at a quit, at another
+vault session, and when the auto-lock rule locks the vault at a screen lock or sleep. One step opens
+it without a vault: "Use a vault from another Mac › Apassy Connect" on the start screen, which the owner
+starts, and only while no vault is unlocked. The key is read once for that step, to join the account or
+list its vault stores: with Touch ID on the Mac; on Linux from the private file, with no prompt (ADR 0045:
+the mode of the file protects it, not a check of Apassy, so another program of the same user can read it
+whether or not this step runs). Every way out of the step (another source of that screen, the start
+screen's home, a lock, a quit, or the first vault session, also of another vault than the one that the
+step downloads) closes the session and drops what holds the key, also a download from a vault store
+that is under way and a copy that waits for its passphrase; only a copy that its passphrase opens
+already finishes opening. The one owner check of that step, taking the
+copy that a removed device left on a vault store, is Touch ID, or system authentication on Linux, bound
+to the session of the step: no unlocked vault holds a passphrase to check. A join of this device that
+waits keeps public values on disk (`connect/pending-join.json`, mode 0600: ids, names, keys, the link
+hash, the safety words; never the link code), so a restart can finish it after a late confirmation. On the Mac the Touch ID
+unlock reads the key with the vault's unlock key under one Touch ID (both items have the same access
+control); a passphrase unlock reads it with a Touch ID of its own. A Connect that cannot be reached never
+blocks the unlock: the session needs only the account file and the key, and each part shows its own
+"Connect unreachable". `apassy owner serve` opens no account session. A change of the Touch ID fingerprints deletes it: the device
 is then no longer a device of its account, and the owner adds it again from another device or
-recovers the account with the recovery code. The vault rows that sign with it go only after the
-device forgot the account (a revoke of it, a deletion, "Forget this device") or Connect answered
-`401` to a fresh sign-in; a missing or unreadable account file removes nothing. Adding a device to a
-vault store and deleting a vault store need a fresh owner check on this Mac, as adding or revoking
-an account device does.
+recovers the account with the recovery code. The key and the vault rows that sign with it go only
+when the owner confirms "Forget This Mac" (or iPhone, or Computer on Linux) on that device, after a revoke of it, a
+deletion, or Connect's signed-in answer that the device was removed. A refused sign-in, a missing
+answer, or a missing or unreadable account file removes nothing. Adding a device to a vault store
+by hand and deleting a vault store need a fresh owner check on this Mac, as adding or revoking an
+account device does; the sync through Apassy Connect adds the other verified devices of the same
+account to a store that it turned on without one (each still needs the vault passphrase). Only a
+verified device can be added to a store. A vault store has no device link: a device of the account
+gets the copy from the store that lists it, with the passphrase of the copy. A store that holds
+devices of another account opens only with a share of it that the device verified (below), else it
+is refused before any request. That early refusal relies on Connect's `shared` mark; against a
+Connect that hides the mark, the signer policy alone refuses: no head of a device of another account
+that no verified share names is accepted, and nothing is merged. Sharing a vault, accepting a share, ending a share, and leaving a
+shared vault each need a fresh owner check, and so does joining a vault that another account
+shares; the owner's checks name the vault by its name on this computer, and Join names a vault that
+no vault of this computer syncs as "a vault shared by" the person, with Connect's name of the store
+beside it as a hint only (the other account chose it); each check names the person by the name that
+their verified device list signed with the short fingerprint of their pinned root (Connect's name
+for them shows beside it as a hint only), the step, and the exact entries that the step signs: the
+device reads its own list just before it builds the check and signs exactly those entries or
+nothing. A device of the owner ends a share by itself, without an owner check, only when the
+member's verified list left that share, when Connect's group answer shows this account as an active
+member and does not show the member (or names it as removed), or when Connect marks the share void
+after a removal from the group, since an end gives no one access; an error or an unclear group
+answer ends nothing. A re-pin after a reset has an owner check of its own that names the shares
+that end.
+
+**The device list** (connect-account-v1 section 7.5) is a signed list with a cryptographic root:
+version 1 is the first device of the account (after a recovery, the recovering device), signed by
+its own key over its name, and each later version is one change, an `add` or a `remove`, signed by
+a device of the list over the hash of the entry before. An `add` signs the name of the new device,
+so a name stays with the key that it was confirmed for, and a key that was in the list is never
+added again. Each client keeps in its account file the root key, the version and the hash of the
+newest list it verified, the devices of that list, and the keys it knew that left; it takes a list
+only while the list holds its own key as a device. A confirmation and a revoke are entries that the
+client signs itself after an owner check: the revoke names the key that the client's own verified
+list holds for the row, with that list's name and a short fingerprint of the key, and a row whose
+key is the client's own while its id is not (or the reverse) is refused. A new device pins only a
+list that holds its own `add`, signed by the confirming device that the code named. A device that a
+device confirmed before it left stays a device: its `add` precedes the `remove`. An entry that adds
+something (a device, a peer, a share, a join, a store) comes only while every device, peer, share,
+and join can still be ended before the list is full (1024 entries, adds up to version 822; a store
+entry never needs an end), so a removal, the end of a share, and a recovery always remain possible.
+
+The heads of a vault store are accepted from the devices of the verified list; from a device that
+left, as the current head only for the versions of that store that the client had merged when it
+learned of the removal (a key that the verified list removed, also one that left before the client joined), and below a head that a device of the list signed (that device had taken
+it). A live device whose own last head is one of a device that left signs a head of its own over it
+at its next sync, so a device that is behind takes the copy again; until then that device waits and
+says so. When no live device will sign over that head (the device that left pushed last), the owner
+ends the wait on the waiting device behind a fresh owner check that names that head, with the device that left named by its
+signed name and the time of its head: take exactly that head once ("Use the Copy That … Left…",
+only for a key that the verified list removed), or replace it with the device's own copy. A head or
+a chain entry of a signer that the client does not know yet makes it read the device list again
+before it calls the copy refused or damaged. A key that was never a device of the verified list signs nothing; the decision never comes from
+Connect's answers (a group, a store marked shared, a device it lists). What a client cannot detect: a
+newer list that Connect withholds (the client keeps the last list it verified, so a removal it has
+not seen yet does not reach it); entries after its own `add` that Connect withholds at a join (the
+new device starts from the list that holds its `add`); and the same for an account file restored
+from a backup, which learns the removals from the list at its next view only while Connect serves
+them. The cost of the rule below the head: a device from which a removal was withheld can still take
+a push of the device that left, and its own later head carries that push into a head that the other
+devices take. A recovery starts a new root; a device of the old root learns
+it only by joining again with a link from the recovered device, never from Connect.
+
+**A vault shared between accounts** (connect-account-v1 section 16). The account that made a vault
+store is the only authority for who signs its heads, and which account that is can be checked: the
+device that makes a store signs a `store` entry of it in its account's list, in the step that makes
+the store (a store made before the entry gets it only from a device that syncs it with the account's
+key and that Connect's store view names as its maker, and, when the list shared it already, only
+after an owner check that names the shares that count again), and a share of a store counts only in
+a list that holds its `store` entry; a list that
+holds it never joins that store, so no device of that account takes it as another account's store,
+also a device that does not sync it. What the owner says of other accounts are entries of its own
+device list (`peer`, `share`, `join`, and their ends), in the chain of its device entries, so they
+have one order with the device changes and a removed device signs none of them. A `join` names the
+`share` that it answers: it counts only while that share is active, and a new share of the same
+store is joined anew. No role in a group carries
+trust; the group view, a store's `shared` flag, and a store's device rows are hints only. A `peer`
+pins the root of another account once for each pair of accounts, after six words that both devices
+compute from a share code that Connect never sees, both roots, and both devices' keys; the code
+carries the fingerprint of the sharing account's root and device, so the answering device checks the
+account that Connect names. A device of another account signs in a store only when the signed
+`share` entries of the store's owner name its account, through a root that the client pinned (a
+co-member's root comes from the owner's `peer` entry and counts only in that owner's stores; the
+client keeps one pin for each pair of an account and the list that named it, so two owners that name
+different roots for one person stay apart, and a re-pin keeps the old keys as keys that left). A
+list of a peer from another root suspends that pin: its keys sign nothing new until the people
+compare new words, which a recovery of either account needs. When the owner's list ends a share, or
+a peer's list removes a device, those keys sign only what the client had merged and below an
+accepted head; the ended members of a store come from the verified lists, so every device computes
+the same, also one that reads a share and its end at once; Connect serves the lists of the accounts
+that joined a store with a device (a share that was never answered gives no read), so a device that
+was offline while a member wrote still reads that member's keys after the member left the group.
+A share that ends on a device (an `unshare`, a newer share not joined yet, a void mark of Connect)
+only ends there: the pins of the other accounts stay with their list pins, so a later share goes on
+from them and never takes an older list again. A client takes a store as another
+account's only through its own signed `join` of a share that the owner's verified list holds for a
+store that the owner's list made, and never offers or joins a store that its own list made, shares,
+or joins from another account, or that a vault of the same computer syncs as its own. A join reads
+the lists of the store's co-members before its first download. Connect also refuses a device of
+another account in a store without the owner's active share, the member's join of it, and one active
+group (a second line), and a removal from the group voids at Connect the shares that name the
+removed account and the shares that it made, until a newer share.
+
+What a client cannot detect here: a suffix of a list that Connect withholds (a removal or an
+`unshare`), or an old prefix that it gives to a new device or member, until Connect serves it the
+newer list (no head carries a list; until then that client takes the heads of the ended keys, and
+the other devices take them below its later head); a permanent partition, in which Connect keeps the
+devices of a share apart; and the time between an admin's removal of a member at Connect, which
+ends the member's sign-in to the store, and the next refresh of a device of the owner, which then
+signs the `unshare` by itself, until which the member's earlier heads still count; and the old keys
+of an account that reset, on a device that learns that account only after the reset when Connect
+withholds that account's last list before the reset (Connect keeps it while a store names the
+account, and a device takes it only from an earlier root that its naming list pinned, as keys that
+left): their chain entries after that device's anchor are refused, and at a first download a copy
+whose head a verified device signed is taken only after the owner's own choice, "Take This Copy
+Without Its Earlier History…", which names that head, its device, and its time.
+
+**The recovery code** is the seed of an Ed25519 key pair. Connect stores only the public key; a
+recovery is a signature by that key over the new device key and the next recovery key, so the code
+never leaves the device where it is typed. A new code of a live device (connect-account-v1 section 9.1)
+is written first as a pending rotation of public values (the old and the new public key and the signed
+statement), so a lost answer, a `429`, or a quit never leaves the owner with a code that stopped
+working unannounced: the device shows the code only when Connect names its key; without an answer it
+says that it cannot tell yet, shows the mark of a code that nobody saw at once, and the next read of
+the account settles it in the same session (Connect took the key: the mark stays; it did not: the old
+code still works, and the device says so). A request of an earlier try that reaches Connect late is
+settled the same way: the key that names this device as its maker is a code that nobody saw. The mark
+goes only when the owner closes the sheet of a code. Each device pins the public key that it saw last,
+so a new code of another device shows on every other device with the name of that device and its day,
+also on a device whose account file is from a build before the pin.
+A Connect that lies about the key can make a device say that the code changed, or that it did not;
+it cannot learn or use a code.
 
 **Relay copies without a code (plan s7 S0).** The hosted relay gets the team name `Vault` and the
 device name `Mac` (or `iPhone`) of a codeless relay copy, never the names that the owner gave them;

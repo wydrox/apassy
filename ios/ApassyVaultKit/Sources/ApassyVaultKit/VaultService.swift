@@ -26,6 +26,8 @@ public struct VaultError: Error, Sendable, Equatable, LocalizedError {
         case damaged
         case staleCopy = "stale_copy"
         case forkedCopy = "forked_copy"
+        /// A vault store of Apassy Connect waits for another device of the account to sync.
+        case waitsForDevice = "waits_for_device"
         case busy
         case tooLarge = "too_large"
         case io
@@ -72,6 +74,9 @@ public struct VaultError: Error, Sendable, Equatable, LocalizedError {
         case tooManyActions = "too_many_actions"
         /// The relay asks this iPhone to wait a minute before it reads the feeds again.
         case feedRate = "feed_rate"
+        /// The hosted relay ended the free questions, feed, and push of this team (410
+        /// `free_connect_ended` or `hosted_retired`): the iPhone is paired again from the Mac.
+        case relayEnded = "relay_ended"
         /// The service has no such call (an older core; app side, not the core).
         case unsupported
         case accessUnavailable = "access_unavailable"
@@ -278,6 +283,18 @@ public protocol VaultService: Sendable {
         -> SentFeedAction
     /// The state of a posted action; a long poll of `timeout` seconds (0 to 25) while it is open.
     func feedActionWait(actionID: String, vaultID: String?, timeout: Int) async throws -> FeedActionOutcome
+
+    // 5.14 Apassy Connect (`Connect.swift`). The app only. This iPhone only joins an account of a
+    // Mac and shows its plan; it never creates one or starts a purchase.
+    /// Ask to join the account of the code that "Add a device…" shows on the Mac.
+    func connectJoin(link: String, deviceName: String) async throws -> ConnectJoin
+    /// Whether the Mac confirmed: `.confirmed` makes this iPhone a device of the account.
+    func connectJoinPoll() async throws -> ConnectJoin
+    func connectJoinCancel() async throws
+    /// The account of this iPhone and its plan.
+    func connectStatus() async throws -> ConnectStatus
+    /// Remove the account key and the account from this iPhone. True when there was one.
+    func connectForget() async throws -> Bool
 }
 
 public extension VaultService {
@@ -384,4 +401,15 @@ public extension VaultService {
     func questionsUnlock(vaultID: String, passphrase: String) async throws -> QuestionsStatus {
         throw VaultError(.notAllowed, "This vault cannot read the questions of another vault. Update Apassy.")
     }
+
+    // A service without Apassy Connect: this iPhone is on no account.
+    func connectJoin(link: String, deviceName: String) async throws -> ConnectJoin {
+        throw VaultError(.unsupported, "This version of Apassy cannot join Apassy Connect.")
+    }
+    func connectJoinPoll() async throws -> ConnectJoin {
+        throw VaultError(.invalidInput, "No join waits.")
+    }
+    func connectJoinCancel() async throws {}
+    func connectStatus() async throws -> ConnectStatus { ConnectStatus(state: .none) }
+    func connectForget() async throws -> Bool { false }
 }

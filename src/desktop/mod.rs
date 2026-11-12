@@ -29,7 +29,8 @@ mod companion;
 pub mod inbox;
 #[cfg(feature = "vault")]
 mod learning_ui;
-pub mod model;
+/// Shared with the headless owner service: [`crate::owner::model`].
+pub use crate::owner::model;
 #[cfg(all(feature = "vault", any(target_os = "macos", test)))]
 mod native_menu;
 /// The Mac's own node for cloud agents (ADR 0037, cloud slice).
@@ -46,10 +47,12 @@ pub mod owner_check;
 pub(crate) mod owner_cli;
 #[cfg(feature = "vault")]
 mod owner_frequency;
+/// Shared with the headless owner service: [`crate::owner::owner_store`].
 #[cfg(feature = "vault")]
-pub(crate) mod owner_socket;
+pub use crate::owner::owner_store;
+/// Shared with the headless owner service (`apassy owner serve`): [`crate::owner::socket`].
 #[cfg(feature = "vault")]
-pub mod owner_store;
+pub(crate) use crate::owner::socket as owner_socket;
 /// Tests of the browser passkeys, the browser one-time codes, and the macOS passkey sheet.
 #[cfg(all(test, feature = "vault"))]
 mod passkey_controller_tests;
@@ -59,6 +62,9 @@ pub(crate) mod passkey_socket;
 /// The agent feeds of the other Macs of the vault (relay-feed-v1 reader).
 #[cfg(feature = "vault")]
 pub(crate) mod remote_feeds;
+/// Linux screen lock, sleep and inactivity in the owner window and auto-lock.
+#[cfg(feature = "vault")]
+pub(crate) mod session_watch;
 /// The sync log and the notice of a vault that does not sync.
 #[cfg(feature = "vault")]
 pub(crate) mod sync_health;
@@ -237,6 +243,35 @@ pub struct DesktopApp {
     native_menu: Option<native_menu::NativeMenu>,
 }
 
+/// The key of the quit mark in the memory of egui.
+#[cfg(target_os = "linux")]
+fn quit_id() -> eframe::egui::Id {
+    eframe::egui::Id::new("apassy-quit-requested")
+}
+
+/// Linux, Ctrl+Q: close the window as a quit. [`DesktopApp::keep_open_for_node`] then
+/// lets the close through, as the Mac's Quit Apassy (⌘Q) does.
+#[cfg(target_os = "linux")]
+pub(crate) fn request_quit(ctx: &eframe::egui::Context) {
+    ctx.data_mut(|data| data.insert_temp(quit_id(), true));
+    ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Close);
+}
+
+/// True after [`request_quit`]. Always false on macOS: its menu quits without a close
+/// request.
+#[cfg(feature = "vault")]
+pub(crate) fn quit_requested(ctx: &eframe::egui::Context) -> bool {
+    #[cfg(target_os = "linux")]
+    return ctx
+        .data(|data| data.get_temp::<bool>(quit_id()))
+        .unwrap_or(false);
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = ctx;
+        false
+    }
+}
+
 /// Broker state for the Agents view.
 #[cfg(feature = "vault")]
 #[derive(Debug, Default)]
@@ -334,8 +369,11 @@ impl DesktopApp {
         let _ = options;
         #[cfg(feature = "vault")]
         {
+            // The one Apassy Connect account session: it opens with each unlock (plan s7
+            // unit M5b); Settings › Connect, the sync, and the node's tunnel share it.
+            app.connect_use_platform(&crate::paths::data_dir());
             // The node starts later, for an unlocked vault with cloud agents.
-            app.node = node::NodeFlows::platform(options.node);
+            app.node = node::NodeFlows::platform(options.node, app.connect_session());
             // `bouncer.json`: the broker uses its address, and in "With Apassy" the
             // model server starts now.
             app.model_server = Some(crate::broker::model_server::ModelServer::start_default());
@@ -547,6 +585,8 @@ impl eframe::App for DesktopApp {
         {
             // A Mac that joins through the relay cancels its link or its device.
             self.relay_quit();
+            // A device that joins an Apassy Connect account cancels its join.
+            self.connect_quit();
             // No background sync after this: the lock in `shut_down` syncs last.
             self.stop_sync_worker();
             self.shut_down();
@@ -569,6 +609,9 @@ impl eframe::App for DesktopApp {
             self.poll_platform(ctx);
             ui::poll_notifications(self);
             self.poll_update_restart(ctx);
+            // The Connect account session follows the vault here too, before the node,
+            // so that the tunnel finds it open.
+            self.poll_connect(ctx);
             // Here and not in `ui`: the node follows the vault also while the window is
             // minimized, and a close of the window keeps the app open while it runs.
             self.sync_node(ctx);
@@ -641,6 +684,11 @@ pub fn run() -> eframe::Result {
 
 /// Open the native desktop window with the options of the app binary.
 pub fn run_with(options: RunOptions) -> eframe::Result {
+    // Linux: one owner process for the data directory, this window or
+    // `apassy owner serve` (ADR 0045). The lock lives as long as the window.
+    #[cfg(all(target_os = "linux", feature = "vault"))]
+    let _owner = crate::owner::serve::instance::OwnerInstance::acquire(&crate::paths::data_dir())
+        .map_err(|err| eframe::Error::AppCreation(Box::new(err)))?;
     // Here and not in a `main`: the app bundle runs `crates/apassy-app`, and each window
     // process must write the decision log, whichever binary opened it.
     crate::decision_log::enable(crate::decision_log::default_path());

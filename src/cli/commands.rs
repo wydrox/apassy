@@ -19,8 +19,8 @@ Session commands
 
   apassy status               The vault, the broker, the session, and what waits for you.
   apassy login [--raw] [--shell sh|fish]
-                              Ask the window for a session. Confirm with Touch ID or the
-                              passphrase. Prints a shell line that sets APASSY_SESSION:
+                              Ask the window for a session and confirm it there.
+                              Prints a shell line that sets APASSY_SESSION:
                                 eval \"$(apassy login)\"
                               --raw prints only the token. A session ends after 30 idle
                               minutes, after 12 hours, at a lock, and when Apassy quits.
@@ -60,12 +60,19 @@ SECRET: the token, password, private key, or custom value. add asks on the termi
         the passphrase of an SSH key.
 ";
 
-pub const ADD_HELP: &str = "\
+/// How the Linux window confirms the owner, for `apassy status` and `apassy doctor`.
+pub(crate) const LINUX_OWNER_CHECK: &str =
+    "the passphrase, or system authentication where the polkit action is installed";
+
+pub const ADD_HELP: &str = concat!(
+    "\
 apassy add [--folder PATH [--create-folder]]
 
 Paste a secret, a KEY=value line, a whole .env file, a URL with a password
 (postgres://user:pass@host/db), or an otpauth:// link. Apassy finds the kind, the name,
-the variable, the provider hosts, and the declaration of each credential on this Mac,
+the variable, the provider hosts, and the declaration of each credential on this ",
+    crate::computer!(),
+    ",
 and adds all of them at once. It prints one line for each, such as:
   Anthropic API key · ANTHROPIC_API_KEY · production
 The text comes from stdin when it is not a terminal (apassy add < .env), else from a
@@ -76,7 +83,8 @@ A name that another credential has gets \" 2\". A variable that another credenti
 becomes APASSY_ITEM_<id>. A known provider gets a placeholder for its hosts (ADR 0011);
 change it with apassy item env. No owner check: a new credential gives an agent nothing
 that the bouncer does not decide.
-";
+"
+);
 
 pub const IMPORT_HELP: &str = "\
 apassy import FILE [--format env|1password|bitwarden|csv] [--kind KIND]
@@ -98,14 +106,17 @@ that is not valid, or that another credential uses, is refused and reported.
 Delete the export file after the import: it holds every password in plain text.
 ";
 
-pub const AGENT_HELP: &str = "\
+pub const AGENT_HELP: &str = concat!(
+    "\
 Agent commands. AGENT is an ID or the exact name.
 
   apassy agent list
   apassy agent show AGENT             Grants, operations, and requests.
   apassy agent add NAME               Register. Prints the token one time.
   apassy agent add-remote NAME [--days N]
-                              Owner check. A remote agent of this Mac (remote access on)
+                              Owner check. A remote agent of this ",
+    crate::computer!(),
+    " (remote access on)
                               for a client without the MCP authorization flow: no
                               credential until you choose some; every run asks you.
                               Prints its token one time with the MCP address. N: 1 to
@@ -115,7 +126,8 @@ Agent commands. AGENT is an ID or the exact name.
   apassy agent see-all AGENT on|off   on: owner check; removes \"Only these items\".
   apassy agent lifetime [DAYS]        Read, or set (owner check), the token lifetime.
   apassy setup claude|codex           Register and connect an agent host. See apassy help setup.
-";
+"
+);
 
 pub const GRANT_HELP: &str = "\
 Grant commands. Each change that gives access asks for the owner check in the window.
@@ -241,14 +253,19 @@ pub fn status_block(status: &StatusView, has_token: bool) -> Block {
         "Broker socket",
         status.broker_socket.clone().unwrap_or_default(),
     );
-    block.line(
-        "Touch ID",
-        if status.touch_id {
-            "available"
-        } else {
-            "not available: the window asks for the passphrase"
-        },
-    );
+    // Linux has no Touch ID: the window confirms with the passphrase or polkit.
+    if cfg!(target_os = "linux") {
+        block.line("Owner check", LINUX_OWNER_CHECK);
+    } else {
+        block.line(
+            "Touch ID",
+            if status.touch_id {
+                "available"
+            } else {
+                "not available: the window asks for the passphrase"
+            },
+        );
+    }
     block.line(
         "Session",
         match (status.session, has_token) {
@@ -1432,7 +1449,11 @@ fn print_remote_token(cli: &Cli, response: &Response) {
     } = &response.data
     {
         terminal::tell(&format!(
-            "{} (ID {}) is a remote agent of this Mac. Save the token now. Apassy does not show it again:",
+            concat!(
+                "{} (ID {}) is a remote agent of this ",
+                crate::computer!(),
+                ". Save the token now. Apassy does not show it again:"
+            ),
             clean(&agent.name),
             agent.id
         ));

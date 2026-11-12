@@ -144,6 +144,12 @@ impl From<SyncError> for CoreError {
                 "removed",
                 "A Mac removed this iPhone from the vault. The vault on this iPhone stays as it is.",
             ),
+            // The iPhone has no recovery screen: it reports a store that a recovery deleted
+            // as a removal, which keeps its vault as it is (ios-core-v1 section 5.14).
+            SyncError::StoreDeleted => Self::new(
+                "removed",
+                "The copy of this vault at Apassy Connect was deleted. The vault on this iPhone stays as it is.",
+            ),
             SyncError::StaleCopy => Self::new(
                 "stale_copy",
                 "The relay has an older copy than this iPhone saw.",
@@ -151,6 +157,24 @@ impl From<SyncError> for CoreError {
             SyncError::ForkedCopy => Self::new(
                 "forked_copy",
                 "The relay served a copy that does not include this iPhone's last change.",
+            ),
+            SyncError::WaitsForAccountDevice => Self::new(
+                "waits_for_device",
+                "Waiting for another device of this account to sync. Nothing was changed.",
+            ),
+            SyncError::ChecksDeviceList => Self::new(
+                "waits_for_device",
+                "Checking the device list of this account. Nothing was changed.",
+            ),
+            SyncError::UnknownSigner => Self::new(
+                "forked_copy",
+                "The relay copy has a change by a device that is not in the device list of this account.",
+            ),
+            // The iPhone offers no step to take a copy without its earlier history: the
+            // owner takes it on a Mac (connect-account-v1 section 16.8).
+            SyncError::HistoryUnverified => Self::new(
+                "forked_copy",
+                "The relay copy has earlier versions saved by devices that this iPhone cannot verify. Nothing was taken.",
             ),
             SyncError::TooLarge => Self::new(
                 "too_large",
@@ -212,6 +236,13 @@ impl From<RelayRefusal> for CoreError {
                 Self::new("busy", "The relay is busy with another device. Try again.")
             }
             RelayRefusal::NotFound => Self::new("removed", "The relay does not know this vault."),
+            // `410 free_connect_ended` and `410 hosted_retired` to a sync call (a join, a
+            // sign-in, a vault sync): the code of the ended questions (ios-core-v1 section
+            // 5.10, "The end of the free hosted paths"), with words for any call.
+            RelayRefusal::FreeEnded | RelayRefusal::HostedRetired => Self::new(
+                super::questions::RELAY_ENDED,
+                "This relay has ended this service. Pair this iPhone again from Apassy on your Mac.",
+            ),
             RelayRefusal::InvalidRequest | RelayRefusal::Error => {
                 Self::internal("The relay refused the request.")
             }

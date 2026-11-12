@@ -25,7 +25,7 @@ use crate::broker::approvals::{ApprovalQueue, OwnerAction, OwnerProof};
 use crate::broker::http::parse_destination;
 use crate::broker::profile;
 use crate::contracts::CredentialKind;
-use crate::desktop::model::{DetailDraft, ItemDraft, ModelError, ModelResult};
+use crate::owner::model::{DetailDraft, ItemDraft, ModelError, ModelResult};
 use crate::vault::providers::{self, Suggestion};
 use crate::vault::{
     AccessRequest, ActivityDecision, ActivityRecord, AgentSummary, AgentToken, CompanionDevice,
@@ -36,12 +36,19 @@ use crate::vault::{
     VaultError, VaultErrorKind, checked_env_name, parse_placeholder_host,
 };
 
+// The file is loaded from `crate::owner` (shared with the headless owner service), so
+// its submodules name their files.
+#[path = "owner_store/add.rs"]
 mod add;
+#[path = "owner_store/browser.rs"]
 mod browser;
+#[path = "owner_store/copy.rs"]
 mod copy;
+#[path = "owner_store/decisions.rs"]
 mod decisions;
 /// Tests of the rows of the last searches ([`SearchCache`]).
 #[cfg(test)]
+#[path = "owner_store/search_tests.rs"]
 mod search_tests;
 pub use browser::{FillValues, PageCode, PageLogin, PasskeyItem, SYSTEM_FILL_ORIGIN, SystemLogin};
 pub use decisions::{ActionUse, AgentActivity, AgentOverview, ExceptionRow, RecentUse, WeekCounts};
@@ -682,7 +689,11 @@ impl OwnerSession {
         let generation = self.owner_window.begin_unlock(expected).ok_or_else(|| {
             fail(
                 "owner_check_changed",
-                "The Mac session changed during unlock. Confirm again.",
+                concat!(
+                    "The ",
+                    crate::computer!(),
+                    " session changed during unlock. Confirm again."
+                ),
             )
         })?;
         self.forget_all_reveals();
@@ -808,6 +819,8 @@ impl OwnerSession {
 
     /// All decisions as JSON Lines (`docs/operations/learning.md`). They have commands
     /// and user requests, but no secret value.
+    // The window and its owner command line only (`owner.sock`).
+    #[cfg(feature = "desktop")]
     pub(crate) fn export_decisions_checked(&self, proof: OwnerProof) -> ModelResult<String> {
         self.unlocked_for(proof, &OwnerAction::ExportDecisions)?
             .export_decisions_jsonl()
@@ -1087,6 +1100,8 @@ impl OwnerSession {
         self.code_seeds.remove(&(id, field.to_owned()));
     }
 
+    // The window and its owner command line only (`owner.sock`).
+    #[cfg(feature = "desktop")]
     pub(crate) fn cli_code_field(&self, id: u64) -> ModelResult<String> {
         self.unlocked()?
             .code_field(id)
@@ -1094,6 +1109,8 @@ impl OwnerSession {
             .ok_or_else(|| fail("no_code", "This item has no one-time password detail."))
     }
 
+    // The window and its owner command line only (`owner.sock`).
+    #[cfg(feature = "desktop")]
     pub(crate) fn cli_code_at(
         &mut self,
         id: u64,
@@ -1191,6 +1208,8 @@ impl OwnerSession {
         self.backup_inner(destination, None)
     }
 
+    // The window and its owner command line only (`owner.sock`).
+    #[cfg(feature = "desktop")]
     pub(crate) fn backup_checked(
         &mut self,
         destination: &Path,
@@ -1266,6 +1285,8 @@ impl OwnerSession {
         self.unlocked()?.register_agent(name).map_err(map_err)
     }
 
+    // The window and its owner command line only (`owner.sock`).
+    #[cfg(feature = "desktop")]
     pub(crate) fn register_setup_agent_checked(
         &mut self,
         name: &str,
@@ -1287,6 +1308,8 @@ impl OwnerSession {
         Ok((agent, token))
     }
 
+    // The window and its owner command line only (`owner.sock`).
+    #[cfg(feature = "desktop")]
     pub(crate) fn register_agent_checked(
         &mut self,
         name: &str,
@@ -2845,6 +2868,7 @@ fn is_reserved_field(name: &str) -> bool {
 
 /// Windowless round trip used by `--smoke-test` when the vault feature is on.
 /// Errors do not include secret values.
+#[cfg(feature = "desktop")]
 pub(crate) fn smoke_roundtrip() -> Result<(), String> {
     use crate::broker::approvals::{OwnerCheck, OwnerGate};
 

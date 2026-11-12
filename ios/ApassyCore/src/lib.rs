@@ -12,4 +12,4 @@ pub mod core;
 mod ffi;
 mod transport;
 
-pub use core::{Core, HistoryKeyError, HistoryKeyProvider};
+pub use core::{Core, DialState, DialTiming, HistoryKeyError, HistoryKeyProvider};

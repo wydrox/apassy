@@ -382,7 +382,7 @@ mod tests {
                 ActionKind::Read,
                 &[offered],
                 None,
-                "this Mac",
+                concat!("this ", crate::computer!()),
             )
             .unwrap();
         vault
@@ -474,7 +474,7 @@ mod tests {
                 ActionKind::Change,
                 &[offered],
                 Some("synthetic-command-digest"),
-                "this Mac",
+                concat!("this ", crate::computer!()),
             )
             .unwrap();
         assert_eq!(
@@ -526,7 +526,7 @@ mod tests {
                     ActionKind::Read,
                     &[first.clone(), second],
                     None,
-                    "this Mac"
+                    concat!("this ", crate::computer!())
                 )
                 .unwrap_err()
                 .kind(),
@@ -546,7 +546,7 @@ mod tests {
                     ActionKind::Read,
                     &[first, second],
                     None,
-                    "this Mac"
+                    concat!("this ", crate::computer!())
                 )
                 .unwrap_err()
                 .kind(),
@@ -621,7 +621,7 @@ mod tests {
                     ActionKind::Read,
                     &[offered],
                     None,
-                    "this Mac"
+                    concat!("this ", crate::computer!())
                 )
                 .is_err()
         );

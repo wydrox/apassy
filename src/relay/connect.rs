@@ -49,7 +49,7 @@ impl fmt::Display for ConnectError {
             Self::NetworkLimit => "This network has reached Connect's creation limit (up to 5 connections per day). Wait until tomorrow and try again. Your saved key will be reused.",
             Self::Unsupported => "This relay does not support Connect. Update the relay, then try again.",
             Self::OriginChanged => "A connection is already waiting at another relay address. Retry with that address so Apassy can reuse its saved key.",
-            Self::JoinOtherMac => "This vault already has a relay connection on another Mac. On that Mac, turn on relay sync for this vault, then select “Join from another Mac” here.",
+            Self::JoinOtherMac => concat!("This vault already has a relay connection on another ", crate::computer!(), ". On that ", crate::computer!(), ", turn on relay sync for this vault, then select “Join from another ", crate::computer!(), "” here."),
             Self::Refused => "The relay could not complete Connect. Nothing was enabled. Your connection key is saved; try again later.",
             Self::Sync(e) => return write!(f, "{e}"),
         })
@@ -229,6 +229,14 @@ fn failure(error: Failure) -> ConnectError {
         Failure::Relay(503, _, _) => ConnectError::DailyCapacity,
         Failure::Relay(429, _, _) => ConnectError::NetworkLimit,
         Failure::Relay(404, _, _) => ConnectError::Unsupported,
+        // `410 free_connect_ended` and `410 hosted_retired` (plan s7 unit M5): the free path
+        // ended for good; the app shows the choices of the notice.
+        Failure::Relay(410, code, _) if code == "free_connect_ended" => {
+            ConnectError::Sync(SyncError::Relay(crate::sync::RelayRefusal::FreeEnded))
+        }
+        Failure::Relay(410, code, _) if code == "hosted_retired" => {
+            ConnectError::Sync(SyncError::Relay(crate::sync::RelayRefusal::HostedRetired))
+        }
         _ => ConnectError::Refused,
     }
 }

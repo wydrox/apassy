@@ -56,13 +56,16 @@
 //! Lock order: the node (read or write), then the catalog state, then the vault. No code
 //! holds the vault while it waits for the node.
 
+pub mod acme;
 pub mod backend;
 pub mod catalog;
 pub mod funnel;
 mod host;
 pub mod master_key;
+pub mod public_cert;
 pub mod questions_team;
 pub mod tailnet;
+pub mod tunnel;
 
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
@@ -79,6 +82,7 @@ use self::backend::{
 use self::funnel::{Funnel, FunnelError, SystemTailscale, Tailscale, TailscaleCli};
 use self::master_key::{KeySource, KeyStore, KeychainStore, NoKeychain};
 use self::tailnet::{TailnetHere, TailnetRoute};
+use self::tunnel::{ConnectSetup, Targets, Tunnel, TunnelHandle, TunnelOptions, TunnelStatus};
 use crate::broker::SharedVault;
 use crate::broker::decide::BrokerContext;
 use crate::net::tls_front::FrontRoute;
@@ -103,6 +107,9 @@ const SERVE_TCP_PORT_FILE: &str = "serve-tcp-port";
 /// The file in the node directory with the Funnel port that the owner chose ("Use Port
 /// 10000"). Without it the route uses 8443.
 const FUNNEL_PORT_FILE: &str = "funnel-port";
+/// The file in the node directory that says the "Apassy Connect" route is on (plan s7
+/// unit M4). The route is of this Mac (its Connect account), not of a vault.
+const CONNECT_ROUTE_FILE: &str = "connect-route";
 /// The audit rows of one run that Logs reads at most.
 const RUN_AUDIT_ROWS: u32 = 500;
 /// Rows of "Recent cloud activity".
@@ -372,6 +379,8 @@ pub struct NodeStatus {
     pub funnel_port: u16,
     /// The tailnet route (plan unit N4).
     pub tailnet: TailnetStatus,
+    /// The "Apassy Connect" route (plan s7 unit M4).
+    pub connect: ConnectRouteStatus,
 }
 
 /// Why remote access does not work, for the remote access block (plan F6).
@@ -484,6 +493,40 @@ struct Running {
     funnel_on: bool,
     /// The tailnet route, when it is on.
     tailnet: Option<TailnetRoute>,
+    /// The tunnel to Apassy Connect, when its route is on (plan s7 unit M4).
+    tunnel: Option<TunnelHandle>,
+    /// `https://<public name>` that this start used, when it knew it.
+    connect_origin: Option<String>,
+    /// The pairing route of a node that runs with only the Connect route (no tailnet
+    /// route): the devices pair with it and reach the node through the Connect dial
+    /// (plan s7 unit M5). The Mac's own clients reach it through a local route.
+    connect_pairing: Option<ConnectPairing>,
+}
+
+/// The origin, the pin, and the name of the pairing codes of a node with only the
+/// Connect route (plan s7 unit M5; node-pairing-v1 sections 3 and 7a): the origin that
+/// the devices sign (the one they paired with, else the public name with the node port),
+/// the pin of the node certificate that the dial serves, and the node name.
+#[derive(Debug, Clone)]
+struct ConnectPairing {
+    origin: String,
+    pin: crate::net::pin::Pin,
+    name: String,
+}
+
+/// The "Apassy Connect" route of this Mac, for Bouncer > Agents.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectRouteStatus {
+    /// This Mac has a Connect account (the route can be turned on).
+    pub available: bool,
+    /// The owner's switch.
+    pub on: bool,
+    /// The node runs.
+    pub running: bool,
+    /// The public name, from the tunnel or the kept registration.
+    pub public_name: Option<String>,
+    /// The tunnel, while the node runs with the route on.
+    pub tunnel: Option<TunnelStatus>,
 }
 
 #[derive(Default)]
@@ -510,12 +553,13 @@ struct Move {
 
 /// The failure codes after which the desktop tries a start again by itself
 /// ([`Node::retry_soon`]): Tailscale was not there yet, or a port was taken.
-const RETRY_CODES: [&str; 5] = [
+const RETRY_CODES: [&str; 6] = [
     "no_tailscale",
     "tailscale_not_connected",
     "tailscale_no_address",
     "tailnet_port_taken",
     "tailnet_serve_failed",
+    "connect_unavailable",
 ];
 
 /// The node service. Every method can be called from any thread.
@@ -545,6 +589,8 @@ pub struct Node {
     /// Called on the host thread when the connect requests change; every node of this
     /// service gets it.
     on_connects: Arc<Mutex<Option<host::ConnectsHook>>>,
+    /// The Connect account of this build ([`Node::set_connect`]); `None`: no Connect route.
+    connect: Mutex<Option<ConnectSetup>>,
 }
 
 /// The state of the open vault that a start needs.
@@ -588,6 +634,7 @@ impl Node {
             notes: Mutex::new(Notes::default()),
             connect_ends: Mutex::new(std::collections::VecDeque::new()),
             on_connects: Arc::new(Mutex::new(None)),
+            connect: Mutex::new(None),
         }
     }
 
@@ -628,6 +675,24 @@ impl Node {
             .map(|route| route.origin.clone())
     }
 
+    /// The origin that a new node team and its pairing codes name: the node origin of the
+    /// tailnet route, else, for a node with only the Connect route, the origin that its
+    /// devices sign and reach through the Connect dial (plan s7 unit M5).
+    pub fn pairing_origin(&self) -> Option<String> {
+        lock(&self.running).as_ref().and_then(|running| {
+            running
+                .tailnet
+                .as_ref()
+                .map(|route| route.origin.clone())
+                .or_else(|| {
+                    running
+                        .connect_pairing
+                        .as_ref()
+                        .map(|pairing| pairing.origin.clone())
+                })
+        })
+    }
+
     /// The last start failed for a reason that can pass by itself (Tailscale was not up,
     /// a port was taken): the desktop tries again after a while.
     pub fn retry_soon(&self) -> bool {
@@ -663,6 +728,19 @@ impl Node {
             .then(|| vault.epoch())
     }
 
+    /// [`Node::wanted`] with the "Apassy Connect" route of this Mac: an unlocked vault
+    /// also wants the node while that route is on.
+    pub fn wanted_here(&self, vault: &Vault) -> Option<[u8; 32]> {
+        self.may_run_here(vault)
+    }
+
+    /// [`Node::may_run`] with the "Apassy Connect" route of this Mac.
+    pub fn may_run_here(&self, vault: &Vault) -> Option<[u8; 32]> {
+        Self::may_run(vault).or_else(|| {
+            (!vault.is_locked() && self.connect_wanted().is_some()).then(|| vault.epoch())
+        })
+    }
+
     /// Serve the new session of the same vault file (a passphrase change or a backup
     /// ends the session without a lock), so its sessions and the route stay. Returns
     /// false when no node runs, or it serves another file: then stop it.
@@ -685,7 +763,7 @@ impl Node {
         Ok((loaded.secret, loaded.source, loaded.retired.is_some()))
     }
 
-    fn vault_state(vault: &SharedVault) -> Result<VaultState, NodeError> {
+    fn vault_state(vault: &SharedVault, connect_on: bool) -> Result<VaultState, NodeError> {
         let mut guard = lock(vault);
         let vault = guard
             .as_mut()
@@ -693,7 +771,7 @@ impl Node {
             .ok_or_else(|| error("vault_locked", "The vault is locked."))?;
         let storage = |_| error("vault_error", "The vault cannot be read for the node.");
         let setting = vault.cloud_node_setting().map_err(storage)?;
-        if !setting.route_on && !setting.tailnet_on {
+        if !setting.route_on && !setting.tailnet_on && !connect_on {
             return Err(error(
                 "route_off",
                 "Remote access is off (Bouncer > Agents).",
@@ -807,7 +885,8 @@ impl Node {
             return Ok(());
         }
         self.check_not_stopping()?;
-        let state = Self::vault_state(vault)?;
+        let connect = self.connect_wanted();
+        let state = Self::vault_state(vault, connect.is_some())?;
         lock(&self.notes).tailnet_notes.clear();
         // The Funnel route needs the MagicDNS name; the tailnet route its address.
         let dns_name = if state.route_on {
@@ -824,8 +903,8 @@ impl Node {
         };
         let dns_name = match dns_name {
             Ok(name) => name,
-            // With the tailnet route on, the node starts without Funnel.
-            Err(failure) if state.tailnet_on => {
+            // With the tailnet route or the Connect route on, the node starts without Funnel.
+            Err(failure) if state.tailnet_on || connect.is_some() => {
                 lock(&self.notes).tailnet_notes.push(format!(
                     "The public route for cloud agents is off: {}",
                     failure.message
@@ -853,33 +932,84 @@ impl Node {
             team_id = None;
         }
         self.check_not_stopping()?;
+        // The certificate key is sealed under the node key, which moves into the config.
+        let certificate_key = Zeroizing::new(key.expose().as_bytes().to_vec());
+        // The Connect route: the node certificate (its pin), the public name, and the key
+        // that seals the Connect files (derived from the node key, which is not kept).
+        let (connect_certificate, connect_origin) = match &connect {
+            Some(setup) => {
+                let (certificate, name) = self.connect_name(setup, &certificate_key)?;
+                let seal = crate::net::sealed_key::SealKey::derive(
+                    &certificate_key,
+                    crate::net::sealed_key::CONNECT_INFO,
+                )
+                .map_err(|failure| error("node_key", failure.to_string()))?;
+                (
+                    Some((certificate, Arc::new(seal))),
+                    name.map(|name| format!("https://{name}")),
+                )
+            }
+            None => (None, None),
+        };
+        self.check_not_stopping()?;
         let origin = here.as_ref().map(|here| here.origin(state.tailnet_port));
-        let public_url = match (&dns_name, &origin) {
-            (Some(name), _) => self.funnel.origin(name),
+        // The devices sign in with the node origin. With the tailnet route: the tailnet
+        // origin. With only the Connect route: the origin that the devices paired with
+        // (kept in the vault), so a paired device keeps its identity and dials the node
+        // through Connect instead of the tailnet; before any pairing, the public name with
+        // the node port (a pinned origin names a port; Connect is the transport).
+        let device_origin = origin
+            .clone()
+            .or_else(|| connect.as_ref().and(state.last_origin.clone()))
+            .or_else(|| {
+                connect_origin
+                    .as_ref()
+                    .map(|connect_origin| format!("{connect_origin}:{}", state.tailnet_port))
+            });
+        // The first public origin: Funnel's when Funnel is up, else the public name at
+        // Connect while remote access is on. With both, the public name at Connect is a
+        // further origin: the node answers each request with the origin it arrived on
+        // (relay docs/SPEC.md section 31.1).
+        let public_url = match (&dns_name, &connect_origin, &device_origin) {
+            (Some(name), _, _) => self.funnel.origin(name),
+            (None, Some(connect_origin), _) if state.route_on => connect_origin.clone(),
             // No public route: the node origin is the only origin.
-            (None, Some(origin)) => origin.clone(),
-            (None, None) => {
+            (None, _, Some(device_origin)) => device_origin.clone(),
+            (None, _, None) if connect.is_some() => {
+                return Err(error(
+                    "connect_unavailable",
+                    "Apassy Connect did not register this Mac yet. Apassy tries again.",
+                ));
+            }
+            (None, _, None) => {
                 return Err(error(
                     "route_off",
                     "Remote access is off (Bouncer > Agents).",
                 ));
             }
         };
+        let public_origins: Vec<String> = connect_origin
+            .iter()
+            .filter(|origin| dns_name.is_some() && state.route_on && **origin != public_url)
+            .cloned()
+            .collect();
         let funnel_wanted = dns_name.is_some();
-        let tailnet_config = origin.as_ref().map(|origin| NodeTailnet {
+        // The public listener serves Funnel, and the public streams of Connect while
+        // remote access is on.
+        let public_wanted = funnel_wanted || (state.route_on && connect_origin.is_some());
+        let tailnet_config = device_origin.as_ref().map(|origin| NodeTailnet {
             node_origin: origin.clone(),
             tailnet_listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
             tailnet_agents: false,
             push_gateway: Some(state.push_gateway.clone()),
         });
-        // The certificate key is sealed under the node key, which moves into the config.
-        let certificate_key = Zeroizing::new(key.expose().as_bytes().to_vec());
         let node = match self.backend.start_on_tailnet(
             NodeConfig {
                 data_dir: self.data_dir.clone(),
                 master_key: key,
                 public_url: public_url.clone(),
-                public_listen: funnel_wanted
+                public_origins,
+                public_listen: public_wanted
                     .then(|| SocketAddr::from((Ipv4Addr::LOCALHOST, state.port))),
             },
             tailnet_config,
@@ -895,6 +1025,10 @@ impl Node {
             }
         };
         let tailnet_target = node.tailnet_addr().zip(node.local_route_addr());
+        let connect_targets = Targets {
+            device: node.tailnet_addr(),
+            public: public_wanted.then(|| SocketAddr::from((Ipv4Addr::LOCALHOST, state.port))),
+        };
         let team = match team_id.map(NodeTeamId) {
             Some(team) if node.has_team(&team) => team,
             stored => {
@@ -1015,6 +1149,28 @@ impl Node {
             }
             return Err(failure);
         }
+        // The tunnel last: it connects by itself, and a stop closes it first.
+        let connect_pin = connect_certificate
+            .as_ref()
+            .map(|(certificate, _)| certificate.pin);
+        let tunnel = match (connect, connect_certificate) {
+            (Some(setup), Some((certificate, seal))) => {
+                self.start_tunnel(setup, certificate, seal, connect_targets)
+            }
+            _ => None,
+        };
+        // Only the Connect route: the devices pair with the device origin and reach the
+        // node through the dial; this Mac's own clients take a local route to it.
+        let connect_pairing = match (&route, &tunnel, &device_origin, connect_pin) {
+            (None, Some(_), Some(origin), Some(pin)) => tailnet_target
+                .and_then(|(_, local)| crate::sync::relay_http::set_local_route(origin, local).ok())
+                .map(|()| ConnectPairing {
+                    origin: origin.clone(),
+                    pin,
+                    name: crate::sync::device_name(),
+                }),
+            _ => None,
+        };
         *lock(&self.running) = Some(Running {
             serial: self.serial.fetch_add(1, Ordering::SeqCst) + 1,
             shared,
@@ -1022,8 +1178,147 @@ impl Node {
             port: state.port,
             funnel_on,
             tailnet: route,
+            tunnel,
+            connect_origin,
+            connect_pairing,
         });
         Ok(())
+    }
+
+    /// The Connect account of this build, when the owner turned its route on.
+    fn connect_wanted(&self) -> Option<ConnectSetup> {
+        if !self.connect_route_on() {
+            return None;
+        }
+        lock(&self.connect)
+            .clone()
+            .filter(|setup| setup.auth.has_account())
+    }
+
+    /// The node certificate and the public name of the Connect route: the kept
+    /// registration when it has this pin, else a registration now. A Connect that cannot
+    /// be reached gives no name (the tunnel registers later, and [`Node::maintain`]
+    /// starts the node again with it).
+    fn connect_name(
+        &self,
+        setup: &ConnectSetup,
+        certificate_key: &[u8],
+    ) -> Result<(crate::net::NodeCertificate, Option<String>), NodeError> {
+        let name = crate::sync::device_name();
+        let (certificate, _) = tailnet::certificate(&self.data_dir, certificate_key, &name)?;
+        let pin = certificate.pin.text();
+        let origin = setup.auth.origin();
+        if let Some(file) = tunnel::load_node_file(&self.data_dir, &origin, &setup.zone)
+            .filter(|file| file.pin == pin)
+        {
+            return Ok((certificate, Some(file.public_name)));
+        }
+        match tunnel::register_now(
+            setup.auth.as_ref(),
+            &self.data_dir,
+            &name,
+            &pin,
+            &setup.zone,
+        ) {
+            Ok(view) => Ok((certificate, Some(view.public_name))),
+            Err(failure) => {
+                lock(&self.notes)
+                    .tailnet_notes
+                    .push(format!("Apassy Connect: {failure}."));
+                Ok((certificate, None))
+            }
+        }
+    }
+
+    fn start_tunnel(
+        &self,
+        setup: ConnectSetup,
+        certificate: crate::net::NodeCertificate,
+        seal: Arc<crate::net::sealed_key::SealKey>,
+        targets: Targets,
+    ) -> Option<TunnelHandle> {
+        match Tunnel::start(TunnelOptions {
+            setup,
+            node_dir: self.data_dir.clone(),
+            name: crate::sync::device_name(),
+            certificate,
+            targets,
+            seal,
+        }) {
+            Ok(tunnel) => Some(tunnel),
+            Err(failure) => {
+                lock(&self.notes).tailnet_notes.push(format!(
+                    "The tunnel to Apassy Connect did not start: {failure}."
+                ));
+                None
+            }
+        }
+    }
+
+    /// Give the node the Connect account of this build (the app: [`ConnectSetup::for_session`]
+    /// with the one account session of the app, plan s7 unit M5b). `None` turns the Connect route off for this
+    /// process. It takes effect at the next start.
+    pub fn set_connect(&self, setup: Option<ConnectSetup>) {
+        *lock(&self.connect) = setup;
+    }
+
+    /// This build has a Connect account for the route.
+    pub fn has_connect(&self) -> bool {
+        lock(&self.connect).is_some()
+    }
+
+    /// The owner's "Apassy Connect" switch of this Mac.
+    pub fn connect_route_on(&self) -> bool {
+        std::fs::read_to_string(self.data_dir.join(CONNECT_ROUTE_FILE))
+            .is_ok_and(|text| text.trim() == "on")
+    }
+
+    /// Turn the "Apassy Connect" route on or off. A running node stops, so the desktop
+    /// starts it again with the new routes (off: the tunnel closes and no stream
+    /// survives). Devices still authenticate inside the pinned TLS, and cloud agents
+    /// reach the public listener only while remote access is on, where every connect
+    /// asks the owner: the switch itself grants nothing.
+    pub fn set_connect_route(&self, on: bool) -> Result<(), NodeError> {
+        let path = self.data_dir.join(CONNECT_ROUTE_FILE);
+        let saved = if on {
+            std::fs::create_dir_all(&self.data_dir).and_then(|()| std::fs::write(&path, "on\n"))
+        } else {
+            match std::fs::remove_file(&path) {
+                Err(failure) if failure.kind() != std::io::ErrorKind::NotFound => Err(failure),
+                _ => Ok(()),
+            }
+        };
+        saved.map_err(|_| error("node_failed", "The Apassy Connect route cannot be saved."))?;
+        lock(&self.notes).failure = None;
+        if self.is_running() {
+            self.stop();
+        }
+        Ok(())
+    }
+
+    /// The "Apassy Connect" route as Bouncer > Agents shows it.
+    pub fn connect_status(&self) -> ConnectRouteStatus {
+        let tunnel = lock(&self.running)
+            .as_ref()
+            .and_then(|running| running.tunnel.as_ref())
+            .map(TunnelHandle::status);
+        let setup = lock(&self.connect)
+            .clone()
+            .filter(|setup| setup.auth.has_account());
+        let kept = setup.as_ref().and_then(|setup| {
+            tunnel::load_node_file(&self.data_dir, &setup.auth.origin(), &setup.zone)
+                .map(|file| file.public_name)
+        });
+        ConnectRouteStatus {
+            available: setup.is_some(),
+            on: self.connect_route_on(),
+            running: self.is_running(),
+            public_name: tunnel
+                .as_ref()
+                .and_then(|status| status.public_name.clone())
+                .or(kept),
+            tunnel,
+        }
     }
 
     /// The tailnet route of a start: the certificate, then the front on the relay's
@@ -1046,7 +1341,12 @@ impl Node {
         let (certificate, new) = tailnet::certificate(&self.data_dir, certificate_key, &name)?;
         if new && state.node_questions {
             lock(&self.notes).tailnet_notes.push(
-                "The node certificate of this Mac is new, so its pin changed. Pair your iPhone again.".to_owned(),
+                concat!(
+                    "The node certificate of this ",
+                    crate::computer!(),
+                    " is new, so its pin changed. Pair your iPhone again."
+                )
+                .to_owned(),
             );
         }
         self.check_not_stopping()?;
@@ -1081,8 +1381,13 @@ impl Node {
             && state.node_questions
         {
             lock(&self.notes).tailnet_notes.push(format!(
-                "The address of this Mac on the tailnet changed from {last} to {}. Pair your iPhone again.",
-                route.origin
+                concat!(
+                    "The address of this ",
+                    crate::computer!(),
+                    " on the tailnet changed from {last} to {}. Pair your iPhone again."
+                ),
+                route.origin,
+                last = last
             ));
         }
         let mut guard = lock(vault);
@@ -1145,12 +1450,19 @@ impl Node {
         };
         // A move waits for a device of the node team: its key goes with the node.
         lock(&self.moving).take();
+        // The tunnel first: its WebSocket closes and every stream through it ends.
+        if let Some(mut tunnel) = running.tunnel.take() {
+            tunnel.stop();
+        }
         // The summary rows, while the vault is still open (at a quit; a lock wrote its
         // own rows already).
         host::end_all_sessions(&running.shared, "the node stopped");
         // The front first, then the node: the sessions end at once, before the slower
         // command line. Then the local route of the origin.
         Self::stop_parts(&running.shared, running.host.take(), running.tailnet.take());
+        if let Some(pairing) = running.connect_pairing.take() {
+            crate::sync::relay_http::clear_local_route(&pairing.origin);
+        }
         if running.funnel_on {
             let _ = self.funnel.disable(running.port);
         }
@@ -1163,8 +1475,18 @@ impl Node {
     /// down keeps the node: the front follows the addresses. Only the node that it checked
     /// is stopped. Returns true when it stopped the node.
     pub fn maintain(&self) -> bool {
-        let Some((serial, port, public_url, funnel_on, on_tailnet)) =
+        let Some((serial, port, public_url, funnel_on, on_tailnet, connect_late)) =
             lock(&self.running).as_ref().map(|running| {
+                // The tunnel registered after a start without the public name: start
+                // again with it.
+                let connect_late = running.tunnel.as_ref().is_some_and(|tunnel| {
+                    tunnel
+                        .status()
+                        .public_name
+                        .map(|name| format!("https://{name}"))
+                        != running.connect_origin
+                        && tunnel.status().public_name.is_some()
+                });
                 (
                     running.serial,
                     running.port,
@@ -1174,12 +1496,13 @@ impl Node {
                         .tailnet
                         .as_ref()
                         .map(|route| (route.origin.clone(), route.port)),
+                    connect_late,
                 )
             })
         else {
             return false;
         };
-        let mut stop = false;
+        let mut stop = connect_late;
         if funnel_on {
             let name_changed = match self.funnel.status() {
                 Tailscale::Connected { dns_name } => self.funnel.origin(&dns_name) != public_url,
@@ -1281,7 +1604,16 @@ impl Node {
             }
         }
         if route_on {
-            warnings.push("The name of this Mac is in public certificate logs while the route is on. The Mac must stay awake and the vault unlocked for each run.".to_owned());
+            warnings.push(
+                concat!(
+                    "The name of this ",
+                    crate::computer!(),
+                    " is in public certificate logs while the route is on. The ",
+                    crate::computer!(),
+                    " must stay awake and the vault unlocked for each run."
+                )
+                .to_owned(),
+            );
         }
         warnings.extend(lock(&self.notes).tailnet_notes.iter().cloned());
         let keychain_fallback = lock(&self.notes).keychain_fallback;
@@ -1297,6 +1629,7 @@ impl Node {
             problem,
             funnel_port: self.funnel.port(),
             tailnet,
+            connect: self.connect_status(),
         }
     }
 
@@ -1397,16 +1730,23 @@ impl Node {
         let Some(membership) = membership else {
             return status;
         };
+        // A node with only the Connect route pairs with its own origin (plan s7 unit M5).
+        let connect_origin = lock(&self.running)
+            .as_ref()
+            .filter(|running| running.tailnet.is_none())
+            .and_then(|running| running.connect_pairing.as_ref())
+            .map(|pairing| pairing.origin.clone());
         let here = status
             .origin
             .as_deref()
+            .or(connect_origin.as_deref())
             .is_some_and(|origin| questions_team::on_node(&membership, origin));
         if !here {
             status.questions_elsewhere = Some(membership.relay_url.clone());
             return status;
         }
         status.questions_team = Some(membership.team_id.clone());
-        if !status.running {
+        if !status.running && connect_origin.is_none() {
             return status;
         }
         let team = NodeTeamId(membership.team_id.clone());
@@ -1502,13 +1842,31 @@ impl Node {
         let running = running.as_ref().ok_or_else(|| {
             error(
                 "tailnet_off",
-                "The node of this Mac is not on the tailnet. Turn on “Reachable on your tailnet”.",
+                concat!(
+                    "The node of this ",
+                    crate::computer!(),
+                    " is not on the tailnet. Turn on “Reachable on your tailnet”."
+                ),
             )
         })?;
+        if running.tailnet.is_none()
+            && let Some(pairing) = &running.connect_pairing
+        {
+            // Only the Connect route (plan s7 unit M5).
+            return Ok((
+                pairing.origin.clone(),
+                pairing.name.clone(),
+                running.shared.epoch(),
+            ));
+        }
         let route = running.tailnet.as_ref().ok_or_else(|| {
             error(
                 "tailnet_off",
-                "The node of this Mac is not on the tailnet. Turn on “Reachable on your tailnet”.",
+                concat!(
+                    "The node of this ",
+                    crate::computer!(),
+                    " is not on the tailnet. Turn on “Reachable on your tailnet”."
+                ),
             )
         })?;
         Ok((
@@ -1518,14 +1876,38 @@ impl Node {
         ))
     }
 
+    /// The origin, the pin, and the tailnet alternatives that a new node team names: the
+    /// tailnet route, else the route of a node with only the Connect route (plan s7 unit
+    /// M5; its code adds the Connect route as its last alternative).
+    fn pairing_trust(&self) -> Result<(String, crate::net::pin::Pin, Vec<String>), NodeError> {
+        let running = lock(&self.running);
+        let running = running
+            .as_ref()
+            .ok_or_else(|| error("node_stopped", "The node is not running."))?;
+        if let Some(route) = &running.tailnet {
+            return Ok((route.origin.clone(), route.pin, route.alt.clone()));
+        }
+        running
+            .connect_pairing
+            .as_ref()
+            .map(|pairing| (pairing.origin.clone(), pairing.pin, Vec::new()))
+            .ok_or_else(|| error("node_stopped", "The node is not running."))
+    }
+
     /// The pin and the alternatives of the running route: the certificate that the front
     /// serves now.
     fn route_trust(&self) -> Result<(String, Vec<String>), NodeError> {
         let running = lock(&self.running);
-        running
+        let running = running
             .as_ref()
-            .and_then(|running| running.tailnet.as_ref())
-            .map(|route| (route.pin.text(), route.alt.clone()))
+            .ok_or_else(|| error("node_stopped", "The node is not running."))?;
+        if let Some(route) = &running.tailnet {
+            return Ok((route.pin.text(), route.alt.clone()));
+        }
+        running
+            .connect_pairing
+            .as_ref()
+            .map(|pairing| (pairing.pin.text(), Vec::new()))
             .ok_or_else(|| error("node_stopped", "The node is not running."))
     }
 
@@ -1605,26 +1987,36 @@ impl Node {
             (Some(_), _) => {
                 return Err(error(
                     "conflict",
-                    "The approvals of this vault go through another relay. Move them to this Mac first.",
+                    concat!(
+                        "The approvals of this vault go through another relay. Move them to this ",
+                        crate::computer!(),
+                        " first."
+                    ),
                 ));
             }
             (None, Some(_)) => {
                 return Err(error(
                     "conflict",
-                    "This vault has its approvals on another Mac. Join them from that Mac with “Add an iPhone or a Mac…”.",
+                    concat!(
+                        "This vault has its approvals on another ",
+                        crate::computer!(),
+                        ". Join them from that ",
+                        crate::computer!(),
+                        " with “Add an iPhone or a ",
+                        crate::computer!(),
+                        "…”."
+                    ),
                 ));
             }
             (None, None) => {}
         }
         let route_err = || error("node_stopped", "The node is not running.");
         let membership = {
-            let running = lock(&self.running);
-            let route = running
-                .as_ref()
-                .and_then(|running| running.tailnet.as_ref())
-                .ok_or_else(route_err)?;
+            let (origin, pin, alt) = self.pairing_trust()?;
             shared
-                .with_node(|node| questions_team::new_node_team(node, route, device_name))
+                .with_node(|node| {
+                    questions_team::new_node_team_at(node, &origin, &pin, &alt, device_name)
+                })
                 .ok_or_else(route_err)??
         };
         let mut guard = lock(vault);
@@ -1658,7 +2050,11 @@ impl Node {
         .ok_or_else(|| {
             error(
                 "not_found",
-                "This vault has no approvals on this Mac yet. Turn them on first.",
+                concat!(
+                    "This vault has no approvals on this ",
+                    crate::computer!(),
+                    " yet. Turn them on first."
+                ),
             )
         })?;
         // The link names the certificate that the front serves now, never a stored pin
@@ -1691,11 +2087,24 @@ impl Node {
                 .ok_or_else(|| error("vault_locked", "The vault is locked."))?;
             questions_team::node_questions_membership(open, &origin)?
         }
-        .ok_or_else(|| error("not_found", "This vault has no approvals on this Mac."))?;
+        .ok_or_else(|| {
+            error(
+                "not_found",
+                concat!(
+                    "This vault has no approvals on this ",
+                    crate::computer!(),
+                    "."
+                ),
+            )
+        })?;
         if device_id == membership.device_id {
             return Err(error(
                 "conflict",
-                "This Mac holds the approvals of the vault. Turn them off instead.",
+                concat!(
+                    "This ",
+                    crate::computer!(),
+                    " holds the approvals of the vault. Turn them off instead."
+                ),
             ));
         }
         // Resolve the request's stable UUID before making any remote change.
@@ -1784,13 +2193,11 @@ impl Node {
         let route_err = || error("node_stopped", "The node is not running.");
         let shared = self.shared().ok_or_else(route_err)?;
         let node = {
-            let running = lock(&self.running);
-            let route = running
-                .as_ref()
-                .and_then(|running| running.tailnet.as_ref())
-                .ok_or_else(route_err)?;
+            let (origin, pin, alt) = self.pairing_trust()?;
             shared
-                .with_node(|node| questions_team::new_node_team(node, route, device_name))
+                .with_node(|node| {
+                    questions_team::new_node_team_at(node, &origin, &pin, &alt, device_name)
+                })
                 .ok_or_else(route_err)??
         };
         let client = QuestionsClient::from_membership(&node).map_err(questions_team::sync_error)?;
@@ -1891,6 +2298,44 @@ impl Node {
         })
     }
 
+    /// "Move Approvals to Connect", step 2 (plan s7 unit M5, section 5), after a device
+    /// joined the node team with a code that carries the Connect route: the questions of
+    /// the vault go through the node team now, but the hosted membership stays in the
+    /// vault (`crate::relay::membership::move_questions_keeping_hosted`) and its devices
+    /// stay on the hosted relay. The window takes them off only after the first question
+    /// went round through the node team (`finish_move_to_connect`), and puts the hosted
+    /// team back after a failure (`undo_move_to_connect`). No relay call.
+    pub fn finish_move_keeping_hosted(
+        &self,
+        vault: &SharedVault,
+        device_name: &str,
+    ) -> Result<MoveDone, NodeError> {
+        let moving = lock(&self.moving)
+            .take()
+            .ok_or_else(|| error("not_found", "No move of the approvals runs."))?;
+        let mut guard = lock(vault);
+        let open = guard
+            .as_mut()
+            .filter(|vault| !vault.is_locked() && vault.epoch() == moving.epoch)
+            .ok_or_else(|| {
+                error(
+                    "vault_locked",
+                    "The vault was locked. Start the move again.",
+                )
+            })?;
+        crate::relay::membership::move_questions_keeping_hosted(
+            open,
+            &moving.node,
+            &moving.hosted_team,
+            device_name,
+        )
+        .map_err(questions_team::sync_error)?;
+        Ok(MoveDone {
+            team_id: moving.node.team_id.clone(),
+            hosted_removed: false,
+        })
+    }
+
     /// Turn the public route (remote access) on or off. Off stops the node at once; on
     /// lets the desktop start it. A change writes the Activity row `remote access on` or
     /// `remote access off`. On gives authority: the caller asks for the owner check
@@ -1916,9 +2361,9 @@ impl Node {
                     operation: if on { ACTIVITY_ROUTE_ON } else { ACTIVITY_ROUTE_OFF }.to_owned(),
                     decision: ActivityDecision::Allow,
                     reason: if on {
-                        "Remote access is on: remote agents can reach this Mac through Tailscale Funnel while it is awake and the vault is unlocked. Every remote run still asks you."
+                        concat!("Remote access is on: remote agents can reach this ", crate::computer!(), " through Tailscale Funnel while it is awake and the vault is unlocked. Every remote run still asks you.")
                     } else {
-                        "Remote access is off: no remote agent reaches this Mac."
+                        concat!("Remote access is off: no remote agent reaches this ", crate::computer!(), ".")
                     }
                     .to_owned(),
                 });
@@ -2000,7 +2445,7 @@ impl Node {
                 )
             })?;
         let by = device.map_or_else(
-            || "Allowed with Touch ID on this Mac.".to_owned(),
+            || concat!("Allowed with Touch ID on this ", crate::computer!(), ".").to_owned(),
             |device| format!("Allowed with Face ID on {}.", cut(device, MAX_NAME_BYTES)),
         );
         let made = shared.add_agent(

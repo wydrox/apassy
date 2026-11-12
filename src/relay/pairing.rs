@@ -1,6 +1,15 @@
 //! A QR capability hands question keys to a confirmed iPhone or Apple Watch (ADR 0039 §6)
 //! over existing opaque question routes. The relay never sees the QR secret. No vault
 //! snapshot or paid sync is involved.
+//!
+//! The code that the Mac shows is a device link of node-pairing-v1, built by
+//! `PairedLink::format` (or `format_with` for a given Connect route) and read by
+//! `PairedLink::parse`, the one builder and the one reader of the Mac and the iPhone
+//! core. Beside the tailnet address it can carry the node's Connect route (section 7a,
+//! plan s7 units I2 and M5): `alt=…,wss://<Connect host>/v1/tunnel/dial/<node id>` and
+//! `node=<node id>`. The fragment never reaches a server; the handoff AAD and the safety
+//! words cover the route exactly as written, so a code with a changed route gives other
+//! words on the two devices.
 use crate::questions::envelope::{Sealed, new_qid, open};
 use crate::questions::{QuestionsClient, QuestionsError};
 use crate::sync::DeviceKey;
@@ -332,6 +341,42 @@ impl PairingChannel {
     }
 }
 
+/// The node id of a public name of connect-tunnel-v1 section 2: `node_` and the first
+/// label of `<10 characters>.<zone>`. `None` for a name of another form.
+pub fn node_id_of_public_name(public_name: &str) -> Option<String> {
+    let (label, zone) = public_name.split_once('.')?;
+    let id = format!("node_{label}");
+    (!zone.is_empty() && crate::sync::valid_node_id(&id)).then_some(id)
+}
+
+/// The Connect route that a pairing code of this Mac's node carries beside its tailnet
+/// address (node-pairing-v1 section 7a, plan s7 unit M5): `Some` only while the node
+/// runs with the owner's "Apassy Connect" route on, on an account that Connect named
+/// (a public name, so the account has a plan with the tunnel), and the tunnel does not
+/// say that the account is off Connect. `connect_origin` is the Connect origin that the
+/// reader of the code checks the route against (`crate::connect::configured_origin`).
+/// Otherwise the code is exactly the code of today: an older iPhone app refuses a code
+/// with `node=` ("Update Apassy to use this code"), so the fields are never added
+/// needlessly.
+pub fn pairing_route(
+    status: &crate::node::ConnectRouteStatus,
+    connect_origin: &str,
+) -> Option<crate::sync::TunnelRoute> {
+    if !(status.available && status.on && status.running) {
+        return None;
+    }
+    if status.tunnel.as_ref().is_some_and(|tunnel| {
+        matches!(
+            tunnel.state,
+            crate::node::tunnel::TunnelState::NotOnConnect | crate::node::tunnel::TunnelState::Off
+        )
+    }) {
+        return None;
+    }
+    let node = node_id_of_public_name(status.public_name.as_deref()?)?;
+    crate::sync::TunnelRoute::new(connect_origin, &node).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -578,6 +623,137 @@ mod tests {
         let hosted_link = channel.link(&hosted);
         let (read, _) = PairingChannel::parse(&hosted_link).unwrap();
         assert_eq!(read, hosted);
+    }
+
+    /// Section 7a and 8: the route and the node of a code of a node on Connect are part
+    /// of "the original full link without handoff", so the words cover them; the relay
+    /// call still sends the code alone.
+    #[test]
+    fn a_handoff_after_a_connect_route_binds_the_route() {
+        let connect = crate::connect::configured_origin();
+        let route = crate::sync::TunnelRoute::new(&connect, "node_k7m2q4x3ca").unwrap();
+        let url = crate::sync::RelayUrl::parse_with_trust(
+            "https://100.64.0.7:8444",
+            crate::sync::TlsTrust::Pinned(crate::sync::parse_pin(PIN).unwrap()),
+        )
+        .unwrap()
+        .alternatives(&["apassy-mini.tail0123.ts.net".to_owned()])
+        .unwrap();
+        let raw = crate::sync::PairedLink::format_with(
+            crate::sync::LinkKind::Device,
+            &url,
+            &link_code(),
+            Some("Studio"),
+            Some(&route),
+        )
+        .unwrap();
+        assert!(raw.contains(&format!(",{}&node=node_k7m2q4x3ca", route.text())));
+        let channel = PairingChannel::generate(&raw).unwrap();
+        let link = channel.link(&raw);
+        let (read, phone_channel) = PairingChannel::parse(&link).unwrap();
+        assert_eq!(read, raw.as_str(), "the route is in the text of the AAD");
+        let (relay_url, code) = crate::sync::PendingJoin::parse_link(&link, "").unwrap();
+        assert_eq!(code.as_str(), link_code());
+        assert_eq!(relay_url.as_str(), "https://100.64.0.7:8444");
+        assert_eq!(relay_url.tunnel(), Some(&route));
+
+        let phone = DeviceKey::generate().unwrap();
+        let name = "Synthetic iPhone";
+        let words = channel.mac_safety(TEAM, phone.public_key(), name).unwrap();
+        assert_eq!(
+            phone_channel.phone_safety(TEAM, &phone, name).unwrap(),
+            words
+        );
+        // Another node in the route and the node: other words.
+        let moved = link.replace("node_k7m2q4x3ca", "node_aaaaaaaaaa");
+        let (_, moved_channel) = PairingChannel::parse(&moved).unwrap();
+        assert_ne!(
+            moved_channel.phone_safety(TEAM, &phone, name).unwrap(),
+            words
+        );
+        // The same code without a route keeps the AAD of a link of today.
+        let plain = crate::sync::PairedLink::format(
+            crate::sync::LinkKind::Device,
+            &url,
+            &link_code(),
+            Some("Studio"),
+        )
+        .unwrap();
+        assert!(!plain.contains("node="));
+        let plain_link = PairingChannel::generate(&plain).unwrap().link(&plain);
+        let (read, _) = PairingChannel::parse(&plain_link).unwrap();
+        assert_eq!(read, plain.as_str());
+    }
+
+    /// Plan s7 unit M5: the code carries the route only for a running node with the
+    /// Connect route on and a public name; any other state keeps the code of today.
+    #[test]
+    fn the_code_carries_the_connect_route_only_while_the_node_is_on_connect() {
+        use crate::node::ConnectRouteStatus;
+        use crate::node::tunnel::{CertState, TunnelState, TunnelStatus};
+        let origin = "https://apassy-relay.wyderka.cc";
+        let tunnel = |state| TunnelStatus {
+            state,
+            public_name: Some("k7m2q4x3ca.node.apassy.wyderka.cc".to_owned()),
+            url: None,
+            certificate: CertState::Missing("synthetic".to_owned()),
+            open_streams: 0,
+            attempts: 1,
+            connects: 1,
+            connected_at: None,
+        };
+        let on = ConnectRouteStatus {
+            available: true,
+            on: true,
+            running: true,
+            public_name: Some("k7m2q4x3ca.node.apassy.wyderka.cc".to_owned()),
+            tunnel: Some(tunnel(TunnelState::On)),
+        };
+        let route = pairing_route(&on, origin).expect("a route");
+        assert_eq!(
+            route.text(),
+            "wss://apassy-relay.wyderka.cc/v1/tunnel/dial/node_k7m2q4x3ca"
+        );
+        // A tunnel that reconnects keeps the route: the iPhone tries the tailnet first.
+        let mut reconnecting = on.clone();
+        reconnecting.tunnel = Some(tunnel(TunnelState::Reconnecting {
+            why: "synthetic".to_owned(),
+        }));
+        assert!(pairing_route(&reconnecting, origin).is_some());
+        for off in [
+            ConnectRouteStatus {
+                available: false,
+                ..on.clone()
+            },
+            ConnectRouteStatus {
+                on: false,
+                ..on.clone()
+            },
+            ConnectRouteStatus {
+                running: false,
+                ..on.clone()
+            },
+            ConnectRouteStatus {
+                public_name: None,
+                ..on.clone()
+            },
+            ConnectRouteStatus {
+                tunnel: Some(tunnel(TunnelState::NotOnConnect)),
+                ..on.clone()
+            },
+            ConnectRouteStatus {
+                public_name: Some("not-a-node-name".to_owned()),
+                ..on.clone()
+            },
+        ] {
+            assert!(pairing_route(&off, origin).is_none(), "{off:?}");
+        }
+        assert_eq!(
+            node_id_of_public_name("k7m2q4x3ca.node.apassy.wyderka.cc").as_deref(),
+            Some("node_k7m2q4x3ca")
+        );
+        assert!(node_id_of_public_name("K7M2Q4X3CA.node.apassy.wyderka.cc").is_none());
+        assert!(node_id_of_public_name("k7m2q4x3ca").is_none());
     }
 
     #[test]

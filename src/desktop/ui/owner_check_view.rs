@@ -58,8 +58,9 @@ struct AccountChoice {
     rp_id: String,
     /// The origin of the page, or `None` for the macOS passkey sheet.
     origin: Option<String>,
-    /// The login name and the user of each account, as the dialog shows them.
-    rows: Vec<(String, String)>,
+    /// The login name, the user, and when the login was added ("Added …", empty when
+    /// unknown) of each account, as the dialog shows them, the newest first.
+    rows: Vec<(String, String, String)>,
     /// The index of the account that the owner chose, if they chose one.
     chosen: Option<usize>,
 }
@@ -89,7 +90,11 @@ impl AccountChoice {
                     (true, false) => display,
                     (false, false) => format!("{name} ({display})"),
                 };
-                (page_text(&account.item_name), who)
+                (
+                    page_text(&account.item_name),
+                    who,
+                    account.added.map(added_text).unwrap_or_default(),
+                )
             })
             .collect();
         Some(Self {
@@ -181,6 +186,11 @@ pub(super) fn draw(app: &mut DesktopApp, ctx: &egui::Context) {
                 "Waiting for Touch ID. Touch the sensor, or cancel the macOS prompt.",
                 Tone::Warning,
             ),
+            Some(CheckMethod::Polkit) => kit::tone_note(
+                ui,
+                "Waiting for system authentication. You can cancel and use the passphrase.",
+                Tone::Warning,
+            ),
             Some(CheckMethod::Passphrase) => {
                 kit::tone_note(ui, "Apassy is checking the passphrase.", Tone::Accent);
             }
@@ -222,6 +232,22 @@ pub(super) fn draw(app: &mut DesktopApp, ctx: &egui::Context) {
         kit::sheet_buttons(
             ui,
             |ui| {
+                #[cfg(target_os = "linux")]
+                if ui
+                    .add_enabled_ui(idle, |ui| {
+                        kit::button_with(
+                            ui,
+                            None,
+                            "Use system authentication",
+                            Style::Link,
+                            Size::Regular,
+                        )
+                    })
+                    .inner
+                    .clicked()
+                {
+                    touch_id = true;
+                }
                 if has_helper
                     && ui
                         .add_enabled_ui(idle, |ui| {
@@ -293,6 +319,9 @@ pub(super) fn draw(app: &mut DesktopApp, ctx: &egui::Context) {
             );
         }
     } else if touch_id && ready {
+        #[cfg(target_os = "linux")]
+        app.start_owner_check(OwnerCheck::Polkit, Some(ctx.clone()));
+        #[cfg(not(target_os = "linux"))]
         app.start_owner_check(OwnerCheck::TouchId, Some(ctx.clone()));
     } else if passphrase && ready {
         app.start_passphrase_check(ctx);
@@ -301,6 +330,12 @@ pub(super) fn draw(app: &mut DesktopApp, ctx: &egui::Context) {
 
 /// The site, the caller, and one button for each account. Returns the account that the
 /// owner clicked. The owner can click again to choose another account.
+/// "Added 2026-11-10 14:03:05 UTC": the time of an account in the chooser, to the
+/// second, so two passkeys made minutes apart differ.
+fn added_text(at: u64) -> String {
+    format!("Added {}", crate::vault::format_utc(at))
+}
+
 fn account_list(ui: &mut egui::Ui, choice: &AccountChoice) -> Option<usize> {
     let mut picked = None;
     kit::section(ui, None, None, |s| {
@@ -310,7 +345,7 @@ fn account_list(ui: &mut egui::Ui, choice: &AccountChoice) -> Option<usize> {
         );
         let caller = match &choice.origin {
             Some(origin) => page_text(origin),
-            None => "the macOS passkey sheet".to_owned(),
+            None => crate::passkey_sheet!().to_owned(),
         };
         s.labeled(
             "Asked by",
@@ -328,9 +363,9 @@ fn account_list(ui: &mut egui::Ui, choice: &AccountChoice) -> Option<usize> {
         .auto_shrink([false, true])
         .show(ui, |ui| {
             kit::section(ui, None, None, |s| {
-                for (index, (login, who)) in choice.rows.iter().enumerate() {
+                for (index, (login, who, added)) in choice.rows.iter().enumerate() {
                     let selected = choice.chosen == Some(index);
-                    let name = format!("Use the account {who} of the login {login}");
+                    let name = format!("Use the account {who} of the login {login} {added}");
                     let response = s.clickable_row(&name, |ui| {
                         ui.horizontal(|ui| {
                             ui.vertical(|ui| {
@@ -338,6 +373,12 @@ fn account_list(ui: &mut egui::Ui, choice: &AccountChoice) -> Option<usize> {
                                 if !who.is_empty() {
                                     ui.label(
                                         kit::text(who, Font::Callout)
+                                            .color(kit::palette().secondary),
+                                    );
+                                }
+                                if !added.is_empty() {
+                                    ui.label(
+                                        kit::text(added, Font::Callout)
                                             .color(kit::palette().secondary),
                                     );
                                 }
@@ -503,6 +544,7 @@ mod tests {
             user_name: user.to_owned(),
             user_display_name: display.to_owned(),
             credential_id: vec![id; 16],
+            added: None,
         }
     }
 
@@ -588,6 +630,50 @@ mod tests {
         assert_eq!(running(&app), None);
     }
 
+    /// Two passkeys of one site and one account looked the same, and the older one was
+    /// once selected (Linux acceptance, 2026-11-10). The vault lists the newest first,
+    /// the browser request selects it, and each row shows when its login was added.
+    #[test]
+    fn same_account_passkeys_differ_by_their_time_and_the_newest_is_selected() {
+        let dir = TempDir::new().unwrap();
+        let mut newer = account("localhost", "l4@example.test", "L4 Owner", 2);
+        newer.added = Some(1_762_783_385); // 2025-11-10 14:03:05 UTC
+        let mut older = account("localhost", "l4@example.test", "L4 Owner", 1);
+        older.added = Some(1_762_779_600); // 2025-11-10 13:00:00 UTC
+        let mut request = sign(vec![newer, older], Some(ORIGIN));
+        if let OwnerRequest::SignPasskey { chosen, .. } = &mut request {
+            *chosen = 0;
+        }
+        let (app, window) = open(&dir, request);
+        let screen = window.screen();
+        for text in [
+            "2 accounts",
+            "Added 2025-11-10 14:03:05 UTC",
+            "Added 2025-11-10 13:00:00 UTC",
+            "Selected",
+        ] {
+            assert!(window.has(text), "\"{text}\" is missing: {screen}");
+        }
+        assert!(!window.has("Choose an account to continue."), "{screen}");
+        assert_eq!(chosen(&app), 0);
+        assert_eq!(named_credential(&app), vec![2; 16], "the newest is named");
+        // The selected tag is on the row of the newest passkey: above the older one.
+        let y = |text: &str| {
+            window
+                .texts
+                .iter()
+                .find(|(painted, _)| painted == text)
+                .map(|(_, pos)| pos.y)
+                .unwrap()
+        };
+        let (newest, oldest) = (
+            y("Added 2025-11-10 14:03:05 UTC"),
+            y("Added 2025-11-10 13:00:00 UTC"),
+        );
+        assert!(newest < oldest, "the newest row comes first");
+        assert!((y("Selected") - newest).abs() < (y("Selected") - oldest).abs());
+    }
+
     #[test]
     fn the_macos_sheet_is_named_as_the_caller() {
         let dir = TempDir::new().unwrap();
@@ -599,7 +685,7 @@ mod tests {
             None,
         );
         let (_app, window) = open(&dir, request);
-        assert!(window.has("the macOS passkey sheet"), "{}", window.screen());
+        assert!(window.has(crate::passkey_sheet!()), "{}", window.screen());
         // A display name that is empty adds nothing to the user name.
         assert!(window.has("ada@example.test"), "{}", window.screen());
     }
