@@ -192,7 +192,7 @@ pub(crate) fn lock_note(obs: &Observation) -> String {
     match obs.coverage() {
         // What is not observed is listed once, in the note of "How often to ask".
         Coverage::None => format!(
-            "Lock the vault manually when you finish: Apassy cannot observe the screen lock here. {} {agents}",
+            "Lock the vault manually when you finish. Apassy cannot observe the screen lock here. {} {agents}",
             obs.inactivity_source()
         ),
         Coverage::Full => format!(

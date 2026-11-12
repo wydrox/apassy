@@ -1151,6 +1151,8 @@ fn a_vault_on_connect_is_named_apassy_connect() {
         .expect("relay link")
         .connect = true;
     assert!(a.syncs_on_connect(&id));
+    // The message of the turn-on of the relay sync above goes.
+    a.status_text.clear();
     let text = settled_frames(&mut a);
     for expected in [
         "Apassy Connect",

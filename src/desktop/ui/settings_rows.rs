@@ -432,8 +432,11 @@ pub(crate) fn text_buttons(
             );
     } else {
         ui.add(Label::new(text).wrap());
-        ui.with_layout(
-            Layout::right_to_left(Align::Center).with_main_wrap(true),
+        // A line of its own for the buttons: as high as a button, not the rest of the
+        // column.
+        ui.allocate_ui_with_layout(
+            Vec2::new(width, LINE),
+            Layout::right_to_left(Align::Min).with_main_wrap(true),
             |ui| draw(ui, &mut pressed),
         );
     }

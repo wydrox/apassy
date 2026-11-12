@@ -602,7 +602,14 @@ fn every_row_fits_its_column_at_each_width() {
         let ctx = egui::Context::default();
         let left = 20.0;
         for frame in 0..3 {
-            let output = ctx.run_ui(input(0.0, Vec::new()), |ui| {
+            let screen = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1000.0, 3000.0),
+                )),
+                ..Default::default()
+            };
+            let output = ctx.run_ui(screen, |ui| {
                 let rect =
                     egui::Rect::from_min_size(egui::pos2(left, 0.0), egui::vec2(width, 3000.0));
                 ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {

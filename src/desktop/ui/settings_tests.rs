@@ -2097,7 +2097,6 @@ fn security_owner_frequency_defaults_every_time_and_names_covered_actions() {
             "Each sensitive action requires fresh confirmation with the vault passphrase or optional system authentication.",
             "Approval reuse is off: Apassy cannot observe the screen lock here.",
             "Lock the vault manually when you finish.",
-            "Screen lock is not observed here",
             "Inactivity counts only input in the Apassy window",
             "Agents cannot use credentials while the vault is locked.",
         ]
@@ -2112,6 +2111,10 @@ fn security_owner_frequency_defaults_every_time_and_names_covered_actions() {
     };
     for expected in expected {
         assert!(text.contains(expected), "missing {expected}: {text}");
+    }
+    // The lock note does not repeat what the note of "How often to ask" lists.
+    if cfg!(target_os = "linux") {
+        assert!(!text.contains("Screen lock is not observed here"), "{text}");
     }
     if cfg!(target_os = "linux") {
         for unavailable in [
