@@ -975,7 +975,8 @@ fn join_a_group_with_the_pasted_link() {
             .is_some_and(|group| group.state == "pending")
     });
     let text = text(&ctx, &mut app);
-    assert!(text.contains("Waiting for Rafal to confirm you."), "{text}");
+    // One row of the Account group: who has to confirm this account.
+    assert!(text.contains("Waiting for Rafal"), "{text}");
     assert!(
         !text.contains(MANAGE_BILLING),
         "a member has no billing: {text}"
