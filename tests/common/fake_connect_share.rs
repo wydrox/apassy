@@ -550,6 +550,18 @@ fn append(state: &mut State, body: &Value, account: &str, device: &str, origin: 
     {
         return fail(403, "account_limit");
     }
+    // A `store` names a store that this account made (connect-account-v1 section 16.3).
+    if op == "store" {
+        match state
+            .stores
+            .iter()
+            .find(|store| Some(&store.team_id) == team.as_ref())
+        {
+            None => return fail(404, "not_found"),
+            Some(store) if store.account != account => return fail(403, "forbidden"),
+            Some(_) => {}
+        }
+    }
     let message = share_list_message(
         origin,
         account,

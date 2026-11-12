@@ -3399,23 +3399,38 @@ impl DesktopApp {
         });
     }
 
-    /// The signed name of the device of `key` in the account: a device that the verified
-    /// device list removed, or a device of that list.
+    /// The device of `key` as a sentence names it, by its signed name: “name” for a device of
+    /// the account (one that the verified device list removed, or a device of that list),
+    /// “name” of <person> for a device of another account of a shared vault, by that
+    /// account's verified list.
     fn relay_signed_name(&self, key: &[u8]) -> Option<String> {
         if let Some(name) = self.sync.relay.departed_names.get(key) {
-            return Some(name.clone());
+            return Some(format!("“{name}”"));
         }
-        let slot = self.ui.connect.live.session().slot();
-        let guard = slot.try_lock().ok()?;
-        guard
-            .as_ref()?
-            .verified_list()?
-            .name_of(key)
-            .map(str::to_owned)
+        let own = self
+            .ui
+            .connect
+            .live
+            .session()
+            .slot()
+            .try_lock()
+            .ok()
+            .and_then(|guard| {
+                guard
+                    .as_ref()?
+                    .verified_list()?
+                    .name_of(key)
+                    .map(|name| format!("“{name}”"))
+            });
+        own.or_else(|| {
+            let (device, person) = self.sync.relay.shared_devices.get(key)?;
+            Some(format!("“{device}” of {person}"))
+        })
     }
 
     /// The copy that "Use the relay copy…" of the vault store of `id` takes: the current
-    /// head that the relay served at the last check, and the signed name of its device.
+    /// head that the relay served at the last check, and its device as a sentence names it
+    /// ([`Self::relay_signed_name`]).
     pub(crate) fn relay_served_copy(&self, id: &str) -> Option<(DepartedHead, Option<String>)> {
         let head = self.relay_of(id)?.served_head()?;
         let name = self.relay_signed_name(&head.key);
@@ -3449,10 +3464,9 @@ impl DesktopApp {
             team_id,
             version: head.version,
             head: head.head_hash.clone(),
-            device_name: name.map_or_else(
-                || concat!("a device that this ", crate::computer!(), " does not know").to_owned(),
-                |name| format!("“{name}”"),
-            ),
+            device_name: name.unwrap_or_else(|| {
+                concat!("a device that this ", crate::computer!(), " does not know").to_owned()
+            }),
             time: head.time,
             vault_name,
         };
@@ -6667,7 +6681,7 @@ pub(crate) fn store_copy_text(
 ) -> String {
     let device = device.map_or_else(
         || concat!("a device that this ", crate::computer!(), " does not know").to_owned(),
-        |name| format!("“{name}”"),
+        str::to_owned,
     );
     format!(
         concat!(
@@ -7032,6 +7046,30 @@ mod access_repair_tests {
 #[cfg(test)]
 mod departed_tests {
     use super::*;
+
+    /// "Use the relay copy…" names a device of another account of a shared vault by its
+    /// verified name and person, and a key that no list holds as unknown.
+    #[test]
+    fn the_copy_of_a_co_member_names_its_verified_device() {
+        let mut app = DesktopApp::new();
+        let key = vec![4; 65];
+        app.sync.relay.shared_devices.insert(
+            key.clone(),
+            ("Synthetic MacBook".to_owned(), "“Ola”".to_owned()),
+        );
+        assert_eq!(
+            app.relay_signed_name(&key).as_deref(),
+            Some("“Synthetic MacBook” of “Ola”")
+        );
+        assert_eq!(app.relay_signed_name(&[5; 65]), None);
+        let text = store_copy_text("Family", 7, app.relay_signed_name(&key).as_deref(), 0);
+        assert!(
+            text.contains("which “Synthetic MacBook” of “Ola” saved"),
+            "{text}"
+        );
+        let text = store_copy_text("Family", 7, None, 0);
+        assert!(text.contains("does not know"), "{text}");
+    }
 
     fn head() -> DepartedHead {
         DepartedHead {

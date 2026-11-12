@@ -837,7 +837,7 @@ pub(crate) fn step(app: &mut DesktopApp, ctx: &egui::Context) {
 /// The signers of the vault stores after each write of the account file (any step of
 /// Settings › Connect, of Shared Vaults, or of the sync; also a step whose call to Connect
 /// failed): from the account file alone, to the sync of each vault at once.
-fn hand_over_signers(app: &mut DesktopApp) {
+pub(super) fn hand_over_signers(app: &mut DesktopApp) {
     let live = &mut app.ui.connect.live;
     if let Some(signers) = live.session.signers_after(&mut live.signers_seen) {
         live.signers = Some(signers);
