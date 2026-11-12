@@ -2841,4 +2841,20 @@ fn route_chips_show_only_where_routes_differ() {
     let text = view_texts(&view);
     assert!(text.contains("via Apassy Connect"), "{text}");
     assert!(!text.contains("via Apassy relay"), "{text}");
+    // A node that runs only on Apassy Connect: every row goes through Connect, so no row
+    // has a chip, and the This Mac group names the route once, not the relay.
+    view.node = NodeState::Off;
+    for device in &mut view.devices {
+        if device.route.is_some() {
+            device.route = Some(Route::Connect);
+        }
+    }
+    let text = view_texts(&view);
+    assert!(!text.contains("via Apassy Connect"), "{text}");
+    assert!(!text.contains("Apassy relay"), "{text}");
+    assert_eq!(
+        text.matches("Approvals go through Apassy Connect.").count(),
+        1,
+        "{text}"
+    );
 }

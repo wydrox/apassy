@@ -48,6 +48,9 @@ pub(crate) const ROUTE_OFF: &str = "Approvals go through Apassy relay.";
 /// The same while the questions of the vault do not go through the relay: they wait on
 /// this Mac.
 pub(crate) const ROUTE_OFF_HERE: &str = concat!("Approvals stay on this ", crate::computer!(), ".");
+/// The same while the node of this Mac runs only on Apassy Connect: its devices reach it
+/// through Connect, and their rows draw no chip, so this line names the route.
+pub(crate) const ROUTE_OFF_CONNECT: &str = "Approvals go through Apassy Connect.";
 /// The subline of the switch while the vault is locked.
 pub(crate) const ROUTE_LOCKED: &str = "Stopped while the vault is locked.";
 /// The one add button of the section.
@@ -770,6 +773,11 @@ fn switch_row(
 /// The subline of a route that is off: "Approvals go through Apassy relay." only while
 /// they do (or while the vault is locked or not open, when the window cannot tell).
 fn route_off_line(view: &DevicesView) -> &'static str {
+    // The rows of the devices draw no chip for the common route: when it is Apassy
+    // Connect, this line is the one place on the pane that names it.
+    if common_route(&view.devices) == Some(Route::Connect) {
+        return ROUTE_OFF_CONNECT;
+    }
     match view.relay.as_ref().map(|relay| relay.questions) {
         None | Some(Questions::On | Questions::Locked) => ROUTE_OFF,
         Some(_) => ROUTE_OFF_HERE,

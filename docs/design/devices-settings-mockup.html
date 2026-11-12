@@ -978,7 +978,7 @@ body.show-notes .notes-toggle{background:var(--accent);color:#fff}
     <li><b>Move to Connect…</b> runs the move of frame 4 with a code that carries the Connect route. After the confirmation the vault asks through this Mac; the hosted membership stays (9c) until the first approval went round through Apassy Connect, then its devices leave Apassy relay. <b>Undo</b> puts the old path back before that; nothing needs Touch ID, because nothing new can approve.</li>
     <li><b>The code</b> carries the Connect route only while the node is on Connect. Otherwise it is the code of today: an older iPhone app refuses a code with the new fields.</li>
     <li><b>9d</b> replaces the notice once the hosted relay answers <code>410</code>. Apassy asks it nothing more; the questions wait on this Mac; Activity says it once.</li>
-    <li><b>9e</b>: "via Apassy Connect" when the node runs with only the Connect route. The chips show here because the two devices take two routes; an iPhone alone would have none. With the tailnet route on as well the row keeps "via your Mac": both routes reach this Mac, and the node does not record which one a request used yet.</li>
+    <li><b>9e</b>: "via Apassy Connect" when the node runs with only the Connect route. The chips show here because the two devices take two routes. When every device goes through Connect (the node runs only on Connect), no row has a chip and the switch of the This Mac group says "Approvals go through Apassy Connect." instead of the relay line: the pane names the route once. With the tailnet route on as well the row keeps "via your Mac": both routes reach this Mac, and the node does not record which one a request used yet.</li>
     <li><b>9f</b>: the row of Settings › Vault › Sync and the sidebar ("Relay copy ended"); the worker and the waiter stop calling the hosted relay for that copy.</li>
   </ul>
 </section>
@@ -1028,7 +1028,7 @@ body.show-notes .notes-toggle{background:var(--accent);color:#fff}
   <h2>Texts to keep exactly</h2>
   <table>
     <tr><th>Place</th><th>Text</th><th>Note</th></tr>
-    <tr><td>Node switch</td><td>Reachable on Your Tailnet</td><td>Row label. No subline when on; "Approvals go through Apassy relay." when off or unavailable; "Stopped while the vault is locked." when locked.</td></tr>
+    <tr><td>Node switch</td><td>Reachable on Your Tailnet</td><td>Row label. No subline when on; "Approvals go through Apassy relay." when off or unavailable ("Approvals go through Apassy Connect." when every device reaches the node through Connect); "Stopped while the vault is locked." when locked.</td></tr>
     <tr><td>Node rows</td><td>Address · Node Words · Notifications</td><td>Address is the Tailscale IPv4 and the port, <code>100.101.7.12:8444</code>; Copy copies the origin <code>https://100.101.7.12:8444</code>. Locked: no Address row (the subline says that it stopped).</td></tr>
     <tr><td>Node problems</td><td>Tailscale is not installed. / Tailscale is not connected. / Another app uses port 8444. / The address changed. Paired devices must pair again.</td><td>Buttons: Get Tailscale… / Check Again / Use Port 8445 / Pair Again….</td></tr>
     <tr><td>Device hover</td><td>&lt;Kind&gt; · &lt;Role&gt;[ · &lt;Role&gt;]</td><td>One line per device; this text is the hover text of the name and its VoiceOver description. Kinds: Mac, iPhone, Apple Watch, Linux node. Roles: Hosts approvals, Asks for approvals, Approves runs, Sees requests, Syncs &lt;vault&gt;. A Wi-Fi iPhone: "Paired 12 Sep".</td></tr>
