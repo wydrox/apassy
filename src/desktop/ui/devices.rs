@@ -1159,19 +1159,19 @@ fn device_row(g: &mut rows::Group<'_>, device: &DeviceEntry, now: u64) -> Option
                             }
                         });
                     };
-                    if device.failed {
-                        // A problem keeps its second line.
-                        ui.vertical(|ui| {
-                            ui.spacing_mut().item_spacing.y = 1.0;
-                            head(ui);
+                    // The name starts at the top inset of the row, as the rows under "This
+                    // Mac": not centered on the taller glyph. A problem keeps its second
+                    // line.
+                    ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                        ui.spacing_mut().item_spacing.y = 1.0;
+                        head(ui);
+                        if device.failed {
                             ui.label(
                                 kit::text("Not revoked. Try Again", Font::Callout)
                                     .color(Tone::Critical.text()),
                             );
-                        });
-                    } else {
-                        head(ui);
-                    }
+                        }
+                    });
                 },
                 |ui| {
                     ui.spacing_mut().item_spacing.x = 10.0;
@@ -1380,11 +1380,15 @@ pub(crate) fn wifi_group(ui: &mut Ui, wifi: &WifiView, now: u64) -> Option<Actio
                             ui.spacing_mut().item_spacing.x = 10.0;
                             device_glyph(ui, Kind::Iphone);
                             let paired = format!("Paired {}", day_month(device.paired_at));
-                            let name = ui.add(Label::new(rows::label_text(&entry.name)).truncate());
-                            ui.ctx().accesskit_node_builder(name.id, |node| {
-                                node.set_description(paired.as_str());
+                            // The name at the top inset of the row, as in the Devices list.
+                            ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                                let name =
+                                    ui.add(Label::new(rows::label_text(&entry.name)).truncate());
+                                ui.ctx().accesskit_node_builder(name.id, |node| {
+                                    node.set_description(paired.as_str());
+                                });
+                                name.on_hover_text(paired);
                             });
-                            name.on_hover_text(paired);
                         },
                         |ui| {
                             ui.spacing_mut().item_spacing.x = 10.0;
