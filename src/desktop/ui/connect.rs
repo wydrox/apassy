@@ -145,6 +145,9 @@ pub(crate) const RECOVERY_UNRECORDED: &str = concat!(
     crate::computer!(),
     " could not record the new code in its account file. The code works: save it now. Apassy records it when it next reads the account."
 );
+/// The sheet that shows a recovery code once: the account id comes with it.
+pub(crate) const ACCOUNT_ID: &str = "Account ID";
+pub(crate) const RECOVERY_BOTH: &str = "Save both. You need them together to recover the account.";
 /// The row of a new recovery code that another device made.
 pub(crate) const RECOVERY_CHANGED_ROW: &str = "Changed on another device";
 pub(crate) const RECOVERY_CHANGED_OK: &str = "OK";
@@ -160,6 +163,88 @@ pub(crate) fn recovery_changed(device: Option<&str>, at: Option<u64>) -> String 
             day(at)
         ),
         None => format!("The recovery code was changed on {device}. The old code no longer works."),
+    }
+}
+
+/// Settings › Connect without an account: the recovery of an account that has no device
+/// left (connect-account-v1 section 9).
+pub(crate) const RECOVER: &str = "Recover an Account…";
+pub(crate) const RECOVER_ROW: &str =
+    "Lost every device of your account? Recover it with its account ID and recovery code.";
+pub(crate) const RECOVER_TITLE: &str = "Recover an Account";
+/// The start screen's Apassy Connect path without an account file: the way of a person
+/// who has no other device of the account.
+pub(crate) const START_NO_DEVICE: &str = concat!(
+    "No other device of the account? Make a vault on this ",
+    crate::computer!(),
+    " first, then recover the account in Settings › Connect."
+);
+pub(crate) const RECOVER_LEAD: &str = concat!(
+    "Use this only when you no longer have any device of the account. To add this ",
+    crate::computer!(),
+    " while another device still works, use Add This ",
+    crate::computer_cap!(),
+    " to an Account…"
+);
+pub(crate) const RECOVER_WHAT: &str = concat!(
+    "This ",
+    crate::computer!(),
+    " becomes the account's first device. The copies of your vaults that Connect keeps are deleted; the vaults on your devices are not touched. The plan stays, and a new recovery code replaces the old one."
+);
+pub(crate) const RECOVER_CODE: &str = "Recovery Code";
+pub(crate) const RECOVER_CODE_HINT: &str = "The 16 words";
+pub(crate) const RECOVER_ID_WRONG: &str =
+    "An account ID is acc_ and 10 letters and digits, as you saved it with the code.";
+pub(crate) const RECOVER_GO: &str = "Recover…";
+/// Connect's one refusal of a recovery: a wrong code, an unknown account id, and an
+/// account that still has a device get the same answer (section 9).
+pub(crate) const RECOVER_REFUSED: &str = concat!(
+    "Apassy Connect did not recover the account. It gives this one answer in three cases:\n",
+    "• The recovery code is not the current code of the account: a new code replaces the old one. Check the words you saved.\n",
+    "• The account ID is wrong. Check it against the one you saved with the code.\n",
+    "• A device of the account still works. Choose Add a Device… on it, then Add This ",
+    crate::computer_cap!(),
+    " to an Account… here."
+);
+/// A recovery that finished after a restart or a lock, before its new code was shown.
+pub(crate) const RECOVERED_UNSEEN: &str = "The account is recovered, but its new recovery code was not shown. Make a new one now with New Recovery Code….";
+
+/// The word at `position` of a typed recovery code is not a word of the list.
+pub(crate) fn recover_word_wrong(position: usize, word: &str) -> String {
+    format!("Word {position}, \u{201c}{word}\u{201d}, is not a word of a recovery code.")
+}
+
+/// A typed recovery code of `count` words of the list, not 16.
+pub(crate) fn recover_count_wrong(count: usize) -> String {
+    format!("A recovery code has 16 words. This one has {count}.")
+}
+
+/// Too many tries of a recovery (`429`): when to try again.
+pub(crate) fn recover_wait(seconds: u64) -> String {
+    let minutes = seconds.div_ceil(60).max(1);
+    if minutes == 1 {
+        "Too many recovery tries. Try again in a minute.".to_owned()
+    } else {
+        format!("Too many recovery tries. Try again in {minutes} minutes.")
+    }
+}
+
+/// The line of Settings › Connect after a recovery: what it deleted at Connect, and that
+/// each vault can sync through Connect again. `deleted` is `None` when the recovery was
+/// settled without Connect's count.
+pub(crate) fn recovered_line(deleted: Option<u64>) -> String {
+    let again = "Each vault can sync through Apassy Connect again: choose Sync Through Apassy Connect Again… in Settings › Vault › Sync.";
+    match deleted {
+        Some(0) => "The account is recovered. It had no vault copies at Apassy Connect.".to_owned(),
+        Some(1) => format!(
+            "The account is recovered. Apassy Connect deleted the 1 vault copy of the account. {again}"
+        ),
+        Some(count) => format!(
+            "The account is recovered. Apassy Connect deleted the {count} vault copies of the account. {again}"
+        ),
+        None => format!(
+            "The account is recovered. Apassy Connect deleted the vault copies of the account. {again}"
+        ),
     }
 }
 
@@ -299,6 +384,20 @@ pub(crate) const TEXTS: &[&str] = &[
     RECOVERY_NOTE,
     RECOVERY_UNRECORDED,
     RECOVERY_CHANGED_ROW,
+    ACCOUNT_ID,
+    RECOVERY_BOTH,
+    RECOVER,
+    RECOVER_ROW,
+    RECOVER_TITLE,
+    START_NO_DEVICE,
+    RECOVER_LEAD,
+    RECOVER_WHAT,
+    RECOVER_CODE,
+    RECOVER_CODE_HINT,
+    RECOVER_ID_WRONG,
+    RECOVER_GO,
+    RECOVER_REFUSED,
+    RECOVERED_UNSEEN,
     SAVED_IT,
     PICKER_TITLE,
     PICKER_LEAD,
@@ -619,6 +718,9 @@ pub(crate) struct Account {
     /// Another device made a new recovery code since this device saw the key: the line,
     /// and the key that "OK" pins.
     pub(crate) recovery_changed: Option<RecoveryLine>,
+    /// This device recovered the account in this session: the number of vault copies that
+    /// Connect deleted, when it named it ([`recovered_line`]).
+    pub(crate) recovered: Option<Option<u64>>,
 }
 
 /// The line of a new recovery code that another device made, and the recovery key that
@@ -831,6 +933,8 @@ pub(crate) fn plan_note(plan: &Plan) -> Option<(String, Tone)> {
 pub(crate) enum Action {
     Create,
     AddThisMac,
+    /// "Recover an Account…" (section 9).
+    Recover,
     SignIn,
     ChoosePlan,
     ManageBilling,
@@ -854,6 +958,10 @@ pub(crate) enum Action {
     NewRecoveryCode,
     /// "OK" of the line of a new recovery code that another device made.
     RecoveryChangeSeen,
+    /// "Copy" of the account id.
+    CopyAccountId,
+    /// "OK" of the line after a recovery.
+    RecoveredSeen,
     Delete,
 }
 
@@ -964,7 +1072,8 @@ fn not_on_connect(ui: &mut Ui, action: &mut Option<Action>) {
         g.tone_icon_row(SELF_HOST, Tone::Accent);
     });
     ui.add_space(12.0);
-    ui.horizontal(|ui| {
+    // The two buttons wrap onto two lines in a narrow window.
+    ui.horizontal_wrapped(|ui| {
         if kit::button(ui, CREATE, Style::Prominent).clicked() {
             *action = Some(Action::Create);
         }
@@ -973,6 +1082,15 @@ fn not_on_connect(ui: &mut Ui, action: &mut Option<Action>) {
         }
     });
     rows::footnote(ui, KEY_NOTE);
+    rows::group(ui, None, |g| {
+        g.row(|ui| {
+            if rows::text_buttons(ui, rows::note(RECOVER_ROW), &[(RECOVER, Style::Bordered)])
+                .is_some()
+            {
+                *action = Some(Action::Recover);
+            }
+        });
+    });
 }
 
 fn account_section(
@@ -989,10 +1107,28 @@ fn account_section(
         && group.is_none_or(|group| group.role == "owner");
     let billing = account.pays() && has_plan;
     rows::group(ui, Some(GROUP_LABEL), |g| {
+        if let Some(deleted) = account.recovered {
+            g.row(|ui| {
+                let line =
+                    kit::text(recovered_line(deleted), Font::Callout).color(kit::palette().label);
+                if rows::text_buttons(ui, line, &[("OK", Style::Bordered)]).is_some() {
+                    *action = Some(Action::RecoveredSeen);
+                }
+            });
+        }
         g.labeled("Name", rows::value(account.name.as_str()));
         if let Some(email) = &account.email {
             g.labeled("Email", rows::value(email.as_str()));
         }
+        // The account id, which a recovery needs with the code: selectable, with Copy.
+        g.row(|ui| {
+            ui.label(rows::label_text(ACCOUNT_ID));
+            let id =
+                kit::text(account.account_id.as_str(), Font::Mono).color(kit::palette().secondary);
+            if rows::text_buttons(ui, id, &[("Copy", Style::Bordered)]).is_some() {
+                *action = Some(Action::CopyAccountId);
+            }
+        });
         let (value, tone) = view.plan_value(plan);
         let color = match tone {
             Tone::Neutral => kit::palette().secondary,
@@ -1388,11 +1524,20 @@ fn group_section(
 pub(crate) enum Sheet {
     /// Frame 2a.
     Create { name: String, device_name: String },
-    /// Frame 2b: the 16 words, once. They are erased with the sheet. `unrecorded`: Connect
-    /// took a new code, and the account file of this device could not record it.
+    /// Frame 2b: the 16 words, once, under the account id. They are erased with the
+    /// sheet. `unrecorded`: Connect took a new code, and the account file of this device
+    /// could not record it.
     Recovery {
+        account_id: String,
         words: zeroize::Zeroizing<String>,
         unrecorded: bool,
+    },
+    /// Frame 14a: the recovery of an account (section 9): its id, its recovery code, and
+    /// the name of this device.
+    Recover {
+        account_id: String,
+        code: zeroize::Zeroizing<String>,
+        device_name: String,
     },
     /// Frame 4: the plan, `month` or `year`, and the people or seats.
     Picker {
@@ -1810,6 +1955,142 @@ pub(crate) fn sheet(
     choice
 }
 
+/// What the Copy button of a recovery code copies: the account id and the words, which
+/// a recovery needs together. The recovery sheet reads both back from it.
+pub(crate) fn recovery_copy(account_id: &str, words: &str) -> String {
+    format!("{ACCOUNT_ID}: {account_id}\n{RECOVER_CODE}: {words}")
+}
+
+/// What the recovery sheet reads in a typed recovery code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Typed {
+    Empty,
+    Ready,
+    /// The word at this place (from 1) is not a word of the list.
+    Unknown(usize, String),
+    /// Every word is of the list, and there are this many, not 16.
+    Count(usize),
+}
+
+/// The vault build reads a typed code with the word list of `crate::connect`.
+#[cfg(feature = "vault")]
+fn typed_code(code: &str) -> Typed {
+    use crate::connect::{TypedRecovery, read_recovery};
+    match read_recovery(code) {
+        TypedRecovery::Empty => Typed::Empty,
+        TypedRecovery::Ready(_) => Typed::Ready,
+        TypedRecovery::UnknownWord { position, word } => Typed::Unknown(position, word),
+        TypedRecovery::Count(count) => Typed::Count(count),
+    }
+}
+
+/// The demo build has no word list: it reads the synthetic words of its frames.
+#[cfg(not(feature = "vault"))]
+fn typed_code(code: &str) -> Typed {
+    demo::typed_code(code)
+}
+
+/// Whether `text` is an account id (`acc_` and 10 characters of `a-z2-7`).
+#[cfg(feature = "vault")]
+fn account_id_ok(text: &str) -> bool {
+    crate::connect::words::valid_account_id(text)
+}
+
+#[cfg(not(feature = "vault"))]
+fn account_id_ok(text: &str) -> bool {
+    text.strip_prefix("acc_").is_some_and(|rest| {
+        rest.len() == 10
+            && rest
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || (b'2'..=b'7').contains(&byte))
+    })
+}
+
+/// The account id in a pasted text (the Copy button of a recovery code).
+#[cfg(feature = "vault")]
+fn pasted_account_id(text: &str) -> Option<String> {
+    crate::connect::find_account_id(text)
+}
+
+#[cfg(not(feature = "vault"))]
+fn pasted_account_id(_text: &str) -> Option<String> {
+    None
+}
+
+/// What the recovery sheet says of what the owner typed: the problem with the account id,
+/// the problem with the words, and whether "Recover…" may run.
+pub(crate) fn recover_check(
+    account_id: &str,
+    code: &str,
+    device_name: &str,
+) -> (Option<&'static str>, Option<String>, bool) {
+    let id = account_id.trim().to_ascii_lowercase();
+    let id_ok = account_id_ok(&id);
+    let id_note = (!id.is_empty() && !id_ok).then_some(RECOVER_ID_WRONG);
+    let (code_note, code_ok) = match typed_code(code) {
+        Typed::Empty => (None, false),
+        Typed::Ready => (None, true),
+        Typed::Unknown(position, word) => (Some(recover_word_wrong(position, &word)), false),
+        Typed::Count(count) => (Some(recover_count_wrong(count)), false),
+    };
+    (
+        id_note,
+        code_note,
+        id_ok && code_ok && !device_name.trim().is_empty(),
+    )
+}
+
+/// Frame 14a: the account id, the recovery code, and the name of this device. A pasted
+/// text that holds an account id (the Copy button of a recovery code) fills the id too.
+fn recover_sheet(
+    ui: &mut Ui,
+    account_id: &mut String,
+    code: &mut zeroize::Zeroizing<String>,
+    device_name: &mut String,
+    busy: bool,
+) -> Option<SheetChoice> {
+    kit::sheet_title(ui, RECOVER_TITLE, Some(RECOVER_LEAD));
+    kit::note(ui, RECOVER_WHAT);
+    ui.add_space(8.0);
+    let (id_note, code_note, ready) = recover_check(account_id, code, device_name);
+    rows::group_box(ui, |g| {
+        g.row(|ui| {
+            ui.label(rows::label_text(ACCOUNT_ID));
+            kit::mono_input(ui, account_id, "connect-recover-id", "acc_…");
+            if let Some(note) = id_note {
+                ui.add(
+                    Label::new(kit::text(note, Font::Callout).color(Tone::Critical.text())).wrap(),
+                );
+            }
+        });
+        g.row(|ui| {
+            ui.label(rows::label_text(RECOVER_CODE));
+            let response = kit::text_area(ui, code, "connect-recover-code", RECOVER_CODE_HINT, 3);
+            if response.changed()
+                && account_id.trim().is_empty()
+                && let Some(id) = pasted_account_id(code)
+            {
+                *account_id = id;
+            }
+            if let Some(note) = &code_note {
+                ui.add(
+                    Label::new(kit::text(note, Font::Callout).color(Tone::Critical.text())).wrap(),
+                );
+            }
+        });
+        g.field(THIS_DEVICE, |ui| {
+            kit::text_input(
+                ui,
+                device_name,
+                "connect-recover-device",
+                crate::computer_cap!(),
+            )
+        });
+    });
+    ui.add_space(8.0);
+    cancel_and(ui, RECOVER_GO, ready, busy)
+}
+
 fn cancel_and(ui: &mut Ui, label: &str, enabled: bool, busy: bool) -> Option<SheetChoice> {
     let mut choice = None;
     kit::sheet_buttons(
@@ -1864,13 +2145,26 @@ fn sheet_body(
             let ready = !name.trim().is_empty() && !device_name.trim().is_empty();
             cancel_and(ui, "Create Account", ready, busy)
         }
-        Sheet::Recovery { words, unrecorded } => {
+        Sheet::Recovery {
+            account_id,
+            words,
+            unrecorded,
+        } => {
             let mut choice = None;
             kit::sheet_title(ui, RECOVERY_TITLE, Some(RECOVERY_LEAD));
             if *unrecorded {
                 ui.label(kit::text(RECOVERY_UNRECORDED, Font::Callout).color(Tone::Warning.text()));
                 ui.add_space(6.0);
             }
+            rows::group_box(ui, |g| {
+                g.labeled(
+                    ACCOUNT_ID,
+                    kit::text(account_id.as_str(), Font::Mono).color(kit::palette().label),
+                );
+            });
+            ui.add_space(4.0);
+            kit::note(ui, RECOVERY_BOTH);
+            ui.add_space(6.0);
             let list: Vec<&str> = words.split_whitespace().collect();
             egui::Frame::new()
                 .fill(kit::palette().surface)
@@ -1901,7 +2195,7 @@ fn sheet_body(
                 |ui| {
                     kit::button(ui, "Copy", Style::Bordered)
                         .clicked()
-                        .then(|| SheetChoice::Copy(words.as_str().to_owned()))
+                        .then(|| SheetChoice::Copy(recovery_copy(account_id, words)))
                 },
                 |ui| {
                     kit::button(ui, SAVED_IT, Style::Prominent)
@@ -2058,6 +2352,11 @@ fn sheet_body(
                 destructive(ui, &format!("Revoke {name}?"), REVOKE_LEAD, "Revoke…")
             }
         }
+        Sheet::Recover {
+            account_id,
+            code,
+            device_name,
+        } => recover_sheet(ui, account_id, code, device_name, busy),
         Sheet::JoinAccount { code } => {
             kit::sheet_title(ui, JOIN_ACCOUNT_TITLE, Some(JOIN_ACCOUNT_LEAD));
             kit::mono_input(ui, code, "connect-join-code", "apassy_alk_…");

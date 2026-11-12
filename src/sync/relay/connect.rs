@@ -33,6 +33,12 @@
 //! - [`StorePlan`]: the plan of the account as the window read it, for the read-only
 //!   states of the sync worker: a push that Connect refuses with `403 plan_required`
 //!   stops, pulls go on, and nothing is lost on this Mac.
+//! - [`store_deleted`]: a recovery deletes every vault store of the account (contract
+//!   section 9). The account file and the sync state tell which stores went: a store of
+//!   this account whose state names an earlier account key of this device than the key of
+//!   an account that this device recovered, or a shared store whose owner's root changed
+//!   (section 16.7). Such a sync asks Connect nothing more ([`RelaySync::set_store_deleted`],
+//!   [`SyncError::StoreDeleted`]); the vault on this device stays as it is.
 
 use std::fmt;
 use std::fs;
@@ -47,7 +53,9 @@ use super::{
     VaultAccess, ended_by_lock, lock,
 };
 use crate::broker::approvals::OwnerProof;
-use crate::connect::{AccountSigner, ConnectAccount, ConnectError, PlanView, VaultStoreView};
+use crate::connect::{
+    AccountSigner, AccountState, ConnectAccount, ConnectError, PlanView, VaultStoreView,
+};
 use crate::sync::{RelayRefusal, SyncError, SyncOutcome, state};
 use crate::vault::{Vault, VaultErrorKind};
 
@@ -94,6 +102,55 @@ impl StorePlan {
     pub fn entitled(self) -> bool {
         self.pushes()
     }
+}
+
+/// Why the vault store of a relay sync is gone at Apassy Connect ([`store_deleted`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoreDeleted {
+    /// This device recovered the account, and the store is from before it: every store of
+    /// the account was deleted then (connect-account-v1 section 9).
+    Recovered,
+    /// Another account made this shared store, and Connect serves a list of another root
+    /// for it now: that account was recovered, which deleted its stores (section 16.7).
+    OwnerRecovered,
+}
+
+/// Whether the vault store of the relay sync `sync` was deleted at a recovery, from the
+/// account file `account` and the sync state alone (no answer of Connect is waited for):
+///
+/// - [`StoreDeleted::Recovered`]: this device recovered the account
+///   (`AccountState::recovered_at`), the store is one that this account made, and its state
+///   names an account key of this device other than the key of the account file. Connect
+///   never takes a key that was a device of an account at a recovery, so such a state is
+///   of a store from before the recovery. A state without the account and the key that
+///   started it (an earlier build) is not decided here.
+/// - [`StoreDeleted::OwnerRecovered`]: the store is one that another account made and this
+///   account joined, and this account's own pin of that account is suspended (a list of
+///   another root: that account reset, section 16.7).
+///
+/// `None` for any other sync, also for a store that went for another reason (a deletion,
+/// the end of a plan): that sync keeps the state that its relay calls give.
+pub fn store_deleted(account: &AccountState, sync: &state::SyncState) -> Option<StoreDeleted> {
+    if sync.transport != state::TransportKind::Relay
+        || sync.relay_url.as_deref() != Some(account.origin.as_str())
+    {
+        return None;
+    }
+    let team = sync.team_id.as_deref()?;
+    let made_by = sync.store_account.as_deref();
+    if account.recovered_at.is_some()
+        && made_by == Some(account.account_id.as_str())
+        && sync
+            .store_key
+            .as_deref()
+            .is_some_and(|key| key != account.public_key)
+    {
+        return Some(StoreDeleted::Recovered);
+    }
+    let owner = crate::connect::share::reset_owner(account, team)?;
+    made_by
+        .is_none_or(|made_by| made_by == owner)
+        .then_some(StoreDeleted::OwnerRecovered)
 }
 
 /// Why a step of the sync through Apassy Connect failed.
@@ -307,6 +364,19 @@ impl RelaySync {
         *lock(&self.plan)
     }
 
+    /// The vault store of this relay sync was deleted at a recovery ([`store_deleted`]), as
+    /// the window found from the account file, or `None` when it was not. A clone shares
+    /// it, and so does each session of the vault. While it holds, no sync, poll, or other
+    /// call of this vault asks Connect: each ends at once with [`SyncError::StoreDeleted`].
+    pub fn set_store_deleted(&self, deleted: Option<StoreDeleted>) {
+        self.removed.set_deleted(deleted);
+    }
+
+    /// [`Self::set_store_deleted`].
+    pub fn store_deleted(&self) -> Option<StoreDeleted> {
+        self.removed.deleted()
+    }
+
     // ---- Turning it on. ----
 
     /// Turn on the sync of the unlocked vault through Apassy Connect with the account of
@@ -404,6 +474,7 @@ impl RelaySync {
                 SessionKey::Account(signer),
                 Some(store_device),
             )
+            .for_store_of(&account.state().account_id)
             .sharing_removed(&self.removed)
             .with_shared_signers(Arc::clone(&self.account_keys)),
         );
@@ -469,12 +540,18 @@ impl RelaySync {
             .ok_or(not_in)?;
         let signer = account.signer()?;
         let policy = crate::connect::signer_policy(account.state());
+        // The account that made the store, from the account file: another account for a
+        // store that this account joined, else this account.
+        let made_by = account
+            .joined_store_owner(&store.team_id)
+            .unwrap_or_else(|| account.state().account_id.clone());
         let session = Session::new(
             url,
             &store.team_id,
             SessionKey::Account(signer),
             Some(store_device),
-        );
+        )
+        .for_store_of(&made_by);
         if crate::connect::store_signer_policy(account.state(), &store.team_id).is_none() {
             return Ok(JoinedDevice {
                 session: Arc::new(session.with_fixed_signers(policy)),

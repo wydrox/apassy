@@ -278,6 +278,75 @@
      "note": "Demo frame 13e."
     },
     {
+     "title": "Recover an account: the sheet",
+     "mockups": [
+      "connect-14a.png",
+      "connect-1.png"
+     ],
+     "shots": [
+      "connect-demo-14a.png",
+      "connect-recover-none.png",
+      "connect-recover-sheet-empty.png",
+      "connect-recover-sheet.png"
+     ],
+     "note": "Demo frame 14a; scene connect-recover (the real window on the fake Connect)."
+    },
+    {
+     "title": "Recover: a wrong word and an account ID of another form",
+     "mockups": [
+      "connect-14a.png"
+     ],
+     "shots": [
+      "connect-demo-14b.png"
+     ],
+     "note": "Demo frame 14b."
+    },
+    {
+     "title": "Recover: the owner check",
+     "mockups": [
+      "connect-14b.png"
+     ],
+     "shots": [
+      "owner-check-recover.png"
+     ],
+     "note": "Scene connect-recover."
+    },
+    {
+     "title": "Recover: Connect's one refusal, too many tries, no answer, busy",
+     "mockups": [
+      "connect-14c.png"
+     ],
+     "shots": [
+      "connect-demo-14c.png",
+      "connect-demo-14d.png",
+      "connect-demo-14e.png",
+      "connect-demo-14f.png"
+     ],
+     "note": "Demo frames 14c to 14f."
+    },
+    {
+     "title": "Recovered: the new code with the account ID",
+     "mockups": [
+      "connect-14g.png"
+     ],
+     "shots": [
+      "connect-demo-14g.png",
+      "connect-recover-code.png"
+     ],
+     "note": "Demo frame 14g; scene connect-recover."
+    },
+    {
+     "title": "Recovered: the account, its ID, and the deleted copies",
+     "mockups": [
+      "connect-14h.png"
+     ],
+     "shots": [
+      "connect-demo-14h.png",
+      "connect-recover-account.png"
+     ],
+     "note": "Demo frame 14h; scene connect-recover."
+    },
+    {
      "title": "Choose a Plan: Personal, monthly",
      "mockups": [
       "connect-4a.png"

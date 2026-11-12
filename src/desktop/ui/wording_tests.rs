@@ -446,8 +446,19 @@ fn connect_screens(screens: &mut Vec<Screen>) {
         &mut app,
         "recovery code",
         ConnectSheet::Recovery {
+            account_id: "acc_k7m2q4x3ca".to_owned(),
             words: Zeroizing::new("blaze cable flute board seal tiger maple orbit".to_owned()),
             unrecorded: false,
+        },
+    );
+    sheet(
+        screens,
+        &mut app,
+        "recover an account",
+        ConnectSheet::Recover {
+            account_id: "acc_k7m2q4x3c".to_owned(),
+            code: Zeroizing::new("blaze cable orbitt".to_owned()),
+            device_name: device_name.clone(),
         },
     );
     create_account(&ctx, &mut app, "Synthetic");

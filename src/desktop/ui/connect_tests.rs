@@ -1024,6 +1024,7 @@ fn the_plan_row_shows_its_whole_status_at_the_settings_width() {
                 list_nearly_full: false,
                 recovery_unseen: false,
                 recovery_changed: None,
+                recovered: None,
             }),
             plans: Some(fixture_plans()),
             locked: false,
@@ -1095,6 +1096,7 @@ fn every_state_of_the_plan_row() {
                 list_nearly_full: false,
                 recovery_unseen: false,
                 recovery_changed: None,
+                recovered: None,
             }),
             plans: Some(fixture_plans()),
             locked: false,
@@ -2940,4 +2942,532 @@ fn a_shared_store_whose_list_reads_fail_keeps_checking_and_offers_try_again() {
         Some(&super::sync::UiStatus::Damaged),
         "fresh verified lists decided the head"
     );
+}
+
+// ---- Round 8: recovering an account with its recovery code (section 9). ----
+
+/// Create the account of `app` through the sheet; the account id, its device id, and the
+/// words of the recovery code, after "I Saved It".
+fn create_with_words(
+    ctx: &egui::Context,
+    app: &mut DesktopApp,
+) -> (String, String, Zeroizing<String>) {
+    act(ctx, app, Action::Create);
+    if let Some(Sheet::Create { name, .. }) = &mut app.ui.connect.sheet {
+        name.push_str("Rafal");
+    }
+    choose(ctx, app, SheetChoice::Go);
+    until(ctx, app, "the recovery code", |app| {
+        matches!(app.ui.connect.sheet, Some(Sheet::Recovery { .. }))
+    });
+    let Some(Sheet::Recovery {
+        account_id, words, ..
+    }) = &app.ui.connect.sheet
+    else {
+        unreachable!();
+    };
+    let (account_id, words) = (account_id.clone(), words.clone());
+    choose(ctx, app, SheetChoice::Done);
+    until(ctx, app, "the account", |app| shown(app).is_some());
+    let device_id = live::view(app).shown.clone();
+    let Shown::Account(account) = device_id else {
+        unreachable!();
+    };
+    assert_eq!(
+        account.account_id, account_id,
+        "the sheet names the account"
+    );
+    (account_id, account.devices[0].id.clone(), words)
+}
+
+/// "Recover an Account…" on `app` with `account_id` and `code` typed.
+fn type_recovery(ctx: &egui::Context, app: &mut DesktopApp, account_id: &str, code: &str) {
+    act(ctx, app, Action::Recover);
+    let Some(Sheet::Recover {
+        account_id: typed_id,
+        code: typed_code,
+        ..
+    }) = &mut app.ui.connect.sheet
+    else {
+        panic!("no recovery sheet");
+    };
+    typed_id.push_str(account_id);
+    typed_code.push_str(code);
+}
+
+/// The account of a lost device: made on `a`, with one vault store, then its only device
+/// revoked. Its id and the words of its code.
+fn lost_account(connect: &FakeConnect) -> (String, Zeroizing<String>) {
+    let dir = TempDir::new().expect("temp dir");
+    let mut app = connect_app(&dir, connect);
+    let ctx = egui::Context::default();
+    let (account_id, device_id, words) = create_with_words(&ctx, &mut app);
+    connect.store_without_entry(&account_id, &device_id, "t_lostaaaaaa", "Personal");
+    connect.revoke(&device_id);
+    (account_id, words)
+}
+
+/// The sheet says what is wrong with the id and the words, as the owner types them: an id
+/// of another form, a word that is not of the list (by its place), too few words; extra
+/// spaces, line breaks, upper case, and a pasted account id with labels are fine.
+#[test]
+fn the_recovery_sheet_checks_the_id_and_the_words() {
+    use super::connect::{
+        RECOVER_ID_WRONG, recover_check, recover_count_wrong, recover_word_wrong,
+    };
+    let code = crate::connect::RecoveryCode::generate().expect("code");
+    let words = code.words();
+    let list: Vec<&str> = words.split(' ').collect();
+    assert_eq!(
+        recover_check("", "", "MacBook"),
+        (None, None, false),
+        "nothing typed yet"
+    );
+    assert_eq!(
+        recover_check("acc_k7m2q4x3c", &words, "MacBook"),
+        (Some(RECOVER_ID_WRONG), None, false)
+    );
+    assert_eq!(
+        recover_check("  ACC_K7M2Q4X3CA ", &words.to_uppercase(), "MacBook"),
+        (None, None, true)
+    );
+    let mut wrong = list.clone();
+    wrong[6] = "orbitt";
+    assert_eq!(
+        recover_check("acc_k7m2q4x3ca", &wrong.join("\n"), "MacBook"),
+        (None, Some(recover_word_wrong(7, "orbitt")), false)
+    );
+    assert_eq!(
+        recover_check("acc_k7m2q4x3ca", &list[..12].join("  "), "MacBook"),
+        (None, Some(recover_count_wrong(12)), false)
+    );
+    assert_eq!(
+        recover_check("acc_k7m2q4x3ca", &words, "  "),
+        (None, None, false),
+        "a name for this device"
+    );
+    // The Copy button copies both, and the sheet reads both back from it.
+    let copied = super::connect::recovery_copy("acc_k7m2q4x3ca", &words);
+    assert!(copied.contains("acc_k7m2q4x3ca") && copied.contains(words.as_str()));
+    assert!(recover_check("acc_k7m2q4x3ca", &copied, "MacBook").2);
+    assert_eq!(
+        crate::connect::find_account_id(&copied).as_deref(),
+        Some("acc_k7m2q4x3ca")
+    );
+    // The sheet shows the notes, and "Recover…" stays off.
+    let dir = TempDir::new().expect("temp dir");
+    let connect = FakeConnect::start();
+    let mut app = connect_app(&dir, &connect);
+    let ctx = egui::Context::default();
+    type_recovery(&ctx, &mut app, "acc_k7m2q4x3c", &wrong.join(" "));
+    let painted = text(&ctx, &mut app);
+    for line in [
+        super::connect::RECOVER_TITLE,
+        super::connect::RECOVER_GO,
+        RECOVER_ID_WRONG,
+        &recover_word_wrong(7, "orbitt"),
+    ] {
+        assert!(painted.contains(line), "{line:?} in {painted}");
+    }
+    choose(&ctx, &mut app, SheetChoice::Go);
+    assert!(app.owner.check.is_none(), "no owner check for a wrong code");
+    assert_eq!(connect.count("POST /v1/account/recover"), 0);
+}
+
+/// "Recover…" asks for its own owner check, which names the account; nothing goes to
+/// Connect before it. Then the new code shows once under the account id, its sheet says
+/// to save both, and Settings › Connect shows the account, signed in, with its id and one
+/// line of the deleted copies until "OK". The old code recovers nothing any more.
+#[test]
+fn a_recovery_asks_the_owner_then_shows_the_new_code_and_the_deleted_copies() {
+    let connect = FakeConnect::start();
+    let (account_id, old) = lost_account(&connect);
+    let dir = TempDir::new().expect("temp dir");
+    let mut app = connect_app(&dir, &connect);
+    let ctx = egui::Context::default();
+    let painted = text(&ctx, &mut app);
+    assert!(painted.contains(super::connect::RECOVER), "{painted}");
+    // Upper case, spaces, and a word on each line.
+    let typed = old
+        .split(' ')
+        .collect::<Vec<_>>()
+        .join(" \n ")
+        .to_uppercase();
+    type_recovery(
+        &ctx,
+        &mut app,
+        &format!(" {} ", account_id.to_uppercase()),
+        &typed,
+    );
+    choose(&ctx, &mut app, SheetChoice::Go);
+    let action = app
+        .owner
+        .check
+        .as_ref()
+        .map(|check| check.request.action())
+        .expect("an owner check");
+    assert_eq!(
+        action,
+        crate::broker::approvals::OwnerAction::RecoverConnectAccount {
+            account_id: account_id.clone()
+        }
+    );
+    assert!(action.needs_fresh_local_check(), "always asked again");
+    let prompt = app
+        .owner
+        .check
+        .as_ref()
+        .map(|check| check.request.describe())
+        .expect("a prompt");
+    assert!(prompt.contains(&account_id), "{prompt}");
+    assert_eq!(
+        connect.count("POST /v1/account/recover"),
+        0,
+        "nothing before it"
+    );
+    confirm_with(&mut app, &ctx, PASS);
+    until(&ctx, &mut app, "the new code", |app| {
+        matches!(app.ui.connect.sheet, Some(Sheet::Recovery { .. }))
+    });
+    let Some(Sheet::Recovery {
+        account_id: shown_id,
+        words,
+        ..
+    }) = &app.ui.connect.sheet
+    else {
+        unreachable!();
+    };
+    assert_eq!(shown_id, &account_id);
+    assert_eq!(words.split_whitespace().count(), 16, "16 words, once");
+    assert_ne!(words.as_str(), old.as_str());
+    let new = words.clone();
+    let painted = text(&ctx, &mut app);
+    assert!(painted.contains(&account_id), "{painted}");
+    assert!(painted.contains(super::connect::RECOVERY_BOTH), "{painted}");
+    assert_eq!(connect.live_devices(&account_id).len(), 1);
+    assert!(
+        connect.stores(&account_id).is_empty(),
+        "the copies are deleted"
+    );
+    // "I Saved It": the account, signed in, with its id and the line of the deleted copy.
+    choose(&ctx, &mut app, SheetChoice::Done);
+    until(&ctx, &mut app, "the account", |app| {
+        shown(app).is_some_and(|account| !account.recovery_unseen)
+    });
+    let account = shown(&app).expect("account");
+    assert_eq!(account.recovered, Some(Some(1)));
+    let painted = text(&ctx, &mut app);
+    for line in [
+        super::connect::recovered_line(Some(1)).as_str(),
+        super::connect::ACCOUNT_ID,
+        account_id.as_str(),
+    ] {
+        assert!(painted.contains(line), "{line:?} in {painted}");
+    }
+    assert!(!painted.contains(super::connect::RECOVER_ROW), "{painted}");
+    let copied = act(&ctx, &mut app, Action::CopyAccountId);
+    assert!(
+        copied
+            .iter()
+            .any(|command| matches!(command, OutputCommand::CopyText(text) if *text == account_id)),
+        "{copied:?}"
+    );
+    act(&ctx, &mut app, Action::RecoveredSeen);
+    assert!(
+        !text(&ctx, &mut app).contains(&super::connect::recovered_line(Some(1))),
+        "OK ends the line"
+    );
+    // The old code is spent; the new one is the account's code.
+    let b = TempDir::new().expect("temp dir");
+    let mut other = connect_app(&b, &connect);
+    connect.revoke(&account.devices[0].id);
+    type_recovery(&ctx, &mut other, &account_id, &old);
+    choose(&ctx, &mut other, SheetChoice::Go);
+    confirm_with(&mut other, &ctx, PASS);
+    until(&ctx, &mut other, "the refusal", |app| {
+        live::error_for_test(app).is_some()
+    });
+    other.ui.connect.sheet = None;
+    type_recovery(&ctx, &mut other, &account_id, &new);
+    choose(&ctx, &mut other, SheetChoice::Go);
+    confirm_with(&mut other, &ctx, PASS);
+    until(&ctx, &mut other, "the new code works", |app| {
+        matches!(app.ui.connect.sheet, Some(Sheet::Recovery { .. }))
+    });
+}
+
+/// Connect's one refusal (a wrong code, an unknown account id, an account that still has
+/// a device) shows one text that names the three causes and what to do for each; nothing
+/// changed on this device. A `429` says when to try again.
+#[test]
+fn a_refused_recovery_names_its_three_causes_and_too_many_tries_say_when() {
+    let connect = FakeConnect::start();
+    let dir = TempDir::new().expect("temp dir");
+    let mut app = connect_app(&dir, &connect);
+    let ctx = egui::Context::default();
+    // A live device: the account still has one.
+    let (account_id, _, words) = {
+        let other = TempDir::new().expect("temp dir");
+        let mut owner_app = connect_app(&other, &connect);
+        let made = create_with_words(&ctx, &mut owner_app);
+        (made.0, made.1, made.2)
+    };
+    let unknown = "acc_zzzzzzzzzz";
+    let wrong = crate::connect::RecoveryCode::generate()
+        .expect("code")
+        .words();
+    for (id, code) in [
+        (account_id.as_str(), words.as_str()),
+        (account_id.as_str(), wrong.as_str()),
+        (unknown, words.as_str()),
+    ] {
+        type_recovery(&ctx, &mut app, id, code);
+        choose(&ctx, &mut app, SheetChoice::Go);
+        confirm_with(&mut app, &ctx, PASS);
+        until(&ctx, &mut app, "the refusal", |app| {
+            live::error_for_test(app).is_some()
+        });
+        assert_eq!(
+            live::error_for_test(&app).as_deref(),
+            Some(super::connect::RECOVER_REFUSED)
+        );
+        let painted = text(&ctx, &mut app);
+        for cause in [
+            "recovery code is not the current code",
+            "account ID is wrong",
+            "device of the account still works",
+            "Add a Device…",
+        ] {
+            assert!(painted.contains(cause), "{cause:?} in {painted}");
+        }
+        assert!(matches!(app.ui.connect.sheet, Some(Sheet::Recover { .. })));
+        let data = dir.path().join("data/connect");
+        assert!(!data.join("account.json").exists());
+        assert!(!data.join("pending-recovery.json").exists());
+        app.ui.connect.sheet = None;
+    }
+    connect.answer_route_error("POST /v1/account/recover", 429, "rate_limited");
+    type_recovery(&ctx, &mut app, &account_id, &words);
+    choose(&ctx, &mut app, SheetChoice::Go);
+    confirm_with(&mut app, &ctx, PASS);
+    until(&ctx, &mut app, "the limit", |app| {
+        live::error_for_test(app).is_some()
+    });
+    assert_eq!(
+        live::error_for_test(&app),
+        Some(super::connect::recover_wait(60))
+    );
+    assert!(
+        !dir.path()
+            .join("data/connect/pending-recovery.json")
+            .exists()
+    );
+}
+
+/// Connect cannot be reached: the step says that the account is not recovered yet and to
+/// try again; the recovery stays pending on disk (never its code). When Connect had taken
+/// it, the next session settles it: the account file is written, and as the new code was
+/// not shown (a restart), the account keeps the lasting line of a code that nobody saw.
+#[test]
+fn an_unanswered_recovery_is_settled_by_the_next_session() {
+    let connect = FakeConnect::start();
+    let (account_id, old) = lost_account(&connect);
+    let dir = TempDir::new().expect("temp dir");
+    let mut app = connect_app(&dir, &connect);
+    let ctx = egui::Context::default();
+    connect.lose_next_answers("POST /v1/account/recover", 50);
+    type_recovery(&ctx, &mut app, &account_id, &old);
+    choose(&ctx, &mut app, SheetChoice::Go);
+    confirm_with(&mut app, &ctx, PASS);
+    until(&ctx, &mut app, "no answer", |app| {
+        live::error_for_test(app).is_some()
+    });
+    assert_eq!(
+        live::error_for_test(&app),
+        Some(ConnectError::RecoverUnanswered.to_string())
+    );
+    let data = dir.path().join("data/connect");
+    assert!(!data.join("account.json").exists());
+    let pending = std::fs::read_to_string(data.join("pending-recovery.json")).expect("pending");
+    assert!(!pending.contains(old.as_str()), "never the code");
+    assert_eq!(
+        connect.live_devices(&account_id).len(),
+        1,
+        "Connect took it"
+    );
+    // A restart: the new code is not in memory any more.
+    connect.keep_answers();
+    crate::connect::account::forget_pending_creation_codes();
+    app.ui.connect.sheet = None;
+    let store = app.connect_session().store();
+    app.connect_configure(store, Some(dir.path().join("data")));
+    until(&ctx, &mut app, "the account", |app| shown(app).is_some());
+    assert!(!data.join("pending-recovery.json").exists());
+    let account = shown(&app).expect("account");
+    assert!(account.recovery_unseen);
+    assert_eq!(account.recovered, Some(Some(1)));
+    assert_eq!(app.status_text, super::connect::RECOVERED_UNSEEN);
+    let painted = text(&ctx, &mut app);
+    assert!(
+        painted.contains(super::connect::RECOVERY_UNSEEN),
+        "{painted}"
+    );
+}
+
+/// A lock between Connect's answer and the sheet of the code, at a creation and at a
+/// recovery: the code is not shown to a locked vault, and the next unlock shows the account
+/// with the lasting line of a code that nobody saw and "New Recovery Code…".
+#[test]
+fn a_lock_before_the_code_is_shown_leaves_the_lasting_line() {
+    let connect = FakeConnect::start();
+    let (account_id, old) = lost_account(&connect);
+    for case in ["create", "recover"] {
+        let dir = TempDir::new().expect("temp dir");
+        let mut app = connect_app(&dir, &connect);
+        let ctx = egui::Context::default();
+        // The request waits at Connect a moment, and the lock comes while it waits: after
+        // the owner check counted and the request left, before the answer.
+        let route = if case == "create" {
+            "POST /v1/account"
+        } else {
+            "POST /v1/account/recover"
+        };
+        let sent = connect.count(route);
+        connect.slow_next_answers(route, 1, Duration::from_millis(800));
+        if case == "create" {
+            act(&ctx, &mut app, Action::Create);
+            if let Some(Sheet::Create { name, .. }) = &mut app.ui.connect.sheet {
+                name.push_str("Rafal");
+            }
+            choose(&ctx, &mut app, SheetChoice::Go);
+        } else {
+            type_recovery(&ctx, &mut app, &account_id, &old);
+            choose(&ctx, &mut app, SheetChoice::Go);
+            confirm_with(&mut app, &ctx, PASS);
+            pass(&ctx, &mut app, live::step);
+        }
+        assert!(live::view(&app).busy, "{case}: the request runs");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while connect.count(route) == sent {
+            assert!(Instant::now() < deadline, "{case}: no request");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        app.lock_vault(Some(&ctx));
+        until(&ctx, &mut app, "the answer", |app| {
+            !app.ui.connect.live.session().is_open()
+                && app.ui.connect.sheet.is_none()
+                && !live::view(app).busy
+        });
+        assert!(
+            !matches!(app.ui.connect.sheet, Some(Sheet::Recovery { .. })),
+            "{case}: no code to a locked vault"
+        );
+        assert!(
+            dir.path().join("data/connect/account.json").exists(),
+            "{case}: the account file"
+        );
+        unlock(&ctx, &mut app);
+        until(&ctx, &mut app, "the account", |app| shown(app).is_some());
+        assert!(
+            shown(&app).expect("account").recovery_unseen,
+            "{case}: the mark"
+        );
+        let painted = text(&ctx, &mut app);
+        assert!(
+            painted.contains(super::connect::RECOVERY_UNSEEN),
+            "{case}: {painted}"
+        );
+        assert!(painted.contains(super::connect::NEW_RECOVERY), "{case}");
+    }
+}
+
+/// A computer with an account file is not offered the recovery, and the action does
+/// nothing there.
+#[test]
+fn the_recovery_is_not_offered_with_an_account_file() {
+    let dir = TempDir::new().expect("temp dir");
+    let connect = FakeConnect::start();
+    let mut app = connect_app(&dir, &connect);
+    let ctx = egui::Context::default();
+    assert!(text(&ctx, &mut app).contains(super::connect::RECOVER));
+    create_account(&ctx, &mut app, "Rafal");
+    assert!(!text(&ctx, &mut app).contains(super::connect::RECOVER));
+    act(&ctx, &mut app, Action::Recover);
+    assert!(app.ui.connect.sheet.is_none());
+}
+
+/// The new rows stay inside their column, from the width of Settings in the smallest
+/// window to a wide one: the recovery row without an account, and the account id and the
+/// line after a recovery, each with its whole button.
+#[test]
+fn the_recovery_rows_fit_their_column_at_each_width() {
+    let account = Account {
+        account_id: "acc_k7m2q4x3ca".to_owned(),
+        name: "Aleksandra Nowak-Kowalska".to_owned(),
+        email: None,
+        plan: Plan {
+            plan: None,
+            status: "none".to_owned(),
+            entitled: false,
+            interval: None,
+            quantity: None,
+            renews_at: None,
+            ends_at: None,
+            grace_until: None,
+            read_only_until: None,
+            delete_at: None,
+        },
+        devices: Vec::new(),
+        group: None,
+        list_verified: true,
+        list_nearly_full: false,
+        recovery_unseen: true,
+        recovery_changed: None,
+        recovered: Some(Some(12)),
+    };
+    for (shown, whole) in [
+        (Shown::None, vec![super::connect::RECOVER]),
+        (
+            Shown::Account(account),
+            vec!["Copy", "OK", "acc_k7m2q4x3ca"],
+        ),
+    ] {
+        let view = ConnectView {
+            shown,
+            plans: Some(fixture_plans()),
+            locked: false,
+            busy: false,
+            error: None,
+            now: 1_795_000_000,
+        };
+        for width in [300.0_f32, 340.0, 560.0] {
+            let ctx = egui::Context::default();
+            let left = 20.0;
+            for frame in 0..3 {
+                let output = ctx.run_ui(input(0.0, Vec::new()), |ui| {
+                    let rect =
+                        egui::Rect::from_min_size(egui::pos2(left, 0.0), egui::vec2(width, 3000.0));
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                        let _ = super::connect::draw(ui, &view);
+                    });
+                });
+                if frame == 2 {
+                    let mut text = String::new();
+                    for clipped in &output.shapes {
+                        collect(&clipped.shape, &mut text);
+                        let right = clipped.shape.visual_bounding_rect().right();
+                        assert!(
+                            right <= left + width + 3.0,
+                            "at {width}: a shape ends at {right}: {:?}",
+                            clipped.shape
+                        );
+                    }
+                    for word in &whole {
+                        assert!(text.contains(word), "at {width}: no {word:?} in\n{text}");
+                    }
+                }
+                output.drop_without_applying_deltas();
+            }
+        }
+    }
 }

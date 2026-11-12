@@ -2,7 +2,7 @@
 //! from synthetic fixtures, drawn by the same functions as the vault build. The menu at
 //! the top of the section picks a frame; `APASSY_DEMO_CONNECT` (1, 2a, 2b, 3, S, 4a, 4b,
 //! 4c, 5a, 5b, 5c, 6a to 6h, 7a to 7d, 8a, 8b, 8c, 9, 9a to 9e, 10a, 10b, 10c, 11a, 11b,
-//! 13a, 13c, and the states without a mockup frame T1 to T8) opens it at start once
+//! 13a, 13c, 13d, 13e, 14a to 14h, and the states without a mockup frame T1 to T8) opens it at start once
 //! Settings shows (`APASSY_DEMO_DEVICES=1` opens Settings). The
 //! prices are those of `tests/fixtures/connect-billing-v1/plans.json`, read as Connect
 //! would send them; no amount is written here.
@@ -21,6 +21,8 @@ const DAY: u64 = 86_400;
 /// The text of `ConnectError` for a Connect that cannot be reached.
 const UNREACHABLE_NOTE: &str =
     "Apassy Connect could not be reached. Check the internet connection and try again.";
+/// The text of `ConnectError::RecoverUnanswered`.
+const RECOVER_UNREACHABLE: &str = "Apassy Connect could not be reached, so the account is not recovered yet. Try again later. If Connect got the request, Apassy finishes the recovery the next time it reaches Connect.";
 /// 21 Sep 2026: the account and this Mac.
 const CREATED: u64 = 1_790_000_000;
 
@@ -68,6 +70,14 @@ const FRAMES: &[(&str, &str)] = &[
     ("13c", "Frame 13c: The New Code"),
     ("13d", "Frame 13d: A New Code of Another Device"),
     ("13e", "Frame 13e: The New Code, Not Recorded"),
+    ("14a", "Frame 14a: Recover an Account"),
+    ("14b", "Frame 14b: Recover, a Wrong Word"),
+    ("14c", "Frame 14c: Recover, Refused"),
+    ("14d", "Frame 14d: Recover, Too Many Tries"),
+    ("14e", "Frame 14e: Recover, Connect Unreachable"),
+    ("14f", "Frame 14f: Recover, Busy"),
+    ("14g", "Frame 14g: Recovered, the New Code"),
+    ("14h", "Frame 14h: Recovered, the Account"),
     // The states of the vault build that the mockup has no frame for.
     ("T1", "Asking Connect"),
     ("T2", "Connect Unreachable"),
@@ -251,6 +261,50 @@ fn account(plan: Plan, group: Option<Group>) -> Account {
         list_nearly_full: false,
         recovery_unseen: false,
         recovery_changed: None,
+        recovered: None,
+    }
+}
+
+/// The words of the recovery code that frame 14 types (synthetic).
+const OLD_WORDS: &str = "blaze cable flute board seal tiger maple orbit cedar lemon quartz otter harbor mango piano river";
+
+/// The words of the recovery codes of the frames, the only words that the demo build
+/// knows (it has no word list).
+const NEW_WORDS: &str = "amber lotus quiet prism walnut ember falcon meadow pilot cobalt summit river nickel violet canyon tulip";
+
+/// A typed recovery code as the vault build reads it, with the words of the frames as the
+/// list.
+pub(super) fn typed_code(code: &str) -> super::Typed {
+    let words: Vec<String> = code
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .map(str::to_lowercase)
+        .filter(|word| !word.is_empty() && !word.bytes().all(|byte| byte.is_ascii_digit()))
+        .collect();
+    if words.is_empty() {
+        return super::Typed::Empty;
+    }
+    let known = |word: &str| {
+        OLD_WORDS
+            .split(' ')
+            .chain(NEW_WORDS.split(' '))
+            .any(|w| w == word)
+    };
+    if let Some((index, word)) = words.iter().enumerate().find(|(_, word)| !known(word)) {
+        return super::Typed::Unknown(index + 1, word.clone());
+    }
+    if words.len() == 16 {
+        super::Typed::Ready
+    } else {
+        super::Typed::Count(words.len())
+    }
+}
+
+/// Frame 14a and its states: the recovery sheet with `account_id` and `code` typed.
+fn recover_sheet(account_id: &str, code: &str) -> Sheet {
+    Sheet::Recover {
+        account_id: account_id.to_owned(),
+        code: Zeroizing::new(code.to_owned()),
+        device_name: THIS_NAME.to_owned(),
     }
 }
 
@@ -288,6 +342,7 @@ fn frame(code: &str) -> (Shown, Option<Sheet>) {
         "2b" => (
             Shown::None,
             Some(Sheet::Recovery {
+                account_id: "acc_k7m2q4x3ca".to_owned(),
                 words: Zeroizing::new(
                     "blaze cable flute board seal tiger maple orbit cedar lemon quartz otter harbor mango piano river"
                         .to_owned(),
@@ -515,6 +570,7 @@ fn frame(code: &str) -> (Shown, Option<Sheet>) {
         "13e" => (
             personal(),
             Some(Sheet::Recovery {
+                account_id: "acc_k7m2q4x3ca".to_owned(),
                 words: Zeroizing::new(
                     "amber lotus quiet prism walnut ember falcon meadow pilot cobalt summit river nickel violet canyon tulip"
                         .to_owned(),
@@ -532,6 +588,7 @@ fn frame(code: &str) -> (Shown, Option<Sheet>) {
         "13c" => (
             personal(),
             Some(Sheet::Recovery {
+                account_id: "acc_k7m2q4x3ca".to_owned(),
                 words: Zeroizing::new(
                     "amber lotus quiet prism walnut ember falcon meadow pilot cobalt summit river nickel violet canyon tulip"
                         .to_owned(),
@@ -539,6 +596,36 @@ fn frame(code: &str) -> (Shown, Option<Sheet>) {
                 unrecorded: false,
             }),
         ),
+        "14a" | "14c" | "14d" | "14e" | "14f" => (
+            Shown::None,
+            Some(recover_sheet("acc_k7m2q4x3ca", OLD_WORDS)),
+        ),
+        "14b" => (
+            Shown::None,
+            Some(recover_sheet(
+                "acc_k7m2q4x3c",
+                &OLD_WORDS.replace("orbit", "orbitt").to_uppercase(),
+            )),
+        ),
+        "14g" => (
+            Shown::Loading {
+                name: Some("Alex".to_owned()),
+            },
+            Some(Sheet::Recovery {
+                account_id: "acc_k7m2q4x3ca".to_owned(),
+                words: Zeroizing::new(
+                    "amber lotus quiet prism walnut ember falcon meadow pilot cobalt summit river nickel violet canyon tulip"
+                        .to_owned(),
+                ),
+                unrecorded: false,
+            }),
+        ),
+        "14h" => {
+            let mut shown = account(active("personal", renews), None);
+            shown.recovered = Some(Some(2));
+            shown.devices.truncate(1);
+            (Shown::Account(shown), None)
+        }
         "T1" => (
             Shown::Loading {
                 name: Some("Alex".to_owned()),
@@ -661,6 +748,7 @@ pub(crate) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
         Some(Action::Delete) => Some("11a"),
         Some(Action::ForgetRemoved) => Some("T4"),
         Some(Action::NewRecoveryCode) => Some("13c"),
+        Some(Action::Recover) => Some("14a"),
         _ => None,
     };
     if let Some(frame) = next.and_then(Frame::from_code) {
@@ -669,8 +757,13 @@ pub(crate) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let plans = view.plans.clone();
     let choice = app.ui.connect.sheet.as_mut().and_then(|sheet| {
         // Frame 2c: the creation waits for Connect after a first try failed.
+        let wait = super::recover_wait(1_800);
         let (busy, error) = match app.ui.connect.demo.code() {
             "2c" => (true, Some(UNREACHABLE_NOTE)),
+            "14c" => (false, Some(super::RECOVER_REFUSED)),
+            "14d" => (false, Some(wait.as_str())),
+            "14e" => (false, Some(RECOVER_UNREACHABLE)),
+            "14f" => (true, None),
             _ => (false, None),
         };
         super::sheet(&ctx, sheet, plans.as_ref(), busy, error, NOW, &|ui, _| {

@@ -49,7 +49,8 @@ use super::client::{
     AccountCreated, AccountDeleted, AccountView, Challenge, ChallengeRequest, CheckoutAnswer,
     CheckoutRequest, ConnectClient, CreateAccount, DeviceView, GroupDetail, GroupJoined,
     GroupMember, InviteAnswer, JoinBody, JoinCancel, MemberRemoved, PlanView, PortalAnswer,
-    RecoverBody, RevokeAnswer, SeatsAnswer, StoreDevice, TokenRequest, VaultStoreView,
+    RecoverAnswer, RecoverBody, RevokeAnswer, SeatsAnswer, StoreDevice, TokenRequest,
+    VaultStoreView,
 };
 use super::device_key::{AccountSigner, DeviceKeyStore, recover_message};
 use super::entitlement::Entitlement;
@@ -198,6 +199,116 @@ impl PendingCreation {
     }
 }
 
+/// The waits between the tries of one recovery: the same body again after a lost answer,
+/// until Connect answers or the last try is lost too (the recovery stays pending).
+const RECOVER_WAITS: [Duration; 4] = [
+    Duration::from_millis(250),
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+];
+/// A pending recovery whose first try is younger than this sends its body again: Connect
+/// answers the same body with the same result for 10 minutes (section 9). An older one is
+/// settled with a sign-in of this device's key instead.
+const RECOVER_REPEAT_SECS: u64 = 9 * 60;
+
+/// The pending recovery of an account on this device, next to the account file
+/// (`connect/pending-recovery.json`): the exact body of `POST /v1/account/recover`, written
+/// before the first try, with the time of that try, and removed when Connect answered it
+/// or when this device knows that Connect did not take it. Public values only: the ids,
+/// the name, the public key, the public recovery key of the new code, and signatures;
+/// never a recovery code.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PendingRecovery {
+    v: u8,
+    origin: String,
+    account_id: String,
+    device_name: String,
+    platform: String,
+    public_key: String,
+    recovery_key: String,
+    signature: String,
+    recovery_signature: String,
+    statement: String,
+    sent_at: u64,
+}
+
+impl PendingRecovery {
+    fn path(account_file: &Path) -> PathBuf {
+        account_file.with_file_name("pending-recovery.json")
+    }
+
+    /// The pending recovery of `account_file` for this key (and `origin`, when given);
+    /// `None` when there is none, or one of another shape, origin, or key (it goes).
+    fn load(account_file: &Path, origin: Option<&str>, public_key: &str) -> Option<Self> {
+        let path = Self::path(account_file);
+        let meta = fs::symlink_metadata(&path).ok()?;
+        let pending = (meta.is_file() && meta.permissions().mode() & 0o077 == 0)
+            .then(|| fs::read(&path).ok())
+            .flatten()
+            .filter(|text| text.len() as u64 <= MAX_STATE_BYTES)
+            .and_then(|text| serde_json::from_slice::<Self>(&text).ok())
+            .filter(|pending| {
+                pending.v == STATE_VERSION
+                    && origin.is_none_or(|origin| pending.origin == origin)
+                    && pending.public_key == public_key
+                    && valid_account_id(&pending.account_id)
+                    && clean_name(&pending.device_name)
+                        .is_ok_and(|clean| clean == pending.device_name)
+            });
+        if pending.is_none() {
+            let _ = fs::remove_file(&path);
+        }
+        pending
+    }
+
+    fn body(&self) -> RecoverBody<'_> {
+        RecoverBody {
+            account_id: &self.account_id,
+            device_name: &self.device_name,
+            platform: &self.platform,
+            public_key: &self.public_key,
+            recovery_key: &self.recovery_key,
+            signature: &self.signature,
+            recovery_signature: &self.recovery_signature,
+            statement: &self.statement,
+        }
+    }
+
+    /// Write it with mode 0600 next to the account file, before the first try.
+    fn save(&self, account_file: &Path) -> Result<(), ConnectError> {
+        let text = serde_json::to_vec_pretty(self).map_err(|_| ConnectError::Local)?;
+        write_private(&Self::path(account_file), &text)
+    }
+
+    /// It goes, with the new recovery code that this process holds for it.
+    fn remove(account_file: &Path, account_id: &str) {
+        let _ = fs::remove_file(Self::path(account_file));
+        drop(take_pending_code(&Self::path(account_file), account_id));
+    }
+}
+
+/// Whether the account file `account_file` has a recovery of this device beside it that
+/// Connect did not answer ([`ConnectAccount::resume_recovery`] settles it).
+pub fn has_pending_recovery(account_file: &Path) -> bool {
+    PendingRecovery::path(account_file).is_file()
+}
+
+/// A recovered account, the new recovery code when this process still holds it, and the
+/// number of vault stores that Connect deleted when it named it.
+pub type Resumed = (ConnectAccount, Option<RecoveryCode>, Option<u64>);
+
+/// How a pending recovery ended at Connect.
+enum Settled {
+    /// Connect took it: this device is the account's first device, and the account file
+    /// is written; the new code when this process still holds it, and the number of
+    /// deleted stores when Connect named it.
+    Recovered(Box<ConnectAccount>, Option<RecoveryCode>, Option<u64>),
+    /// Connect did not take it: the pending recovery went, and the key comes back.
+    NotTaken(AccountSigner),
+}
+
 /// The recovery codes of the pending creations of this process, by the pending file and
 /// the account id: in memory only, so a creation that is repeated in the same run still
 /// shows its code once. A restart forgets them ([`ConnectError::RecoveryCodeNotShown`]).
@@ -321,6 +432,12 @@ pub struct AccountState {
     /// not had yet ([`PendingRotation`]): public values only, never the code.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery_pending: Option<PendingRotation>,
+    /// Unix seconds when this device recovered the account with its recovery code
+    /// (section 9): every vault store that the account had was deleted at Connect then, so
+    /// a vault whose store is gone says why and offers a new store. `None` for an account
+    /// that this device made or joined.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovered_at: Option<u64>,
     /// The other accounts whose root this account pinned (its own `peer` entries) or took
     /// from the `peer` entry of the account that made a store it joined (at most 64,
     /// section 16, [`PeerPin`]).
@@ -412,6 +529,7 @@ impl AccountState {
             recovery_unseen: false,
             recovery_key: None,
             recovery_pending: None,
+            recovered_at: None,
             peers: Vec::new(),
             stores: Vec::new(),
         }
@@ -860,6 +978,81 @@ fn twice<T>(mut step: impl FnMut() -> Result<T, ConnectError>) -> Result<T, Conn
     }
 }
 
+/// An error after which Connect may have taken a request: no answer, a broken answer,
+/// or a failure of the service.
+fn unanswered(error: &ConnectError) -> bool {
+    matches!(
+        error,
+        ConnectError::Offline
+            | ConnectError::Broken
+            | ConnectError::Refused {
+                status: 500..=599,
+                ..
+            }
+    )
+}
+
+/// Send the pending recovery `pending`, and the same body again after a lost answer
+/// ([`RECOVER_WAITS`]).
+fn send_recovery(
+    client: &ConnectClient,
+    pending: &PendingRecovery,
+) -> Result<RecoverAnswer, ConnectError> {
+    let mut answer = client.recover(&pending.body());
+    for wait in RECOVER_WAITS {
+        if !matches!(answer, Err(ConnectError::Offline | ConnectError::Broken)) {
+            break;
+        }
+        std::thread::sleep(wait);
+        answer = client.recover(&pending.body());
+    }
+    answer
+}
+
+/// Whether Connect took the pending recovery `pending` of an earlier try, by a sign-in of
+/// this device's key at its account: `Some` with the device id and the recovery key that
+/// Connect holds when the key is a live device of the account and the verified device
+/// list has this key as its root, under the name of the recovery; `None` when the key is
+/// no device of the account (`401` at the challenge) or a removed one.
+fn recovered_by_sign_in(
+    client: &ConnectClient,
+    signer: &AccountSigner,
+    pending: &PendingRecovery,
+    now: u64,
+) -> Result<Option<(String, String)>, ConnectError> {
+    let public_key = signer.public_key_b64u();
+    let challenge = match client.challenge(&ChallengeRequest {
+        account_id: &pending.account_id,
+        public_key: &public_key,
+    }) {
+        Ok(challenge) => challenge,
+        Err(
+            ConnectError::Unauthenticated | ConnectError::JoinPending | ConnectError::JoinRefused,
+        ) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let (token, device_id) =
+        match finish_sign_in(client, signer, &pending.account_id, challenge, None, now) {
+            Ok(signed_in) => signed_in,
+            Err(ConnectError::Revoked) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+    let view = client.account(token.value.as_str())?;
+    if view.account_id != pending.account_id {
+        return Err(ConnectError::BadAnswer);
+    }
+    let own = signer.public_key();
+    trust::verify_list(client.origin(), &pending.account_id, own, &view.device_list)
+        .filter(|list| list.live.iter().any(|key| key.as_slice() == own))
+        .filter(|list| list.name_of(own) == Some(pending.device_name.as_str()))
+        .ok_or(ConnectError::BadAnswer)?;
+    let recovery_key = view
+        .recovery_key
+        .filter(|key| valid_recovery_key(key))
+        .unwrap_or_else(|| pending.recovery_key.clone());
+    Ok(Some((device_id, recovery_key)))
+}
+
 impl ConnectAccount {
     fn build(
         client: ConnectClient,
@@ -1045,14 +1238,14 @@ impl ConnectAccount {
         if created.account_id != creation.account_id || !valid_device_id(&created.device_id) {
             return Err(ConnectError::BadAnswer);
         }
-        // This Mac is the account root: version 1 of the device list. A code that this
-        // process does not hold any more was never shown: the account file keeps saying so.
-        let shown = pending_codes()
-            .iter()
-            .any(|(held, id, _)| held == path && *id == creation.account_id);
+        // This Mac is the account root: version 1 of the device list. The account file
+        // keeps the mark of a code that nobody saw until the owner closes the sheet of the
+        // code ("I Saved It", [`Self::recovery_code_seen`]): a lock, a quit, or a restart
+        // before it (a code that this process does not hold any more was never shown)
+        // leaves the lasting line and "New Recovery Code…".
         let state = AccountState {
             name: Some(creation.name.clone()),
-            recovery_unseen: !shown,
+            recovery_unseen: true,
             recovery_key: Some(creation.recovery_key.clone()),
             ..AccountState::for_root(
                 client.origin(),
@@ -1087,14 +1280,39 @@ impl ConnectAccount {
         Ok(Some(Self::build(client, state, path, Arc::new(signer))))
     }
 
-    /// Recover an account that has no live device (section 9): this Mac becomes its first
-    /// device (the new root) with its account key, every vault store of the account is
-    /// deleted at Connect, and a new recovery code replaces the old one. The old code
-    /// never leaves this Mac: its key signs the request. A lost answer is sent once more
-    /// with the same body. A used key (`409 conflict`) is handled as at
+    /// The owner action of the recovery of the account `account_id` on this device.
+    pub fn recover_action(account_id: &str) -> OwnerAction {
+        OwnerAction::RecoverConnectAccount {
+            account_id: account_id.to_owned(),
+        }
+    }
+
+    /// Recover an account that has no live device (section 9), after a fresh owner check
+    /// for [`Self::recover_action`] in the vault session `epoch`: this device becomes its
+    /// first device (the new root) with its account key, every vault store of the account
+    /// is deleted at Connect, and a new recovery code replaces the old one. The old code
+    /// never leaves this device: its key signs the request. The proof is used up, also when
+    /// the call fails. `account_id` may have spaces around it and upper case.
+    ///
+    /// The body is written as the pending recovery of this device before the first try
+    /// (public values only), and the new code stays in memory; a lost answer sends the same
+    /// body again, until Connect answers or the last try is lost too: then the call is
+    /// [`ConnectError::RecoverUnanswered`], the pending recovery stays, and
+    /// [`Self::resume_recovery`] (or the next call) settles it, also after a restart: with
+    /// the same body while Connect still answers it (10 minutes), else with a sign-in of
+    /// this device's key. So a recovery never ends with a key that Connect made the root
+    /// while this device has no account file. A used key (`409 conflict`) is handled as at
     /// [`Self::create`]: the account of a late-confirmed earlier join is left first, then a
-    /// new key signs a new request, once. The new code comes back once, with the number of
-    /// deleted stores.
+    /// new key signs a new request, once. Any other refusal ends the recovery, and nothing
+    /// changed.
+    ///
+    /// The account file keeps the mark of a code that nobody saw
+    /// ([`AccountState::recovery_unseen`]) until the owner closes the sheet of the new code
+    /// ([`Self::recovery_code_seen`]). The new code comes back once, with the number of
+    /// deleted stores (`None` when the recovery was settled by a sign-in). A recovery that
+    /// a restart interrupted finishes without its code: the account file is written, and
+    /// the call answers [`ConnectError::RecoveryCodeNotShown`].
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     pub fn recover(
         client: ConnectClient,
         store: &dyn DeviceKeyStore,
@@ -1102,17 +1320,36 @@ impl ConnectAccount {
         account_id: &str,
         recovery: &str,
         device_name: &str,
-    ) -> Result<(Self, RecoveryCode, u64), ConnectError> {
+        proof: OwnerProof,
+        epoch: &[u8; 32],
+    ) -> Result<(Self, RecoveryCode, Option<u64>), ConnectError> {
         if AccountState::load(path)?.is_some() {
             return Err(ConnectError::AccountExists);
         }
-        let account_id = account_id.trim();
-        if !valid_account_id(account_id) {
+        let account_id = account_id.trim().to_ascii_lowercase();
+        if !valid_account_id(&account_id) {
             return Err(ConnectError::Invalid);
         }
+        proof
+            .check(&Self::recover_action(&account_id), epoch)
+            .map_err(ConnectError::OwnerCheck)?;
+        drop(proof);
         let old = RecoveryCode::parse(recovery).ok_or(ConnectError::Invalid)?;
         let device_name = clean_name(device_name)?;
         let mut signer = AccountSigner::open_or_create(store)?;
+        // A recovery of an earlier try that Connect did not answer goes first: Connect may
+        // have taken it.
+        if let Some(pending) =
+            PendingRecovery::load(path, Some(client.origin()), &signer.public_key_b64u())
+        {
+            match Self::settle_pending_recovery(client.clone(), signer, path, &pending)? {
+                Settled::Recovered(account, Some(code), deleted) => {
+                    return Ok((*account, code, deleted));
+                }
+                Settled::Recovered(..) => return Err(ConnectError::RecoveryCodeNotShown),
+                Settled::NotTaken(back) => signer = back,
+            }
+        }
         // A join of this device that waits on disk ends first. A device may have confirmed
         // it after this device left it, so its account may list this key (below).
         let mut earlier = PendingJoinFile::load(path)
@@ -1120,54 +1357,185 @@ impl ConnectAccount {
         end_pending_join(path, &signer);
         let new = RecoveryCode::generate()?;
         let recovery_key = new.key()?.public_key_b64u();
+        let codes_at = PendingRecovery::path(path);
+        let mut new = Some(new);
         let mut key_note = None;
-        let (answer, public_key) = loop {
+        loop {
             let public_key = signer.public_key_b64u();
-            let message = recover_message(client.origin(), account_id, &public_key, &recovery_key);
-            let signature = encode_b64u(&signer.sign(&message)?);
-            let recovery_signature = encode_b64u(&old.key()?.sign_recover(&message)?);
+            let message = recover_message(client.origin(), &account_id, &public_key, &recovery_key);
             // This device is the root of the new device list: its entry, signed over its
             // name.
-            let (root, _) = signer.sign_root(client.origin(), account_id, &device_name)?;
-            let statement = encode_b64u(&root);
-            let body = RecoverBody {
-                account_id,
-                device_name: &device_name,
-                platform: PLATFORM,
-                public_key: &public_key,
-                recovery_key: &recovery_key,
-                signature: &signature,
-                recovery_signature: &recovery_signature,
-                statement: &statement,
+            let (root, _) = signer.sign_root(client.origin(), &account_id, &device_name)?;
+            let pending = PendingRecovery {
+                v: STATE_VERSION,
+                origin: client.origin().to_owned(),
+                account_id: account_id.clone(),
+                device_name: device_name.clone(),
+                platform: PLATFORM.to_owned(),
+                public_key,
+                recovery_key: recovery_key.clone(),
+                signature: encode_b64u(&signer.sign(&message)?),
+                recovery_signature: encode_b64u(&old.key()?.sign_recover(&message)?),
+                statement: encode_b64u(&root),
+                sent_at: system_clock()(),
             };
-            match twice(|| client.recover(&body)) {
-                Ok(answer) => break (answer, public_key),
-                // Connect counts this key as used: a new key and a new request.
+            // Nothing is sent before the pending recovery is on disk.
+            pending.save(path)?;
+            if let Some(code) = new.take() {
+                pending_codes().push((codes_at.clone(), account_id.clone(), code));
+            }
+            match send_recovery(&client, &pending) {
+                Ok(answer) => {
+                    let (mut account, code, deleted) =
+                        Self::recovered(client, signer, path, &pending, &answer)?;
+                    drop(old);
+                    account.key_note = key_note;
+                    return code
+                        .map(|code| (account, code, deleted))
+                        .ok_or(ConnectError::RecoveryCodeNotShown);
+                }
+                // Connect counts this key as used: a new key and a new request, with the
+                // same new code.
                 Err(ConnectError::Conflict) if key_note.is_none() => {
+                    let _ = fs::remove_file(PendingRecovery::path(path));
                     signer = Self::renew_key(store, signer, earlier.take(), &mut key_note)?;
                 }
-                Err(error) => return Err(error),
+                // No answer: the recovery stays pending, and the next call or
+                // [`Self::resume_recovery`] settles it.
+                Err(error) if unanswered(&error) => return Err(ConnectError::RecoverUnanswered),
+                // A refusal of Connect: nothing changed.
+                Err(error) => {
+                    PendingRecovery::remove(path, &account_id);
+                    return Err(error);
+                }
             }
+        }
+    }
+
+    /// A recovery of this device that Connect did not answer (a lost answer, a quit, a
+    /// restart): settle it now, with the same body while Connect still answers it, else
+    /// with a sign-in of this device's key. `None` when there is none, or Connect did not
+    /// take it (it goes); else the account, whose file is now written, with the new code
+    /// when this process still holds it (else the account file keeps the mark of a code
+    /// that nobody saw) and the number of deleted stores when Connect named it. No answer
+    /// is [`ConnectError::RecoverUnanswered`], and the recovery stays pending.
+    pub fn resume_recovery(
+        store: &dyn DeviceKeyStore,
+        path: &Path,
+    ) -> Result<Option<Resumed>, ConnectError> {
+        if !has_pending_recovery(path) {
+            return Ok(None);
+        }
+        if AccountState::load(path)?.is_some() {
+            let _ = fs::remove_file(PendingRecovery::path(path));
+            return Ok(None);
+        }
+        let Some(signer) = AccountSigner::open(store)? else {
+            let _ = fs::remove_file(PendingRecovery::path(path));
+            return Ok(None);
         };
-        drop(old);
-        if answer.account_id != account_id || !valid_device_id(&answer.device_id) {
+        let Some(pending) = PendingRecovery::load(path, None, &signer.public_key_b64u()) else {
+            return Ok(None);
+        };
+        let client = ConnectClient::new(&pending.origin)?;
+        Ok(
+            match Self::settle_pending_recovery(client, signer, path, &pending)? {
+                Settled::Recovered(account, code, deleted) => Some((*account, code, deleted)),
+                Settled::NotTaken(_) => None,
+            },
+        )
+    }
+
+    /// Settle the pending recovery `pending` of this device ([`Self::resume_recovery`]).
+    fn settle_pending_recovery(
+        client: ConnectClient,
+        signer: AccountSigner,
+        path: &Path,
+        pending: &PendingRecovery,
+    ) -> Result<Settled, ConnectError> {
+        let now = system_clock()();
+        if now.saturating_sub(pending.sent_at) < RECOVER_REPEAT_SECS {
+            match send_recovery(&client, pending) {
+                Ok(answer) => {
+                    let (account, code, deleted) =
+                        Self::recovered(client, signer, path, pending, &answer)?;
+                    return Ok(Settled::Recovered(Box::new(account), code, deleted));
+                }
+                Err(error) if unanswered(&error) => return Err(ConnectError::RecoverUnanswered),
+                // A refusal: the sign-in below says whether an earlier try was taken.
+                Err(_) => {}
+            }
+        }
+        match recovered_by_sign_in(&client, &signer, pending, now) {
+            Ok(Some((device_id, recovery_key))) => {
+                let (account, code) =
+                    Self::write_recovered(client, signer, path, pending, &device_id, recovery_key)?;
+                Ok(Settled::Recovered(Box::new(account), code, None))
+            }
+            Ok(None) => {
+                PendingRecovery::remove(path, &pending.account_id);
+                Ok(Settled::NotTaken(signer))
+            }
+            Err(error) if unanswered(&error) || matches!(error, ConnectError::RateLimited(_)) => {
+                Err(ConnectError::RecoverUnanswered)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// The account that Connect recovered for the pending recovery `pending`.
+    fn recovered(
+        client: ConnectClient,
+        signer: AccountSigner,
+        path: &Path,
+        pending: &PendingRecovery,
+        answer: &RecoverAnswer,
+    ) -> Result<(Self, Option<RecoveryCode>, Option<u64>), ConnectError> {
+        if answer.account_id != pending.account_id || !valid_device_id(&answer.device_id) {
             return Err(ConnectError::BadAnswer);
         }
-        // This Mac is the new account root: version 1 of a new device list.
-        let state = AccountState::for_root(
-            client.origin(),
-            &answer.account_id,
+        let (account, code) = Self::write_recovered(
+            client,
+            signer,
+            path,
+            pending,
             &answer.device_id,
-            &device_name,
-            &public_key,
-            0,
-        );
-        let mut account = Self::build(client, state, path, Arc::new(signer));
-        account.state.created_at = account.now();
-        account.state.recovery_key = Some(recovery_key);
-        account.state.save(path)?;
-        account.key_note = key_note;
-        Ok((account, new, answer.deleted_stores))
+            pending.recovery_key.clone(),
+        )?;
+        Ok((account, code, Some(answer.deleted_stores)))
+    }
+
+    /// The account file of a recovery that Connect took, then the end of the pending
+    /// recovery, and its new code when this process still holds it. This device is the new
+    /// account root: version 1 of a new device list. The mark of a code that nobody saw is
+    /// on until the owner closes the sheet of the code. A failed write keeps the recovery
+    /// pending (and its code in memory): the next try writes the file.
+    fn write_recovered(
+        client: ConnectClient,
+        signer: AccountSigner,
+        path: &Path,
+        pending: &PendingRecovery,
+        device_id: &str,
+        recovery_key: String,
+    ) -> Result<(Self, Option<RecoveryCode>), ConnectError> {
+        let now = system_clock()();
+        let state = AccountState {
+            recovery_unseen: true,
+            recovery_key: Some(recovery_key),
+            recovered_at: Some(now),
+            ..AccountState::for_root(
+                client.origin(),
+                &pending.account_id,
+                device_id,
+                &pending.device_name,
+                &pending.public_key,
+                now,
+            )
+        };
+        state.save(path)?;
+        let _ = fs::remove_file(PendingRecovery::path(path));
+        let code = take_pending_code(&PendingRecovery::path(path), &pending.account_id);
+        Ok((Self::build(client, state, path, Arc::new(signer)), code))
     }
 
     /// Connect counts the key of `signer` as used at a creation or a recovery (`409
@@ -3305,6 +3673,7 @@ impl JoinRequest {
                 .clone()
                 .filter(|key| valid_recovery_key(key)),
             recovery_pending: None,
+            recovered_at: None,
             peers: Vec::new(),
             stores: Vec::new(),
         };
@@ -3384,6 +3753,7 @@ mod tests {
             recovery_unseen: false,
             recovery_key: None,
             recovery_pending: None,
+            recovered_at: None,
             peers: Vec::new(),
             stores: Vec::new(),
         }

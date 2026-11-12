@@ -49,7 +49,7 @@ pub use account::{
     AccountState, Clock, ConnectAccount, DeviceLink, Forgotten, JoinPoll, JoinRequest,
     ListedSigners, PendingJoin, PendingRotation, RevokeOutcome, RotatedCode, Sleeper, account_file,
     drop_account_rows, drop_stale_account_rows, forget_old_account_file, forget_this_device,
-    group_invite_code, has_pending_join, is_old_account_file, signer_policy,
+    group_invite_code, has_pending_join, has_pending_recovery, is_old_account_file, signer_policy,
 };
 pub use client::{
     AccountCreated, AccountDeleted, AccountView, CheckoutAnswer, CheckoutRequest, ConnectClient,
@@ -71,9 +71,9 @@ pub use share::{
 };
 pub use trust::ListEntry;
 pub use words::{
-    LinkCode, RecoveryCode, RecoveryKey, ShareCode, key_fingerprint, link_fingerprint, link_hash,
-    new_account_id, safety_words, same_safety_words, share_fingerprint, share_link_hash,
-    share_safety_words,
+    LinkCode, RecoveryCode, RecoveryKey, ShareCode, TypedRecovery, find_account_id,
+    key_fingerprint, link_fingerprint, link_hash, new_account_id, read_recovery, safety_words,
+    same_safety_words, share_fingerprint, share_link_hash, share_safety_words,
 };
 
 use crate::broker::approvals::ProofRefusal;
@@ -148,6 +148,10 @@ pub enum ConnectError {
     /// Connect did not answer a new recovery code after its repeats: whether it took the
     /// code is checked at the next read of the account (section 9.1).
     RecoveryUnanswered,
+    /// Connect did not answer a recovery of the account after its repeats (section 9): the
+    /// recovery stays pending on this device, and the next try or the next visit of
+    /// Settings › Connect settles it (`ConnectAccount::resume_recovery`).
+    RecoverUnanswered,
     /// `409 seat_limit`: people or seats below the confirmed members, or above the
     /// maximum of the plan (connect-billing-v1 section 6).
     SeatLimit,
@@ -249,6 +253,9 @@ impl fmt::Display for ConnectError {
             }
             Self::RecoveryUnanswered => {
                 "Apassy Connect did not answer, so Apassy cannot tell yet whether it took the new recovery code. Apassy checks again when it next reads the account. Keep your current code until then."
+            }
+            Self::RecoverUnanswered => {
+                "Apassy Connect could not be reached, so the account is not recovered yet. Try again later. If Connect got the request, Apassy finishes the recovery the next time it reaches Connect."
             }
             Self::SeatLimit => {
                 "That number is below the members of your family or team, or above the most the plan allows. Remove members first, or choose another number."

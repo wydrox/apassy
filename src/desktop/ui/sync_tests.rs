@@ -4630,3 +4630,243 @@ fn a_wrong_pin_refuses_the_node_before_any_request() {
         SyncError::InvalidRelayAddress
     );
 }
+
+// ---- A vault store deleted at a recovery (connect-account-v1 sections 9 and 16.7). ----
+
+/// The line and the tag of a vault store that Connect deleted at a recovery say so, and
+/// never "damaged", "removed", or "join again with a link". A store that refuses this
+/// device for another reason claims no recovery and names no link.
+#[test]
+fn a_store_deleted_at_a_recovery_says_so_and_nothing_else() {
+    use super::sync::relay::{STORE_REFUSED_WORDS, tag_of, words_of};
+    use crate::desktop::sync_worker::ConnectState;
+    use crate::sync::{StoreDeleted, SyncError};
+    let deleted = |why| UiStatus::Connect(ConnectState::StoreDeleted(why));
+    assert_eq!(
+        words_of(&deleted(StoreDeleted::Recovered), None, true),
+        "The copy of this vault at Apassy Connect was deleted when the account was recovered."
+    );
+    assert_eq!(
+        words_of(&deleted(StoreDeleted::OwnerRecovered), None, true),
+        "The copy of this vault at Apassy Connect was deleted when the person who shares it with you recovered their account."
+    );
+    for why in [StoreDeleted::Recovered, StoreDeleted::OwnerRecovered] {
+        let words = words_of(&deleted(why), None, true);
+        let (tag, tone) = tag_of(&deleted(why), true);
+        assert_eq!(
+            (tag, tone),
+            ("Copy at Connect deleted", super::kit::Tone::Warning)
+        );
+        for wrong in ["amaged", "emoved", "link", "relay"] {
+            assert!(
+                !words.contains(wrong) && !tag.contains(wrong),
+                "{words} {tag}"
+            );
+        }
+    }
+    let refused = UiStatus::Problem(SyncError::RemovedFromRelay.to_string());
+    let words = words_of(&refused, None, true);
+    assert_eq!(words, STORE_REFUSED_WORDS);
+    assert!(
+        !words.contains("recovered") && !words.contains("link"),
+        "{words}"
+    );
+}
+
+/// The row of a deleted store keeps its line and "Sync Through Apassy Connect Again…"
+/// inside the row from the narrowest Settings column to a wide one
+/// (`rows::text_buttons`): the line wraps, and the button goes under it.
+#[test]
+fn the_row_of_a_deleted_store_fits_its_column_at_each_width() {
+    use super::sync::relay::{SYNC_AGAIN, deleted_store_row};
+    use crate::sync::StoreDeleted;
+    for width in [300.0_f32, 340.0, 560.0] {
+        let ctx = egui::Context::default();
+        let left = 20.0;
+        for frame in 0..3 {
+            let screen = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 800.0))),
+                ..Default::default()
+            };
+            let output = ctx.run_ui(screen, |ui| {
+                let rect = Rect::from_min_size(egui::pos2(left, 0.0), Vec2::new(width, 800.0));
+                ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                    let _ = deleted_store_row(ui, StoreDeleted::OwnerRecovered, true);
+                });
+            });
+            if frame == 2 {
+                let mut text = String::new();
+                for clipped in &output.shapes {
+                    collect(&clipped.shape, &mut text);
+                    let right = clipped.shape.visual_bounding_rect().right();
+                    assert!(
+                        right <= left + width + 3.0,
+                        "at {width}: a shape ends at {right}, past {}: {:?}",
+                        left + width,
+                        clipped.shape
+                    );
+                }
+                assert!(text.contains(SYNC_AGAIN), "at {width}:\n{text}");
+                assert!(text.contains("recovered their"), "at {width}:\n{text}");
+            }
+            output.drop_without_applying_deltas();
+        }
+    }
+}
+
+/// The whole path in the window: a vault syncs through its store; the account file then
+/// says that this device recovered the account, and the state of the sync names an earlier
+/// account key (as after a recovery, which also deleted the store at Connect). The window
+/// marks the sync at its Connect step: its row says so with "Sync Through Apassy Connect
+/// Again…", no sync and no "Sync now" asks Connect, and the button opens the step that
+/// turns on the sync through Apassy Connect, which makes a new store that syncs.
+#[test]
+fn a_store_deleted_at_a_recovery_is_named_once_and_a_new_store_syncs() {
+    use super::connect::{Action, live};
+    use super::connect_tests::fake_connect::FakeConnect;
+    use super::connect_tests::{create_account, until};
+    use super::sync::relay::{SYNC_AGAIN, SetupMode};
+    use crate::connect::MemoryKeyStore;
+    use crate::desktop::sync_worker::ConnectState;
+    use crate::sync::{StoreDeleted, StorePlan};
+    let dir = TempDir::new().expect("temp dir");
+    let relay = Arc::new(fake_relay::FakeRelay::start());
+    let connect = FakeConnect::with_relay(Arc::clone(&relay) as _);
+    let mut app = DesktopApp::new();
+    app.load_vault_list(dir.path().join("mac"), true);
+    app.sync.offered = true;
+    let ctx = egui::Context::default();
+    app.vault_list.name_input = "Personal".to_owned();
+    app.owner_ui.passphrase.push_str(PASS);
+    app.owner_ui.passphrase_confirm.push_str(PASS);
+    start::create_vault(&mut app, &ctx);
+    assert!(!app.owner_ui.session.is_locked(), "{}", app.status_text);
+    let data = dir.path().join("data");
+    fs::create_dir_all(&data).expect("data dir");
+    app.connect_configure(Some(Arc::new(MemoryKeyStore::new())), Some(data));
+    app.ui.connect.live.origin = Some(connect.url.clone());
+    super::open_settings(&mut app, super::SettingsSection::Connect);
+    let account_id = create_account(&ctx, &mut app, "Rafal");
+    connect.entitle(&account_id);
+    let output = ctx.run_ui(RawInput::default(), |ui| {
+        live::act(&mut app, ui.ctx(), Action::SignIn);
+    });
+    output.drop_without_applying_deltas();
+    until(&ctx, &mut app, "the plan", |app| {
+        app.ui
+            .connect
+            .live
+            .sync_account()
+            .is_some_and(|account| account.plan.is_some_and(StorePlan::entitled))
+    });
+    let id = current_id(&app);
+    app.relay_enable_connect(&id).expect("turn on");
+    app.relay_settle_for_test();
+    let sync = app.relay_of(&id).expect("the relay sync");
+    let state = sync.state().expect("state").expect("on");
+    let old = state.team_id.clone().expect("a store");
+    let key = state.store_key.clone().expect("the account key");
+
+    // A recovery: Connect deletes the store; the account file says so; the state names an
+    // earlier key of this device.
+    connect.delete_store(&old);
+    let file = app.ui.connect.live.session().path().expect("account file");
+    let mut account: serde_json::Value =
+        serde_json::from_slice(&fs::read(&file).expect("read")).expect("json");
+    account["recovered_at"] = serde_json::json!(1_790_000_000_u64);
+    fs::write(&file, serde_json::to_vec(&account).expect("json")).expect("write");
+    let earlier = crate::sync::DeviceKey::generate()
+        .expect("key")
+        .public_key_b64u();
+    assert_ne!(earlier, key);
+    let path = sync.config().state_path.clone();
+    let mut written: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).expect("read")).expect("json");
+    written["store_key"] = serde_json::json!(earlier);
+    fs::write(&path, serde_json::to_vec(&written).expect("json")).expect("write");
+
+    // The Connect step of the window marks it (no network), before any sync asks.
+    app.relay_connect_tick_now_for_test();
+    assert_eq!(app.relay_store_deleted(&id), Some(StoreDeleted::Recovered));
+    assert_eq!(
+        app.sync.statuses.get(&id),
+        Some(&UiStatus::Connect(ConnectState::StoreDeleted(
+            StoreDeleted::Recovered
+        )))
+    );
+    let asked = |relay: &fake_relay::FakeRelay| {
+        relay
+            .log()
+            .iter()
+            .filter(|line| {
+                line.contains(&old) || line.contains("/v1/sync") || line.contains("/v1/auth")
+            })
+            .count()
+    };
+    let before = asked(&relay);
+    app.sync_now();
+    app.relay_settle_for_test();
+    let now = Instant::now();
+    app.sync.worker.tick(now);
+    app.sync.worker.tick(now + SETTLE + Duration::from_secs(1));
+    app.sync
+        .worker
+        .tick(now + CHECK_EVERY + Duration::from_secs(1));
+    assert_eq!(asked(&relay), before, "{:?}", relay.log());
+    let events = app.sync.worker.take_events();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                crate::desktop::sync_worker::SyncEvent::Failure { .. }
+            ))
+            .count(),
+        1,
+        "said once: {events:?}"
+    );
+    super::open_settings(&mut app, super::SettingsSection::Vault);
+    let text = frames(&mut app);
+    assert!(
+        text.contains("was deleted when the account was recovered."),
+        "{text}"
+    );
+    assert!(text.contains(SYNC_AGAIN), "{text}");
+    for wrong in ["Damaged", "Removed from", "join again", "Sync now"] {
+        assert!(!text.contains(wrong), "{wrong:?} in {text}");
+    }
+
+    // The button: the setup sheet on "Apassy Connect", whose "Turn on" makes a new store.
+    app.relay_sync_again(&id, Some(&ctx));
+    assert!(matches!(
+        &app.ui.sheet,
+        Some(Sheet::Vault(VaultSheet::Sync(SyncSheet::RelaySetup { id: open }))) if *open == id
+    ));
+    assert_eq!(app.sync.relay.mode, SetupMode::Connect);
+    app.relay_enable_connect(&id).expect("turn on again");
+    app.relay_settle_for_test();
+    assert_eq!(app.relay_store_deleted(&id), None);
+    let state = app
+        .relay_of(&id)
+        .expect("the relay sync")
+        .state()
+        .expect("state")
+        .expect("on");
+    let new = state.team_id.clone().expect("a store");
+    assert_ne!(new, old, "a new store");
+    assert_eq!(state.store_key.as_deref(), Some(key.as_str()));
+    app.relay_connect_tick_now_for_test();
+    assert_eq!(
+        app.relay_store_deleted(&id),
+        None,
+        "the new store is not deleted"
+    );
+    app.sync_now();
+    app.relay_settle_for_test();
+    assert!(
+        matches!(app.sync.statuses.get(&id), Some(UiStatus::UpToDate(_))),
+        "{:?} {}",
+        app.sync.statuses.get(&id),
+        app.status_text
+    );
+}

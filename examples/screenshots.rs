@@ -860,6 +860,9 @@ enum Step {
     Hook(&'static str),
     /// Paste the share code that the other person of the scene made.
     PasteCode,
+    /// A step of Settings › Connect (`DesktopApp::tour_connect`), with the recovery text
+    /// of the scene.
+    Connect(&'static str),
     Quit,
 }
 
@@ -1398,6 +1401,14 @@ impl Tour {
                     .as_mut()
                     .expect("a scene (APASSY_TOUR_SCENE)")
                     .hook(hook);
+                pause = 1.0;
+            }
+            Step::Connect(step) => {
+                let text = self.scene.as_ref().and_then(scenes::Scene::recovery_text);
+                assert!(
+                    self.app.tour_connect(ctx, step, text.as_deref()),
+                    "connect {step}: it does not fit the open sheet"
+                );
                 pause = 1.0;
             }
             Step::PasteCode => {

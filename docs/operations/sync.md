@@ -454,14 +454,14 @@ A vault of one account syncs with another account of the same family or team onl
 1. Settings › Connect › Shared Vaults, the vault's row: "Share with…". Pick the person (an active member of your family or team).
 2. Apassy shows a share code and its QR code: "Send this to <name>." Send it to them (a message, the QR code on the screen). The code works once, for 10 minutes.
 3. When they paste it, both Macs show six words: `"<name>" (<device>) asks to share vaults with you.` Confirm only if their screen shows the same words. "Confirm…" runs the owner check; it names the vault by its name on this Mac and the person by the device name that their signed device list holds, with the short fingerprint of their account key (the name that Apassy Connect gives them shows beside it). Apassy signs the share and adds their devices to the copy.
-4. The row says "<name>: has not joined yet" until they join. If they stopped before "The Words Match…", the row says that they have not finished comparing the words: "Share with…" shows a new code, and nothing is signed twice.
+4. The row says "<name>: has not joined yet" until they join. If they stopped before "The Words Match", the row says that they have not finished comparing the words: "Share with…" shows a new code, and nothing is signed twice.
 
 A person with whom you shared a vault before needs no code: "Share with…" and the owner check share the next vault at once.
 
 **Accept and join (the other person):**
 
 1. Settings › Connect › Shared Vaults › "Accept a Shared Vault…": paste the code. "The code does not match the account that answered." means that Apassy Connect named another account than the code: nothing was signed; ask for a new code.
-2. Compare the six words with the other screen. "The Words Match…" runs the owner check. "The Words Differ" signs nothing.
+2. Compare the six words with the other screen. "The Words Match" runs the owner check. "The Words Differ" signs nothing.
 3. The vault then shows as "<vault>, shared by <name>". "Join" runs an owner check that names the vault and the person, signs the join, and opens the copy: type the passphrase of the vault. A wrong passphrase makes no vault. A vault that this Mac syncs as its own, or that your account shares, is never offered.
 
 Your other Macs (and the other person's) take the share from the signed lists at their next refresh of Settings › Connect; they need no code and no words.
@@ -514,6 +514,17 @@ The sync worker shows the plan state of the account on the vault's row (connect-
 
 The account key leaves the memory of the sync with the vault key at a lock.
 
-### 18.6 Tests
+### 18.6 Lost every device of the account
+
+When no device of the account is left (every Mac, Linux computer, and iPhone of it is lost, or each was removed), the account and its plan come back with its **account ID** and its **recovery code** (the sheet of the code showed both: "Save both."). Use this only then: while one device still works, add the new computer from it instead (Settings › Connect › Add a Device… there, "Add This Mac to an Account…" here).
+
+1. Make or open a vault on the new computer (the start screen's Apassy Connect path needs another device of the account; it says so).
+2. Settings › Connect › "Recover an Account…": the account ID, the 16 words (pasted or typed; case, spaces, and line breaks do not matter), and the name of this computer. "Recover…" asks for the owner check.
+3. Save the **new** recovery code with the account ID ("I Saved It"). The old code stops working.
+4. Settings › Connect shows the account again, with its plan, and says how many vault copies Connect deleted. The vaults on your devices are not touched. Each vault syncs through Apassy Connect again with "Sync Through Apassy Connect Again…" in Settings › Vault › Sync (a new copy; the vault passphrase stays the same).
+
+Connect gives one answer for a wrong code, a wrong account ID, and an account that still has a device; the sheet names the three. A recovery that Connect did not answer is finished the next time Apassy reaches Connect. The iPhone has no recovery screen in this release. The steps are in [connect-account-v1](../contracts/connect-account-v1.md) section 9.
+
+### 18.7 Tests
 
 `tests/relay_sync.rs`, module `connect_sync`, against the fake Connect with its stores in the fake relay (`FakeConnect::with_relay`; the relay checks every head with `ring`): `enabling_on_connect_pushes_version_one_under_the_account_key`, `a_second_mac_of_the_account_joins_without_a_link_code_and_merges`, `a_store_of_another_account_is_refused_before_any_request`, `moving_the_relay_copy_pushes_to_connect_first_and_deletes_the_old_copy_second`, `a_failure_between_the_steps_of_a_move_leaves_both_copies_with_a_clear_state` (also the retry and the undo), and `a_read_only_plan_shows_the_state_and_keeps_pulls`. The words of the states: `the_connect_states_say_what_works_with_their_date` (`src/desktop/ui/sync/relay.rs`); the picker: `the_sync_offers_apassy_connect_only_with_a_plan_that_pushes` (`src/desktop/ui/connect_tests.rs`). The shared vaults of 18.3: `tests/connect_share.rs` (the fake Connect as a Connect that lies: a store marked shared without a share, a list of another root or with an unsigned key, a substituted inviter or answering key, an inserted or cut list, a member kept in the store after the end of its share, a store of this account offered by a peer; also a second Mac that reads a share and its end at once and follows the chain, a new code for a person who did not finish the words, a leave on every device, a member outside the group, and a re-pin near the end of the list) and, against the real relay, `crates/apassy-relay/tests/app_vault_share.rs`. A physical second Mac is not covered here.

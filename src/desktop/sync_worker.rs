@@ -95,6 +95,12 @@
 //! and the window offers the choices of the notice (your own node, or Apassy Connect).
 //! Another sync of the vault (a move) starts again.
 //!
+//! A vault store that Apassy Connect deleted when an account was recovered
+//! ([`crate::sync::RelaySync::store_deleted`], which the window sets from the account file)
+//! stops the same way: the worker and the waiter ask Connect nothing more for it, its row
+//! shows [`ConnectState::StoreDeleted`] for every vault of the list, and the window says it
+//! once ([`deleted_copy_words`]). The vault on this Mac stays as it is.
+//!
 //! The waiter thread never takes the op lock or the schedule mutex. It takes the plan
 //! mutex for a copy, then the vault mutex alone and only to see whether the vault is
 //! unlocked. It waits on the relay with no lock held, then sets the pull flag and takes
@@ -115,8 +121,8 @@ use crate::desktop::sync_health::{LogDetails, StuckNotice, SyncHealth, SyncKind}
 use crate::native::SyncStuckReason;
 use crate::relay::membership::PathEnded;
 use crate::sync::{
-    FileStatus, FolderSync, RelayPoll, RelayRefusal, RelaySync, StorePlan, SyncError, SyncOutcome,
-    VaultSync, is_plan_refusal, waits_for_account,
+    FileStatus, FolderSync, RelayPoll, RelayRefusal, RelaySync, StoreDeleted, StorePlan, SyncError,
+    SyncOutcome, VaultSync, is_plan_refusal, waits_for_account,
 };
 use crate::vault::{Vault, VaultErrorKind};
 
@@ -214,6 +220,22 @@ pub(crate) enum ConnectState {
     /// it nothing more, and the vault on this Mac is safe. The choices: your own node, or
     /// Apassy Connect.
     HostedEnded(PathEnded),
+    /// Apassy Connect deleted the vault store of this vault when an account was recovered
+    /// (connect-account-v1 section 9): Apassy asks it nothing more, and the vault on this
+    /// Mac is safe. The choice: a new vault store for the vault.
+    StoreDeleted(StoreDeleted),
+}
+
+/// The state of a vault store that Apassy Connect deleted at a recovery, in a sentence.
+pub(crate) fn deleted_copy_words(why: StoreDeleted) -> &'static str {
+    match why {
+        StoreDeleted::Recovered => {
+            "The copy of this vault at Apassy Connect was deleted when the account was recovered."
+        }
+        StoreDeleted::OwnerRecovered => {
+            "The copy of this vault at Apassy Connect was deleted when the person who shares it with you recovered their account."
+        }
+    }
 }
 
 /// The state of a free relay copy whose path the hosted relay ended, in a sentence: the
@@ -344,6 +366,20 @@ impl Output {
             self.events.remove(0);
         }
         self.events.push(event);
+    }
+
+    /// The status of a vault store that was deleted at a recovery for `id`, with its note
+    /// when the status is new. Returns whether it changed.
+    fn show_deleted(&mut self, id: &str, why: StoreDeleted) -> bool {
+        let status = UiStatus::Connect(ConnectState::StoreDeleted(why));
+        let changed = self.statuses.insert(id.to_owned(), status.clone()) != Some(status);
+        if changed {
+            self.push(SyncEvent::Failure {
+                id: id.to_owned(),
+                text: deleted_copy_words(why).to_owned(),
+            });
+        }
+        changed
     }
 }
 
@@ -538,9 +574,14 @@ impl Shared {
         {
             self.show_removed(id);
         }
-        // A relay copy whose free path ended asks nothing more (plan s7 unit M5).
+        // A relay copy whose free path ended asks nothing more (plan s7 unit M5), nor does
+        // a vault store that Connect deleted at a recovery.
         let ended = relay.and_then(|relay| ended_of(self, relay));
-        let removed = removed || ended.is_some();
+        let deleted = relay.and_then(RelaySync::store_deleted);
+        if let (Some(why), Some((id, _))) = (deleted, &open) {
+            self.show_deleted(id, why);
+        }
+        let removed = removed || ended.is_some() || deleted.is_some();
         if removed {
             self.pull.store(false, Ordering::SeqCst);
         }
@@ -750,6 +791,20 @@ impl Shared {
             // The vault locked or changed: nothing to tell.
             return;
         }
+        if let (Err(SyncError::StoreDeleted), Some(relay)) = (&result, sync.as_relay())
+            && let Some(why) = relay.store_deleted()
+        {
+            // The vault store went at a recovery: as an ended copy, one state and one note,
+            // no retry.
+            self.relay_backoff.store(true, Ordering::SeqCst);
+            schedule.relay_failures = 0;
+            schedule.relay_retry_at = None;
+            schedule.next_relay_pull = None;
+            schedule.changed_since = None;
+            lock(&self.out).change_waits = false;
+            self.show_deleted(id, why);
+            return;
+        }
         if let (Err(err), Some(relay)) = (&result, sync.as_relay())
             && let Some(why) = PathEnded::of_sync(*err)
         {
@@ -949,6 +1004,16 @@ impl Shared {
         }
     }
 
+    /// The vault store of the vault `id` was deleted at a recovery
+    /// ([`RelaySync::store_deleted`]): its row shows [`ConnectState::StoreDeleted`], and the
+    /// window says it once ([`deleted_copy_words`]).
+    fn show_deleted(&self, id: &str, why: StoreDeleted) {
+        let changed = lock(&self.out).show_deleted(id, why);
+        if changed {
+            self.repaint();
+        }
+    }
+
     /// Tell [`SyncHealth`] the result of a sync of the vault `id`, and post its notice.
     /// A sync that a lock ended (`Locked`) says nothing.
     fn record(
@@ -1023,6 +1088,8 @@ impl Shared {
         let previous = lock(&self.out).statuses.clone();
         let mut statuses = BTreeMap::new();
         let mut observed = None;
+        // The vault stores that were deleted at a recovery: each says it once.
+        let mut deleted = Vec::new();
         for (id, sync) in synced {
             let kept = previous.get(&id).filter(|status| {
                 matches!(
@@ -1071,11 +1138,21 @@ impl Shared {
                 }
                 // The relay status needs the key: the last known state, or the result
                 // of the last sync of the worker.
-                VaultSync::Relay(sync) => match (kept, sync.state()) {
-                    (Some(kept), Ok(Some(_))) => kept.clone(),
-                    (_, Ok(Some(state))) => UiStatus::UpToDate(state.last_sync_at),
-                    (_, Ok(None)) => UiStatus::from_error(SyncError::NotEnabled),
-                    (_, Err(err)) => UiStatus::from_error(err),
+                VaultSync::Relay(sync) => match (sync.store_deleted(), kept, sync.state()) {
+                    (Some(why), _, Ok(Some(_))) => {
+                        deleted.push((id.clone(), why));
+                        UiStatus::Connect(ConnectState::StoreDeleted(why))
+                    }
+                    // The mark went (the window found the store again): the next sync says.
+                    (
+                        None,
+                        Some(UiStatus::Connect(ConnectState::StoreDeleted(_))),
+                        Ok(Some(state)),
+                    ) => UiStatus::UpToDate(state.last_sync_at),
+                    (_, Some(kept), Ok(Some(_))) => kept.clone(),
+                    (_, _, Ok(Some(state))) => UiStatus::UpToDate(state.last_sync_at),
+                    (_, _, Ok(None)) => UiStatus::from_error(SyncError::NotEnabled),
+                    (_, _, Err(err)) => UiStatus::from_error(err),
                 },
             };
             statuses.insert(id, status);
@@ -1090,6 +1167,15 @@ impl Shared {
             }
             let changed = out.statuses != statuses;
             out.statuses = statuses;
+            for (id, why) in deleted {
+                let status = UiStatus::Connect(ConnectState::StoreDeleted(why));
+                if previous.get(&id) != Some(&status) {
+                    out.push(SyncEvent::Failure {
+                        id,
+                        text: deleted_copy_words(why).to_owned(),
+                    });
+                }
+            }
             changed
         };
         if changed {
@@ -1138,7 +1224,10 @@ fn wait_for_relay(shared: &Shared) {
             )
         };
         let ready = open.as_ref().is_some_and(|(_, relay)| {
-            relay.has_session() && !relay.is_removed() && ended_of(shared, relay).is_none()
+            relay.has_session()
+                && !relay.is_removed()
+                && ended_of(shared, relay).is_none()
+                && relay.store_deleted().is_none()
         }) && vault.as_ref().is_some_and(is_unlocked);
         let Some((id, relay)) = open.filter(|_| ready) else {
             signalled = None;
@@ -1925,6 +2014,70 @@ mod tests {
                     .len(),
                 items,
                 "nothing local is lost"
+            );
+        }
+
+        /// A vault store that Connect deleted at a recovery (the window marked its relay
+        /// sync) is asked nothing: no sync of the worker, no long poll of the waiter, no
+        /// push at a change; its row (also of a vault that is not open) says it, and one
+        /// note says it once.
+        #[test]
+        fn a_store_deleted_at_a_recovery_is_asked_nothing_and_said_once() {
+            let root = tempfile::TempDir::new().expect("dir");
+            let relay = FakeRelay::start();
+            let (a, _vault_a, b, mut vault_b) = pair(root.path(), &relay);
+            vault_b.add(item("Beta")).expect("add");
+            b.set_store_deleted(Some(StoreDeleted::Recovered));
+            a.set_store_deleted(Some(StoreDeleted::OwnerRecovered));
+            let vault: SharedVault = Arc::new(Mutex::new(Some(vault_b)));
+            let before = relay.log().len();
+            let mut worker = SyncWorker::default();
+            worker.set_synced_all(vec![
+                ("a".to_owned(), VaultSync::Relay(a.clone())),
+                ("b".to_owned(), VaultSync::Relay(b.clone())),
+            ]);
+            worker.track_sync(
+                Some(("b".to_owned(), VaultSync::Relay(b.clone()))),
+                Arc::clone(&vault),
+            );
+            worker.start(&egui::Context::default());
+            // Past the settle time of the change of B.
+            std::thread::sleep(SETTLE + Duration::from_secs(2));
+            worker.refresh();
+            let statuses = worker.statuses();
+            let events = worker.take_events();
+            drop(worker);
+            assert_eq!(relay.log().len(), before, "asked: {:?}", relay.log());
+            assert_eq!(
+                statuses.get("b"),
+                Some(&UiStatus::Connect(ConnectState::StoreDeleted(
+                    StoreDeleted::Recovered
+                ))),
+                "{events:?}"
+            );
+            assert_eq!(
+                statuses.get("a"),
+                Some(&UiStatus::Connect(ConnectState::StoreDeleted(
+                    StoreDeleted::OwnerRecovered
+                )))
+            );
+            let notes: Vec<&String> = events
+                .iter()
+                .filter_map(|event| match event {
+                    SyncEvent::Failure { id, text } if id == "b" => Some(text),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                notes,
+                [&deleted_copy_words(StoreDeleted::Recovered).to_owned()],
+                "one note: {events:?}"
+            );
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, SyncEvent::Damaged(_))),
+                "{events:?}"
             );
         }
 

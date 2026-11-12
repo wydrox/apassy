@@ -592,21 +592,22 @@ impl PeerPin {
 
     /// Take `list`, the last list of this account before its reset, verified from an
     /// earlier root that the naming list pinned for it: its devices and its keys that left
-    /// become keys that left here (never devices). Returns whether anything changed.
+    /// become keys that left here (never devices), as the newest ones, so a full
+    /// [`Self::left`] drops its oldest keys for them. Returns whether anything changed.
     fn learn_reset(&mut self, list: &Verified) -> bool {
-        let before = self.left.len();
+        let before = self.left.clone();
         let keys = list
-            .live
+            .removed
             .iter()
-            .chain(&list.removed)
+            .chain(&list.live)
             .map(|key| encode_b64u(key));
         for key in keys {
             if !self.known.contains(&key) && !self.left.contains(&key) {
-                self.left.insert(0, key);
+                self.left.push(key);
             }
         }
         bound_oldest(&mut self.left, MAX_PEER_LEFT);
-        self.left.len() != before
+        self.left != before
     }
 
     /// The list that named this account names another root now (after a reset and new
@@ -712,6 +713,21 @@ pub(super) fn valid_state(account_id: &str, peers: &[PeerPin], stores: &[StoreSh
         && stores.len() <= MAX_STORES
         && teams.len() == stores.len()
         && stores.iter().all(|store| store.is_valid(account_id))
+}
+
+/// The account that made the store `team`, when that is another account and this
+/// account's own pin of it is suspended: Connect serves a list of another root for it, so
+/// it was recovered (section 16.7), and a recovery deletes every store of the account
+/// (section 9). `None` for a store of this account, and for a store that the account file
+/// does not hold.
+pub fn reset_owner<'a>(state: &'a AccountState, team: &str) -> Option<&'a str> {
+    let store = state
+        .stores
+        .iter()
+        .find(|store| store.team_id == team && !store.is_own())?;
+    pin_of(state, &store.owner, None)
+        .is_some_and(|pin| pin.suspended)
+        .then_some(store.owner.as_str())
 }
 
 fn pin_of<'a>(state: &'a AccountState, account: &str, via: Option<&str>) -> Option<&'a PeerPin> {
@@ -1159,7 +1175,10 @@ pub(super) fn learn_lists_with(
     for (account, list) in &learned.own {
         note_names(&mut learned.names, account, list);
     }
-    // The lists before a reset: from an earlier root that the naming list pinned.
+    // The lists before a reset: from an earlier root that the naming list pinned. That
+    // can be the root of the pin itself, while the naming list still pins it and Connect
+    // serves a list of another root (the pin is suspended): a device that never read the
+    // list of that root takes its keys as keys that left too.
     for pin in &mut state.peers {
         let Some(entries) = reset.get(&pin.account_id) else {
             continue;
@@ -1168,7 +1187,7 @@ pub(super) fn learn_lists_with(
             .first()
             .and_then(|entry| entry.key.as_deref())
             .and_then(point)
-            .filter(|earlier| *earlier != pin.root_key())
+            .filter(|earlier| *earlier != pin.root_key() || pin.suspended)
         else {
             continue;
         };

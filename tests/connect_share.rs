@@ -105,6 +105,31 @@ struct Owner {
     gate: OwnerGate,
 }
 
+/// `ConnectAccount::recover` after a fresh owner check for it.
+fn recover_with(
+    client: ConnectClient,
+    store: &dyn apassy::connect::DeviceKeyStore,
+    path: &std::path::Path,
+    account_id: &str,
+    recovery: &str,
+    device_name: &str,
+) -> Result<(ConnectAccount, apassy::connect::RecoveryCode, Option<u64>), ConnectError> {
+    let owner = owner();
+    let (proof, epoch) = owner.proof(ConnectAccount::recover_action(
+        &account_id.trim().to_ascii_lowercase(),
+    ));
+    ConnectAccount::recover(
+        client,
+        store,
+        path,
+        account_id,
+        recovery,
+        device_name,
+        proof,
+        &epoch,
+    )
+}
+
 fn owner() -> Owner {
     let dir = TempDir::new().expect("dir");
     let mut vault = Vault::create(&dir.path().join("owner.db"), PASS).expect("vault");
@@ -201,12 +226,14 @@ struct Family {
     team: String,
     /// The recovery code of X's account.
     recovery_x: apassy::connect::RecoveryCode,
+    /// The recovery code of A's account.
+    recovery_a: apassy::connect::RecoveryCode,
 }
 
 fn family() -> Family {
     let cloud = cloud();
     let (a, x) = (mac(&cloud, "a"), mac(&cloud, "x"));
-    let mut account_a = new_account(&cloud, &a, "Rafal");
+    let (mut account_a, recovery_a) = new_account_with_code(&cloud, &a, "Rafal");
     let (account_x, recovery_x) = new_account_with_code(&cloud, &x, "Ola");
     let a_id = account_a.state().account_id.clone();
     cloud.connect.make_group(&a_id, "family");
@@ -232,6 +259,7 @@ fn family() -> Family {
         vault_a,
         team,
         recovery_x,
+        recovery_a,
     }
 }
 
@@ -1181,7 +1209,7 @@ fn a_reset_account_is_shared_again_only_with_new_words() {
         .expect("X removes itself");
     let fresh = mac(&f.cloud, "x-fresh");
     let code = f.recovery_x.text();
-    let (mut new_x, _, _) = ConnectAccount::recover(
+    let (mut new_x, _, _) = recover_with(
         client(&f.cloud),
         &fresh.keys,
         &fresh.account_path,
@@ -1285,7 +1313,7 @@ fn a_re_pin_near_the_end_of_the_list_signs_nothing() {
     f.account_x.revoke(&row, proof, &epoch).expect("revoke");
     let fresh = mac(&f.cloud, "x-fresh");
     let code = f.recovery_x.text();
-    let (mut new_x, _, _) = ConnectAccount::recover(
+    let (mut new_x, _, _) = recover_with(
         client(&f.cloud),
         &fresh.keys,
         &fresh.account_path,
@@ -2381,7 +2409,7 @@ fn a_first_download_after_a_writer_reset_its_account() {
     let (proof, epoch) = f.owner_x.proof(f.account_x.revoke_action(&row));
     f.account_x.revoke(&row, proof, &epoch).expect("X leaves");
     let fresh = mac(&f.cloud, "x-fresh");
-    let (mut new_x, _, _) = ConnectAccount::recover(
+    let (mut new_x, _, _) = recover_with(
         client(&f.cloud),
         &fresh.keys,
         &fresh.account_path,
@@ -2458,4 +2486,181 @@ fn a_first_download_after_a_writer_reset_its_account() {
     let mut vault = Vault::open(&z2.vault_path).expect("open");
     vault.unlock(PASS).expect("unlock");
     assert_eq!(titles(&vault), vec!["Alpha", "Beta", "Gamma"]);
+}
+
+// ---- Vault stores deleted at a recovery (sections 9 and 16.7). ----
+
+/// The only device of `account` leaves it (Connect revokes it), the Mac `device` forgets
+/// the account (when it had it), and recovers it with `code`: a new account key, the new
+/// root.
+fn recover_on(
+    cloud: &Cloud,
+    device: &Mac,
+    account: &ConnectAccount,
+    code: &apassy::connect::RecoveryCode,
+) -> (ConnectAccount, u64) {
+    let account_id = account.state().account_id.clone();
+    cloud.connect.revoke(&account.state().device_id);
+    apassy::connect::forget_this_device(&device.keys, &device.account_path).expect("forget");
+    let (recovered, _, deleted) = recover_with(
+        client(cloud),
+        &device.keys,
+        &device.account_path,
+        &account_id,
+        &code.text(),
+        "Synthetic MacBook",
+    )
+    .expect("recover");
+    (
+        recovered,
+        deleted.expect("Connect names the deleted stores"),
+    )
+}
+
+/// Section 9 on the device that recovered the account: the sync of a vault through a store
+/// from before the recovery is told as deleted from the account file and its state alone
+/// (the account that made the store, and an earlier account key of this device). Marked,
+/// it asks Connect nothing (no sync, no poll), and the step that turns on the sync through
+/// Apassy Connect makes a new store, which is not told as deleted.
+#[test]
+fn a_store_deleted_at_a_recovery_asks_nothing_and_a_new_store_syncs() {
+    use apassy::sync::{StoreDeleted, SyncError, store_deleted};
+    let cloud = cloud();
+    let m = mac(&cloud, "m");
+    let (mut account, code) = new_account_with_code(&cloud, &m, "Rafal");
+    let account_id = account.state().account_id.clone();
+    let mut vault = Vault::create(&m.vault_path, PASS).expect("vault");
+    vault.unlock(PASS).expect("unlock");
+    vault.add(item("Alpha")).expect("add");
+    let old = m
+        .sync
+        .enable_on_connect(&mut vault, &mut account, "Personal")
+        .expect("enable")
+        .team_id;
+    let state = m.sync.state().expect("state").expect("on");
+    assert_eq!(state.store_account.as_deref(), Some(account_id.as_str()));
+    assert_eq!(
+        state.store_key.as_deref(),
+        Some(account.state().public_key.as_str())
+    );
+    assert_eq!(store_deleted(account.state(), &state), None);
+
+    let (mut recovered, deleted) = recover_on(&cloud, &m, &account, &code);
+    drop(account);
+    assert_eq!(deleted, 1);
+    assert!(!cloud.relay.has_team(&old), "the store went with its copy");
+    assert!(recovered.state().recovered_at.is_some());
+    let state = m.sync.state().expect("state").expect("still on here");
+    assert_eq!(
+        store_deleted(recovered.state(), &state),
+        Some(StoreDeleted::Recovered)
+    );
+    // Without the mark the sync fails on the row of the earlier key, and says nothing of
+    // the recovery.
+    hand_over(&m, &recovered);
+    let unmarked = m.sync.sync(&mut vault).unwrap_err();
+    assert!(
+        matches!(
+            unmarked,
+            SyncError::WrongVault | SyncError::RemovedFromRelay
+        ),
+        "{unmarked:?}"
+    );
+    // Marked, nothing asks Connect.
+    m.sync.set_store_deleted(Some(StoreDeleted::Recovered));
+    let (relay_before, connect_before) = (cloud.relay.log().len(), cloud.connect.log().len());
+    assert_eq!(
+        m.sync.sync(&mut vault).unwrap_err(),
+        SyncError::StoreDeleted
+    );
+    assert_eq!(
+        m.sync.poll(std::time::Duration::from_secs(1)).unwrap_err(),
+        SyncError::StoreDeleted
+    );
+    assert_eq!(
+        cloud.relay.log().len(),
+        relay_before,
+        "{:?}",
+        cloud.relay.log()
+    );
+    assert_eq!(cloud.connect.log().len(), connect_before);
+
+    // "Sync Through Apassy Connect Again…": the sync of the deleted store goes on this
+    // device, and the step of the sync through Apassy Connect makes a new store.
+    m.sync.disable(Some(&mut vault)).expect("off");
+    assert_eq!(m.sync.store_deleted(), None);
+    let new = m
+        .sync
+        .enable_on_connect(&mut vault, &mut recovered, "Personal")
+        .expect("a new store")
+        .team_id;
+    assert_ne!(new, old);
+    let state = m.sync.state().expect("state").expect("on");
+    assert_eq!(store_deleted(recovered.state(), &state), None);
+    m.sync.sync(&mut vault).expect("the new store syncs");
+}
+
+/// Section 16.7: the recovery of the account that made a shared store deletes it. The
+/// member's device learns the reset from the lists (its pin of the owner is suspended)
+/// and tells the store as deleted: marked, its sync asks Connect nothing.
+#[test]
+fn a_shared_store_whose_owner_recovered_is_deleted_for_the_member() {
+    use apassy::sync::{StoreDeleted, SyncError, store_deleted};
+    let mut f = family();
+    f.share();
+    let mut vault_x = f.x_vault();
+    let (team, a_id) = (f.team.clone(), f.a_id());
+    let state_x = f.x.sync.state().expect("state").expect("on");
+    assert_eq!(state_x.store_account.as_deref(), Some(a_id.as_str()));
+    assert_eq!(store_deleted(f.account_x.state(), &state_x), None);
+
+    let fresh = mac(&f.cloud, "a-fresh");
+    let (_recovered, deleted) = recover_on(&f.cloud, &fresh, &f.account_a, &f.recovery_a);
+    assert_eq!(deleted, 1);
+    assert!(!f.cloud.relay.has_team(&team));
+    // Before X reads the lists, nothing is told.
+    assert_eq!(store_deleted(f.account_x.state(), &state_x), None);
+    hand_over(&f.x, &f.account_x);
+    assert_eq!(
+        f.x.sync.sync(&mut vault_x).unwrap_err(),
+        SyncError::RemovedFromRelay,
+        "today's refusal of a store that is gone"
+    );
+    let status = f.account_x.refresh_shares(&[]).expect("X");
+    assert_eq!(status.suspended, vec![a_id.clone()]);
+    assert_eq!(
+        store_deleted(f.account_x.state(), &state_x),
+        Some(StoreDeleted::OwnerRecovered)
+    );
+    f.x.sync
+        .set_store_deleted(Some(StoreDeleted::OwnerRecovered));
+    let before = f.cloud.relay.log().len();
+    assert_eq!(
+        f.x.sync.sync(&mut vault_x).unwrap_err(),
+        SyncError::StoreDeleted
+    );
+    assert_eq!(f.cloud.relay.log().len(), before);
+}
+
+/// The other way round: a member that recovers its account leaves the owner's store at
+/// Connect. Neither the member's recovered device (the store is of another account) nor the
+/// owner (its own store, whose member reset) tells it as deleted.
+#[test]
+fn a_member_that_recovers_leaves_the_owners_store_undeleted() {
+    use apassy::sync::store_deleted;
+    let mut f = family();
+    f.share();
+    let _vault_x = f.x_vault();
+    let team = f.team.clone();
+    let x_id = f.x_id();
+    let state_x = f.x.sync.state().expect("state").expect("on");
+    let (recovered_x, deleted) = recover_on(&f.cloud, &f.x, &f.account_x, &f.recovery_x);
+    assert_eq!(deleted, 0, "X made no store");
+    assert!(f.cloud.relay.has_team(&team));
+    assert!(recovered_x.state().recovered_at.is_some());
+    assert_eq!(store_deleted(recovered_x.state(), &state_x), None);
+    let status = f.account_a.refresh_shares(&[]).expect("A");
+    assert_eq!(status.suspended, vec![x_id]);
+    let state_a = f.a.sync.state().expect("state").expect("on");
+    assert_eq!(store_deleted(f.account_a.state(), &state_a), None);
 }

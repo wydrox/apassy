@@ -204,7 +204,15 @@ fn a_computer_without_a_vault_joins_the_account_and_gets_a_vault_from_connect() 
     let text = text + &frame(&ctx, &mut b);
     assert!(text.contains(ADD_THIS_MAC), "the join is offered: {text}");
     assert!(text.contains(CONNECT_OPEN_JOIN), "{text}");
-    assert!(!text.contains("Settings"), "{text}");
+    // Only the line for a person without another device names Settings, where a recovery
+    // runs; the join itself never sends the owner there.
+    assert!(text.contains(super::connect::START_NO_DEVICE), "{text}");
+    assert!(
+        !text
+            .replace(super::connect::START_NO_DEVICE, "")
+            .contains("Settings"),
+        "{text}"
+    );
     let session = b.connect_session();
     let start = session.start_epoch().expect("the step of the start screen");
     assert_eq!(session.state(), SessionState::Closed, "no account yet");

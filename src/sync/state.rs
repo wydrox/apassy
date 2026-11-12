@@ -97,6 +97,16 @@ pub struct SyncState {
     /// anchor (an anchor drops it at the next write).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approved_head: Option<ApprovedHead>,
+    /// For a vault store of Apassy Connect: the account that made the store (`acc_…`), as
+    /// the account file of this device said when its sync through the store started.
+    /// `None` for any other relay, and in a state of an earlier build.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_account: Option<String>,
+    /// For a vault store: b64u of the account device key of this device that signs in to
+    /// it. A recovery gives this device a new key (connect-account-v1 section 9), so a
+    /// state with an earlier key is of a store from before the recovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_key: Option<String>,
 }
 
 /// The relay head that an owner check named ([`SyncState::approved_head`]).
@@ -126,6 +136,8 @@ impl SyncState {
             last_remote_version: 0,
             last_head_sha256: None,
             approved_head: None,
+            store_account: None,
+            store_key: None,
         }
     }
 
@@ -153,8 +165,11 @@ impl SyncState {
                     .bytes()
                     .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         };
+        let short = |text: &str| !text.is_empty() && text.len() <= 128 && text.is_ascii();
         let common = self.vault_id.len() == 36
             && self.vault_id.is_ascii()
+            && self.store_account.as_deref().is_none_or(short)
+            && self.store_key.as_deref().is_none_or(short)
             && self.last_file_sha256.as_deref().is_none_or(hex)
             && self.last_content.as_deref().is_none_or(hex);
         let folder = self.transport == TransportKind::Folder

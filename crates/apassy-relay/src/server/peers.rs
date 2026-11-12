@@ -35,7 +35,8 @@
 //! the reads of other accounts' lists (`GET /v1/account/peers/{account_id}`, `POST
 //! /v1/account/peers/lists`) in a budget of their own (`PeerCalls::reads`: 60 a minute).
 //! A list is read by an account of the same group, or by an account that takes part in a
-//! vault store with it (`may_read`).
+//! vault store with it (`may_read`); a join that the owner's `unshare` ended reads only the
+//! owner's list up to that entry, and a join that its `leave` ended no list through it.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, PoisonError};
@@ -1271,48 +1272,222 @@ fn join_end(hub: &Hub, caller: &AccountCaller, join_id: u64, now: u64) -> RelayR
 
 // ---- The lists of other accounts (section 16.4). ----
 
-/// The accounts that joined a vault store that exists with `account`, `account` left out:
-/// for each store that `account` made, every account that joined it; for each store that
-/// `account` joined, the account that made it and every other account that joined it. An
-/// account joined a store when its list has a `join` of it naming the account that made it
-/// (active or ended), or Connect holds its join of it (`account_join_share`). A share that
-/// was never answered gives nothing. It ends with the deletion of the store.
-fn store_participants(conn: &Connection, account: &str) -> RelayResult<HashSet<String>> {
-    let mut statement = conn
-        .prepare(
-            "WITH joins(team, account) AS ( \
-               SELECT t.id, j.account_id FROM account_list j JOIN team t ON t.id = j.team_id \
-               WHERE j.op = 'join' AND t.kind = 'account' AND j.peer_account = t.account_id \
-               UNION SELECT t.id, js.account_id FROM account_join_share js JOIN team t ON t.id = js.team_id \
-               WHERE t.kind = 'account'), \
-             mine(team, owner) AS ( \
-               SELECT id, account_id FROM team WHERE kind = 'account' AND account_id = ?1 \
-               UNION SELECT t.id, t.account_id FROM joins j JOIN team t ON t.id = j.team \
-               WHERE j.account = ?1) \
-             SELECT owner FROM mine \
-             UNION SELECT j.account FROM mine m JOIN joins j ON j.team = m.team",
-        )
-        .map_err(db)?;
-    let mut accounts = statement
-        .query_map(params![account], |row| row.get::<_, String>(0))
-        .map_err(db)?
-        .collect::<Result<HashSet<_>, _>>()
-        .map_err(db)?;
-    accounts.remove(account);
-    Ok(accounts)
+/// How much of another account's list a vault store lets the caller read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ListRead {
+    /// The whole list.
+    Whole,
+    /// The list up to and with its entry at `version`, of the list hash `hash`: the
+    /// owner's `unshare` that ended the caller's join of a store of that owner.
+    UpTo { version: u64, hash: String },
 }
 
-/// Whether `caller` may read the list of `account` (connect-account-v1 section 16.4):
-/// both are active members of one group, or `account` is in `participants`, the accounts
-/// that joined a store with the caller (`store_participants`).
+impl ListRead {
+    /// The wider of two reads of one list: the whole list, else the later end.
+    fn widen(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::UpTo { version: held, .. }, later @ Self::UpTo { version, .. })
+                if version > held =>
+            {
+                later
+            }
+            (Self::Whole, _) | (_, Self::Whole) => Self::Whole,
+            (held, _) => held,
+        }
+    }
+}
+
+/// Where the join of the store `team` (made by `owner`) by `member` stands, from the
+/// stored entries of both lists (connect-account-v1 section 16.4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StoreJoin {
+    /// The last `join` or `leave` of the store in `member`'s list naming `owner` is a
+    /// `join` that names a `share` of `owner`'s list by its list hash, and no `unshare` of
+    /// the pair came after that share. A void mark does not end it here: the views that
+    /// it gives carry the marks that end it (16.7).
+    Counts,
+    /// That share was ended by the owner's `unshare` at `version` (list hash `hash`).
+    Unshared { version: u64, hash: String },
+    /// No join, a `leave`, a join that names no share, or a share that the owner's list
+    /// does not hold.
+    Over,
+}
+
+/// Where the join of `team` by `member`, a store that `owner` made, stands (`StoreJoin`).
+pub(crate) fn store_join(
+    conn: &Connection,
+    member: &str,
+    team: &str,
+    owner: &str,
+) -> RelayResult<StoreJoin> {
+    let last: Option<(String, Option<Vec<u8>>)> = conn
+        .query_row(
+            "SELECT op, peer_root FROM account_list WHERE account_id = ?1 AND team_id = ?2 \
+             AND peer_account = ?3 AND op IN ('join', 'leave') ORDER BY version DESC LIMIT 1",
+            params![member, team, owner],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(db)?;
+    let Some((op, Some(share))) = last else {
+        return Ok(StoreJoin::Over);
+    };
+    if op != "join" {
+        return Ok(StoreJoin::Over);
+    }
+    let shared: Option<i64> = conn
+        .query_row(
+            "SELECT version FROM account_list WHERE account_id = ?1 AND team_id = ?2 \
+             AND peer_account = ?3 AND op = 'share' AND hash = ?4",
+            params![owner, team, member, encode_b64(&share)],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(db)?;
+    let Some(shared) = shared else {
+        return Ok(StoreJoin::Over);
+    };
+    let unshared: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT version, hash FROM account_list WHERE account_id = ?1 AND team_id = ?2 \
+             AND peer_account = ?3 AND op = 'unshare' AND version > ?4 ORDER BY version LIMIT 1",
+            params![owner, team, member, shared],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(db)?;
+    Ok(match unshared {
+        Some((version, hash)) => StoreJoin::Unshared {
+            version: to_u(version),
+            hash,
+        },
+        None => StoreJoin::Counts,
+    })
+}
+
+/// The accounts of the stored joins of each vault store that exists: a `join` of a list
+/// naming the account that made the store (active or ended), or a join that Connect holds
+/// (`account_join_share`). A share that was never answered is none.
+const STORE_JOINS: &str = "WITH joins(team, account) AS ( \
+       SELECT t.id, j.account_id FROM account_list j JOIN team t ON t.id = j.team_id \
+       WHERE j.op = 'join' AND t.kind = 'account' AND j.peer_account = t.account_id \
+       UNION SELECT t.id, js.account_id FROM account_join_share js JOIN team t ON t.id = js.team_id \
+       WHERE t.kind = 'account') ";
+
+/// The accounts that a vault store that exists lets `account` read (`account` left out),
+/// with how much of each list (connect-account-v1 section 16.4):
+/// - for each store that `account` made, the whole list of every account that joined it
+///   (`STORE_JOINS`, also a join that ended: the keys of that account sign as ended keys);
+/// - for each store that `account` joined while its join counts (`StoreJoin::Counts`), the
+///   whole lists of the account that made it and of every account that joined it;
+/// - for a store whose owner ended `account`'s join with an `unshare`, the owner's list up
+///   to that `unshare`, and no other list: what came later is not for an ended join, and
+///   what it could read while it counted it has read. After its own `leave`, nothing.
+///
+/// It ends with the deletion of the store.
+fn store_participants(conn: &Connection, account: &str) -> RelayResult<HashMap<String, ListRead>> {
+    let accounts = |sql: &str, value: &str| -> RelayResult<Vec<(String, String)>> {
+        let mut statement = conn.prepare(&format!("{STORE_JOINS}{sql}")).map_err(db)?;
+        statement
+            .query_map(params![value], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(db)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(db)
+    };
+    let mut reads: HashMap<String, ListRead> = HashMap::new();
+    let mut grant = |other: String, read: ListRead| {
+        if other == account {
+            return;
+        }
+        let read = match reads.remove(&other) {
+            Some(held) => held.widen(read),
+            None => read,
+        };
+        reads.insert(other, read);
+    };
+    // The stores that `account` made: every account that joined one.
+    for (_, joined) in accounts(
+        "SELECT j.team, j.account FROM joins j JOIN team t ON t.id = j.team WHERE t.account_id = ?1",
+        account,
+    )? {
+        grant(joined, ListRead::Whole);
+    }
+    // The stores that `account` joined, with the account that made each.
+    for (team, owner) in accounts(
+        "SELECT DISTINCT t.id, t.account_id FROM joins j JOIN team t ON t.id = j.team \
+         WHERE j.account = ?1",
+        account,
+    )? {
+        match store_join(conn, account, &team, &owner)? {
+            StoreJoin::Counts => {
+                grant(owner, ListRead::Whole);
+                for (_, joined) in
+                    accounts("SELECT team, account FROM joins WHERE team = ?1", &team)?
+                {
+                    grant(joined, ListRead::Whole);
+                }
+            }
+            StoreJoin::Unshared { version, hash } => {
+                grant(owner, ListRead::UpTo { version, hash });
+            }
+            StoreJoin::Over => {}
+        }
+    }
+    Ok(reads)
+}
+
+/// How much of the list of `account` `caller` may read (connect-account-v1 section 16.4),
+/// `None` for nothing: the whole list when both are active members of one group, else
+/// what `participants`, the reads that its vault stores give the caller
+/// (`store_participants`), say.
 fn may_read(
     hub: &Hub,
     caller: &AccountCaller,
-    participants: &HashSet<String>,
+    participants: &HashMap<String, ListRead>,
     account: &str,
     now: u64,
-) -> RelayResult<bool> {
-    Ok(participants.contains(account) || same_group(hub, &caller.account, account, now)?)
+) -> RelayResult<Option<ListRead>> {
+    let store = participants.get(account);
+    if store == Some(&ListRead::Whole) || same_group(hub, &caller.account, account, now)? {
+        return Ok(Some(ListRead::Whole));
+    }
+    Ok(store.cloned())
+}
+
+/// The list of `account` from version 1 as far as `read` goes, or `None` when the entry
+/// that ends a bounded read is not in its list now (a recovery started it again).
+fn read_entries(
+    conn: &Connection,
+    account: &str,
+    read: &ListRead,
+) -> RelayResult<Option<Vec<ListEntry>>> {
+    let mut entries = list_entries(conn, account)?;
+    if let ListRead::UpTo { version, hash } = read {
+        if bounded_head(conn, account, *version, hash)?.is_none() {
+            return Ok(None);
+        }
+        entries.retain(|entry| entry.version <= *version);
+    }
+    Ok(Some(entries))
+}
+
+/// The keys of the devices of a list at its last entry (`root` and `add`, less `remove`).
+fn live_keys(entries: &[ListEntry]) -> HashSet<String> {
+    let mut keys = HashSet::new();
+    for entry in entries {
+        if let Some(key) = &entry.key {
+            match entry.op {
+                ListOp::Root | ListOp::Add => {
+                    keys.insert(key.clone());
+                }
+                ListOp::Remove => {
+                    keys.remove(key);
+                }
+                _ => {}
+            }
+        }
+    }
+    keys
 }
 
 /// `GET /v1/account/peers/{account_id}`: another account whose list the caller may read
@@ -1320,6 +1495,8 @@ fn may_read(
 /// its name, its live device rows, its device list from version 1 (with its peers and the
 /// stores it makes, shares, and joins), read in a lock of its own, and the void marks of
 /// its shares (`void_shares`). Which of the rows is a device of it is the list's to say.
+/// A read up to an `unshare` (`ListRead::UpTo`) gives the list up to it and the rows of
+/// the devices of the list there; 403 `not_in_group` when that entry is not in the list.
 fn view(hub: &Hub, caller: &AccountCaller, account: &str, now: u64) -> RelayResult<Value> {
     if account == caller.account {
         return Err(RelayError::invalid(
@@ -1330,9 +1507,14 @@ fn view(hub: &Hub, caller: &AccountCaller, account: &str, now: u64) -> RelayResu
         .directory
         .store
         .with(|conn| store_participants(conn, &caller.account))?;
-    if !may_read(hub, caller, &participants, account, now)? {
+    let Some(read) = may_read(hub, caller, &participants, account, now)? else {
         return Err(not_in_group());
-    }
+    };
+    let device_list = hub
+        .directory
+        .store
+        .with(|conn| read_entries(conn, account, &read))?
+        .ok_or_else(not_in_group)?;
     let (name, devices, void) = hub.directory.store.with(|conn| {
         let name: String = conn
             .query_row(
@@ -1345,30 +1527,43 @@ fn view(hub: &Hub, caller: &AccountCaller, account: &str, now: u64) -> RelayResu
             .ok_or_else(|| RelayError::not_found("account"))?;
         let mut statement = conn
             .prepare(
-                "SELECT id, name, platform, public_key FROM account_device WHERE account_id = ?1 \
-                 AND revoked_at IS NULL ORDER BY created_at, id",
+                "SELECT id, name, platform, public_key, revoked_at IS NULL FROM account_device \
+                 WHERE account_id = ?1 ORDER BY created_at, id",
             )
             .map_err(db)?;
-        let devices = statement
+        let rows = statement
             .query_map(params![account], |row| {
                 let platform: String = row.get(2)?;
                 let key: Vec<u8> = row.get(3)?;
-                Ok(PeerDevice {
-                    device_id: row.get(0)?,
-                    name: row.get(1)?,
-                    platform: Platform::parse(&platform).ok_or(rusqlite::Error::InvalidQuery)?,
-                    public_key: encode_b64(&key),
-                })
+                Ok((
+                    PeerDevice {
+                        device_id: row.get(0)?,
+                        name: row.get(1)?,
+                        platform: Platform::parse(&platform)
+                            .ok_or(rusqlite::Error::InvalidQuery)?,
+                        public_key: encode_b64(&key),
+                    },
+                    row.get::<_, bool>(4)?,
+                ))
             })
             .map_err(db)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(db)?;
+        let devices = match &read {
+            ListRead::Whole => rows
+                .into_iter()
+                .filter_map(|(device, live)| live.then_some(device))
+                .collect(),
+            ListRead::UpTo { .. } => {
+                // The devices of the list at the end of the read, as they were then.
+                let keys = live_keys(&device_list);
+                rows.into_iter()
+                    .filter_map(|(device, _)| keys.contains(&device.public_key).then_some(device))
+                    .collect()
+            }
+        };
         Ok((name, devices, void_between(conn, account, &caller.account)?))
     })?;
-    let device_list = hub
-        .directory
-        .store
-        .with(|conn| list_entries(conn, account))?;
     let reset_list = hub
         .directory
         .store
@@ -1411,6 +1606,24 @@ fn named_head(conn: &Connection, account: &str) -> RelayResult<Option<(String, u
     .map_err(db)
 }
 
+/// The name of `account` and its entry at `version` when that entry has the list hash
+/// `hash` (the end of a read `ListRead::UpTo`), or `None`.
+fn bounded_head(
+    conn: &Connection,
+    account: &str,
+    version: u64,
+    hash: &str,
+) -> RelayResult<Option<(String, u64, String)>> {
+    conn.query_row(
+        "SELECT a.name, l.version, l.hash FROM account a JOIN account_list l ON l.account_id = a.id \
+         WHERE a.id = ?1 AND l.version = ?2 AND l.hash = ?3",
+        params![account, to_i(version), hash],
+        |row| Ok((row.get(0)?, to_u(row.get(1)?), row.get(2)?)),
+    )
+    .optional()
+    .map_err(db)
+}
+
 /// `POST /v1/account/peers/lists`: the lists of 1 to `LIST_READ_ACCOUNTS` other accounts
 /// (distinct; 400 otherwise), each against the pin that the client holds (`version` and
 /// `head`, `0` and `""` for none), answered in the asked order: `refused` for an account
@@ -1421,7 +1634,8 @@ fn named_head(conn: &Connection, account: &str) -> RelayResult<Option<(String, u
 /// list always comes). From the first list that does not fit on, every account whose head
 /// differs from its pin is `later`, decided from its head row alone: no list of it is
 /// read. Each account is read in locks of its own, and no lock is held while a list is
-/// written out.
+/// written out. A read up to an `unshare` (`ListRead::UpTo`) takes that entry for the
+/// head, and is `refused` for a pin past it: the caller holds more than it gives.
 fn lists(
     hub: &Hub,
     caller: &AccountCaller,
@@ -1465,19 +1679,23 @@ fn lists(
             void: None,
             reset_list: None,
         };
-        if !may_read(hub, caller, &participants, &pin.account_id, now)? {
+        let Some(read) = may_read(hub, caller, &participants, &pin.account_id, now)? else {
             items.push(item("refused"));
             continue;
-        }
-        let head = hub
-            .directory
-            .store
-            .with(|conn| named_head(conn, &pin.account_id))?;
+        };
+        let head = hub.directory.store.with(|conn| match &read {
+            ListRead::Whole => named_head(conn, &pin.account_id),
+            ListRead::UpTo { version, hash } => bounded_head(conn, &pin.account_id, *version, hash),
+        })?;
         let Some((name, version, hash)) = head else {
             items.push(item("refused"));
             continue;
         };
         let same = version == pin.version && hash == pin.head;
+        if !same && matches!(read, ListRead::UpTo { .. }) && pin.version > version {
+            items.push(item("refused"));
+            continue;
+        }
         if !same && full {
             // The answer is full: decided from the head row, no list is read.
             items.push(item("later"));
@@ -1494,12 +1712,16 @@ fn lists(
             });
             continue;
         }
-        let (device_list, reset_list) = hub.directory.store.with(|conn| {
-            Ok((
-                list_entries(conn, &pin.account_id)?,
-                reset_entries(conn, &pin.account_id)?,
-            ))
+        let read_lists = hub.directory.store.with(|conn| {
+            let Some(entries) = read_entries(conn, &pin.account_id, &read)? else {
+                return Ok(None);
+            };
+            Ok(Some((entries, reset_entries(conn, &pin.account_id)?)))
         })?;
+        let Some((device_list, reset_list)) = read_lists else {
+            items.push(item("refused"));
+            continue;
+        };
         let written = |entries: &[ListEntry]| {
             serde_json::to_vec(entries)
                 .map(|bytes| bytes.len())

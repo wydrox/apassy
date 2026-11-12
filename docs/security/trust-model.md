@@ -138,13 +138,14 @@ questions, the feed, the access requests, and relay sync use their contracts unc
 | `tailscaled` and the tailnet | WireGuard keys | Which devices talk to the node, sizes, times | Traffic: TLS runs end to end between the device and the node |
 | Push gateway | The APNs key and its handle key | Handles, node addresses, times | Tokens are sealed under the gateway's key; the node never sees them. A node that held a handle can push the fixed notification within the limits until the handle expires (180 days). Making a handle needs no proof of the device: whoever knows a device's APNs token can make handles for it and push the fixed notification, but at most 10 handles a day and 30 pushes an hour per token, over all its handles and addresses ([N8-3](../reviews/node-tailnet-2026-11/n8-panel.md)) |
 
-## Apassy Connect (ADR 0037 stage 7, planned)
+## Apassy Connect (ADR 0037 stage 7, implemented, not released)
 
 The paid hosted service of stage 7 ([plan](../design/implementation-plan-s7-connect.md); contracts
 [connect-account-v1](../contracts/connect-account-v1.md),
 [connect-billing-v1](../contracts/connect-billing-v1.md),
-[connect-tunnel-v1](../contracts/connect-tunnel-v1.md)). Not implemented yet: this section says what
-the contracts allow, and it becomes true when units C1 to C5 ship. The security review Q1 updates it.
+[connect-tunnel-v1](../contracts/connect-tunnel-v1.md)). Implemented on the relay and in the apps, not
+released: this section says what the contracts allow and the code does. The security review Q1 updates
+it.
 
 | Part | Holds | Sees | Cannot see or do |
 | --- | --- | --- | --- |
