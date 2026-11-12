@@ -469,6 +469,7 @@ fn frame(code: &str) -> (Shown, Option<Sheet>) {
                 index: 1,
                 name: "MacBook Pro".to_owned(),
                 this: false,
+                detail: super::device_detail(&devices()[1]),
             }),
         ),
         "7d" => (
@@ -477,6 +478,7 @@ fn frame(code: &str) -> (Shown, Option<Sheet>) {
                 index: 0,
                 name: THIS_NAME.to_owned(),
                 this: true,
+                detail: super::device_detail(&devices()[0]),
             }),
         ),
         "8a" => (

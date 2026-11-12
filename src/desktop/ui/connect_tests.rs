@@ -862,7 +862,8 @@ fn invite_confirm_and_remove_a_family_member() {
             .and_then(|account| account.group)
             .is_some_and(|group| group.members.iter().any(|member| member.state == "pending"))
     });
-    assert!(text(&ctx, &mut app).contains("Waits for your confirmation"));
+    // One line for the pending member: its cap, Confirm… and Remove….
+    assert!(text(&ctx, &mut app).contains("Pending"));
     let index = shown(&app)
         .and_then(|account| account.group)
         .and_then(|group| {
@@ -2452,7 +2453,8 @@ fn an_account_without_a_seen_recovery_code_says_so_until_a_new_code() {
         !painted.contains(super::connect::RECOVERY_UNSEEN),
         "{painted}"
     );
-    assert!(painted.contains(super::connect::NEW_RECOVERY), "{painted}");
+    // Without the line, "New Recovery Code…" is in the menu of the Account row only.
+    assert!(!painted.contains(super::connect::NEW_RECOVERY), "{painted}");
 }
 
 // ---- Round 7: a new recovery code that Connect took without an answer. ----
@@ -3138,13 +3140,14 @@ fn a_recovery_asks_the_owner_then_shows_the_new_code_and_the_deleted_copies() {
     let account = shown(&app).expect("account");
     assert_eq!(account.recovered, Some(Some(1)));
     let painted = text(&ctx, &mut app);
+    // The line first; the account id is in the menu of the Account row.
     for line in [
         super::connect::recovered_line(Some(1)).as_str(),
-        super::connect::ACCOUNT_ID,
-        account_id.as_str(),
+        super::connect::ACCOUNT_ROW,
     ] {
         assert!(painted.contains(line), "{line:?} in {painted}");
     }
+    assert!(!painted.contains(account_id.as_str()), "{painted}");
     assert!(!painted.contains(super::connect::RECOVER_ROW), "{painted}");
     let copied = act(&ctx, &mut app, Action::CopyAccountId);
     assert!(
@@ -3407,7 +3410,7 @@ fn the_recovery_rows_fit_their_column_at_each_width() {
         (Shown::None, vec![super::connect::RECOVER]),
         (
             Shown::Account(account),
-            vec!["Copy", "OK", "acc_k7m2q4x3ca"],
+            vec!["OK", "Recovered.", super::connect::NEW_RECOVERY],
         ),
     ] {
         let view = ConnectView {

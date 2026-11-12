@@ -2031,6 +2031,7 @@ pub(crate) fn act(app: &mut DesktopApp, ctx: &egui::Context, action: Action) {
                     index,
                     name: device.name.clone(),
                     this: device.this,
+                    detail: super::device_detail(device),
                 });
             }
         }
@@ -2409,7 +2410,12 @@ pub(crate) fn choose(app: &mut DesktopApp, ctx: &egui::Context, choice: SheetCho
             app.ui.connect.live.link = slot();
             app.ui.connect.live.pending.clear();
         }
-        (Sheet::Revoke { index, name, this }, SheetChoice::Go) => {
+        (
+            Sheet::Revoke {
+                index, name, this, ..
+            },
+            SheetChoice::Go,
+        ) => {
             let Some((account, device)) = account.and_then(|account| {
                 let device = account.devices.get(index).cloned()?;
                 Some((account, device))

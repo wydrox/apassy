@@ -530,20 +530,15 @@ svg{display:block}
         <div class="hdr"><div class="tile" style="background:rgb(52,199,89)"><svg><use href="#i-cloud"/></svg></div><div><h1>Connect</h1><div class="s">No plan</div></div></div>
         <div class="gl">Apassy Connect</div>
         <div class="grp">
-          <div class="fr"><div class="k">Name</div><div class="v">Rafal</div></div>
-          <div class="fr"><div class="k">Email</div><div class="v">rafal@example.com</div></div>
+          <div class="fr"><div class="k">Account</div><div class="v">Rafal · rafal@example.com</div><span class="ib" title="More account actions"><svg><use href="#i-dots"/></svg></span></div>
           <div class="fr"><div class="k">Plan</div><div class="v">No plan</div><span class="pb pri">Choose a Plan…</span></div>
+          <div class="fr"><div class="k">Family or Team</div><div class="v"></div><span class="pb" title="Join a Family or Team">Join…</span></div>
         </div>
         <div class="gl">Devices<span>3</span></div>
         <div class="grp">
-<div class="fr"><div class="dv"><svg><use href="#i-mini"/></svg></div><div class="kn"><div>Mac mini (office) <span class="cap">This Mac</span></div><div class="nt">Mac · Added 21 Sep 2026</div></div><span class="when">Now</span><span class="pb">Forget…</span></div><div class="fr"><div class="dv"><svg><use href="#i-laptop"/></svg></div><div class="kn"><div>MacBook Pro</div><div class="nt">Mac · Added 22 Sep 2026</div></div><span class="when">2 h ago</span><span class="pb">Revoke…</span></div><div class="fr"><div class="dv"><svg><use href="#i-phone"/></svg></div><div class="kn"><div>Rafal's iPhone</div><div class="nt">iPhone · Added 22 Sep 2026</div></div><span class="when">Yesterday</span><span class="pb">Revoke…</span></div>
+<div class="fr" title="Mac · Added 21 Sep 2026 · Key 3f0a 91c2 7be4"><div class="dv"><svg><use href="#i-mini"/></svg></div><div class="kn"><div>Mac mini (office) <span class="cap">This Mac</span></div></div><span class="when mono">Key 3f0a 91c2 7be4</span></div><div class="fr" title="Mac · Added 22 Sep 2026 · Key c815 2d6e a093"><div class="dv"><svg><use href="#i-laptop"/></svg></div><div class="kn"><div>MacBook Pro</div></div><span class="when">2 h ago</span><span class="pb" title="Revoke MacBook Pro">Revoke…</span></div><div class="fr" title="iPhone · Added 22 Sep 2026 · Key 5e7b 0c48 f21d"><div class="dv"><svg><use href="#i-phone"/></svg></div><div class="kn"><div>Rafal's iPhone</div></div><span class="when">Yesterday</span><span class="pb" title="Revoke Rafal's iPhone">Revoke…</span></div>
         </div>
         <div style="margin-top:12px"><span class="btn">Add a Device…</span></div>
-        <div class="gl">Family or Team</div>
-        <div class="grp">
-          <div class="fr"><div class="k">Join a Family or Team</div><div class="v"></div><span class="pb">Join…</span></div>
-        </div>
-        <div class="grp" style="margin-top:22px"><div class="fr"><div class="k" style="color:var(--red)">Delete Account…</div><div class="v"></div></div></div>
       </div></div>
     </section>
   </div><div class="pgrid" style="margin-top:22px">
@@ -561,7 +556,7 @@ svg{display:block}
         <div class="fr"><div class="v" style="text-align:left;display:flex;gap:7px;align-items:center"><span class="spin"></span>Asking Apassy Connect…</div></div>
       </div></div>
   </div>
-  <ul class="fnotes"><li><b>Email</b> shows only when Connect has one (copied from Stripe after a checkout); it is never written to disk.</li><li><b>Choose a Plan…</b> opens frame 4. It is the one primary button of the view.</li><li><b>Forget…</b> on this Mac revokes this Mac itself (frame 7d). <b>Revoke…</b> on another device: frame 7c.</li><li><b>Join…</b>: frame 10. <b>Delete Account…</b>: frame 11.</li><li><b>3b</b>: after the app starts, a lock, or a new unlock, the account key is not in memory. The section shows the account file (no secret) and <b>Sign In…</b>, which reads the key from the Keychain (Touch ID) and asks Connect (3c). The app never asks Touch ID by itself when the section opens.</li></ul>
+  <ul class="fnotes"><li><b>Account</b>: the name, and the email only when Connect has one (copied from Stripe after a checkout; never written to disk). Its ⋯ holds the account ID with Copy Account ID, New Recovery Code…, Forget This Mac… (frame 7d), and Delete Account… (frame 11): frame 9f.</li><li><b>Choose a Plan…</b> opens frame 4. It is the one primary button of the view.</li><li><b>Devices</b>: one line each. This Mac shows its key; another device its last contact and <b>Revoke…</b> (frame 7c, spoken "Revoke MacBook Pro"). The kind, the day it was added, and the key are its hover text and its VoiceOver description.</li><li><b>Join…</b> (spoken "Join a Family or Team"): frame 10.</li><li><b>3b</b>: after the app starts, a lock, or a new unlock, the account key is not in memory. The section shows the account file (no secret) and <b>Sign In…</b>, which reads the key from the Keychain (Touch ID) and asks Connect (3c). The app never asks Touch ID by itself when the section opens.</li></ul>
 </section>
 <!-- ============================================================ 4 -->
 <section class="frame" id="f4">
@@ -652,7 +647,7 @@ svg{display:block}
 <div class="fr pl"><div class="k">Plan</div><div class="v"></div><span class="pb">Manage Billing…</span><div class="pst">Connect Family · Renews 10 Nov 2027</div></div><div class="fr"><div class="k">People</div><div class="v">3 of 4</div><span class="pb">Change…</span></div>
       </div></div><div class="pcard"><div class="plabel">6h · Member of a family<small>Status line: Connect Family · Renews 10 Nov 2027</small></div>
       <div class="grp" style="margin-top:10px">
-<div class="fr pl"><div class="k">Plan</div><div class="v"></div><div class="pst">Connect Family · Renews 10 Nov 2027</div></div><div class="fr"><div class="tn" style="flex:1;color:var(--sec)"><svg><use href="#i-info"/></svg><span>Rafal manages the plan and the billing.</span></div></div>
+<div class="fr pl"><div class="k">Plan</div><div class="v"></div><div class="pst">Connect Family · Renews 10 Nov 2027</div></div><div class="fr"><div class="k">Family</div><div class="v">Managed by Rafal</div></div>
       </div></div></div>
   <ul class="fnotes"><li><b>active</b> and <b>trialing</b>: "Renews &lt;renews_at&gt;", or "Ends &lt;ends_at&gt;" when the plan is canceled at the end of the period. <b>past_due</b>: the warning line with <code>grace_until</code>. <b>read_only</b>: <code>read_only_until</code> and <code>delete_at</code>. <b>suspended</b>: <code>delete_at</code>. <b>pending</b>: "Waiting for the payment". <b>none</b>: "No plan" with Choose a Plan… (frame 3).</li><li><b>Manage Billing…</b>: <code>POST /v1/account/portal</code>, then the URL that Connect returned opens in the default browser. No owner check: the portal changes nothing in Apassy, and Stripe asks for its own confirmation. It shows only for the account that pays (no group, or the owner of the group).</li><li>The status goes under the label in full and wraps at the width of Settings; it never ends in "…". The buttons stay on the line of the label.</li><li>Dates are UTC days, "10 Dec 2026". The list row and the header show the status line under each card.</li><li>A member of a family or team sees the plan without a price, a button, or the billing (6h).</li></ul>
 </section>
@@ -687,6 +682,7 @@ svg{display:block}
       <div class="alert"><div class="aic" style="background:#ff3b30"><svg><use href="#i-warn"/></svg></div>
         <h2>Revoke MacBook Pro?</h2>
         <p>It leaves your Connect account. Its vaults stay on it.</p>
+        <p style="color:var(--sec)">Mac · Added 22 Sep 2026 · Key c815 2d6e a093</p>
       </div>
       <div class="sbar"><span class="btn">Cancel</span><span class="btn des">Revoke…</span></div>
     </div>
@@ -759,22 +755,20 @@ svg{display:block}
         <div class="hdr"><div class="tile" style="background:rgb(52,199,89)"><svg><use href="#i-cloud"/></svg></div><div><h1>Connect</h1><div class="s">Connect Family · 3 of 4 people</div></div></div>
         <div class="gl">Apassy Connect</div>
         <div class="grp">
-          <div class="fr"><div class="k">Name</div><div class="v">Rafal</div></div>
-          <div class="fr"><div class="k">Email</div><div class="v">rafal@example.com</div></div>
+          <div class="fr"><div class="k">Account</div><div class="v">Rafal · rafal@example.com</div><span class="ib" title="More account actions"><svg><use href="#i-dots"/></svg></span></div>
 <div class="fr"><div class="k">Plan</div><div class="v">Connect Family · Renews 10 Nov 2027</div><span class="pb">Manage Billing…</span></div>
           <div class="fr"><div class="k">People</div><div class="v">3 of 4</div><span class="pb">Change…</span></div>
         </div>
         <div class="gl">Family<span>3 of 4</span></div>
         <div class="grp">
-<div class="fr"><div class="avl" style="background:#ff9500">R</div><div class="kn"><div>Rafal <span class="cap">Organizer</span></div><div class="nt">Since 21 Sep 2026</div></div></div><div class="fr"><div class="avl" style="background:#34c759">O</div><div class="kn"><div>Ola</div><div class="nt">Since 22 Sep 2026</div></div><span class="pb">Remove…</span></div><div class="fr"><div class="avl" style="background:#5856d6">J</div><div class="kn"><div>Jan</div><div class="nt">Waits for your confirmation</div></div><span class="pb">Remove…</span><span class="pb">Confirm…</span></div>
+<div class="fr" title="Since 21 Sep 2026"><div class="avl" style="background:#ff9500">R</div><div class="kn"><div>Rafal <span class="cap">Organizer</span></div></div></div><div class="fr" title="Since 22 Sep 2026"><div class="avl" style="background:#34c759">O</div><div class="kn"><div>Ola</div></div><span class="pb" title="Remove Ola">Remove…</span></div><div class="fr"><div class="avl" style="background:#5856d6">J</div><div class="kn"><div>Jan <span class="cap" style="background:rgba(255,149,0,.14);color:var(--t-warn)">Pending</span></div></div><span class="pb" title="Remove Jan">Remove…</span><span class="pb" title="Confirm Jan">Confirm…</span></div>
         </div>
         <div style="margin-top:12px"><span class="btn">Invite…</span></div>
         <div class="gl">Devices<span>3</span></div>
         <div class="grp">
-<div class="fr"><div class="dv"><svg><use href="#i-mini"/></svg></div><div class="kn"><div>Mac mini (office) <span class="cap">This Mac</span></div><div class="nt">Mac · Added 21 Sep 2026</div></div><span class="when">Now</span><span class="pb">Forget…</span></div><div class="fr"><div class="dv"><svg><use href="#i-laptop"/></svg></div><div class="kn"><div>MacBook Pro</div><div class="nt">Mac · Added 22 Sep 2026</div></div><span class="when">2 h ago</span><span class="pb">Revoke…</span></div><div class="fr"><div class="dv"><svg><use href="#i-phone"/></svg></div><div class="kn"><div>Rafal's iPhone</div><div class="nt">iPhone · Added 22 Sep 2026</div></div><span class="when">Yesterday</span><span class="pb">Revoke…</span></div>
+<div class="fr" title="Mac · Added 21 Sep 2026 · Key 3f0a 91c2 7be4"><div class="dv"><svg><use href="#i-mini"/></svg></div><div class="kn"><div>Mac mini (office) <span class="cap">This Mac</span></div></div><span class="when mono">Key 3f0a 91c2 7be4</span></div><div class="fr" title="Mac · Added 22 Sep 2026 · Key c815 2d6e a093"><div class="dv"><svg><use href="#i-laptop"/></svg></div><div class="kn"><div>MacBook Pro</div></div><span class="when">2 h ago</span><span class="pb" title="Revoke MacBook Pro">Revoke…</span></div><div class="fr" title="iPhone · Added 22 Sep 2026 · Key 5e7b 0c48 f21d"><div class="dv"><svg><use href="#i-phone"/></svg></div><div class="kn"><div>Rafal's iPhone</div></div><span class="when">Yesterday</span><span class="pb" title="Revoke Rafal's iPhone">Revoke…</span></div>
         </div>
         <div style="margin-top:12px"><span class="btn">Add a Device…</span></div>
-        <div class="grp" style="margin-top:22px"><div class="fr"><div class="k" style="color:var(--red)">Delete Account…</div><div class="v"></div></div></div>
       </div></div>
     </section>
   </div>
@@ -813,17 +807,30 @@ svg{display:block}
       <div class="sbar"><span class="btn">Cancel</span><span class="btn pri"><svg><use href="#i-touch"/></svg>Change…</span></div>
     </div>
     <div class="shc">
-      <div class="plabel">9e · A member's view</div>
+      <div class="plabel">9f · ⋯ of the Account row</div>
+      <div class="menu" style="position:static;min-width:0;box-shadow:0 0 0 .5px rgba(0,0,0,.2)">
+        <div class="mi"><span class="ck"></span><span style="color:var(--sec)">Account ID</span>&nbsp;<span class="mono">acc_k7m2q4x3ca</span></div>
+        <div class="mi"><span class="ck"></span>Copy Account ID</div>
+        <hr>
+        <div class="mi"><span class="ck"></span>New Recovery Code…</div>
+        <div class="mi"><span class="ck"></span>Forget This Mac…</div>
+        <hr>
+        <div class="mi" style="color:var(--red)"><span class="ck"></span>Delete Account…</div>
+      </div>
+      <div class="note dn">A member also has "Leave Family…" (or "Leave Team…") above the deletion. Items that need an owner check are off while the vault is locked.</div>
+    </div>
+    <div class="shc">
+      <div class="plabel">9e · A member's view (rows of the Apassy Connect group)</div>
       <div class="grp">
-        <div class="fr"><div class="kn"><div>Rafal's family</div><div class="nt">Rafal manages the plan and the members.</div></div><span class="pb">Leave…</span></div>
+        <div class="fr"><div class="k">Family</div><div class="v">Managed by Rafal</div></div>
       </div>
       <div class="mini" style="margin-top:14px">Pending</div>
       <div class="grp">
-        <div class="fr"><div class="kn"><div>Rafal's family</div><div class="nt">Waiting for Rafal to confirm you.</div></div><span class="pb">Leave…</span></div>
+        <div class="fr"><div class="k">Family</div><div class="v" style="color:var(--t-warn)">Waiting for Rafal</div></div>
       </div>
     </div>
   </div>
-  <ul class="fnotes"><li><b>Group label</b>: "Family" or "Team", with "3 of 4" (active members of <code>quantity</code>). Roles: the Family owner is "Organizer"; a Team has "Owner" and "Admin" caps.</li><li><b>Confirm…</b> on a pending member runs the owner check <code>OwnerAction::ChangeConnectGroup</code> (ConfirmMember), then <code>POST …/members/{id}/confirm</code>. <b>Remove…</b> (9c) runs the check (RemoveMember), then <code>DELETE …/members/{id}</code>. <b>Change…</b> (9d) runs the check (SetSeats), then <code>POST /v1/account/group/seats</code>; the new count shows when Stripe confirms it.</li><li><b>Invite…</b> (owner or admin): <code>POST /v1/account/group/invites</code>; the link that Connect returned, with Copy. A Team owner chooses Member or Admin first (9b); a Family and a Team admin invite members at once (9a).</li><li><b>9e</b>: a member sees the group, who manages it, and Leave… (the owner check, then <code>DELETE …/members/&lt;own id&gt;</code>). Seats below the members: "seat_limit" shows as "Remove members first, or choose more."</li></ul>
+  <ul class="fnotes"><li><b>Group label</b>: "Family" or "Team", with "3 of 4" (active members of <code>quantity</code>). Roles: the Family owner is "Organizer"; a Team has "Owner" and "Admin" caps.</li><li><b>Confirm…</b> on a pending member runs the owner check <code>OwnerAction::ChangeConnectGroup</code> (ConfirmMember), then <code>POST …/members/{id}/confirm</code>. <b>Remove…</b> (9c) runs the check (RemoveMember), then <code>DELETE …/members/{id}</code>. <b>Change…</b> (9d) runs the check (SetSeats), then <code>POST /v1/account/group/seats</code>; the new count shows when Stripe confirms it.</li><li><b>Invite…</b> (owner or admin): <code>POST /v1/account/group/invites</code>; the link that Connect returned, with Copy. A Team owner chooses Member or Admin first (9b); a Family and a Team admin invite members at once (9a).</li><li><b>9e</b>: a member sees one row, who manages the group; "Leave Family…" is in the ⋯ menu of the Account row (the owner check, then <code>DELETE …/members/&lt;own id&gt;</code>). Seats below the members: "seat_limit" shows as "Remove members first, or choose more."</li></ul>
 </section>
 <!-- ============================================================ 10 -->
 <section class="frame" id="f10">
@@ -986,20 +993,17 @@ svg{display:block}
 <!-- ============================================================ 13 -->
 <section class="frame" id="f13">
   <div class="flabel"><b><span class="fnum">13</span>A new recovery code</b>
-    <span>The Recovery Code row of the account, the owner check, and the new code once (connect-account-v1 section 9.1).</span></div>
+    <span>The recovery lines of the account, the owner check, and the new code once (connect-account-v1 section 9.1).</span></div>
   <div class="pgrid three">
     <div class="shc">
       <div class="plabel">13a · An account whose code was never shown</div>
       <div class="grp" style="margin-top:6px">
-        <div class="fr"><div class="tn warn" style="flex:1;color:var(--t-warn)"><svg><use href="#i-warn"/></svg><span>You have not seen a recovery code of this account. Make one now.</span></div></div>
-        <div class="fr pl"><div class="k">Recovery Code</div><div class="v"><span class="btn">New Recovery Code…</span></div></div>
+        <div class="fr"><div class="tn warn" style="flex:1;color:var(--t-warn)"><svg><use href="#i-warn"/></svg><span>You have not seen this account's recovery code.</span></div><span class="pb">New Recovery Code…</span></div>
       </div>
-      <div class="note dn">The warning line stays through every refresh and restart until a new code is made and its sheet is closed with “I Saved It”. Without it, the group shows only the Recovery Code row.</div>
+      <div class="note dn">The first row of the Apassy Connect group. It stays through every refresh and restart until a new code is made and its sheet is closed with “I Saved It”. Without it, New Recovery Code… is in the ⋯ menu of the Account row.</div>
       <div class="plabel" style="margin-top:14px">13d · A new code of another device</div>
       <div class="grp" style="margin-top:6px">
-        <div class="fr"><div class="tn warn" style="flex:1;color:var(--t-warn)"><svg><use href="#i-warn"/></svg><span>Your recovery code was replaced on MacBook Air on 11 Nov 2026.</span></div></div>
-        <div class="fr pl"><div class="k">Changed on another device</div><div class="v"><span class="btn">OK</span></div></div>
-        <div class="fr pl"><div class="k">Recovery Code</div><div class="v"><span class="btn">New Recovery Code…</span></div></div>
+        <div class="fr"><div class="tn warn" style="flex:1;color:var(--t-warn)"><svg><use href="#i-warn"/></svg><span>Your recovery code was replaced on MacBook Air on 11 Nov 2026.</span></div><span class="hi" title="The old code no longer works. Not you? Revoke that device, then make a new code."><svg><use href="#i-info"/></svg></span><span class="pb">OK</span></div>
       </div>
     </div>
     <div class="shc">
@@ -1066,9 +1070,8 @@ svg{display:block}
     <div class="shc">
       <div class="plabel">14h · The account after the recovery</div>
       <div class="grp" style="margin-top:6px">
-        <div class="fr"><div class="nt" style="flex:1;color:var(--label)">Account recovered; 2 vault copies at Connect were deleted. To sync again, use Settings › Vault › Sync.</div><div class="v"><span class="btn">OK</span></div></div>
-        <div class="fr"><div class="k">Name</div><div class="v">Alex</div></div>
-        <div class="fr pl"><div class="k">Account ID</div><div class="v"><span class="btn">Copy</span></div><div class="pst mono">acc_k7m2q4x3ca</div></div>
+        <div class="fr"><div class="nt" style="flex:1;color:var(--label)">Recovered. Connect deleted 2 vault copies. Sync again in Vault › Sync.</div><div class="v"><span class="btn">OK</span></div></div>
+        <div class="fr"><div class="k">Account</div><div class="v">Alex</div><span class="ib" title="More account actions"><svg><use href="#i-dots"/></svg></span></div>
         <div class="fr pl"><div class="k">Plan</div><div class="pst">Connect Personal · Renews 10 Dec 2026</div></div>
       </div>
       <div class="note dn">The vault on this Mac whose copy went says once: “The copy at Apassy Connect was deleted by the account recovery.”, with <b>Sync Again…</b> (a new copy at Connect).</div>
@@ -1080,7 +1083,7 @@ svg{display:block}
       <div class="note">No other device? Make a vault on this Mac, then recover the account in Settings › Connect.</div>
     </div>
   </div>
-  <ul class="fnotes"><li><b>Recover…</b> is on only with an account ID of the form <code>acc_</code> and 10 characters, 16 words of the list (any case; spaces, line breaks, the numbers of 2b, and the labels of its Copy text are skipped), and a name. It runs the owner check <code>OwnerAction::RecoverConnectAccount</code> (always asked again; the prompt names the account ID), then <code>ConnectAccount::recover</code> on a worker: <code>POST /v1/account/recover</code>, signed with the old code's key, which never leaves this Mac.</li><li>The body is written as the pending recovery (<code>connect/pending-recovery.json</code>, public values only) before the first try; a lost answer sends it again. Without an answer the next try or the next unlocked session settles it (the same body for 9 minutes, then a sign-in of this Mac's key), so a quit never leaves a used key without an account file.</li><li><b>14g</b> is the sheet of 2b. A lock before it shows the code nowhere; the account then keeps the warning of 13a until a new code is made.</li><li><b>14h</b>: the line comes from <code>deleted_stores</code> of the answer, until <b>OK</b> or the lock. The account ID row shows in every account (selectable, with Copy).</li><li>The iPhone has no recovery screen in this release.</li></ul>
+  <ul class="fnotes"><li><b>Recover…</b> is on only with an account ID of the form <code>acc_</code> and 10 characters, 16 words of the list (any case; spaces, line breaks, the numbers of 2b, and the labels of its Copy text are skipped), and a name. It runs the owner check <code>OwnerAction::RecoverConnectAccount</code> (always asked again; the prompt names the account ID), then <code>ConnectAccount::recover</code> on a worker: <code>POST /v1/account/recover</code>, signed with the old code's key, which never leaves this Mac.</li><li>The body is written as the pending recovery (<code>connect/pending-recovery.json</code>, public values only) before the first try; a lost answer sends it again. Without an answer the next try or the next unlocked session settles it (the same body for 9 minutes, then a sign-in of this Mac's key), so a quit never leaves a used key without an account file.</li><li><b>14g</b> is the sheet of 2b. A lock before it shows the code nowhere; the account then keeps the warning of 13a until a new code is made.</li><li><b>14h</b>: the line comes from <code>deleted_stores</code> of the answer, until <b>OK</b> or the lock. The account ID of every account is in the ⋯ menu of the Account row, with Copy Account ID (frame 9f).</li><li>The iPhone has no recovery screen in this release.</li></ul>
 </section>
 <section class="notes">
   <h2>Rules for every view</h2>

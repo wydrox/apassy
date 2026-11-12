@@ -112,10 +112,10 @@ pub(crate) fn join_left_behind(confirmer: &str, device: &str) -> String {
 }
 
 /// Settings › Connect: a new recovery code (connect-account-v1 section 9.1).
+/// The title of the help of a new recovery code that another device made.
 pub(crate) const RECOVERY_ROW: &str = "Recovery Code";
 pub(crate) const NEW_RECOVERY: &str = "New Recovery Code…";
-pub(crate) const RECOVERY_UNSEEN: &str =
-    "You have not seen a recovery code of this account. Make one now.";
+pub(crate) const RECOVERY_UNSEEN: &str = "You have not seen this account's recovery code.";
 /// The sheet of a new recovery code that Connect took while the account file of this
 /// device could not be written (section 9.1).
 pub(crate) const RECOVERY_UNRECORDED: &str = concat!(
@@ -125,9 +125,18 @@ pub(crate) const RECOVERY_UNRECORDED: &str = concat!(
 );
 /// The sheet that shows a recovery code once: the account id comes with it.
 pub(crate) const ACCOUNT_ID: &str = "Account ID";
-/// The row of a new recovery code that another device made.
-pub(crate) const RECOVERY_CHANGED_ROW: &str = "Changed on another device";
+/// The help of the line of a new recovery code that another device made.
+pub(crate) const RECOVERY_CHANGED_HELP: [&str; 2] = [
+    "The old code no longer works.",
+    "Not you? Revoke that device, then make a new code.",
+];
 pub(crate) const RECOVERY_CHANGED_OK: &str = "OK";
+/// The Account row: the name and the email, and the menu of the rare account actions.
+pub(crate) const ACCOUNT_ROW: &str = "Account";
+pub(crate) const MORE_ACCOUNT: &str = "More account actions";
+pub(crate) const COPY_ACCOUNT_ID: &str = "Copy Account ID";
+/// The row of an account without a family or team, with "Join…".
+pub(crate) const JOIN_ROW: &str = "Family or Team";
 
 /// The line of a new recovery code that another device made (section 9.1): `device`, the
 /// signed name of that device when the device list holds it, and `at`, the time of the
@@ -195,14 +204,12 @@ pub(crate) fn recover_wait(seconds: u64) -> String {
 /// each vault can sync through Connect again. `deleted` is `None` when the recovery was
 /// settled without Connect's count.
 pub(crate) fn recovered_line(deleted: Option<u64>) -> String {
-    let again = "To sync again, use Settings › Vault › Sync.";
+    let again = "Sync again in Vault › Sync.";
     match deleted {
         Some(0) => "The account is recovered.".to_owned(),
-        Some(1) => format!("Account recovered; 1 vault copy at Connect was deleted. {again}"),
-        Some(count) => {
-            format!("Account recovered; {count} vault copies at Connect were deleted. {again}")
-        }
-        None => format!("Account recovered; its vault copies at Connect were deleted. {again}"),
+        Some(1) => format!("Recovered. Connect deleted 1 vault copy. {again}"),
+        Some(count) => format!("Recovered. Connect deleted {count} vault copies. {again}"),
+        None => format!("Recovered. Connect deleted the vault copies. {again}"),
     }
 }
 
@@ -318,7 +325,12 @@ pub(crate) const TEXTS: &[&str] = &[
     RECOVERY_TITLE,
     RECOVERY_LEAD,
     RECOVERY_UNRECORDED,
-    RECOVERY_CHANGED_ROW,
+    RECOVERY_CHANGED_HELP[0],
+    RECOVERY_CHANGED_HELP[1],
+    ACCOUNT_ROW,
+    MORE_ACCOUNT,
+    COPY_ACCOUNT_ID,
+    JOIN_ROW,
     ACCOUNT_ID,
     RECOVER,
     RECOVER_ROW,
@@ -564,6 +576,31 @@ impl Device {
             "linux" => "Linux",
             _ => "Mac",
         }
+    }
+}
+
+/// The facts of a device in one line, "Mac · Added 22 Sep 2026 · Key c815 2d6e a093": the
+/// hover text of its row and the note of its Revoke alert.
+pub(crate) fn device_detail(device: &Device) -> String {
+    if device.fingerprint.is_empty() {
+        format!("{} · Added {}", device.kind(), day(device.created_at))
+    } else {
+        format!(
+            "{} · Added {} · Key {}",
+            device.kind(),
+            day(device.created_at),
+            device.fingerprint
+        )
+    }
+}
+
+/// The line of a member of a family or team on the Account group: who manages it, or
+/// that the owner did not confirm this account yet.
+pub(crate) fn managed_by(group_state: &str, owner_name: &str) -> (String, Tone) {
+    if group_state == "pending" {
+        (format!("Waiting for {owner_name}"), Tone::Warning)
+    } else {
+        (format!("Managed by {owner_name}"), Tone::Neutral)
     }
 }
 
@@ -1029,6 +1066,7 @@ fn account_section(
         && group.is_none_or(|group| group.role == "owner");
     let billing = account.pays() && has_plan;
     rows::group(ui, Some(GROUP_LABEL), |g| {
+        // The problem lines first (frames 14h, 13a, 13d), each with its one button.
         if let Some(deleted) = account.recovered {
             g.row(|ui| {
                 let line =
@@ -1038,18 +1076,32 @@ fn account_section(
                 }
             });
         }
-        g.labeled("Name", rows::value(account.name.as_str()));
-        if let Some(email) = &account.email {
-            g.labeled("Email", rows::value(email.as_str()));
-        }
-        // The account id, which a recovery needs with the code: selectable, with Copy.
-        g.row(|ui| {
-            ui.label(rows::label_text(ACCOUNT_ID));
-            let id =
-                kit::text(account.account_id.as_str(), Font::Mono).color(kit::palette().secondary);
-            if rows::text_buttons(ui, id, &[("Copy", Style::Bordered)]).is_some() {
-                *action = Some(Action::CopyAccountId);
+        if account.recovery_unseen {
+            let button = (!view.locked && account.list_verified).then_some(NEW_RECOVERY);
+            if super::devices::problem_line(g, RECOVERY_UNSEEN, Tone::Warning, button, None) {
+                *action = Some(Action::NewRecoveryCode);
             }
+        }
+        if let Some(changed) = &account.recovery_changed {
+            let button = (!view.locked).then_some(RECOVERY_CHANGED_OK);
+            if super::devices::problem_line(
+                g,
+                changed.text.as_str(),
+                Tone::Warning,
+                button,
+                Some((RECOVERY_ROW, &RECOVERY_CHANGED_HELP)),
+            ) {
+                *action = Some(Action::RecoveryChangeSeen);
+            }
+        }
+        // The account, and the rare account actions in one menu (the account id, a new
+        // recovery code, forgetting this Mac, leaving the group, the deletion).
+        let who = match &account.email {
+            Some(email) => format!("{} · {email}", account.name),
+            None => account.name.clone(),
+        };
+        g.line(ACCOUNT_ROW, Some(rows::value(who)), |ui| {
+            account_menu(ui, view, account, action);
         });
         let (value, tone) = view.plan_value(plan);
         let color = match tone {
@@ -1092,13 +1144,26 @@ fn account_section(
                 }
             });
         }
+        // A member's family or team: who manages it (frames 6h, 9e). Leave… is in the
+        // menu of the Account row.
         if let Some(group) = group.filter(|group| !group.manages()) {
-            let line = if group.state == "pending" {
-                format!("Waiting for {} to confirm you.", group.owner_name)
-            } else {
-                format!("{} manages the plan and the billing.", group.owner_name)
+            let (line, tone) = managed_by(&group.state, &group.owner_name);
+            let color = match tone {
+                Tone::Neutral => kit::palette().secondary,
+                tone => tone.text(),
             };
-            g.tone_icon_row(line, Tone::Neutral);
+            g.line(
+                group.label(),
+                Some(kit::text(line, Font::Body).color(color)),
+                |_| {},
+            );
+        }
+        if group.is_none() && !plan.entitled {
+            g.line(JOIN_ROW, None, |ui| {
+                if named_button(ui, "Join…", JOIN_GROUP, Style::Bordered).clicked() {
+                    *action = Some(Action::JoinGroup);
+                }
+            });
         }
         if let Some((line, tone)) = plan_note(plan) {
             g.tone_icon_row(line, tone);
@@ -1107,78 +1172,70 @@ fn account_section(
     if view.locked {
         rows::footnote(ui, LOCKED);
     }
-    // A family or team comes before the devices (frame 9); "Join a Family or Team" of
-    // an account without one after them (frame 3).
-    if let Some(group) = group {
+    // A family or team comes before the devices (frame 9).
+    if let Some(group) = group.filter(|group| group.manages()) {
         group_section(ui, view, account, group, action);
     }
     devices_group(ui, view, account, action);
-    match group {
-        Some(_) => {}
-        None if !plan.entitled => {
-            rows::group(ui, Some("Family or Team"), |g| {
-                g.line(JOIN_GROUP, None, |ui| {
-                    if kit::small_button(ui, "Join…", Style::Bordered).clicked() {
-                        *action = Some(Action::JoinGroup);
-                    }
-                });
-            });
-        }
-        None => {}
-    }
-    rows::group(ui, Some(RECOVERY_ROW), |g| {
-        if account.recovery_unseen {
-            g.tone_icon_row(RECOVERY_UNSEEN, Tone::Warning);
-        }
-        if let Some(changed) = &account.recovery_changed {
-            g.tone_icon_row(changed.text.as_str(), Tone::Warning);
-            g.line(RECOVERY_CHANGED_ROW, None, |ui| {
-                if ui
-                    .add_enabled_ui(!view.locked, |ui| {
-                        kit::small_button(ui, RECOVERY_CHANGED_OK, Style::Bordered)
-                    })
-                    .inner
-                    .clicked()
-                {
-                    *action = Some(Action::RecoveryChangeSeen);
-                }
-            });
-        }
-        g.line(RECOVERY_ROW, None, |ui| {
-            let enabled = !view.locked && account.list_verified;
-            if ui
-                .add_enabled_ui(enabled, |ui| {
-                    kit::small_button(ui, NEW_RECOVERY, Style::Bordered)
-                })
-                .inner
+}
+
+/// The ⋯ menu of the Account row: the account id with Copy, a new recovery code, forgetting
+/// this Mac, leaving a family or team, and the deletion in red. Every item that needs an
+/// owner check is off while the vault is locked.
+fn account_menu(ui: &mut Ui, view: &ConnectView, account: &Account, action: &mut Option<Action>) {
+    let more = kit::icon_button(ui, Icon::More, MORE_ACCOUNT, kit::Size::Small);
+    egui::Popup::menu(&more).show(|ui| {
+        ui.set_min_width(220.0);
+        let item = |ui: &mut Ui, enabled: bool, label: &str| {
+            ui.add_enabled(enabled, egui::Button::selectable(false, label))
                 .clicked()
-            {
-                *action = Some(Action::NewRecoveryCode);
-            }
+        };
+        ui.horizontal(|ui| {
+            ui.label(kit::text(ACCOUNT_ID, Font::Callout).color(kit::palette().secondary));
+            ui.label(
+                kit::text(account.account_id.as_str(), Font::Mono).color(kit::palette().label),
+            );
         });
-    });
-    ui.add_space(6.0);
-    rows::group(ui, None, |g| {
-        ui_enabled_row(g, !view.locked, |g| {
-            let response = g.clickable_row(DELETE, |ui| {
-                ui.label(kit::text(DELETE, Font::Body).color(Tone::Critical.text()));
-            });
-            if response.clicked() {
-                *action = Some(Action::Delete);
+        if item(ui, true, COPY_ACCOUNT_ID) {
+            *action = Some(Action::CopyAccountId);
+        }
+        ui.separator();
+        if item(ui, !view.locked && account.list_verified, NEW_RECOVERY) {
+            *action = Some(Action::NewRecoveryCode);
+        }
+        if let Some(index) = account.devices.iter().position(|device| device.this)
+            && item(ui, !view.locked, FORGET_THIS_MAC)
+        {
+            *action = Some(Action::Revoke(index));
+        }
+        if let Some(group) = account.group.as_ref().filter(|group| !group.manages()) {
+            let leave = if group.kind == "team" {
+                "Leave Team…"
+            } else {
+                "Leave Family…"
+            };
+            if item(ui, !view.locked, leave) {
+                *action = Some(Action::Leave);
             }
-        });
+        }
+        ui.separator();
+        let delete = kit::text(DELETE, Font::Body).color(Tone::Critical.text());
+        if ui
+            .add_enabled(!view.locked, egui::Button::selectable(false, delete))
+            .clicked()
+        {
+            *action = Some(Action::Delete);
+        }
     });
 }
 
-/// Run `add` with the group's rows off when `enabled` is false.
-fn ui_enabled_row(g: &mut rows::Group<'_>, enabled: bool, add: impl FnOnce(&mut rows::Group<'_>)) {
-    if enabled {
-        add(g);
-    } else {
-        g.row(|ui| {
-            ui.label(kit::text(DELETE, Font::Body).color(kit::palette().tertiary));
-        });
-    }
+/// A small button whose spoken name says more than its label ("Revoke…" that VoiceOver
+/// reads as "Revoke MacBook Pro").
+fn named_button(ui: &mut Ui, label: &str, spoken: &str, style: Style) -> egui::Response {
+    let button = kit::small_button(ui, label, style);
+    ui.ctx()
+        .accesskit_node_builder(button.id, |node| node.set_label(spoken));
+    button
 }
 
 /// A group label with a count on the right, as "Devices ⓘ 6" of Settings > Devices.
@@ -1288,16 +1345,9 @@ fn devices_group(ui: &mut Ui, view: &ConnectView, account: &Account, action: &mu
     }
     rows::group_box(ui, |g| {
         for (index, device) in account.devices.iter().enumerate() {
-            let subline = if device.fingerprint.is_empty() {
-                format!("{} · Added {}", device.kind(), day(device.created_at))
-            } else {
-                format!(
-                    "{} · Added {} · Key {}",
-                    device.kind(),
-                    day(device.created_at),
-                    device.fingerprint
-                )
-            };
+            let detail = device_detail(device);
+            let key =
+                (!device.fingerprint.is_empty()).then(|| format!("Key {}", device.fingerprint));
             let cap = if device.this {
                 Some((THIS_DEVICE, Tone::Neutral))
             } else if !device.verified {
@@ -1310,35 +1360,29 @@ fn devices_group(ui: &mut Ui, view: &ConnectView, account: &Account, action: &mu
                 |ui| device_glyph(ui, &device.platform),
                 &device.name,
                 cap,
-                &subline,
-                None,
+                "",
+                Some(detail.as_str()),
                 |ui| {
-                    let label = if device.this {
-                        "Forget…"
-                    } else {
-                        "Revoke…"
-                    };
+                    // This Mac shows its own key, which the Revoke owner check of another
+                    // device names; "Forget This Mac…" is in the menu of the Account row.
                     // A device that this Mac did not verify is no device of the account
-                    // for it: it has nothing to revoke.
-                    if device.this || device.verified {
-                        let button = ui
-                            .add_enabled_ui(!view.locked, |ui| {
-                                kit::small_button(ui, label, Style::Bordered)
-                            })
-                            .inner;
-                        let spoken = format!("{label} {}", device.name);
-                        ui.ctx()
-                            .accesskit_node_builder(button.id, |node| node.set_label(spoken));
-                        if button.clicked() {
-                            *action = Some(Action::Revoke(index));
+                    // for it: it has nothing to revoke, and its key stands in for the time.
+                    if device.this || !device.verified {
+                        if let Some(key) = &key {
+                            ui.label(rows::value(key.as_str()).size(12.0));
                         }
+                        return;
                     }
-                    let seen = if device.this {
-                        Some(view.now)
-                    } else {
-                        device.last_seen_at
-                    };
-                    if let Some(at) = seen {
+                    let spoken = format!("Revoke {}", device.name);
+                    let button = ui
+                        .add_enabled_ui(!view.locked, |ui| {
+                            named_button(ui, "Revoke…", &spoken, Style::Bordered)
+                        })
+                        .inner;
+                    if button.clicked() {
+                        *action = Some(Action::Revoke(index));
+                    }
+                    if let Some(at) = device.last_seen_at {
                         ui.label(
                             rows::value(super::devices::last_contact(at, view.now)).size(12.0),
                         );
@@ -1380,28 +1424,6 @@ fn group_section(
     group: &Group,
     action: &mut Option<Action>,
 ) {
-    if !group.manages() {
-        rows::group(ui, Some(group.label()), |g| {
-            let title = format!("{}'s {}", group.owner_name, group.word());
-            let note = if group.state == "pending" {
-                format!("Waiting for {} to confirm you.", group.owner_name)
-            } else {
-                format!("{} manages the plan and the members.", group.owner_name)
-            };
-            g.line_note(&title, None, Some(rows::note(&note)), |ui| {
-                if ui
-                    .add_enabled_ui(!view.locked, |ui| {
-                        kit::small_button(ui, "Leave…", Style::Bordered)
-                    })
-                    .inner
-                    .clicked()
-                {
-                    *action = Some(Action::Leave);
-                }
-            });
-        });
-        return;
-    }
     counted_label(
         ui,
         group.label(),
@@ -1410,12 +1432,11 @@ fn group_section(
     rows::group_box(ui, |g| {
         for (index, member) in group.members.iter().enumerate() {
             let pending = member.state == "pending";
-            let subline = if pending {
-                "Waits for your confirmation".to_owned()
+            let since = member.joined_at.map(|at| format!("Since {}", day(at)));
+            let cap = if pending {
+                Some(("Pending", Tone::Warning))
             } else {
-                member
-                    .joined_at
-                    .map_or_else(String::new, |at| format!("Since {}", day(at)))
+                role_cap(&group.kind, &member.role).map(|cap| (cap, Tone::Neutral))
             };
             let removable = member.role != "owner"
                 && member.account_id != account.account_id
@@ -1426,16 +1447,20 @@ fn group_section(
                     kit::avatar(ui, &member.name, 28.0);
                 },
                 &member.name,
-                role_cap(&group.kind, &member.role).map(|cap| (cap, Tone::Neutral)),
-                &subline,
-                None,
+                cap,
+                "",
+                since.as_deref(),
                 |ui| {
                     ui.add_enabled_ui(!view.locked, |ui| {
-                        if pending && kit::small_button(ui, "Confirm…", Style::Prominent).clicked()
+                        let confirm = format!("Confirm {}", member.name);
+                        if pending
+                            && named_button(ui, "Confirm…", &confirm, Style::Prominent).clicked()
                         {
                             *action = Some(Action::ConfirmMember(index));
                         }
-                        if removable && kit::small_button(ui, "Remove…", Style::Bordered).clicked()
+                        let remove = format!("Remove {}", member.name);
+                        if removable
+                            && named_button(ui, "Remove…", &remove, Style::Bordered).clicked()
                         {
                             *action = Some(Action::RemoveMember(index));
                         }
@@ -1502,6 +1527,8 @@ pub(crate) enum Sheet {
         index: usize,
         name: String,
         this: bool,
+        /// The facts of the device ([`device_detail`]), so it can be told apart.
+        detail: String,
     },
     /// "Forget This Mac…" after Connect removed this Mac: the confirmation.
     ForgetRemoved,
@@ -1629,9 +1656,19 @@ fn result_head(ui: &mut Ui, title: &str, lines: &[&str]) {
 
 /// A destructive alert: the red warning tile, the title, the lead, Cancel (the default)
 /// and the bordered button with the red label (frames 7c, 7d, 9c, 11a).
-fn destructive(ui: &mut Ui, title: &str, lead: &str, button: &str) -> Option<SheetChoice> {
+fn destructive(
+    ui: &mut Ui,
+    title: &str,
+    lead: &str,
+    note: Option<&str>,
+    button: &str,
+) -> Option<SheetChoice> {
     let mut choice = None;
     kit::alert_head(ui, Tone::Critical, title, Some(lead));
+    if let Some(note) = note {
+        kit::note(ui, note);
+        ui.add_space(8.0);
+    }
     kit::sheet_buttons(
         ui,
         |_| {},
@@ -2268,12 +2305,20 @@ fn sheet_body(
             .inner
         }
         Sheet::DeviceAdded { name } => done_sheet(ui, &format!("{name} Added"), &[]),
-        Sheet::ForgetRemoved => destructive(ui, FORGET_TITLE, FORGET_REMOVED_LEAD, "Forget"),
-        Sheet::Revoke { name, this, .. } => {
+        Sheet::ForgetRemoved => destructive(ui, FORGET_TITLE, FORGET_REMOVED_LEAD, None, "Forget"),
+        Sheet::Revoke {
+            name, this, detail, ..
+        } => {
             if *this {
-                destructive(ui, FORGET_TITLE, FORGET_LEAD, "Forget…")
+                destructive(ui, FORGET_TITLE, FORGET_LEAD, None, "Forget…")
             } else {
-                destructive(ui, &format!("Revoke {name}?"), REVOKE_LEAD, "Revoke…")
+                destructive(
+                    ui,
+                    &format!("Revoke {name}?"),
+                    REVOKE_LEAD,
+                    Some(detail.as_str()),
+                    "Revoke…",
+                )
             }
         }
         Sheet::Recover {
@@ -2406,6 +2451,7 @@ fn sheet_body(
                     ui,
                     &format!("Leave the {word}?"),
                     &format!("You leave the {word} and its shared vaults."),
+                    None,
                     "Leave…",
                 )
             } else {
@@ -2413,6 +2459,7 @@ fn sheet_body(
                     ui,
                     &format!("Remove {name}?"),
                     &format!("{name} leaves your {word} and its shared vaults."),
+                    None,
                     "Remove…",
                 )
             }
@@ -2475,7 +2522,7 @@ fn sheet_body(
                 "{owner_name} confirms you, then their plan covers you."
             )],
         ),
-        Sheet::Delete => destructive(ui, DELETE_TITLE, DELETE_LEAD, "Delete…"),
+        Sheet::Delete => destructive(ui, DELETE_TITLE, DELETE_LEAD, None, "Delete…"),
         Sheet::MembersFirst => {
             let mut choice = None;
             kit::alert_head(

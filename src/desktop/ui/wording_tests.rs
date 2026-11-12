@@ -486,6 +486,7 @@ fn connect_screens(screens: &mut Vec<Screen>) {
                 index: 0,
                 name: device_name.clone(),
                 this: true,
+                detail: String::new(),
             },
         ),
         ("forget after a removal", ConnectSheet::ForgetRemoved),
