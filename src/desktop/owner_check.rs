@@ -4401,7 +4401,7 @@ mod connect_proof_tests {
         assert_eq!(claim.action(), action);
         assert!(!action.allowed_without_vault());
         let text = claim.describe();
-        assert!(text.contains("\"Family\""), "{text}");
+        assert!(text.contains("\u{201c}Family\u{201d}"), "{text}");
         assert!(
             text.contains(": \u{201c}Ola\u{201d} can sync it."),
             "{text}"
