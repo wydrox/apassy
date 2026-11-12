@@ -164,6 +164,12 @@ impl From<SyncError> for CoreError {
                 "forked_copy",
                 "The relay copy has a change by a device that is not in the device list of this account.",
             ),
+            // The iPhone offers no step to take a copy without its earlier history: the
+            // owner takes it on a Mac (connect-account-v1 section 16.8).
+            SyncError::HistoryUnverified => Self::new(
+                "forked_copy",
+                "The relay copy has earlier versions saved by devices that this iPhone cannot verify. Nothing was taken.",
+            ),
             SyncError::TooLarge => Self::new(
                 "too_large",
                 "The vault is too large for the relay (64 MiB).",

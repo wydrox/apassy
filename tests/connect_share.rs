@@ -2206,13 +2206,15 @@ fn a_store_entry_is_signed_only_for_a_store_of_this_account() {
     // entry, and no request for it.
     let posts = f.cloud.connect.count("POST /v1/account/list");
     f.account_a
-        .refresh_shares_with(&[old.clone()], &[])
+        .refresh_shares_with(std::slice::from_ref(&old), &[])
         .expect("A");
     assert_eq!(f.cloud.connect.count("POST /v1/account/list"), posts);
     // X syncs A's store (or names one that it is not in): Connect does not list it as
     // X's, so X asks for no entry at all.
     let x_entries = f.list_of(&x_id).len();
-    f.account_x.refresh_shares(&[old.clone()]).expect("X");
+    f.account_x
+        .refresh_shares(std::slice::from_ref(&old))
+        .expect("X");
     f.account_x.refresh_shares(&[f.team.clone()]).expect("X");
     assert_eq!(f.list_of(&x_id).len(), x_entries);
     assert_eq!(f.cloud.connect.count("POST /v1/account/list"), posts);
@@ -2241,14 +2243,20 @@ fn a_store_entry_is_signed_only_for_a_store_of_this_account() {
             .any(|store| store.team_id == second && store.account_id == a_id)
     );
     let posts = f.cloud.connect.count("POST /v1/account/list");
-    f.account_x.refresh_shares(&[second.clone()]).expect("X");
+    f.account_x
+        .refresh_shares(std::slice::from_ref(&second))
+        .expect("X");
     assert_eq!(f.cloud.connect.count("POST /v1/account/list"), posts);
     assert_eq!(f.list_of(&x_id).len(), x_entries);
     // A's own store: the entry comes, once.
-    f.account_a.refresh_shares(&[old.clone()]).expect("A");
+    f.account_a
+        .refresh_shares(std::slice::from_ref(&old))
+        .expect("A");
     assert!(holds_store(&f, &old));
     let head = entries(&f);
-    f.account_a.refresh_shares(&[old.clone()]).expect("A again");
+    f.account_a
+        .refresh_shares(std::slice::from_ref(&old))
+        .expect("A again");
     assert_eq!(entries(&f), head);
     // A refusal of Connect is not asked again in this session.
     let refused = "t_refusedaaa".to_owned();
@@ -2260,12 +2268,12 @@ fn a_store_entry_is_signed_only_for_a_store_of_this_account() {
         .answer_route_error("POST /v1/account/list", 403, "forbidden");
     let posts = f.cloud.connect.count("POST /v1/account/list");
     f.account_a
-        .refresh_shares(&[refused.clone()])
+        .refresh_shares(std::slice::from_ref(&refused))
         .expect("refused");
     let tried = f.cloud.connect.count("POST /v1/account/list");
     assert!(tried > posts);
     f.account_a
-        .refresh_shares(&[refused.clone()])
+        .refresh_shares(std::slice::from_ref(&refused))
         .expect("refused again");
     assert_eq!(f.cloud.connect.count("POST /v1/account/list"), tried);
     f.cloud
@@ -2288,7 +2296,10 @@ fn a_store_entry_is_signed_only_for_a_store_of_this_account() {
         Some(&shared),
     );
     let head = entries(&f);
-    let status = f.account_a.refresh_shares(&[shared.clone()]).expect("A");
+    let status = f
+        .account_a
+        .refresh_shares(std::slice::from_ref(&shared))
+        .expect("A");
     assert_eq!(status.claims, vec![shared.clone()], "{status:?}");
     assert_eq!(entries(&f), head, "nothing signed without the owner check");
     let names = ShareNames::default();
@@ -2310,9 +2321,13 @@ fn a_store_entry_is_signed_only_for_a_store_of_this_account() {
     let (proof, epoch) = f
         .owner_a
         .proof(f.account_a.claim_store_action(&old, &names));
-    let wrong = f
-        .account_a
-        .claim_store(&shared, &[shared.clone()], &names, proof, &epoch);
+    let wrong = f.account_a.claim_store(
+        &shared,
+        std::slice::from_ref(&shared),
+        &names,
+        proof,
+        &epoch,
+    );
     assert!(
         matches!(wrong, Err(ConnectError::OwnerCheck(_))),
         "{wrong:?}"
@@ -2324,7 +2339,13 @@ fn a_store_entry_is_signed_only_for_a_store_of_this_account() {
     assert_eq!(entries(&f), head);
     let (proof, epoch) = f.owner_a.proof(action);
     f.account_a
-        .claim_store(&shared, &[shared.clone()], &names, proof, &epoch)
+        .claim_store(
+            &shared,
+            std::slice::from_ref(&shared),
+            &names,
+            proof,
+            &epoch,
+        )
         .expect("the owner confirms");
     assert!(holds_store(&f, &shared));
     assert_eq!(entries(&f), head + 1);
