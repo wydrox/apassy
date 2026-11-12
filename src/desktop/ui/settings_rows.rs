@@ -401,17 +401,37 @@ pub(crate) fn text_buttons(
     text: impl Into<WidgetText>,
     buttons: &[(&str, Style)],
 ) -> Option<usize> {
+    let named: Vec<(&str, &str, Style)> = buttons
+        .iter()
+        .map(|(label, style)| (*label, *label, *style))
+        .collect();
+    text_buttons_named(ui, text, &named)
+}
+
+/// [`text_buttons`] whose buttons carry a spoken name besides their short label
+/// (`(label, spoken, style)`): "Stop Sharing…" that VoiceOver reads as "Stop Sharing with
+/// Ola…".
+pub(crate) fn text_buttons_named(
+    ui: &mut Ui,
+    text: impl Into<WidgetText>,
+    buttons: &[(&str, &str, Style)],
+) -> Option<usize> {
     let text = text.into();
     let width = ui.available_width();
     let needed: f32 = buttons
         .iter()
-        .map(|(label, style)| kit::button_width(ui, label, *style, Size::Small) + BUTTON_GAP)
+        .map(|(label, _, style)| kit::button_width(ui, label, *style, Size::Small) + BUTTON_GAP)
         .sum();
     let mut pressed = None;
     let draw = |ui: &mut Ui, pressed: &mut Option<usize>| {
         ui.spacing_mut().item_spacing.x = BUTTON_GAP;
-        for (index, (label, style)) in buttons.iter().enumerate() {
-            if kit::small_button_fit(ui, label, *style, width).clicked() {
+        for (index, (label, spoken, style)) in buttons.iter().enumerate() {
+            let button = kit::small_button_fit(ui, label, *style, width);
+            if spoken != label {
+                ui.ctx()
+                    .accesskit_node_builder(button.id, |node| node.set_label(*spoken));
+            }
+            if button.clicked() {
                 *pressed = Some(index);
             }
         }

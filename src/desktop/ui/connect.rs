@@ -1227,13 +1227,15 @@ fn device_glyph(ui: &mut Ui, platform: &str) {
 }
 
 /// A row with a glyph, a title with an optional cap, a subline, and controls on the
-/// right (the first is the rightmost).
+/// right (the first is the rightmost). An empty subline draws the row on one line.
+/// `detail` is the hover text of the title and its description for VoiceOver.
 fn entity_row(
     g: &mut rows::Group<'_>,
     glyph: impl FnOnce(&mut Ui),
     title: &str,
     cap: Option<(&str, Tone)>,
     subline: &str,
+    detail: Option<&str>,
     controls: impl FnOnce(&mut Ui),
 ) {
     g.row(|ui| {
@@ -1246,17 +1248,30 @@ fn entity_row(
                 |ui| {
                     ui.spacing_mut().item_spacing.x = 10.0;
                     glyph(ui);
-                    ui.vertical(|ui| {
-                        ui.spacing_mut().item_spacing.y = 1.0;
+                    let head = |ui: &mut Ui| {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 6.0;
-                            ui.add(Label::new(rows::label_text(title)).truncate());
+                            let name = ui.add(Label::new(rows::label_text(title)).truncate());
+                            if let Some(detail) = detail {
+                                ui.ctx().accesskit_node_builder(name.id, |node| {
+                                    node.set_description(detail);
+                                });
+                                name.on_hover_text(detail);
+                            }
                             if let Some((cap, tone)) = cap {
                                 kit::cap_toned(ui, cap, tone);
                             }
                         });
-                        ui.add(Label::new(rows::note(subline)).truncate());
-                    });
+                    };
+                    if subline.is_empty() {
+                        head(ui);
+                    } else {
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 1.0;
+                            head(ui);
+                            ui.add(Label::new(rows::note(subline)).truncate());
+                        });
+                    }
                 },
                 |ui| {
                     ui.spacing_mut().item_spacing.x = 10.0;
@@ -1296,6 +1311,7 @@ fn devices_group(ui: &mut Ui, view: &ConnectView, account: &Account, action: &mu
                 &device.name,
                 cap,
                 &subline,
+                None,
                 |ui| {
                     let label = if device.this {
                         "Forget…"
@@ -1412,6 +1428,7 @@ fn group_section(
                 &member.name,
                 role_cap(&group.kind, &member.role).map(|cap| (cap, Tone::Neutral)),
                 &subline,
+                None,
                 |ui| {
                     ui.add_enabled_ui(!view.locked, |ui| {
                         if pending && kit::small_button(ui, "Confirm…", Style::Prominent).clicked()

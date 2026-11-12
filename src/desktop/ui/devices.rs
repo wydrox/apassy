@@ -665,8 +665,8 @@ pub(crate) fn draw(
 }
 
 /// One problem line in the warning or critical tone, with a warning glyph, and at most
-/// one button on the right.
-fn problem_line(
+/// one button on the right (also the problem lines of Settings › Connect).
+pub(super) fn problem_line(
     g: &mut rows::Group<'_>,
     text: &str,
     tone: Tone,
