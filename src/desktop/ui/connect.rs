@@ -650,15 +650,6 @@ impl Group {
             "Family"
         }
     }
-
-    /// "family" or "team", in a sentence.
-    fn word(&self) -> &'static str {
-        if self.kind == "team" {
-            "team"
-        } else {
-            "family"
-        }
-    }
 }
 
 /// The account at Connect, as `GET /v1/account` and `GET /v1/account/group` showed it.
