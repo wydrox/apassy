@@ -303,6 +303,91 @@ fn a_second_device_of_the_account_gets_the_vault_from_its_store() {
     assert_eq!(titles(&vault_a), vec!["Alpha", "Beta", "Gamma"]);
 }
 
+/// A long-lived store: this relay keeps only the newest two heads (the hosted relay keeps
+/// 10000), so after maintenance the chain of a new device starts at version 4 of 5. The
+/// answer names the oldest kept head, the new device checks every entry from there to the
+/// head, and it gets the vault.
+#[test]
+fn a_new_device_gets_a_store_whose_older_heads_the_relay_dropped() {
+    let relay = start_with(
+        |cfg| {
+            cfg.connect = ConnectConfig::accounts(Some(signing_key()));
+            cfg.edge = EdgeMode::Off;
+            cfg.limits.kept_heads = 2;
+        },
+        UpstreamOptions::default(),
+    );
+    let plans = Arc::new(TestPlans::default());
+    relay.hub().set_plans(plans.clone());
+    let owner = owner();
+    let a = app_device(&relay.url);
+    let b = app_device(&relay.url);
+    let (mut account_a, _) = ConnectAccount::create(
+        client(&relay),
+        &a.store,
+        &a.path,
+        "Rafal",
+        "Synthetic MacBook",
+    )
+    .expect("create");
+    plans
+        .0
+        .lock()
+        .unwrap()
+        .insert(account_a.state().account_id.clone(), entitled());
+    let mut account_b = join(&relay, &owner, &mut account_a, &b, "Synthetic Mac mini");
+    let mut vault_a = Vault::create(&a.vault_path, PASS).unwrap();
+    vault_a.unlock(PASS).unwrap();
+    vault_a.add(item("Alpha")).unwrap();
+    let team = a
+        .sync
+        .enable_on_connect(&mut vault_a, &mut account_a, "Personal")
+        .expect("enable on A")
+        .team_id;
+    for title in ["Beta", "Gamma", "Delta", "Epsilon"] {
+        vault_a.add(item(title)).unwrap();
+        assert!(a.sync.sync(&mut vault_a).expect("A").pushed);
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let mut kept = Vec::new();
+    for core in relay.hub().all() {
+        apassy_relay::server::sync::maintenance(&core, now).expect("maintenance");
+        let view = core
+            .store
+            .with(|conn| apassy_relay::server::sync::view(conn, 0))
+            .expect("view");
+        if view.version > 0 {
+            kept.push((view.version, view.chain_from, view.kept_from));
+        }
+    }
+    assert_eq!(
+        kept,
+        vec![(5, Some(4), Some(4))],
+        "the relay dropped versions 1 to 3"
+    );
+    let store = account_b
+        .vault_stores()
+        .expect("stores")
+        .into_iter()
+        .find(|store| store.team_id == team)
+        .expect("B is in the store");
+    let joined = RelaySync::joined_from_store(&mut account_b, &store).expect("joined");
+    let download = joined
+        .download(&b.data.join("sync"))
+        .expect("the kept chain from version 4 to the head");
+    let (vault, _) = b.sync.adopt(&joined, &download, PASS).expect("adopt");
+    drop((vault, download, joined));
+    let mut vault = Vault::open(&b.vault_path).unwrap();
+    vault.unlock(PASS).unwrap();
+    assert_eq!(
+        titles(&vault),
+        vec!["Alpha", "Beta", "Delta", "Epsilon", "Gamma"]
+    );
+}
+
 /// Three devices of one account on this relay; B is behind when C pushes, and A then
 /// revokes C. B waits ("Waiting for another device of this account to sync", never
 /// "damaged"); A, whose own last head is C's, signs a head of its own over it at its next

@@ -1029,3 +1029,47 @@ fn a_new_recovery_code_of_the_mac_shows_on_the_iphone_until_it_is_seen() {
     let status = call(&phone.core, json!({"op": "connect_status"}));
     assert!(status.get("recovery_changed").is_none(), "{status}");
 }
+
+/// "OK" of the line of a new recovery code while another call holds the account (a slow
+/// `connect_status`): the call opens the account file again, and still takes the key that
+/// the last read named, not `invalid_input`.
+#[test]
+fn ok_of_a_new_recovery_code_works_while_another_call_holds_the_account() {
+    let connect = FakeConnect::start();
+    let owner = owner();
+    let mut mac = mac(&connect, "Rafal");
+    let phone = phone(&connect);
+    join(&mut mac, &owner, &phone);
+    let (proof, epoch) = owner.proof(mac.account.new_recovery_code_action());
+    let rotated = mac
+        .account
+        .new_recovery_code(proof, &epoch)
+        .expect("new code");
+    let key = rotated.code.key().expect("key").public_key_b64u();
+    let status = call(&phone.core, json!({"op": "connect_status"}));
+    assert_eq!(status["recovery_changed"]["recovery_key"], key.as_str());
+    // The next read of the account is slow: that status call holds the account meanwhile.
+    connect.slow_next_answers("GET /v1/account", 1, std::time::Duration::from_millis(1500));
+    std::thread::scope(|scope| {
+        let slow = scope.spawn(|| call(&phone.core, json!({"op": "connect_status"})));
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        assert!(
+            !slow.is_finished(),
+            "the status call still holds the account"
+        );
+        call(
+            &phone.core,
+            json!({"op": "connect_recovery_change_seen", "recovery_key": key}),
+        );
+        slow.join().expect("status");
+    });
+    assert_eq!(
+        apassy::connect::AccountState::load(&phone.state_file())
+            .unwrap()
+            .unwrap()
+            .recovery_key
+            .as_deref(),
+        Some(key.as_str()),
+        "OK pinned the key"
+    );
+}

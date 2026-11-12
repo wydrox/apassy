@@ -47,10 +47,9 @@ use std::fmt;
 
 pub use account::{
     AccountState, Clock, ConnectAccount, DeviceLink, Forgotten, JoinPoll, JoinRequest,
-    ListedSigners, PendingJoin, PendingRotation, RevokeOutcome, RotatedCode, Sleeper,
-    account_file, drop_account_rows,
-    drop_stale_account_rows, forget_old_account_file, forget_this_device, group_invite_code,
-    has_pending_join, is_old_account_file, signer_policy,
+    ListedSigners, PendingJoin, PendingRotation, RevokeOutcome, RotatedCode, Sleeper, account_file,
+    drop_account_rows, drop_stale_account_rows, forget_old_account_file, forget_this_device,
+    group_invite_code, has_pending_join, is_old_account_file, signer_policy,
 };
 pub use client::{
     AccountCreated, AccountDeleted, AccountView, CheckoutAnswer, CheckoutRequest, ConnectClient,
@@ -194,6 +193,9 @@ pub enum ConnectError {
     /// list: this device must join its account again, after the owner forgets the
     /// account here.
     OldAccountFile,
+    /// The account file is there and this Mac cannot read it now (its folder's
+    /// permissions, a busy disk): nothing is decided on it, and the owner tries again.
+    AccountFileUnreadable,
     /// This Mac has no Connect account.
     NoAccount,
     /// A value of a bad shape was given.
@@ -307,6 +309,11 @@ impl fmt::Display for ConnectError {
                 " must join its Apassy Connect account again: its account file is from an earlier version of Apassy. Forget the account on this ",
                 crate::computer!(),
                 ", then join it again from another device of the account."
+            ),
+            Self::AccountFileUnreadable => concat!(
+                "Apassy cannot read the Apassy Connect account file on this ",
+                crate::computer!(),
+                " now. Nothing was changed. Try again; if this stays, check the permissions of the Apassy data folder."
             ),
             Self::NoAccount => concat!(
                 "This ",

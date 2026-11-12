@@ -302,6 +302,17 @@ impl AccountSession {
             .is_some_and(|path| super::account::is_old_account_file(&path))
     }
 
+    /// The account file is there and cannot be read now (permissions, a busy disk): the
+    /// section asks to try again, and offers no step that decides on it.
+    pub fn account_file_unreadable(&self) -> bool {
+        self.path().is_some_and(|path| {
+            matches!(
+                AccountState::load(&path),
+                Err(ConnectError::AccountFileUnreadable)
+            )
+        })
+    }
+
     /// This device has a Connect account (the account file), without asking Connect.
     pub fn has_account(&self) -> bool {
         self.account_state().is_some()

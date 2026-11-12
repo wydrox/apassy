@@ -75,7 +75,7 @@ pub use relay_http::{
     TunnelDialer, TunnelPipe, TunnelRoute, clear_local_route, post_json, probe_direct,
     set_http_transport, set_local_route, valid_node_id,
 };
-pub use state::{SyncState, TransportKind};
+pub use state::{ApprovedHead, SyncState, TransportKind};
 pub use transport::{FolderTransport, Precondition, Remote, RemoteHead, SyncTransport, Transport};
 
 use crate::vault::{
