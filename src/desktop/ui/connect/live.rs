@@ -107,7 +107,9 @@ struct Snapshot {
 /// The result of one worker step.
 #[allow(clippy::large_enum_variant)] // One message at a time on the channel; a box buys nothing.
 enum Outcome {
-    Created(Result<(AccountState, Zeroizing<String>), ConnectError>),
+    /// A creation: the note about a new device key that it made, if any, and the words of
+    /// the recovery code, shown once.
+    Created(Result<(Option<String>, Zeroizing<String>), ConnectError>),
     Refreshed(Result<(Snapshot, Option<PlansView>), ConnectError>),
     Plans(Result<PlansView, ConnectError>),
     Checkout(Result<(String, String), ConnectError>),
@@ -254,6 +256,9 @@ pub(crate) struct Live {
     /// the write it counts.
     signers: Option<crate::connect::ListedSigners>,
     signers_seen: u64,
+    /// The key of a new recovery code whose request Connect did not answer
+    /// ([`ConnectError::RecoveryUnanswered`]): the read that settles it replaces the error.
+    unanswered_rotation: Option<String>,
 }
 
 impl Live {
@@ -314,6 +319,7 @@ impl Live {
         self.unreachable = None;
         self.error = None;
         self.signers = None;
+        self.unanswered_rotation = None;
     }
 
     /// The join step ends (a lock, a quit, the end of the start-screen step, another
@@ -739,12 +745,19 @@ pub(crate) fn view(app: &DesktopApp) -> ConnectView {
         locked,
         busy: live.busy(),
         error: if app.ui.connect.sheet.is_none() {
-            live.error.clone()
+            live.error.clone().or_else(|| unreadable_file(live))
         } else {
             None
         },
         now: crate::desktop::companion::now(),
     }
+}
+
+/// An account file that is there and cannot be read now: the section asks to try again
+/// (no step decides on it; "Forget" is only for a file that this version cannot take).
+fn unreadable_file(live: &Live) -> Option<String> {
+    (live.file().is_none() && live.session.account_file_unreadable())
+        .then(|| message(&ConnectError::AccountFileUnreadable))
 }
 
 /// The error of the last step, also while a sheet is open (the tests).
@@ -1064,7 +1077,7 @@ pub(crate) fn start_account(app: &DesktopApp) -> StartAccount {
             return StartAccount::OldFile;
         }
         let error = if app.ui.connect.sheet.is_none() {
-            live.error.clone()
+            live.error.clone().or_else(|| unreadable_file(live))
         } else {
             None
         };
@@ -1191,33 +1204,44 @@ fn drop_rows(app: &DesktopApp, forgotten: &Forgotten) {
 #[allow(clippy::too_many_lines)]
 fn apply(app: &mut DesktopApp, ctx: &egui::Context, outcome: Outcome) {
     let live = &mut app.ui.connect.live;
+    // Any step may have written the account file: a read of the account settles a pending
+    // new recovery code, and a new code records its result. The section reads it again.
+    live.file = OnceCell::new();
     match outcome {
-        Outcome::Created(Ok((_, words))) => {
-            live.file = OnceCell::new();
+        Outcome::Created(Ok((note, words))) => {
             live.refreshed_at = Some(Instant::now());
             app.ui.connect.sheet = Some(Sheet::Recovery {
                 words,
                 unrecorded: false,
             });
+            if let Some(note) = note {
+                app.set_note(note);
+            }
         }
         Outcome::NewRecovery(Ok((words, recorded))) => {
             // The account file keeps the mark of a code that nobody saw until "I Saved It"
             // closes this sheet: a lock or a quit before it leaves the lasting line.
-            live.file = OnceCell::new();
+            live.unanswered_rotation = None;
             app.ui.connect.sheet = Some(Sheet::Recovery {
                 words,
                 unrecorded: !recorded,
             });
         }
+        Outcome::NewRecovery(Err(error @ ConnectError::RecoveryUnanswered)) => {
+            // The next read of the account settles it, and its answer replaces this error.
+            live.unanswered_rotation = live
+                .file()
+                .and_then(|file| file.recovery_pending.as_ref())
+                .map(|pending| pending.recovery_key.clone());
+            live.error = Some(message(&error));
+        }
         Outcome::RecoverySeen(Ok(())) | Outcome::RecoveryChangeSeen(Ok(())) => {
-            live.file = OnceCell::new();
             refresh(app, ctx);
         }
         Outcome::Created(Err(ConnectError::RecoveryCodeNotShown)) => {
             // An earlier run left the creation pending: the account is made and its file
             // written, but its recovery code was never shown. The section shows the
             // account, and says so.
-            live.file = OnceCell::new();
             app.ui.connect.sheet = None;
             if let Some(ticket) = live.session.retry() {
                 live.open(Some(ctx), ticket);
@@ -1235,6 +1259,7 @@ fn apply(app: &mut DesktopApp, ctx: &egui::Context, outcome: Outcome) {
             if let Some(plans) = plans {
                 live.plans = Some(plans_of(&plans));
             }
+            settle_unanswered(live);
             // The key of the session goes to the sync of the vault stores, with the plan
             // state and the verified devices.
             app.relay_share_connect();
@@ -1393,7 +1418,6 @@ fn apply(app: &mut DesktopApp, ctx: &egui::Context, outcome: Outcome) {
         Outcome::JoinResumed(None) => {}
         Outcome::JoinPolled(Ok(None)) => live.join_at = Some(Instant::now()),
         Outcome::JoinPolled(Ok(Some(_))) => {
-            live.file = OnceCell::new();
             app.ui.connect.sheet = Some(Sheet::Joined);
             refresh(app, ctx);
         }
@@ -1451,6 +1475,28 @@ fn apply(app: &mut DesktopApp, ctx: &egui::Context, outcome: Outcome) {
             }
             live.error = Some(message(&error));
         }
+    }
+}
+
+/// A read of the account settled a new recovery code that Connect had not answered (the
+/// pending rotation left the account file): its error goes. When Connect took the code, the
+/// section shows the lasting line of a code that nobody saw instead; when it did not, the
+/// error says that the current code still works.
+fn settle_unanswered(live: &mut Live) {
+    let Some(key) = live.unanswered_rotation.clone() else {
+        return;
+    };
+    let Some(file) = live.file() else {
+        return;
+    };
+    if file.recovery_pending.is_some() {
+        return;
+    }
+    let taken = file.recovery_key.as_deref() == Some(key.as_str());
+    live.unanswered_rotation = None;
+    // Only the error of that step: a later step's error stays.
+    if live.error.as_deref() == Some(message(&ConnectError::RecoveryUnanswered).as_str()) {
+        live.error = (!taken).then(|| message(&ConnectError::RecoveryNotTaken));
     }
 }
 
@@ -1961,11 +2007,20 @@ pub(crate) fn choose(app: &mut DesktopApp, ctx: &egui::Context, choice: SheetCho
                 Outcome::Created(client.and_then(|client| {
                     let (account, recovery) =
                         ConnectAccount::create(client, store.as_ref(), &path, &typed, &device)?;
-                    let state = account.state().clone();
+                    // The note of a new device key, as at a join: an account of an earlier
+                    // join that still lists this device, else the new key.
+                    let note = match account.left_in_other_account() {
+                        Some((confirmer, device)) => {
+                            Some(super::join_left_behind(confirmer, device))
+                        }
+                        None => account
+                            .made_new_key()
+                            .then(|| super::JOIN_NEW_KEY.to_owned()),
+                    };
                     // The vault locked meanwhile: the account file and the key stay, and
                     // the next unlock opens them.
                     session.install(account, Some(epoch));
-                    Ok((state, recovery.words()))
+                    Ok((note, recovery.words()))
                 }))
             });
             app.ui.connect.sheet = Some(Sheet::Create { name, device_name });

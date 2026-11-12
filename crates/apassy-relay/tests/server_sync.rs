@@ -483,6 +483,7 @@ fn the_vector_heads_chain_on_a_team_with_the_vector_ids() {
     assert_eq!(answer.result()["version"], 2);
     let since0 = get(&relay, &vector, "/v1/sync/head?since=0").result();
     assert_eq!(since0["chain_from"], 1);
+    assert_eq!(since0["kept_from"], 1);
     let chain = since0["chain"].as_array().unwrap();
     assert_eq!(chain.len(), 2);
     assert_eq!(chain[0]["head"], encode_b64(head1.as_bytes()));

@@ -981,11 +981,12 @@ fn a_confirm_that_stripe_refuses_removes_the_store_rows_of_its_window() {
     let owner = team(&c, 1);
     let late = pending(&c, &owner, "Late");
     let (store, _) = c.store(&owner, VAULT);
-    c.stripe.delay_next("/v1/subscription_items/", 1500);
+    // Stripe holds its answer long enough for the rows below to land on a slow machine.
+    c.stripe.delay_next("/v1/subscription_items/", 6000);
     c.stripe.fail_path("/v1/subscription_items/", 400, 1);
     std::thread::scope(|scope| {
         let confirmed = scope.spawn(|| confirm(&c, &owner, &late));
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        std::thread::sleep(std::time::Duration::from_millis(1000));
         // The member is active for the moment: a row of its device in the owner's store.
         c.edit_directory(&format!(
             "INSERT INTO account_store_device (team_id, device_id, account_id, store_device, added_at) \
@@ -1021,7 +1022,8 @@ fn a_confirm_that_stripe_refuses_voids_the_shares_of_its_window() {
     let c = start();
     let owner = team(&c, 1);
     let late = pending(&c, &owner, "Late");
-    c.stripe.delay_next("/v1/subscription_items/", 1500);
+    // Stripe holds its answer long enough for the rows below to land on a slow machine.
+    c.stripe.delay_next("/v1/subscription_items/", 6000);
     c.stripe.fail_path("/v1/subscription_items/", 400, 1);
     // Rows that stand for a `share` of each list naming the other, each after its head.
     let share_row = |of: &Dev, names: &Dev, team: &str| {
@@ -1041,7 +1043,7 @@ fn a_confirm_that_stripe_refuses_voids_the_shares_of_its_window() {
     };
     let versions = std::thread::scope(|scope| {
         let confirmed = scope.spawn(|| confirm(&c, &owner, &late));
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        std::thread::sleep(std::time::Duration::from_millis(1000));
         let versions = (
             share_row(&owner, &late, "t_aaaaaaaaaa"),
             share_row(&late, &owner, "t_bbbbbbbbbb"),
