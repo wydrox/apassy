@@ -1682,7 +1682,7 @@ fn sync_picker(
     .show_ui(ui, |ui| {
         // A vault on Connect shows its choice, also while no plan offers it to others.
         // Relay sync and Connect do not switch here: a vault on the relay moves with
-        // "Move to Connect…", so each shows only its own.
+        // "Move Copy to Connect", so each shows only its own.
         let connect = (connect && current != Current::Relay) || current == Current::Connect;
         for (choice, text) in picker_choices(folders, relay, connect)
             .into_iter()
@@ -1996,9 +1996,16 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                                 && !moving
                                 && app.relay_move_state(&entry.id).is_none()
                                 && app.relay_can_move(&entry.id)
-                                && kit::small_button(ui, "Move to Connect…", Style::Bordered)
-                                    .on_hover_text(relay::MOVE_WORDS)
-                                    .clicked()
+                                && {
+                                    let button =
+                                        kit::small_button(ui, relay::MOVE_COPY, Style::Bordered)
+                                            .on_hover_text(relay::MOVE_WORDS);
+                                    let spoken = relay::move_copy_spoken(&entry.name);
+                                    ui.ctx().accesskit_node_builder(button.id, |node| {
+                                        node.set_label(spoken);
+                                    });
+                                    button.clicked()
+                                }
                             {
                                 move_to = Some(entry.id.clone());
                             }

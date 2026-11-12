@@ -485,7 +485,7 @@ Your other Macs (and the other person's) take the share from the signed lists at
 
 ### 18.4 Move the relay copy to Connect
 
-A vault that syncs through the hosted relay (`apassy-relay.wyderka.cc`) with a key of its own shows "Move to Connect…" while this Mac can sync through Connect. The order:
+A vault that syncs through the hosted relay (`apassy-relay.wyderka.cc`) with a key of its own shows "Move Copy to Connect" (spoken "Move the copy of VAULT to Apassy Connect"; it starts at once, without a sheet) while this Mac can sync through Connect. The order:
 
 1. Apassy syncs with the hosted relay, so this Mac has the changes of the other Macs.
 2. It pushes the vault to Connect (the store, the sign-in with the account key, version 1). The vault still syncs with the hosted relay.

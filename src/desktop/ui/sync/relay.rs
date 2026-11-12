@@ -1323,6 +1323,14 @@ pub(crate) const MOVE_OLD_DELETED: &str = concat!(
     ". Try again."
 );
 
+/// The button of the Sync row that moves the hosted relay copy to Apassy Connect. It
+/// starts the move at once, so its name has no "…"; it is spoken with the vault.
+pub(crate) const MOVE_COPY: &str = "Move Copy to Connect";
+/// Its spoken name: what moves, and where.
+pub(crate) fn move_copy_spoken(vault: &str) -> String {
+    format!("Move the copy of {vault} to Apassy Connect")
+}
+
 /// The words of "Move the relay copy to Connect" before it runs.
 pub(crate) const MOVE_WORDS: &str = "Apassy uploads this vault to Apassy Connect, then deletes the relay copy. If a step fails, both copies stay.";
 
