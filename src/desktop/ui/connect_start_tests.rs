@@ -262,7 +262,12 @@ fn a_computer_without_a_vault_joins_the_account_and_gets_a_vault_from_connect() 
         _ => panic!("the account of A"),
     };
     assert_eq!(confirmer, a_name, "the name of the device that confirms");
-    assert!(text.contains("Both devices show these words"), "{text}");
+    assert!(
+        text.contains(&format!(
+            "Confirm on {confirmer} only if it shows these words."
+        )),
+        "{text}"
+    );
     for word in words.split_whitespace() {
         assert!(text.contains(word), "{word}: {text}");
     }

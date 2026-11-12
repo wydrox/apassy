@@ -930,7 +930,7 @@ pub enum OwnerRequest {
         entries: Vec<crate::broker::approvals::ShareEntry>,
         vault_hint: String,
     },
-    /// "Stop Sharing with <name>…" or "Leave This Shared Vault…".
+    /// "Stop Sharing with <name>…" or "Leave Vault…".
     EndConnectShare {
         account_id: String,
         peer_account: String,
@@ -942,7 +942,7 @@ pub enum OwnerRequest {
         leave: bool,
         entries: Vec<crate::broker::approvals::ShareEntry>,
     },
-    /// "Count Its Shares Again…" of a vault store made before the `store` entry existed:
+    /// "Count Shares Again…" of a vault store made before the `store` entry existed:
     /// the shares with `people` count again.
     ClaimConnectStore {
         account_id: String,
@@ -2099,13 +2099,13 @@ impl OwnerRequest {
                 page_text(device_name),
                 page_text(fingerprint).replace(' ', "\u{a0}")
             ),
-            Self::DeleteConnectAccount { .. } => "Delete your Apassy Connect account? The subscription ends now, and every vault store, device, and link of the account is deleted at Connect. Your vaults stay on your devices.".to_owned(),
-            Self::NewRecoveryCode { .. } => "Make a new recovery code for your Apassy Connect account? Apassy shows the new code once. The old recovery code stops working.".to_owned(),
+            Self::DeleteConnectAccount { .. } => "Delete your Apassy Connect account? The plan ends and Connect deletes the account for good. Your vaults stay on your devices.".to_owned(),
+            Self::NewRecoveryCode { .. } => "Make a new recovery code? The old code stops working.".to_owned(),
             Self::RecoverConnectAccount { account_id } => format!(
                 concat!(
                     "Recover the Apassy Connect account {}? This ",
                     crate::computer!(),
-                    " becomes its first device, the copies of your vaults at Connect are deleted, and a new recovery code replaces the old one. The vaults on your devices stay."
+                    " becomes its first device and its vault copies at Connect are deleted."
                 ),
                 page_text(account_id)
             ),
@@ -4374,7 +4374,7 @@ mod connect_proof_tests {
     }
 
     /// K2, K4: "Take This Copy Without Its Earlier History…" names the store, the head, its
-    /// version, its device, and its time; "Count Its Shares Again…" names the vault and the
+    /// version, its device, and its time; "Count Shares Again…" names the vault and the
     /// people whose shares count again, each name once in its quotes.
     #[test]
     fn the_copy_without_history_and_the_store_claim_name_their_actions() {

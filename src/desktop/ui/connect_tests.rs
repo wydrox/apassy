@@ -449,7 +449,7 @@ fn no_price_is_written_in_the_section() {
 
 // ---- Checkout and portal. ----
 
-/// "Continue in the Browser…" asks Connect for a checkout with the exact body of
+/// "Continue to Payment…" asks Connect for a checkout with the exact body of
 /// connect-billing-v1 section 4, and the browser opens the URL that Connect returned.
 /// While the waiting sheet is open the app asks `GET /v1/account` again and again; it
 /// stops when the plan is entitled, and shows the plan.
@@ -494,7 +494,7 @@ fn checkout_opens_the_url_of_connect_and_polling_stops_on_active() {
     });
     assert!(matches!(app.ui.connect.sheet, Some(Sheet::Waiting { .. })));
 
-    // "Open the Page Again" opens the same URL.
+    // "Open Page Again" opens the same URL.
     let again = choose(&ctx, &mut app, SheetChoice::OpenAgain);
     assert_eq!(
         opened_urls(&again),
@@ -1124,9 +1124,14 @@ fn every_state_of_the_plan_row() {
                     .is_some_and(|line| line.contains("by 4 Nov 2026")),
                 "{name}: {note:?}"
             ),
-            "read_only" | "suspended" => assert!(
+            "read_only" => assert!(
                 note.as_deref()
                     .is_some_and(|line| line.contains("deleted on 2 Feb 2027")),
+                "{name}: {note:?}"
+            ),
+            "suspended" => assert!(
+                note.as_deref()
+                    .is_some_and(|line| line.contains("before 2 Feb 2027")),
                 "{name}: {note:?}"
             ),
             _ => assert_eq!(note, None, "{name}"),
@@ -1256,10 +1261,7 @@ fn a_cancelled_read_at_the_unlock_is_signed_out_and_the_vault_stays_open() {
         SessionState::SignedOut(ConnectError::Cancelled)
     );
     let painted = text(&ctx, &mut app);
-    assert!(
-        painted.contains(super::connect::SIGNED_OUT_NOTE),
-        "{painted}"
-    );
+    assert!(painted.contains(super::connect::SIGNED_OUT), "{painted}");
     assert!(painted.contains(super::connect::SIGN_IN), "{painted}");
 }
 
@@ -1709,40 +1711,24 @@ fn sign_in_reads_nothing_while_locked() {
 fn mac_connect_texts_are_unchanged() {
     use super::connect::*;
     for (text, before) in [
-        (ADD_THIS_MAC, "Add This Mac to an Account…"),
-        (
-            KEY_NOTE,
-            "No password and no email: the key of this Mac, in the Keychain, signs in.",
-        ),
-        (
-            SIGNED_OUT_NOTE,
-            "Touch ID reads the Connect key of this Mac.",
-        ),
-        (
-            CREATE_LEAD,
-            "No password and no email: the key of this Mac, in the Keychain, signs in. You choose a plan later.",
-        ),
-        (
-            RECOVERY_NOTE,
-            "If every device of the account is lost, this code gives the account to a new Mac. The vault copies at Connect are deleted then; your vaults stay on your devices.",
-        ),
+        (ADD_THIS_MAC, "Add This Mac…"),
         (
             ADD_LEAD,
-            "On the new device, choose Add This Mac to an Account (on a Mac) or scan this code (on the iPhone).",
+            "Scan this code with the iPhone, or paste it on the other Mac.",
         ),
         (FORGET_TITLE, "Forget This Mac?"),
         (
             REMOVED_NOTE,
-            "Apassy Connect says this Mac was removed from its account. Its Connect key and its account file stay on this Mac until you forget the account here.",
+            "Apassy Connect removed this Mac from its account. Forget the account here.",
         ),
         (FORGET_THIS_MAC, "Forget This Mac…"),
         (
             FORGET_REMOVED_LEAD,
-            "The Connect key and the account file of this Mac are deleted, and the vault copies of the account stop syncing on this Mac. To use the account here again, add this Mac from another device of the account.",
+            "The Connect key of this Mac is deleted. To come back, add it from another device.",
         ),
         (
             FORGET_LEAD,
-            "This Mac leaves your Connect account, and its Connect key is deleted. To use the account here again, add this Mac from another device of the account.",
+            "This Mac leaves your Connect account. To come back, add it from another device.",
         ),
         (JOIN_ACCOUNT_TITLE, "Add This Mac to an Account"),
         (JOINED_TITLE, "This Mac Is Added"),
@@ -1845,7 +1831,6 @@ fn linux_connect_texts_name_nothing_of_the_mac() {
             "{text}"
         );
     }
-    assert!(super::connect::KEY_NOTE.contains("in a private file of your user"));
 }
 
 /// A vault store of two devices whose removed device pushed the last head (an iMac that
@@ -2560,11 +2545,7 @@ fn a_new_code_left_unseen_and_a_new_code_elsewhere_show_lasting_lines() {
     });
     let painted = text(&ctx, &mut app);
     assert!(
-        painted.contains("The recovery code was changed on another device on"),
-        "{painted}"
-    );
-    assert!(
-        painted.contains("The old code no longer works."),
+        painted.contains("Your recovery code was replaced on another device on"),
         "{painted}"
     );
     assert!(
@@ -3143,7 +3124,7 @@ fn a_recovery_asks_the_owner_then_shows_the_new_code_and_the_deleted_copies() {
     let new = words.clone();
     let painted = text(&ctx, &mut app);
     assert!(painted.contains(&account_id), "{painted}");
-    assert!(painted.contains(super::connect::RECOVERY_BOTH), "{painted}");
+    assert!(painted.contains(super::connect::RECOVERY_LEAD), "{painted}");
     assert_eq!(connect.live_devices(&account_id).len(), 1);
     assert!(
         connect.stores(&account_id).is_empty(),

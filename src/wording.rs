@@ -513,41 +513,6 @@ macro_rules! shift_shortcut {
     };
 }
 
-/// Where the Apassy Connect key of this computer is kept (plan s7 decision 2): "in the
-/// Keychain" on macOS.
-#[cfg(not(target_os = "linux"))]
-#[macro_export]
-macro_rules! connect_key_place {
-    () => {
-        "in the Keychain"
-    };
-}
-/// On Linux: a private file of the user (ADR 0045).
-#[cfg(target_os = "linux")]
-#[macro_export]
-macro_rules! connect_key_place {
-    () => {
-        "in a private file of your user"
-    };
-}
-
-/// How a signed-out Settings › Connect reads the Connect key again.
-#[cfg(not(target_os = "linux"))]
-#[macro_export]
-macro_rules! connect_key_read {
-    () => {
-        "Touch ID reads the Connect key of this Mac."
-    };
-}
-/// On Linux: the private file, with no prompt.
-#[cfg(target_os = "linux")]
-#[macro_export]
-macro_rules! connect_key_read {
-    () => {
-        "Apassy reads the Connect key of this computer from its private file."
-    };
-}
-
 /// A Connect key that cannot be used any more.
 #[cfg(not(target_os = "linux"))]
 #[macro_export]
@@ -632,8 +597,6 @@ mod tests {
             crate::shortcut!("S"),
             crate::shortcut_shift!("H"),
             crate::shift_shortcut!("M"),
-            crate::connect_key_place!(),
-            crate::connect_key_read!(),
             crate::connect_key_lost!(),
             crate::connect_key_unavailable!(),
             crate::connect_key_cancelled!(),
@@ -680,8 +643,6 @@ mod tests {
                 "⌘S",
                 "⌘⇧H",
                 "⇧⌘M",
-                "in the Keychain",
-                "Touch ID reads the Connect key of this Mac.",
                 "This Mac's Apassy Connect key is gone (the Touch ID fingerprints changed). Add this Mac again from another device, or recover the account.",
                 "The Keychain is not available to this build. Apassy Connect works only in Apassy.app.",
                 "Touch ID was cancelled. Nothing changed.",
@@ -732,8 +693,6 @@ A question waits up to 5 minutes:
                 "Ctrl+S",
                 "Ctrl+Shift+H",
                 "Ctrl+Shift+M",
-                "in a private file of your user",
-                "Apassy reads the Connect key of this computer from its private file.",
                 "This computer's Apassy Connect key cannot be used: its file is missing, damaged, or not private to your user. Add this computer again from another device, or recover the account.",
                 "Apassy cannot keep the Apassy Connect key of this computer: its data folder is not usable.",
                 "The request was cancelled. Nothing changed.",
