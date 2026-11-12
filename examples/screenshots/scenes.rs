@@ -510,8 +510,24 @@ pub(crate) fn steps(name: &str) -> Vec<super::Step> {
         }
         "connect-owner" => {
             steps.extend(settings);
+            let pass = || [Type(super::PASS), enter(), Wait(4.0)];
+            // A lock and an unlock: the window reads the account again (its plan).
+            let relock = || {
+                [
+                    Key(egui::Key::L, cmd),
+                    Wait(2.0),
+                    Type(super::PASS),
+                    enter(),
+                    Wait(4.0),
+                    Key(egui::Key::Comma, cmd),
+                    Wait(1.5),
+                    Click(SETTINGS_X, VAULT_ROW),
+                    Wait(3.0),
+                ]
+            };
             steps.extend([
-                // Settings › Vault › Sync: the picker, the setup sheet, Apassy Connect.
+                // Settings › Vault › Sync: the picker, the relay sheet, then "Apassy
+                // Connect" of the picker, which opens the sheet on that choice.
                 Click(SETTINGS_X, VAULT_ROW),
                 Wait(3.0),
                 Click(950.0, 268.0),
@@ -520,51 +536,52 @@ pub(crate) fn steps(name: &str) -> Vec<super::Step> {
                 Click(891.0, 330.0),
                 Wait(1.5),
                 Shot("sync-setup-default"),
-                Click(292.0, 290.0),
+                escape(),
                 Wait(1.0),
+                Click(950.0, 268.0),
+                Wait(1.0),
+                Click(900.0, 360.0),
+                Wait(1.5),
                 Shot("sync-setup-connect"),
-                Click(860.0, 485.0),
-                Wait(4.0),
+                Click(860.0, 464.0),
+                Wait(5.0),
                 Shot("sync-connect-on"),
-                // Settings › Connect: the account, then Shared Vaults.
+                // Settings › Connect: the account (the family before the devices).
                 Click(SETTINGS_X, CONNECT_ROW),
                 Wait(3.0),
                 Pages("connect-live-account"),
                 top(),
                 Wait(1.0),
-                Click(1025.0, 432.0),
+                Click(1025.0, 645.0),
                 Wait(1.5),
                 Shot("connect-live-revoke"),
-                Click(720.0, 417.0),
+                Click(720.0, 440.0),
                 Wait(2.0),
                 Shot("owner-check-revoke"),
                 escape(),
                 // Shared Vaults lists the new store after its next read (every 60 s).
-                Wait(62.0),
+                Wait(58.0),
                 bottom(),
                 Wait(1.0),
                 Shot("share-section"),
-                Click(1016.0, 659.0),
+                Click(1016.0, 652.0),
                 Wait(1.5),
                 Shot("share-pick"),
-                Click(370.0, 384.0),
-                Wait(0.8),
-                Shot("share-pick-chosen"),
                 Click(721.0, 436.0),
                 Wait(3.0),
                 Shot("share-code"),
                 // Copy the code: Ola answers it from this process.
-                Click(726.0, 407.0),
+                Click(726.0, 410.0),
                 Wait(1.0),
                 Hook("member-answers"),
                 Wait(7.0),
                 Shot("share-words-owner"),
-                Click(717.0, 465.0),
+                Click(717.0, 464.0),
                 Wait(2.0),
                 Shot("owner-check-share"),
-                Type(super::PASS),
-                enter(),
-                Wait(4.0),
+            ]);
+            steps.extend(pass());
+            steps.extend([
                 Shot("share-done"),
                 Click(732.0, 410.0),
                 Wait(1.0),
@@ -582,24 +599,36 @@ pub(crate) fn steps(name: &str) -> Vec<super::Step> {
                 bottom(),
                 Wait(1.0),
                 Shot("share-syncs"),
-                Click(913.0, 659.0),
+                Click(930.0, 652.0),
                 Wait(1.5),
                 Shot("share-stop"),
+                // Stop Sharing… asks the owner first; Escape cancels both.
+                Click(704.0, 440.0),
+                Wait(2.0),
+                Shot("owner-check-stop"),
                 escape(),
                 Wait(1.0),
-                Click(991.0, 457.0),
+                escape(),
+                Wait(1.0),
+                Click(991.0, 450.0),
                 Wait(2.0),
                 Shot("owner-check-recovery"),
-                Type(super::PASS),
-                enter(),
-                Wait(4.0),
+            ]);
+            steps.extend(pass());
+            steps.extend([
                 Shot("recovery-new-code"),
                 // "I Saved It": the sheet of the code does not close with Escape.
-                Click(730.0, 512.0),
+                Click(721.0, 504.0),
                 Wait(1.0),
-                // The hooks plan-past-due, plan-read-only and unlisted-device change the
-                // fake, but the window reads the account again only on its own schedule:
-                // within a scene the plan rows and the Sync tags keep their first state.
+                // The plan past due: the Sync row after a lock and an unlock.
+                Hook("plan-past-due"),
+            ]);
+            steps.extend(relock());
+            steps.extend([
+                Click(589.0, 315.0),
+                Wait(4.0),
+                Shot("sync-connect-past-due"),
+                Hook("plan-active"),
             ]);
         }
         "connect-member" => {
@@ -611,7 +640,7 @@ pub(crate) fn steps(name: &str) -> Vec<super::Step> {
                 bottom(),
                 Wait(1.0),
                 Hook("owner-shares"),
-                Click(987.0, 697.0),
+                Click(987.0, 690.0),
                 Wait(1.5),
                 Shot("share-accept-empty"),
                 PasteCode,
@@ -633,7 +662,7 @@ pub(crate) fn steps(name: &str) -> Vec<super::Step> {
                 bottom(),
                 Wait(1.0),
                 Shot("share-offer-join"),
-                Click(1040.0, 659.0),
+                Click(1040.0, 635.0),
                 Wait(2.0),
                 Shot("owner-check-join"),
                 Type(super::PASS),
@@ -642,9 +671,15 @@ pub(crate) fn steps(name: &str) -> Vec<super::Step> {
                 bottom(),
                 Wait(1.0),
                 Shot("share-joined"),
-                Click(983.0, 659.0),
+                Click(982.0, 636.0),
                 Wait(1.5),
                 Shot("share-leave"),
+                // Leave… asks the owner first; Escape cancels both.
+                Click(724.0, 440.0),
+                Wait(2.0),
+                Shot("owner-check-leave"),
+                escape(),
+                Wait(1.0),
                 escape(),
                 Wait(1.0),
                 // The vault menu › Use a vault from Apassy Connect…, with a vault open.

@@ -41,9 +41,10 @@ rsync -a --checksum --delete --exclude target/ --exclude node_modules/ --exclude
 
 # The source sits at /w/src, as in the warm target volume.
 ssh "$HOST" bash -s -- "$DIR" "$BUILD_IMAGE" "$TARGET_VOLUME" "$CARGO_VOLUME" "$JOBS" "$MEMORY" \
-  "${APASSY_TOUR_PART:-}" "${APASSY_TOUR_SCENES:-}" "${APASSY_TOUR_ONLY:-}" <<'REMOTE'
+  "${APASSY_TOUR_PART:--}" "${APASSY_TOUR_SCENES:--}" "${APASSY_TOUR_ONLY:--}" <<'REMOTE'
 set -euo pipefail
-dir=$HOME/$1 image=$2 target=$3 cargo=$4 jobs=$5 memory=$6 part=$7 scenes=$8 only=$9
+# ssh drops empty arguments: "-" stands for an empty value.
+dir=$HOME/$1 image=$2 target=$3 cargo=$4 jobs=$5 memory=$6 part=${7#-} scenes=${8#-} only=${9#-}
 flock "$dir/build.lock" docker run --rm --memory="$memory" --cpus="$jobs" \
   -e CARGO_INCREMENTAL=0 -e CARGO_BUILD_JOBS="$jobs" -e CARGO_TARGET_DIR=/target \
   -v "$dir/src:/w/src" -v "$dir/out:/w/out" -v "$target:/target" \
