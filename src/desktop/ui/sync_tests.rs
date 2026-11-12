@@ -2715,14 +2715,18 @@ fn received_by_shows_the_receipt_of_the_other_mac() {
     super::open_settings(&mut a, super::SettingsSection::Vault);
     let text = settled_frames(&mut a);
     // The fake relay sends no device names; the real relay does (contract section 9).
+    // The tag of the row says "Saved to the relay"; the line under it does not say it
+    // again.
+    assert!(text.contains("Saved to the relay"), "the tag: {text}");
     assert!(
         text.contains(concat!(
-            "Saved to the relay. Received by another ",
+            "Received by another ",
             crate::computer!(),
             " just now."
         )),
         "{text}"
     );
+    assert!(!text.contains("Saved to the relay. Received"), "{text}");
 }
 
 /// A passphrase that changed on another Mac: the check with the relay copy runs on its

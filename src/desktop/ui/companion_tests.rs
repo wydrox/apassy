@@ -724,17 +724,18 @@ fn a_pairing_goes_from_the_phone_through_the_code_and_the_owner_check() {
         "Wi-Fi pairing ends in two versions.",
         WIFI_LISTEN,
         "Test iPhone",
-        "Paired ",
-        "Wi-Fi",
         "Remove…",
         "Reset Pairing…",
     ] {
         assert!(text.contains(expected), "shows {expected}: {text}");
     }
+    // One line for the iPhone: the day of the pairing is its hover text, and the group
+    // names the route, so the row has no chip.
     for gone in [
         "Pair an iPhone",
         "Pair…",
         "Allow the iPhone app on this network",
+        "Paired ",
     ] {
         assert!(!text.contains(gone), "no {gone}: {text}");
     }
