@@ -265,9 +265,11 @@ const ACCOUNT_LIST_COLUMNS: &str = "account_id, version, op, key, link_hash, nam
 /// naming that member counts only from a later version), `account_join_share` (the
 /// version of the owner's `share` that the member's last `join` of a store answered: the
 /// member's devices sign in to the store only while that share is the active one), and
-/// the index `account_list_named` of the entries by the account they name. A file of 1006
+/// the index `account_list_named` of the entries by the account they name, and
+/// `account_list_reset` (the last device list of an account before its last recovery, kept
+/// while a vault store names the account: connect-account-v1 section 16.4). A file of 1006
 /// without one of them (a build before it) gets it at open (additive, `add_share_marks`).
-const SHARE_MARKS: [(&str, &str); 3] = [
+const SHARE_MARKS: [(&str, &str); 4] = [
     (
         "account_share_void",
         "CREATE TABLE account_share_void (
@@ -285,6 +287,15 @@ const SHARE_MARKS: [(&str, &str); 3] = [
     (
         "account_list_named",
         "CREATE INDEX account_list_named ON account_list(peer_account) WHERE peer_account IS NOT NULL;",
+    ),
+    (
+        "account_list_reset",
+        "CREATE TABLE account_list_reset (
+  account_id TEXT NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+  version INTEGER NOT NULL, op TEXT NOT NULL, key BLOB, link_hash TEXT, name TEXT,
+  by_key BLOB NOT NULL, signature BLOB NOT NULL, hash TEXT NOT NULL, created_at INTEGER NOT NULL,
+  peer_account TEXT, peer_root BLOB, team_id TEXT,
+  PRIMARY KEY (account_id, version));",
     ),
 ];
 
@@ -2488,6 +2499,7 @@ PRAGMA user_version = 1002;
             "account_share_void",
             "account_join_share",
             "account_list_named",
+            "account_list_reset",
             "brain_event",
             "group",
             "group_member",

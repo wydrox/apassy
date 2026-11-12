@@ -541,6 +541,8 @@ enum Phase {
     WithoutHistory {
         joined: Arc<JoinedDevice>,
         head: DepartedHead,
+        /// Its device as a sentence names it ([`DesktopApp::relay_signed_name`]).
+        device: String,
     },
     /// Downloaded: the owner types the passphrase.
     Ready {
@@ -852,8 +854,8 @@ impl RelayUi {
                     label: departed.use_label(),
                 }
             }
-            Phase::WithoutHistory { head, .. } => JoinView::WithoutHistory {
-                words: without_history_words(&self.signed_device(&head.key), head),
+            Phase::WithoutHistory { head, device, .. } => JoinView::WithoutHistory {
+                words: without_history_words(device, head),
             },
             Phase::Ready { .. } => JoinView::Ready {
                 team: join.team.clone(),
@@ -865,21 +867,6 @@ impl RelayUi {
                 team: join.team.clone(),
             },
         })
-    }
-}
-
-impl RelayUi {
-    /// The device of `key` as a sentence names it: “name” of a device of this account that
-    /// left, “name” of <person> of a device of another account, else a device that this
-    /// Mac does not know by name.
-    fn signed_device(&self, key: &[u8]) -> String {
-        if let Some(name) = self.departed_names.get(key) {
-            return format!("“{name}”");
-        }
-        match self.shared_devices.get(key) {
-            Some((device, person)) => format!("“{device}” of {person}"),
-            None => "a device of this account or of a person who shares this vault".to_owned(),
-        }
     }
 }
 
@@ -4608,7 +4595,17 @@ impl DesktopApp {
                     // The owner can take the copy that a device that left pushed.
                     (Some(head), _) => Some(Phase::Departed { joined, head }),
                     // The owner can take the head without its earlier history.
-                    (None, Some(head)) => Some(Phase::WithoutHistory { joined, head }),
+                    (None, Some(head)) => {
+                        let device = self.relay_signed_name(&head.key).unwrap_or_else(|| {
+                            "a device of this account or of a person who shares this vault"
+                                .to_owned()
+                        });
+                        Some(Phase::WithoutHistory {
+                            joined,
+                            head,
+                            device,
+                        })
+                    }
                     (None, None) => {
                         self.relay_end_joined(joined);
                         failure = Some(join_error(error));
@@ -4635,7 +4632,11 @@ impl DesktopApp {
                     Some(Phase::Departed { joined, head })
                 }
             }
-            Phase::WithoutHistory { joined, head } => {
+            Phase::WithoutHistory {
+                joined,
+                head,
+                device,
+            } => {
                 let take = ctx.is_some_and(|ctx| {
                     ctx.data_mut(|data| {
                         data.remove_temp::<bool>(egui::Id::new(TAKE_WITHOUT_HISTORY))
@@ -4643,7 +4644,7 @@ impl DesktopApp {
                     .is_some()
                 });
                 if take {
-                    self.relay_ask_without_history(&joined, &head, ctx);
+                    self.relay_ask_without_history(&joined, &head, &device, ctx);
                 }
                 if self.relay_without_history_approved(&head) {
                     let work = self.vault_list.data_dir.join("sync");
@@ -4653,7 +4654,11 @@ impl DesktopApp {
                     });
                     Some(Phase::Downloading { joined, task })
                 } else {
-                    Some(Phase::WithoutHistory { joined, head })
+                    Some(Phase::WithoutHistory {
+                        joined,
+                        head,
+                        device,
+                    })
                 }
             }
             ready @ (Phase::Ready { .. } | Phase::Passphrase { .. } | Phase::Merging { .. }) => {
@@ -5033,13 +5038,14 @@ impl DesktopApp {
         &mut self,
         joined: &JoinedDevice,
         head: &DepartedHead,
+        device: &str,
         ctx: Option<&egui::Context>,
     ) {
         let request = OwnerRequest::TakeCopyWithoutHistory {
             team_id: joined.team_id().to_owned(),
             version: head.version,
             head: head.head_hash.clone(),
-            device_name: self.sync.relay.signed_device(&head.key),
+            device_name: device.to_owned(),
             time: head.time,
             vault_name: joined.team().to_owned(),
             start: true,
@@ -5152,6 +5158,12 @@ impl DesktopApp {
     /// "Use the Copy That … Left…" of a device that joins, as a click, and one look.
     pub(crate) fn relay_take_departed_for_test(&mut self, ctx: &egui::Context) {
         ctx.data_mut(|data| data.insert_temp(egui::Id::new(TAKE_DEPARTED), true));
+        self.relay_join_step(Some(ctx));
+    }
+
+    /// "Take This Copy Without Its Earlier History…" on the screen of a device that joins.
+    pub(crate) fn relay_take_without_history_for_test(&mut self, ctx: &egui::Context) {
+        ctx.data_mut(|data| data.insert_temp(egui::Id::new(TAKE_WITHOUT_HISTORY), true));
         self.relay_join_step(Some(ctx));
     }
 
