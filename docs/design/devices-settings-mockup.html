@@ -450,7 +450,7 @@ body.show-notes .notes-toggle{background:var(--accent);color:#fff}
 
         <div class="gl">Devices <span class="hi" style="margin-left:0"><svg><use href="#i-info"/></svg></span></div>
         <div class="grp">
-          <div class="fr" title="Mac · Hosts approvals"><div class="dv"><svg><use href="#i-mini"/></svg></div><div class="kn"><div>Mac mini (office) <span class="cap">This Mac</span></div></div><span class="when">Now</span><span class="pb" style="visibility:hidden">Revoke…</span></div>
+          <div class="fr" title="Mac · Hosts approvals"><div class="dv"><svg><use href="#i-mini"/></svg></div><div class="kn"><div>Mac mini (office) <span class="cap">This Mac</span></div></div><span class="pb" style="visibility:hidden">Revoke…</span></div>
           <div class="fr" title="iPhone · Approves runs"><div class="dv"><svg><use href="#i-phone"/></svg></div><div class="kn"><div>Rafal's iPhone</div></div><span class="route mac">via your Mac</span><span class="when">Now</span><span class="pb">Revoke…</span></div>
           <div class="fr" title="Apple Watch · Sees requests"><div class="dv"><svg><use href="#i-watch"/></svg></div><div class="kn"><div>Rafal's Apple Watch</div></div><span class="route mac">via your Mac</span><span class="when">4 min ago</span><span class="pb">Revoke…</span></div>
           <div class="fr" title="Mac · Syncs Personal"><div class="dv"><svg><use href="#i-laptop"/></svg></div><div class="kn"><div>MacBook Pro</div></div><span class="route hosted">via Apassy relay</span><span class="when">2 min ago</span><span class="pb">Revoke…</span></div>
@@ -474,7 +474,7 @@ body.show-notes .notes-toggle{background:var(--accent);color:#fff}
     <li><b>Data:</b> <code>Node::status().tailnet</code> gives on, origin, bound, <code>pin_words</code>, devices. Other Macs come from the sync link, build-box from a pinned <code>RelayLink</code>.</li>
     <li><b>One row per device.</b> A device in two teams gets one row; its roles join with " · ". The node's own team for cloud agents has no device rows.</li>
     <li><b>Route</b> is one of five words: <code>via your Mac</code>, <code>via Apassy relay</code>, <code>via Apassy Connect</code>, <code>Tailnet</code>, <code>Wi-Fi</code>. For a device in two teams, the approvals route wins. A row has a chip only when its route differs from the most common route of the list: with one route for every device (frames 4 and 8) no row has one; with a tie for the most common (here two via your Mac and two via Apassy relay) every routed row keeps its chip.</li><li><b>Facts on hover</b>: the kind and the roles ("iPhone · Approves runs") are the hover text of the name and its VoiceOver description; rows are one line, centred on the glyph.</li>
-    <li><b>Last contact:</b> "Now" under a minute, then "4 min ago", "3 h ago", "Yesterday", "12 Sep".</li>
+    <li><b>Last contact:</b> none on the row of this Mac; for the others "Now" under a minute, then "4 min ago", "3 h ago", "Yesterday", "12 Sep".</li>
     <li><b>Owner checks:</b> the switch (<code>SetTailnetRoute</code>, Touch ID glyph beside it) and every Revoke… (<code>RevokeNodeDevice</code>, frame 5). The Linux node row opens the relay sheet (L4) with Details…, not Revoke.</li>
     <li><b>One primary button:</b> Add an iPhone or a Mac…. It replaces "Get approvals on your iPhone" and the relay group's add button.</li>
   </ul>
@@ -643,7 +643,7 @@ body.show-notes .notes-toggle{background:var(--accent);color:#fff}
 
         <div class="gl">Devices <span class="hi" style="margin-left:0"><svg><use href="#i-info"/></svg></span></div>
         <div class="grp">
-          <div class="fr" title="Mac · Asks for approvals"><div class="dv"><svg><use href="#i-mini"/></svg></div><div class="kn"><div>Mac mini (office) <span class="cap">This Mac</span></div></div><span class="when">Now</span><span class="pb" style="visibility:hidden">Revoke…</span></div>
+          <div class="fr" title="Mac · Asks for approvals"><div class="dv"><svg><use href="#i-mini"/></svg></div><div class="kn"><div>Mac mini (office) <span class="cap">This Mac</span></div></div><span class="pb" style="visibility:hidden">Revoke…</span></div>
           <div class="fr" title="iPhone · Approves runs"><div class="dv"><svg><use href="#i-phone"/></svg></div><div class="kn"><div>Rafal's iPhone</div></div><span class="when">Now</span><span class="pb">Revoke…</span></div>
           <div class="fr" title="Apple Watch · Sees requests"><div class="dv"><svg><use href="#i-watch"/></svg></div><div class="kn"><div>Rafal's Apple Watch</div></div><span class="when">9 min ago</span><span class="pb">Revoke…</span></div>
           <div class="fr" title="Mac · Syncs Personal"><div class="dv"><svg><use href="#i-laptop"/></svg></div><div class="kn"><div>MacBook Pro</div></div><span class="when">2 min ago</span><span class="pb">Revoke…</span></div>
@@ -727,7 +727,7 @@ body.show-notes .notes-toggle{background:var(--accent);color:#fff}
     <div class="pcard" style="padding-bottom:16px">
       <div class="plabel">5c · After</div>
       <div class="grp" style="margin-top:10px">
-        <div class="fr" title="Mac · Hosts approvals"><div class="dv"><svg><use href="#i-mini"/></svg></div><div class="kn"><div>Mac mini (office) <span class="cap">This Mac</span></div></div><span class="when">Now</span></div>
+        <div class="fr" title="Mac · Hosts approvals"><div class="dv"><svg><use href="#i-mini"/></svg></div><div class="kn"><div>Mac mini (office) <span class="cap">This Mac</span></div></div></div>
         <div class="fr" title="Mac · Syncs Personal"><div class="dv"><svg><use href="#i-laptop"/></svg></div><div class="kn"><div>MacBook Pro</div></div><span class="route hosted">via Apassy relay</span><span class="pb">Revoke…</span></div>
         <div class="fr" title="Linux node · Syncs Acme team"><div class="dv"><svg><use href="#i-server"/></svg></div><div class="kn"><div>build-box</div></div><span class="route tail">Tailnet</span><span class="pb">Details…</span></div>
       </div>
@@ -839,7 +839,7 @@ body.show-notes .notes-toggle{background:var(--accent);color:#fff}
 
         <div class="gl">Devices</div>
         <div class="grp">
-          <div class="fr" title="Mac · Asks for approvals"><div class="dv"><svg><use href="#i-mini"/></svg></div><div class="kn"><div>Mac mini (office) <span class="cap">This Mac</span></div></div><span class="when">Now</span></div>
+          <div class="fr" title="Mac · Asks for approvals"><div class="dv"><svg><use href="#i-mini"/></svg></div><div class="kn"><div>Mac mini (office) <span class="cap">This Mac</span></div></div></div>
           <div class="fr"><div class="kn" style="color:var(--sec);font-size:12.5px">Add an iPhone to approve runs with Face ID.</div></div>
         </div>
         <div style="margin-top:12px"><span class="btn pri">Add an iPhone or a Mac…</span></div>
@@ -889,7 +889,7 @@ body.show-notes .notes-toggle{background:var(--accent);color:#fff}
 
         <div class="gl">Devices <span class="hi" style="margin-left:0"><svg><use href="#i-info"/></svg></span></div>
         <div class="grp">
-          <div class="fr" title="Mac · Asks for approvals"><div class="dv"><svg><use href="#i-mini"/></svg></div><div class="kn"><div>Mac mini (office) <span class="cap">This Mac</span></div></div><span class="when">Now</span><span class="pb" style="visibility:hidden">Revoke…</span></div>
+          <div class="fr" title="Mac · Asks for approvals"><div class="dv"><svg><use href="#i-mini"/></svg></div><div class="kn"><div>Mac mini (office) <span class="cap">This Mac</span></div></div><span class="pb" style="visibility:hidden">Revoke…</span></div>
           <div class="fr" title="iPhone · Approves runs"><div class="dv"><svg><use href="#i-phone"/></svg></div><div class="kn"><div>Rafal's iPhone</div></div><span class="when">Now</span><span class="pb">Revoke…</span></div>
           <div class="fr" title="Apple Watch · Sees requests"><div class="dv"><svg><use href="#i-watch"/></svg></div><div class="kn"><div>Rafal's Apple Watch</div></div><span class="when">9 min ago</span><span class="pb">Revoke…</span></div>
           <div class="fr" title="Mac · Syncs Personal"><div class="dv"><svg><use href="#i-laptop"/></svg></div><div class="kn"><div>MacBook Pro</div></div><span class="when">2 min ago</span><span class="pb">Revoke…</span></div>
@@ -959,7 +959,7 @@ body.show-notes .notes-toggle{background:var(--accent);color:#fff}
       <div class="plabel">9e · A device through Connect</div>
       <div class="gl">Devices <span class="hi" style="margin-left:0"><svg><use href="#i-info"/></svg></span></div>
       <div class="grp">
-        <div class="fr" title="Mac · Hosts approvals"><div class="dv"><svg><use href="#i-mini"/></svg></div><div class="kn"><div>Mac mini (office) <span class="cap">This Mac</span></div></div><span class="when">Now</span><span class="pb" style="visibility:hidden">Revoke…</span></div>
+        <div class="fr" title="Mac · Hosts approvals"><div class="dv"><svg><use href="#i-mini"/></svg></div><div class="kn"><div>Mac mini (office) <span class="cap">This Mac</span></div></div><span class="pb" style="visibility:hidden">Revoke…</span></div>
         <div class="fr" title="iPhone · Approves runs"><div class="dv"><svg><use href="#i-phone"/></svg></div><div class="kn"><div>Rafal's iPhone</div></div><span class="route mac">via Apassy Connect</span><span class="when">4 min ago</span><span class="pb">Revoke…</span></div>
         <div class="fr" title="Mac · Syncs Personal"><div class="dv"><svg><use href="#i-laptop"/></svg></div><div class="kn"><div>MacBook Pro</div></div><span class="route hosted">via Apassy relay</span><span class="when">2 min ago</span><span class="pb">Revoke…</span></div>
       </div>

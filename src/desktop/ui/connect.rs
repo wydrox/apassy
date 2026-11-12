@@ -1446,7 +1446,6 @@ fn devices_group(ui: &mut Ui, view: &ConnectView, account: &Account, action: &mu
     });
 }
 
-/// The role cap of a member: the owner of a family is its organizer.
 /// The facts of a member in one line: its role and the day it joined, "Admin · Since 22
 /// Sep 2026", "Member · Pending". The hover text of its row and its VoiceOver description.
 pub(crate) fn member_detail(kind: &str, member: &Member) -> String {
@@ -1458,6 +1457,7 @@ pub(crate) fn member_detail(kind: &str, member: &Member) -> String {
     }
 }
 
+/// The role cap of a member: the owner of a family is its organizer.
 fn role_cap(kind: &str, role: &str) -> Option<&'static str> {
     match (kind, role) {
         ("family", "owner") => Some("Organizer"),

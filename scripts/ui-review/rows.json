@@ -522,6 +522,14 @@
      "note": ""
     },
     {
+     "title": "Leave the family (a member)",
+     "mockups": [
+      "connect-9g.png"
+     ],
+     "shots": [],
+     "note": "Mockup only: the alert of Leave… on a member's Family row."
+    },
+    {
      "title": "Change the people (seats)",
      "mockups": [
       "connect-9d.png"
@@ -607,7 +615,7 @@
     {
      "title": "A member who did not finish the words",
      "mockups": [
-      "connect-12a.png"
+      "connect-12i.png"
      ],
      "shots": [
       "share-not-compared.png"
@@ -617,7 +625,7 @@
     {
      "title": "\"has not joined yet\"",
      "mockups": [
-      "connect-12a.png"
+      "connect-12i.png"
      ],
      "shots": [
       "share-not-joined.png"
@@ -653,6 +661,22 @@
       "share-joined.png"
      ],
      "note": ""
+    },
+    {
+     "title": "People in other states (reset, not joined, left)",
+     "mockups": [
+      "connect-12i.png"
+     ],
+     "shots": [],
+     "note": "Mockup only."
+    },
+    {
+     "title": "Vaults of other accounts in other states (stopped, offer, left, claim)",
+     "mockups": [
+      "connect-12j.png"
+     ],
+     "shots": [],
+     "note": "Mockup only."
     },
     {
      "title": "Share with…: pick a person",
@@ -966,7 +990,9 @@
     },
     {
      "title": "The Relay group with the end of the free approvals",
-     "mockups": [],
+     "mockups": [
+      "devices-settings-8.png"
+     ],
      "shots": [
       "devices-demo-R.png",
       "devices-demo-R-2.png"

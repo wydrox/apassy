@@ -9,7 +9,7 @@ The Mac app has its own **node**: the relay of the questions, the feed, and the 
 | Group | What it shows |
 | --- | --- |
 | This Mac | "Reachable on Your Tailnet" (the route switch), Address (the Tailscale IPv4 and the port, with Copy for the whole origin), Node Words, one line for each problem, "Move to This Mac…" when it applies, and Notifications |
-| Devices | One line for each device of each team: name, the route word, the last contact, and Revoke… (Details… for a Linux node); `<Kind> · <Role>` is the hover text and the VoiceOver description of the name. The count and the ⓘ are by the title |
+| Devices | One line for each device of each team, centred on its glyph: the name, a route chip only when its route differs from the most common route of the list (none when all share one), the last contact, and Revoke… (Details… for a Linux node); `<Kind> · <Role>` is the hover text and the VoiceOver description of the name. The title has the ⓘ of the routes and no count (the header says how many). When every device reaches the node through Apassy Connect, the switch of This Mac says "Approvals go through Apassy Connect." |
 | (button) | **Add an iPhone or a Mac…**: through the node when the route is on, else through Apassy relay (hosted Connect, ADR 0032) |
 | Wi-Fi Pairing | Only while a Wi-Fi iPhone is paired ([companion](companion.md)) |
 

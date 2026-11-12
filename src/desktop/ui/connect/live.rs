@@ -519,7 +519,7 @@ impl DesktopApp {
     /// copies them) in it, `recover-go` presses "Recover…" (the owner check opens), and
     /// `saved` presses "I Saved It". `revoke` presses Revoke… of the first other device,
     /// `go` the button of the open alert or sheet (an owner check opens), `new-recovery`
-    /// the item of the ⋯ menu, and `share-…` a button of Shared Vaults
+    /// "New Code…" of the Recovery Code row, and `share-…` a button of Shared Vaults
     /// ([`DesktopApp::tour_share`]): the rows of the section have no fixed place. Returns
     /// false when the step does not fit the window.
     #[doc(hidden)]

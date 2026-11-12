@@ -2742,7 +2742,8 @@ mod live {
                 "Asks for approvals".to_owned()
             }],
             route: None,
-            last_contact: Some(crate::desktop::companion::now()),
+            // This Mac is the one reading the pane: it shows no time of its own.
+            last_contact: None,
             target: Target::ThisMac,
             failed: false,
         }

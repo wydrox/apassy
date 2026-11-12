@@ -368,15 +368,17 @@ The tests use temporary folders. They do not test a sync service itself.
 - When it syncs: as in section 4, with three changes. After an unlock the worker pulls in the background, so an unlock does not wait for the network. The worker pulls again every 5 minutes, and at once when another Mac pushed (a long poll). Before a lock, Apassy pushes only when a change waits, no other relay sync of the vault runs, and the last relay sync did not fail; that push ends within 10 seconds. Otherwise the change goes up after the next unlock.
 - Every relay call that you start runs in the background: turning sync on with the first upload, "Add a Device…" and its question every 5 seconds, "Confirm…", "Refuse", "Devices…", "Remove", "Sync Now", turning it off, "Replace with this Mac's vault…", a new passphrase, and the link, the wait, the download, and the passphrase of a Mac that joins. The window stays responsive and shows what runs ("Apassy syncs with the relay…"); the button of a call that runs is dimmed. The result comes as the usual message. These calls take the vault only to read it or to write it, never while they wait for the relay.
 
+The row draws the tag beside its line; a line that starts with the tag as a sentence of its own drops that sentence ("Saved to the relay. Received by …" shows as "Received by …").
+
 | Tag | Line |
 | --- | --- |
-| Saved to the relay | Saved to the relay. Received by Mac mini 1 minute ago. |
+| Saved to the relay | Received by Mac mini 1 minute ago. |
 | Sync pending | Saved on this Mac. A change waits for the relay. |
-| Relay not reachable | Relay not reachable. Apassy syncs when it is back. |
+| Relay not reachable | Apassy syncs when it is back. |
 | Sync pending | The relay asks Apassy to wait a minute. Apassy syncs after that. (A `429`; also a relay that stays busy.) |
 | Sync paused | The relay limits the pushes of this vault for this hour. The changes stay on this Mac and sync later. |
 | Damaged copy | The copy on the relay fails a check. Apassy did not use it, and does not download it again until it changes. |
-| Removed from the relay | Removed from the relay. This Mac keeps its vault. Turn relay sync off, then join again with a link from another Mac. |
+| Removed from the relay | This Mac keeps its vault. Turn relay sync off, then join again with a link from another Mac. |
 | Relay copy refused | The relay served a copy that does not include this Mac's last change (or an older copy than this Mac saw). To go on, select “Use the relay copy…” in Settings > Vault > Sync. |
 | Needs a passphrase | as in section 8; after "Use the relay copy": The copy on the relay uses another passphrase than this vault. It can be from before a passphrase change. Type the passphrase of that copy. |
 
@@ -454,7 +456,7 @@ A vault of one account syncs with another account of the same family or team onl
 1. Settings › Connect › Shared Vaults, the vault's row: "Share with…". Pick the person (an active member of your family or team).
 2. Apassy shows a share code and its QR code: "Send this to <name>." Send it to them (a message, the QR code on the screen). The code works once, for 10 minutes.
 3. When they paste it, both Macs show six words: `"<name>" (<device>) asks to share vaults with you.` Confirm only if their screen shows the same words. "Confirm…" runs the owner check; it names the vault by its name on this Mac and the person by the device name that their signed device list holds, with the short fingerprint of their account key (the name that Apassy Connect gives them shows beside it). Apassy signs the share and adds their devices to the copy.
-4. The row says "<name>: has not joined yet" until they join. If they stopped before "The Words Match", the row says that they have not finished comparing the words: "Share with…" shows a new code, and nothing is signed twice.
+4. The person's line says "Not joined" until they join. If they stopped before "The Words Match", it says "Words not compared", with "<name> has not compared the words. Share with… makes a new code." under it: "Share with…" shows a new code, and nothing is signed twice. The line names the person ("Ola"); their device is its hover text.
 
 A person with whom you shared a vault before needs no code: "Share with…" and the owner check share the next vault at once.
 
@@ -462,7 +464,7 @@ A person with whom you shared a vault before needs no code: "Share with…" and 
 
 1. Settings › Connect › Shared Vaults › "Accept Shared Vault…": paste the code. "The code does not match the account that answered." means that Apassy Connect named another account than the code: nothing was signed; ask for a new code.
 2. Compare the six words with the other screen. "The Words Match" runs the owner check. "The Words Differ" signs nothing.
-3. The vault then shows as "<vault>, shared by <name>". "Join" runs an owner check that names the vault and the person, signs the join, and opens the copy: type the passphrase of the vault. A wrong passphrase makes no vault. A vault that this Mac syncs as its own, or that your account shares, is never offered.
+3. The vault then shows as "“<vault>” at Connect · <name>" (or "A vault · <name>"; once joined, "<vault> · <name>"). "Join" runs an owner check that names the vault and the person, signs the join, and opens the copy: type the passphrase of the vault. A wrong passphrase makes no vault. A vault that this Mac syncs as its own, or that your account shares, is never offered.
 
 Your other Macs (and the other person's) take the share from the signed lists at their next refresh of Settings › Connect; they need no code and no words.
 
@@ -481,7 +483,10 @@ Your other Macs (and the other person's) take the share from the signed lists at
 | "Waiting for a device that shares this vault" | The newest copy was signed by a device that left (or a person whose share ended) after this Mac's last sync. A device that shares the vault signs a copy of its own over it at its next sync. |
 | "<name> reset the account. Share again." | The other person recovered their account (a new account key). Their devices sign nothing new until you compare new words: "Share Again…" on their row makes a new code. |
 | "<name> must verify this account again." | The owner recovered their account; ask them to share again with a new code. |
-| "The share ended. The vault stays here." | The owner stopped sharing with you. |
+| "<name> stopped sharing this vault." | The owner stopped sharing with you. When they share it again, it is offered again (Join). |
+| "The share ended. The vault stays here." | Apassy Connect ended the share. |
+
+The first two are lines of the vault's Sync row ("Checking who shares this vault…" also shows, as a plain note, under the vault in Settings › Connect › Shared Vaults). The others are problem lines in Shared Vaults: orange, with a warning sign, under the person or the vault.
 
 ### 18.4 Move the relay copy to Connect
 
@@ -496,8 +501,8 @@ Connect gets the copy **first**; the old copy goes **second**. A move record `<d
 
 | The row says | Both copies | The vault syncs with | What to do |
 | --- | --- | --- | --- |
-| "Both copies are kept, and the vault still syncs with the relay. Try again, or undo the move." | yes | the hosted relay, as before | "Try Again" goes on from step 1 (Connect gets the changes made since), or "Undo the Move…" deletes the Connect copy after an owner check |
-| "The old copy is deleted, but sync with Apassy Connect is not on yet. Try again." | Connect only | nothing yet; the vault is safe on this Mac | "Try Again" runs step 4 |
+| "Both copies are kept, at Apassy Connect and on the relay, and the vault still syncs with the relay. Try again, or undo the move." | yes | the hosted relay, as before | "Try Again" goes on from step 1 (Connect gets the changes made since), or "Undo the Move…" deletes the Connect copy after an owner check |
+| "The old copy is deleted, but sync with Apassy Connect is not on yet. The vault stays on this Mac. Try again." | Connect only | nothing yet; the vault is safe on this Mac | "Try Again" runs step 4 |
 
 The other Macs of the old team: their next sync finds the hosted copy gone. Each turns on 18.2 (same account), or the owner shares the vault with that person (18.3).
 
