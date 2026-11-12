@@ -2511,7 +2511,10 @@ fn recover_on(
         "Synthetic MacBook",
     )
     .expect("recover");
-    (recovered, deleted.expect("Connect names the deleted stores"))
+    (
+        recovered,
+        deleted.expect("Connect names the deleted stores"),
+    )
 }
 
 /// Section 9 on the device that recovered the account: the sync of a vault through a store
