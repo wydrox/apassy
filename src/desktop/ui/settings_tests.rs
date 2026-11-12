@@ -1250,8 +1250,11 @@ fn devices_rows_follow_their_label_as_under_this_mac() {
     };
     let this_mac_box = group_box(this_mac, reachable);
     let devices_box = group_box(label, first);
-    let under_this_mac = this_mac_box.map_or(f32::INFINITY, |rect| rect.top()) - this_mac.bottom();
-    let under_devices = devices_box.map_or(f32::INFINITY, |rect| rect.top()) - label.bottom();
+    // From the top of each label, not the bottom: the rectangles are the glyphs' painted
+    // bounds, and their bottom follows the letters. On Linux the label is "This computer",
+    // whose "p" reaches 2 points under the baseline, while "Devices" has no descender.
+    let under_this_mac = this_mac_box.map_or(f32::INFINITY, |rect| rect.top()) - this_mac.top();
+    let under_devices = devices_box.map_or(f32::INFINITY, |rect| rect.top()) - label.top();
     assert!(
         under_this_mac.is_finite() && under_devices.is_finite(),
         "a group under each label: {under_this_mac} {under_devices}"
