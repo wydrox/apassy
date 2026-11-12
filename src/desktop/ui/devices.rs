@@ -803,14 +803,21 @@ fn this_mac_group(
     action: &mut Option<Action>,
 ) {
     rows::group(ui, Some(concat!("This ", crate::computer!())), |g| {
-        // The move row below says that the approvals go through the relay (frame 9b).
+        // The move row below says that the approvals go through the relay (frame 9b):
+        // then neither route line shows, so the pane never says both.
+        let moving = move_choices(view).is_some();
         let off = Some(route_off_line(view))
-            .filter(|line| *line != ROUTE_OFF || move_choices(view).is_none());
+            .filter(|line| !moving || (*line != ROUTE_OFF && *line != ROUTE_OFF_CONNECT));
+        // A switch that is on whose front is not bound yet (starting, a port taken, a
+        // failure) while the node runs on Apassy Connect: every row goes through
+        // Connect and draws no chip, so this line names the route.
+        let on_connect = (!moving && common_route(&view.devices) == Some(Route::Connect))
+            .then_some(ROUTE_OFF_CONNECT);
         let (subline, enabled) = match &view.node {
             NodeState::Missing | NodeState::NotConnected => (off, false),
             NodeState::Off => (off, !view.locked),
             NodeState::Locked => (Some(ROUTE_LOCKED), false),
-            NodeState::On { .. } => (None, !view.locked),
+            NodeState::On { .. } => (on_connect, !view.locked),
         };
         let was = view.route_on();
         let mut on = was;

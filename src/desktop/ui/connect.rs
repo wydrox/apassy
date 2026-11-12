@@ -169,7 +169,8 @@ pub(crate) const START_NO_DEVICE: &str = concat!(
     crate::computer!(),
     ", then recover the account in Settings › Connect."
 );
-pub(crate) const RECOVER_LEAD: &str = "Use this only if no device of the account is left.";
+pub(crate) const RECOVER_LEAD: &str =
+    "Use this only if no device of the account is left. The plan stays.";
 /// What a recovery deletes, under the lead of its sheet.
 pub(crate) const RECOVER_WHAT: &str =
     "The vault copies at Connect are deleted; the vaults on your devices stay.";
@@ -292,7 +293,8 @@ pub(crate) const JOIN_ACCOUNT_LEAD: &str =
     "Paste the code of Add a Device… from another device of the account.";
 pub(crate) const JOINED_TITLE: &str = concat!("This ", crate::computer_cap!(), " Is Added");
 
-pub(crate) const INVITE_LEAD: &str = "Send this link to the person. It works once.";
+pub(crate) const INVITE_LEAD: &str =
+    "Send this link to the person. It works once. You confirm them here.";
 pub(crate) const ADMIN_NOTE: &str = "Admins manage members; only you change the seats and billing.";
 pub(crate) const CREATE_LINK: &str = "Create Link";
 pub(crate) const SEATS_NOTE: &str =

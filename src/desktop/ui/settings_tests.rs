@@ -2952,4 +2952,27 @@ fn route_chips_show_only_where_routes_differ() {
         1,
         "{text}"
     );
+    // The switch is on and its front is not bound yet ("Starting…"), while the node runs
+    // on Connect: the line names Connect there too.
+    view.node = NodeState::On { address: None };
+    let text = view_texts(&view);
+    assert!(!text.contains("via Apassy Connect"), "{text}");
+    assert_eq!(
+        text.matches("Approvals go through Apassy Connect.").count(),
+        1,
+        "{text}"
+    );
+    // The move row says that the approvals go through Apassy relay (approvals pinned to
+    // another node, this node only on Connect): no Connect line beside it.
+    view.node = NodeState::Off;
+    view.can_move_connect = true;
+    let text = view_texts(&view);
+    assert!(
+        text.contains("Approvals go through Apassy relay"),
+        "the move row: {text}"
+    );
+    assert!(
+        !text.contains("Approvals go through Apassy Connect."),
+        "{text}"
+    );
 }

@@ -71,20 +71,19 @@ pub(crate) const WORDS_DIFFER: &str = "The Words Differ";
 pub(crate) const DIFFERENT: &str =
     "Nothing was signed. Make a new code and compare the words again.";
 pub(crate) const MISMATCH: &str = "The code does not match the account that answered.";
-pub(crate) const EXPIRED: &str = "The code expired. Make a new code.";
+pub(crate) const EXPIRED: &str = "The code expired. Nothing was signed. Make a new code.";
 pub(crate) const JOIN: &str = "Join";
 pub(crate) const LEAVE: &str = "Leave…";
 pub(crate) const CHECKING: &str = "Checking who shares this vault…";
 pub(crate) const WAITING_SHARED: &str = "Waiting for a device that shares this vault";
 pub(crate) const ENDED: &str = "The share ended. The vault stays here.";
-pub(crate) const LEAVE_LEAD: &str =
-    "This device stops syncing the shared copy. The vault stays here.";
+pub(crate) const LEAVE_LEAD: &str = "This device stops syncing the shared copy. The vault stays here, and the other person keeps theirs.";
 pub(crate) const STOP_LEAD: &str =
     "Their devices leave the shared copy now. Every device keeps the vault.";
 pub(crate) const ACCEPTED_LEAD: &str = "Their shared vaults show in Settings › Connect.";
 /// The end of the line of a shared vault that this device left.
 pub(crate) const LEFT_HERE: &str = "you left; the vault stays here";
-pub(crate) const UNPINNED: &str = "Some people who share your vaults could not be verified here. Their devices sign nothing here.";
+pub(crate) const UNPINNED: &str = "Some members of vaults that you joined could not be verified here. Their devices sign nothing here.";
 pub(crate) const DOWNLOAD: &str = "Download Copy…";
 pub(crate) const VAULT_OFFERED: &str = "A vault";
 pub(crate) const CLAIM: &str = "Confirm…";
