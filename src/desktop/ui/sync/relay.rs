@@ -75,9 +75,10 @@ pub(crate) const LABEL: &str = "Apassy relay";
 pub(crate) const CONNECT_LABEL: &str = "Apassy Connect";
 /// What a vault store of Apassy Connect offers instead of "Add a device…" and
 /// "Devices…": a store has no device links; the devices of the account sync it.
-pub(crate) const CONNECT_DEVICES: &str = "Devices of the Account…";
+pub(crate) const CONNECT_DEVICES: &str = "Account Devices…";
 /// Its hint.
-pub(crate) const CONNECT_DEVICES_NOTE: &str = "Every device of your Apassy Connect account syncs this vault. Add or remove devices in Settings › Connect.";
+pub(crate) const CONNECT_DEVICES_NOTE: &str =
+    "Every device of your Apassy Connect account syncs this vault.";
 
 /// The name of the sync of a vault on the relay: [`CONNECT_LABEL`] for a vault store of
 /// Apassy Connect, else [`LABEL`].
@@ -129,27 +130,21 @@ const TAKE_WITHOUT_HISTORY: &str = "sync-relay-take-without-history";
 pub(crate) const WITHOUT_HISTORY: &str = "Take This Copy Without Its Earlier History…";
 /// The step of a vault whose vault store Apassy Connect deleted at a recovery: the sync
 /// through Apassy Connect turns on again with a new store ([`DesktopApp::relay_enable_connect`]).
-pub(crate) const SYNC_AGAIN: &str = "Sync Through Apassy Connect Again…";
+pub(crate) const SYNC_AGAIN: &str = "Sync Again…";
 /// The line of a vault store that refuses this device: it does not claim why.
 pub(crate) const STORE_REFUSED_WORDS: &str = concat!(
     "Apassy Connect no longer lets this ",
     crate::computer!(),
-    " into the copy of this vault: the copy was deleted, or this ",
-    crate::computer!(),
-    " is no longer a device of it. The vault on this ",
-    crate::computer!(),
-    " is safe. Settings › Connect shows whether this ",
-    crate::computer!(),
-    " is still a device of the account."
+    " into this vault's copy. Check Settings › Connect."
 );
 /// A vault store that checks the device list this long says that Connect cannot be reached
 /// to check it, with "Try Again" (connect-account-v1 section 7.5).
 pub(crate) const CHECK_LIST_LONG: Duration = Duration::from_secs(10 * 60);
 /// The line of such a store.
 pub(crate) const CHECK_LIST_UNREACHABLE: &str = concat!(
-    "Apassy Connect cannot be reached to check the device list. Apassy keeps checking. The changes on this ",
+    "Apassy Connect cannot be reached to check the devices. Changes stay on this ",
     crate::computer!(),
-    " stay on it until then; nothing is lost."
+    " until then."
 );
 /// What to do instead of taking the copy of a removed device.
 pub(crate) const DEPARTED_ADVICE: &str =
@@ -157,19 +152,13 @@ pub(crate) const DEPARTED_ADVICE: &str =
 
 /// "Use a vault from another Mac" › "Apassy Connect" while the key of the account was not
 /// read (cancelled, or unavailable): "Sign In…" reads it again.
-pub(crate) const CONNECT_SIGN_IN: &str = concat!(
-    "Sign in to Apassy Connect with the key of this ",
-    crate::computer!(),
-    ". Then the vaults of your account show here."
-);
+pub(crate) const CONNECT_SIGN_IN: &str =
+    "Sign in to Apassy Connect to see the vaults of your account.";
 
 /// A link for the origin of this Mac's Apassy Connect account while the account is not
 /// signed in: nothing is sent.
-pub(crate) const CONNECT_SIGN_IN_FOR_LINK: &str = concat!(
-    "This link is for Apassy Connect, where this ",
-    crate::computer!(),
-    " has an account. Choose Sign In… in Settings › Connect first, then paste the link again."
-);
+pub(crate) const CONNECT_SIGN_IN_FOR_LINK: &str =
+    "This link is for Apassy Connect. Choose Sign In… in Settings › Connect, then paste it again.";
 
 /// The end of the state name of a relay sync that turns on, until the relay answered.
 const STAGED: &str = ".relay-new";
@@ -1095,26 +1084,20 @@ pub(crate) fn connect_tag(state: ConnectState) -> (&'static str, Tone) {
     }
 }
 
-/// The plan state of a vault store in a sentence: what works, what waits, and that
-/// nothing is lost on this Mac. No price and no purchase words (plans section 5).
+/// The plan state of a vault store in a sentence: what works and what to do. No price
+/// and no purchase words (plans section 5).
 pub(crate) fn connect_words(state: ConnectState) -> String {
     use crate::desktop::ui::connect::day;
     match state {
         ConnectState::PastDue { grace_until, .. } => match grace_until {
             Some(until) => format!(
-                "Connect: past due. Sync works until {}. Update the payment method with Manage Billing… in Settings › Connect.",
+                "Connect: past due. Sync works until {}. Update the payment in Settings › Connect.",
                 day(until)
             ),
-            None => "Connect: past due. Sync works for now. Update the payment method with Manage Billing… in Settings › Connect.".to_owned(),
+            None => "Connect: past due. Update the payment in Settings › Connect.".to_owned(),
         },
         ConnectState::ReadOnly { until } => format!(
-            concat!(
-                "{}. Apassy downloads the changes of your other devices. The changes of this ",
-                crate::computer!(),
-                " stay on this ",
-                crate::computer!(),
-                " and go up when the plan is active again."
-            ),
+            "{}. Changes made here upload when the plan is active again.",
             match until {
                 Some(until) => format!("Connect: read-only until {}", day(until)),
                 None => "Connect: read-only".to_owned(),
@@ -1122,16 +1105,14 @@ pub(crate) fn connect_words(state: ConnectState) -> String {
         ),
         ConnectState::Suspended { delete_at } => match delete_at {
             Some(at) => format!(
-                concat!(
-                    "Connect: suspended. Apassy Connect keeps the copy until {}. The vault on this ",
-                    crate::computer!(),
-                    " is safe."
-                ),
+                "Connect: suspended. The copy at Connect is kept until {}.",
                 day(at)
             ),
-            None => concat!("Connect: suspended. The vault on this ", crate::computer!(), " is safe.").to_owned(),
+            None => "Connect: suspended. See Settings › Connect.".to_owned(),
         },
-        ConnectState::SignedOut => concat!("Connect: signed out on this ", crate::computer!(), ". Open Settings › Connect and select “Sign In…” to sync this vault.").to_owned(),
+        ConnectState::SignedOut => {
+            "Connect: signed out. Choose Sign In… in Settings › Connect.".to_owned()
+        }
         ConnectState::HostedEnded(why) => crate::desktop::sync_worker::ended_copy_words(why),
         ConnectState::StoreDeleted(why) => {
             crate::desktop::sync_worker::deleted_copy_words(why).to_owned()
@@ -1309,39 +1290,26 @@ pub(crate) const NODE_SETUP_WORDS: &str = concat!(
 
 /// Why "Apassy Connect" is not offered or did not start: no signed-in account with a
 /// plan that pushes. No price and no purchase words (plans section 5).
-pub(crate) const CONNECT_NEEDS_PLAN: &str = concat!(
-    "Apassy Connect needs an account with an active plan on this ",
-    crate::computer!(),
-    ". Open Settings › Connect, sign in, and try again."
-);
+pub(crate) const CONNECT_NEEDS_PLAN: &str =
+    "Apassy Connect needs a signed-in account with an active plan. See Settings › Connect.";
 
 /// The words of the "Apassy Connect" choice (plan s7 unit M3).
 /// The lead of the setup sheet on "Apassy Connect".
-pub(crate) const CONNECT_SETUP_LEAD: &str = concat!(
-    "Your Apassy Connect account keeps one encrypted copy of this vault. Agents, their exceptions, your answers, and the activity stay on each ",
-    crate::computer!(),
-    "."
-);
-pub(crate) const CONNECT_SETUP_WORDS: &str = concat!(
-    "Apassy Connect keeps the encrypted copy of this vault for your account and passes the changes between your devices within seconds. It never gets the passphrase. The account key of this ",
-    crate::computer!(),
-    " signs each change; it stays ",
-    crate::connect_key_place!(),
-    ". Your other devices of the account turn on the same way, without a link code, and merge."
-);
+pub(crate) const CONNECT_SETUP_LEAD: &str =
+    "Your Apassy Connect account keeps one encrypted copy of this vault.";
+pub(crate) const CONNECT_SETUP_WORDS: &str =
+    "Your other devices of the account turn it on the same way, without a link code.";
 
 /// The relay row of a move that kept both copies.
-pub(crate) const MOVE_BOTH_COPIES: &str = "The copy is on Apassy Connect, and the old copy is still on apassy-relay.wyderka.cc. Both copies are kept, and the vault syncs with the relay as before. Try again to finish the move, or undo it.";
+pub(crate) const MOVE_BOTH_COPIES: &str =
+    "Both copies are kept, and the vault still syncs with the relay. Try again, or undo the move.";
 
 /// The relay row of a move whose old copy is deleted, while Connect did not turn on.
-pub(crate) const MOVE_OLD_DELETED: &str = concat!(
-    "The copy is on Apassy Connect, and the old copy is deleted, but the sync with Apassy Connect did not turn on yet. The vault is safe on this ",
-    crate::computer!(),
-    ". Try again."
-);
+pub(crate) const MOVE_OLD_DELETED: &str =
+    "The old copy is deleted, but sync with Apassy Connect is not on yet. Try again.";
 
 /// The words of "Move the relay copy to Connect" before it runs.
-pub(crate) const MOVE_WORDS: &str = "Apassy uploads this vault to Apassy Connect first and deletes the copy on apassy-relay.wyderka.cc second. If a step fails, both copies stay, and you can try again or undo.";
+pub(crate) const MOVE_WORDS: &str = "Apassy uploads this vault to Apassy Connect, then deletes the relay copy. If a step fails, both copies stay.";
 
 /// "<names> got the vault on Apassy Connect too." for the devices that a Mac added.
 fn registered_words(names: &[String]) -> String {
@@ -6230,7 +6198,7 @@ pub(super) fn add_mac_sheet(
 const MOVE_QR_POINTS: f32 = 140.0;
 
 /// The questions mode of "Add a device…": the sheet of "Add an iPhone or a Mac…" and of
-/// "Move Approvals to This Mac…" in Settings > Devices, with the frames and the exact
+/// "Move Here…" in Settings > Devices, with the frames and the exact
 /// texts of `docs/design/devices-settings-mockup.html`: 2a the link, 2b the safety
 /// words, 2c done; 4b the move, 4c moved, 4d the old entry still on Apassy relay.
 #[allow(clippy::too_many_arguments)]
@@ -6915,20 +6883,15 @@ fn ready_fields(app: &mut DesktopApp, ui: &mut egui::Ui) -> bool {
 }
 
 /// The lead of "Use a vault from another Mac" › "Apassy Connect" (mockup frame 10a).
-pub(crate) const CONNECT_OPEN_LEAD: &str = concat!(
-    "The vaults that your other ",
-    crate::computers!(),
-    " keep in Apassy Connect. No link is needed: this ",
-    crate::computer!(),
-    " is a device of your account. Use the passphrase of the vault."
-);
+pub(crate) const CONNECT_OPEN_LEAD: &str =
+    "Your vaults in Apassy Connect. Open one with its passphrase.";
 /// The list is empty (frame 10b).
 pub(crate) const CONNECT_OPEN_EMPTY: &str = concat!(
-    "No vault of your account waits for this ",
+    "No vault waits for this ",
     crate::computer!(),
     ". On the other ",
     crate::computer!(),
-    ", open Settings › Vault › Sync and select Apassy Connect."
+    ", choose Apassy Connect in Settings › Vault › Sync."
 );
 /// The button of a vault store in the list.
 pub(crate) const CONNECT_OPEN_USE: &str = "Use This Vault…";
@@ -6936,15 +6899,13 @@ pub(crate) const CONNECT_OPEN_USE: &str = "Use This Vault…";
 pub(crate) const CONNECT_OPEN_JOIN: &str = concat!(
     "This ",
     crate::computer!(),
-    " is not in an Apassy Connect account yet. On a device of the account, choose Add a Device…, then add this ",
-    crate::computer!(),
-    " with the code that it shows."
+    " is not in an Apassy Connect account yet."
 );
 /// The account file of this computer is of an earlier version of Apassy.
 pub(crate) const CONNECT_OPEN_OLD_FILE: &str = concat!(
     "This ",
     crate::computer!(),
-    " must join its Apassy Connect account again: its account file is from an earlier version of Apassy. Open a vault, forget the account in Settings › Connect, then join it from another device of the account."
+    "'s account file is from an earlier Apassy. Forget the account in Settings › Connect, then join it again."
 );
 /// The key of the account is being read for this step.
 pub(crate) const CONNECT_OPEN_SIGNING_IN: &str = "Apassy signs in to Apassy Connect…";

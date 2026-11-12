@@ -2585,7 +2585,7 @@ fn a_store_deleted_at_a_recovery_asks_nothing_and_a_new_store_syncs() {
     );
     assert_eq!(cloud.connect.log().len(), connect_before);
 
-    // "Sync Through Apassy Connect Again…": the sync of the deleted store goes on this
+    // "Sync Again…" (Settings › Vault › Sync): the sync of the deleted store goes on this
     // device, and the step of the sync through Apassy Connect makes a new store.
     m.sync.disable(Some(&mut vault)).expect("off");
     assert_eq!(m.sync.store_deleted(), None);

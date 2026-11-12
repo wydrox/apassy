@@ -1157,11 +1157,14 @@ fn a_vault_on_connect_is_named_apassy_connect() {
     for expected in [
         "Apassy Connect",
         "Saved to Apassy Connect",
-        "Devices of the Account…",
+        "Account Devices…",
         "Sync now",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
+    // "Account Devices…" ends with the word of the relay's button; the relay's own
+    // "Devices…" is the one that must not show.
+    let text = text.replace("Account Devices…", "");
     for refused in [
         "Apassy relay",
         "Saved to the relay",
@@ -4644,11 +4647,11 @@ fn a_store_deleted_at_a_recovery_says_so_and_nothing_else() {
     let deleted = |why| UiStatus::Connect(ConnectState::StoreDeleted(why));
     assert_eq!(
         words_of(&deleted(StoreDeleted::Recovered), None, true),
-        "The copy of this vault at Apassy Connect was deleted when the account was recovered."
+        "The copy at Apassy Connect was deleted by the account recovery."
     );
     assert_eq!(
         words_of(&deleted(StoreDeleted::OwnerRecovered), None, true),
-        "The copy of this vault at Apassy Connect was deleted when the person who shares it with you recovered their account."
+        "The copy at Apassy Connect was deleted: its owner recovered their account."
     );
     for why in [StoreDeleted::Recovered, StoreDeleted::OwnerRecovered] {
         let words = words_of(&deleted(why), None, true);
@@ -4673,7 +4676,7 @@ fn a_store_deleted_at_a_recovery_says_so_and_nothing_else() {
     );
 }
 
-/// The row of a deleted store keeps its line and "Sync Through Apassy Connect Again…"
+/// The row of a deleted store keeps its line and "Sync Again…"
 /// inside the row from the narrowest Settings column to a wide one
 /// (`rows::text_buttons`): the line wraps, and the button goes under it.
 #[test]
@@ -4828,7 +4831,7 @@ fn a_store_deleted_at_a_recovery_is_named_once_and_a_new_store_syncs() {
     super::open_settings(&mut app, super::SettingsSection::Vault);
     let text = frames(&mut app);
     assert!(
-        text.contains("was deleted when the account was recovered."),
+        text.contains("was deleted by the account recovery."),
         "{text}"
     );
     assert!(text.contains(SYNC_AGAIN), "{text}");
