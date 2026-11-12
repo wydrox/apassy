@@ -317,27 +317,32 @@ pub(crate) fn sidebar_status(app: &DesktopApp) -> (String, Tone) {
             Tone::Neutral,
         );
     };
+    let connect = link.is_relay() && app.syncs_on_connect(&entry.id);
     let folder = if link.is_relay() {
-        relay::LABEL.to_owned()
+        relay::label_of(connect).to_owned()
     } else {
         sidebar_folder_label(&app.sync.folders, &link.folder)
     };
-    // The state first: a narrow sidebar cuts the end of the line.
+    // The place first, then the state: the narrow sidebar keeps the place, and a state
+    // that needs the owner shows alone.
     match app.sync.statuses.get(&entry.id) {
         Some(UiStatus::UpToDate(Some(at))) => {
-            (format!("Synced {} · {folder}", ago(*at)), Tone::Neutral)
+            (format!("{folder} · synced {}", ago(*at)), Tone::Neutral)
         }
-        Some(UiStatus::UpToDate(None)) | None => (format!("Synced · {folder}"), Tone::Neutral),
-        Some(UiStatus::Syncing) => (format!("Sync pending · {folder}"), Tone::Neutral),
-        Some(UiStatus::Waiting) => (format!("Waiting for the file · {folder}"), Tone::Neutral),
-        Some(status) => (status_tag(link, status).0.to_owned(), Tone::Warning),
+        Some(UiStatus::UpToDate(None)) | None => (format!("{folder} · synced"), Tone::Neutral),
+        Some(UiStatus::Syncing) => (format!("{folder} · sync pending"), Tone::Neutral),
+        Some(UiStatus::Waiting) => (format!("{folder} · waiting for the file"), Tone::Neutral),
+        Some(status) => (
+            status_tag(link, status, connect).0.to_owned(),
+            Tone::Warning,
+        ),
     }
 }
 
 /// The short tag of a status and its tone, for a folder or the relay.
-fn status_tag(link: &SyncLink, status: &UiStatus) -> (&'static str, Tone) {
+fn status_tag(link: &SyncLink, status: &UiStatus, connect: bool) -> (&'static str, Tone) {
     if link.is_relay() {
-        relay::tag(status)
+        relay::tag_of(status, connect)
     } else {
         status.tag()
     }
@@ -370,7 +375,9 @@ fn folder_label(folders: &[SyncFolder], path: &Path) -> String {
 pub(super) fn method_words(app: &DesktopApp, entry: &VaultEntry) -> String {
     match entry.sync.as_ref().filter(|_| entry.sync_state().is_some()) {
         None => "Not synced".to_owned(),
-        Some(link) if link.is_relay() => relay::LABEL.to_owned(),
+        Some(link) if link.is_relay() => {
+            relay::label_of(app.syncs_on_connect(&entry.id)).to_owned()
+        }
         Some(link) => sidebar_folder_label(&app.sync.folders, &link.folder),
     }
 }
@@ -411,7 +418,10 @@ pub(super) fn other_macs(app: &DesktopApp) -> OtherMacs {
                 words: if removed {
                     "Removed from the relay".to_owned()
                 } else {
-                    format!("Through the {}", relay::LABEL)
+                    format!(
+                        "Through {}",
+                        relay::label_of(app.syncs_on_connect(&entry.id))
+                    )
                 },
                 relay: (!removed).then(|| entry.id.clone()),
             }
@@ -761,6 +771,9 @@ impl DesktopApp {
         self.sync_take_hook_results();
         self.sync_send_list();
         for event in self.sync.worker.take_events() {
+            if let SyncEvent::Synced { id, .. } = &event {
+                self.relay_note_connect(&id.clone());
+            }
             self.sync_apply_event(event);
         }
         self.sync.statuses = self.sync.worker.statuses();
@@ -1588,6 +1601,10 @@ pub(super) enum Pick {
     Folder(PathBuf),
     /// The Apassy relay (ADR 0022). Settings offers it; the Create screen does not.
     Relay,
+    /// A vault store of the Apassy Connect account (plan s7 unit M3): the setup sheet
+    /// on its "Apassy Connect" choice. Settings offers it while this device can sync
+    /// through Connect.
+    Connect,
     Choose,
 }
 
@@ -1597,11 +1614,17 @@ enum Current<'a> {
     Off,
     Folder(&'a Path),
     Relay,
+    Connect,
 }
 
 /// The choices of the picker in their order, with their labels: off, the detected
-/// folders, the Apassy relay after them when `relay` is true, and "Choose folder…".
-pub(super) fn picker_choices(folders: &[SyncFolder], relay: bool) -> Vec<(Pick, String)> {
+/// folders, the Apassy relay after them when `relay` is true, Apassy Connect when
+/// `connect` is true too, and "Choose folder…".
+pub(super) fn picker_choices(
+    folders: &[SyncFolder],
+    relay: bool,
+    connect: bool,
+) -> Vec<(Pick, String)> {
     let mut choices = vec![(Pick::Off, "Off".to_owned())];
     choices.extend(
         folders
@@ -1610,6 +1633,9 @@ pub(super) fn picker_choices(folders: &[SyncFolder], relay: bool) -> Vec<(Pick, 
     );
     if relay {
         choices.push((Pick::Relay, relay::LABEL.to_owned()));
+        if connect {
+            choices.push((Pick::Connect, relay::CONNECT_LABEL.to_owned()));
+        }
     }
     choices.push((Pick::Choose, "Choose folder…".to_owned()));
     choices
@@ -1622,11 +1648,13 @@ fn sync_picker(
     folders: &[SyncFolder],
     current: Current<'_>,
     relay: bool,
+    connect: bool,
 ) -> Option<Pick> {
     let label = match current {
         Current::Off => "Off".to_owned(),
         Current::Folder(path) => folder_label(folders, path),
         Current::Relay => relay::LABEL.to_owned(),
+        Current::Connect => relay::CONNECT_LABEL.to_owned(),
     };
     let mut pick = None;
     kit::menu(
@@ -1636,9 +1664,18 @@ fn sync_picker(
     )
     .truncate()
     .show_ui(ui, |ui| {
-        for (choice, text) in picker_choices(folders, relay) {
+        // A vault on Connect shows its choice, also while no plan offers it to others.
+        // Relay sync and Connect do not switch here: a vault on the relay moves with
+        // "Move the Relay Copy to Connect", so each shows only its own.
+        let connect = (connect && current != Current::Relay) || current == Current::Connect;
+        for (choice, text) in picker_choices(folders, relay, connect)
+            .into_iter()
+            .filter(|(choice, _)| !(current == Current::Connect && *choice == Pick::Relay))
+        {
             let selected = match (&choice, current) {
-                (Pick::Off, Current::Off) | (Pick::Relay, Current::Relay) => true,
+                (Pick::Off, Current::Off)
+                | (Pick::Relay, Current::Relay)
+                | (Pick::Connect, Current::Connect) => true,
                 (Pick::Folder(path), Current::Folder(now)) => path == now,
                 _ => false,
             };
@@ -1681,6 +1718,9 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let mut move_to: Option<String> = None;
     let mut undo_move: Option<String> = None;
     let mut check_list: Option<String> = None;
+    let mut open_connect = false;
+    let mut connect_setup = false;
+    let connect_offered = app.connect_sync_available();
     super::settings::rows::section(
         ui,
         Some("Sync"),
@@ -1695,6 +1735,8 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 let status = app.sync.statuses.get(&entry.id);
                 let link = entry.sync.as_ref().filter(|_| entry.sync_state().is_some());
                 let on_relay = link.is_some_and(SyncLink::is_relay);
+                // A vault store of the Connect account: named "Apassy Connect".
+                let on_connect = on_relay && app.syncs_on_connect(&entry.id);
                 let syncing = on_relay && app.relay_busy(&entry.id, Job::SyncNow);
                 // No other choice while relay sync turns on or off.
                 let changing = app.relay_changing(&entry.id);
@@ -1714,6 +1756,7 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                         if open_unlocked {
                             let now = match link {
                                 None => Current::Off,
+                                Some(_) if on_connect => Current::Connect,
                                 Some(link) if link.is_relay() => Current::Relay,
                                 Some(link) => Current::Folder(link.folder.as_path()),
                             };
@@ -1725,6 +1768,7 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                                         &app.sync.folders,
                                         now,
                                         true,
+                                        connect_offered,
                                     )
                                 })
                                 .inner;
@@ -1739,7 +1783,7 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                             });
                         }
                         if let (Some(status), Some(link)) = (status, link) {
-                            let (tag, tone) = status_tag(link, status);
+                            let (tag, tone) = status_tag(link, status, on_connect);
                             kit::tag(ui, tag, tone);
                         }
                     });
@@ -1754,9 +1798,14 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                         }
                         (Some(_), Some(status)) if on_relay => {
                             app.share_sync_line(&entry.id, status).unwrap_or_else(|| {
-                                relay::words(status, app.sync.relay.receipt(&entry.id))
+                                relay::words_of(
+                                    status,
+                                    app.sync.relay.receipt(&entry.id),
+                                    on_connect,
+                                )
                             })
                         }
+                        (Some(_), None) if on_connect => "Syncs through Apassy Connect.".to_owned(),
                         (Some(_), None) if on_relay => "Syncs through the Apassy relay.".to_owned(),
                         (Some(link), Some(status)) => format!(
                             "{} {} in {}.",
@@ -1873,7 +1922,16 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                             {
                                 sync_now = true;
                             }
-                            if on_relay && !removed {
+                            // A vault store has no device links: the devices of the
+                            // account sync it, in Settings › Connect.
+                            if on_connect && !removed {
+                                if kit::small_button(ui, relay::CONNECT_DEVICES, Style::Bordered)
+                                    .on_hover_text(relay::CONNECT_DEVICES_NOTE)
+                                    .clicked()
+                                {
+                                    open_connect = true;
+                                }
+                            } else if on_relay && !removed {
                                 if kit::small_button(ui, "Add a device…", Style::Bordered).clicked()
                                 {
                                     sheet = Some(SyncSheet::AddMac {
@@ -1912,6 +1970,9 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
         },
     );
     let ctx = ui.ctx().clone();
+    if open_connect {
+        super::open_settings(app, super::settings_view::SettingsSection::Connect);
+    }
     if let Some(id) = check_list {
         app.relay_check_list_again(&id);
     }
@@ -1943,6 +2004,11 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
             Pick::Relay => {
                 sheet = Some(SyncSheet::RelaySetup { id });
             }
+            // The setup sheet on its "Apassy Connect" choice.
+            Pick::Connect => {
+                connect_setup = true;
+                sheet = Some(SyncSheet::RelaySetup { id });
+            }
             // A vault on the relay leaves its relay team first, in the "Turn off" sheet.
             Pick::Folder(folder) if app.is_relay(&id) => {
                 app.relay_switch_to_folder(&id, folder, Some(&ctx));
@@ -1955,6 +2021,9 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     }
     if let Some(sheet) = sheet {
         app.sync_open_sheet(sheet, Some(&ctx));
+        if connect_setup {
+            app.sync.relay.mode = relay::SetupMode::Connect;
+        }
     }
 }
 
@@ -2384,6 +2453,7 @@ pub(super) fn create_option(app: &mut DesktopApp, ui: &mut egui::Ui) {
                             &app.sync.folders,
                             current,
                             false,
+                            false,
                         );
                     },
                 );
@@ -2413,7 +2483,7 @@ pub(super) fn create_option(app: &mut DesktopApp, ui: &mut egui::Ui) {
             app.sync.create_folder = None;
             app.sync.create_custom = true;
         }
-        Some(Pick::Relay) | None => {}
+        Some(Pick::Relay | Pick::Connect) | None => {}
     }
 }
 

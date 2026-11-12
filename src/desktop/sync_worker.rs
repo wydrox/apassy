@@ -408,6 +408,7 @@ fn same_vault(sync: &VaultSync, vault: &Vault) -> bool {
 fn kind_of(sync: &VaultSync) -> SyncKind {
     match sync {
         VaultSync::Folder(_) => SyncKind::Folder,
+        VaultSync::Relay(relay) if relay.uses_account_key() => SyncKind::Connect,
         VaultSync::Relay(_) => SyncKind::Relay,
     }
 }

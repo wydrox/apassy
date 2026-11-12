@@ -1131,12 +1131,67 @@ fn assert_qr_encodes(qr: &crate::desktop::companion::QrModules, link: &str) {
     }
 }
 
+/// A vault that syncs through a vault store of the Connect account is named "Apassy
+/// Connect" everywhere the window names its sync: Settings › Vault › Sync (the picker,
+/// the tag, the line), the Vault row of Settings and the sidebar; and its buttons fit
+/// Connect: no device link ("Add a device…", "Devices…"), the devices of the account
+/// instead.
+#[test]
+fn a_vault_on_connect_is_named_apassy_connect() {
+    let folders = folders();
+    let relay = fake_relay::FakeRelay::start();
+    let (mut a, id) = relay_mac_a(&folders, &relay);
+    super::open_settings(&mut a, super::SettingsSection::Vault);
+    // The label that the turn-on through Connect (or the first sync of a store) keeps.
+    a.vault_list
+        .registry
+        .entry_mut(&id)
+        .and_then(|entry| entry.sync.as_mut())
+        .and_then(|link| link.relay.as_mut())
+        .expect("relay link")
+        .connect = true;
+    assert!(a.syncs_on_connect(&id));
+    let text = settled_frames(&mut a);
+    for expected in [
+        "Apassy Connect",
+        "Saved to Apassy Connect",
+        "Devices of the Account…",
+        "Sync now",
+    ] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+    for refused in [
+        "Apassy relay",
+        "Saved to the relay",
+        "Add a device…",
+        "Devices…",
+    ] {
+        assert!(!text.contains(refused), "{refused}: {text}");
+    }
+    assert_eq!(
+        super::sync::sidebar_status(&a).0,
+        "Apassy Connect · synced just now"
+    );
+    let entry = a.vault_list.registry.get(&id).expect("entry").clone();
+    assert_eq!(super::sync::method_words(&a, &entry), "Apassy Connect");
+    // A vault of the relay keeps its name.
+    a.vault_list
+        .registry
+        .entry_mut(&id)
+        .and_then(|entry| entry.sync.as_mut())
+        .and_then(|link| link.relay.as_mut())
+        .expect("relay link")
+        .connect = false;
+    assert!(!a.syncs_on_connect(&id));
+    assert_eq!(super::sync::method_words(&a, &entry), "Apassy relay");
+}
+
 #[test]
 fn the_picker_offers_the_relay_after_the_detected_folders() {
     use super::sync::{Pick, picker_choices};
     let folders = folders();
     let app = folders.mac("mac-a");
-    let labels: Vec<String> = picker_choices(&app.sync.folders, true)
+    let labels: Vec<String> = picker_choices(&app.sync.folders, true, false)
         .into_iter()
         .map(|(_, label)| label)
         .collect();
@@ -1151,13 +1206,31 @@ fn the_picker_offers_the_relay_after_the_detected_folders() {
         ]
     );
     assert!(
-        picker_choices(&app.sync.folders, true).contains(&(Pick::Relay, "Apassy relay".into()))
+        picker_choices(&app.sync.folders, true, false)
+            .contains(&(Pick::Relay, "Apassy relay".into()))
+    );
+    // With an account that can sync through Connect, "Apassy Connect" follows the relay:
+    // the choice that the start screen names ("select Apassy Connect").
+    let labels: Vec<String> = picker_choices(&app.sync.folders, true, true)
+        .into_iter()
+        .map(|(_, label)| label)
+        .collect();
+    assert_eq!(
+        labels,
+        [
+            "Off",
+            "iCloud Drive",
+            "Dropbox",
+            "Apassy relay",
+            "Apassy Connect",
+            "Choose folder…"
+        ]
     );
     // The Create screen keeps folders only.
     assert!(
-        !picker_choices(&app.sync.folders, false)
+        !picker_choices(&app.sync.folders, false, true)
             .iter()
-            .any(|(pick, _)| *pick == Pick::Relay)
+            .any(|(pick, _)| matches!(pick, Pick::Relay | Pick::Connect))
     );
 }
 
@@ -1287,7 +1360,7 @@ fn add_a_mac_shows_a_link_then_the_safety_words_and_confirm_needs_the_owner_chec
     }
     assert_eq!(
         super::sync::sidebar_status(&a).0,
-        "Synced just now · Apassy relay"
+        "Apassy relay · synced just now"
     );
 
     // Mac A: the link, and nobody asks yet.
