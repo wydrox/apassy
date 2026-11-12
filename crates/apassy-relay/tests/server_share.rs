@@ -2210,6 +2210,18 @@ fn void_marks_show_in_the_store_view_and_the_list_reads() {
             answer.1
         );
     }
+    // Another member reads the owner's list: only the marks between the two show.
+    let anna = c.account("Anna");
+    c.add_member(owner, &anna);
+    let view = c.ok(
+        "GET",
+        &format!("/v1/account/peers/{}", owner.account),
+        Some(&anna.token),
+        None,
+    );
+    assert_eq!(view["void"], json!([]));
+    let answer = lists(c, &anna, json!([no_pin(&owner.account)]));
+    assert_eq!(answer.1["result"]["accounts"][0]["void"], json!([]));
     // A newer share has no mark.
     for op in ["unshare", "share"] {
         assert_eq!(
