@@ -2240,6 +2240,72 @@ fn void_marks_show_in_the_store_view_and_the_list_reads() {
     );
 }
 
+/// The owner may add a member's devices to its store before the member joins it: until
+/// its join counts, the member's store view holds only its own device rows and the void
+/// mark that names it; after its join, every row and every mark of the store.
+#[test]
+fn a_store_view_shows_a_member_only_its_own_rows_before_its_join() {
+    let f = family();
+    let (c, owner, member) = (&f.c, &f.owner, &f.member);
+    let anna = c.account("Anna");
+    c.add_member(owner, &anna);
+    for dev in [member, &anna] {
+        c.share_store(owner, dev, &f.team);
+        assert_eq!(add_to_store(c, owner, &f.team, dev).0, 200);
+    }
+    c.join_store(&anna, owner, &f.team);
+    // A void mark of each share (as a removal from the group writes it).
+    let (head, _) = c.list_head(&owner.account);
+    for dev in [member, &anna] {
+        c.edit_directory(&format!(
+            "INSERT INTO account_share_void (account_id, peer_account, version, created_at) \
+             VALUES ('{}', '{}', {head}, 1);",
+            owner.account, dev.account
+        ));
+    }
+    let seen = |by: &Dev| {
+        let views = c.ok("GET", "/v1/account/vaults", Some(&by.token), None);
+        let view = views
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|view| view["team_id"] == f.team.as_str())
+            .expect("the store")
+            .clone();
+        let accounts: Vec<String> = view["devices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["account_id"].as_str().unwrap().to_string())
+            .collect();
+        (accounts, view["void"].clone(), view["shared"].clone())
+    };
+    let every = vec![
+        owner.account.clone(),
+        member.account.clone(),
+        anna.account.clone(),
+    ];
+    let marks = json!([member.account, anna.account]);
+    assert_eq!(seen(owner), (every.clone(), marks.clone(), json!(true)));
+    assert_eq!(seen(&anna), (every.clone(), marks.clone(), json!(true)));
+    assert_eq!(
+        seen(member),
+        (
+            vec![member.account.clone()],
+            json!([member.account]),
+            json!(true)
+        ),
+        "before its join"
+    );
+    // Its share counts again, and it joins: it sees the store as the others do.
+    c.edit_directory(&format!(
+        "DELETE FROM account_share_void WHERE account_id = '{}' AND peer_account = '{}';",
+        owner.account, member.account
+    ));
+    c.join_store(member, owner, &f.team);
+    assert_eq!(seen(member), (every, json!([anna.account]), json!(true)));
+}
+
 /// The marks of the share condition go with what they name: the join marks of a store
 /// with the store, the void marks that name an account with the account.
 #[test]

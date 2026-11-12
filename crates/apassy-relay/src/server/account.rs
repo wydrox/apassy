@@ -2460,8 +2460,11 @@ fn revoke(
 
 // ---- Vault stores (section 8). ----
 
-/// The view of one vault store.
-fn store_view(conn: &Connection, team: &TeamId) -> RelayResult<VaultStoreView> {
+/// The view of one vault store for the account `viewer`. The account that made it, and an
+/// account whose join of it counts (`peers::StoreJoin::Counts`), see every device row and
+/// every void mark of it; any other account (the owner may add its devices before its
+/// join) sees only its own device rows and the void mark that names it.
+fn store_view(conn: &Connection, team: &TeamId, viewer: &str) -> RelayResult<VaultStoreView> {
     let row = crate::server::directory::team_by_id(conn, team)?
         .filter(|row| row.kind == TeamKind::Account)
         .ok_or_else(|| RelayError::not_found("vault store"))?;
@@ -2471,7 +2474,7 @@ fn store_view(conn: &Connection, team: &TeamId) -> RelayResult<VaultStoreView> {
             "SELECT store_device, device_id, account_id FROM account_store_device WHERE team_id = ?1 ORDER BY store_device",
         )
         .map_err(db)?;
-    let devices = statement
+    let mut devices = statement
         .query_map(params![team.as_str()], |row| {
             Ok(StoreDevice {
                 store_device_id: to_u(row.get(0)?),
@@ -2482,17 +2485,26 @@ fn store_view(conn: &Connection, team: &TeamId) -> RelayResult<VaultStoreView> {
         .map_err(db)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(db)?;
-    let void = crate::server::peers::void_shares(conn, &owner, Some(team.as_str()))?
-        .into_iter()
-        .map(|share| share.account_id)
-        .collect();
+    let mut void: Vec<String> =
+        crate::server::peers::void_shares(conn, &owner, Some(team.as_str()))?
+            .into_iter()
+            .map(|share| share.account_id)
+            .collect();
+    let shared = devices.iter().any(|device| device.account_id != owner);
+    if viewer != owner
+        && crate::server::peers::store_join(conn, viewer, team.as_str(), &owner)?
+            != crate::server::peers::StoreJoin::Counts
+    {
+        devices.retain(|device| device.account_id == viewer);
+        void.retain(|account| account == viewer);
+    }
     Ok(VaultStoreView {
         team_id: team.clone(),
         vault_id: row.vault_id.unwrap_or_default(),
         name: row.name,
-        account_id: owner.clone(),
+        account_id: owner,
         created_at: row.created_at,
-        shared: devices.iter().any(|device| device.account_id != owner),
+        shared,
         devices,
         void,
     })
@@ -2590,7 +2602,7 @@ fn vault_create(
         return to_value(
             &hub.directory
                 .store
-                .with(|conn| store_view(conn, &existing))?,
+                .with(|conn| store_view(conn, &existing, &caller.account))?,
         );
     }
     let plans = hub.accounts.plans();
@@ -2651,11 +2663,15 @@ fn vault_create(
         },
         now,
     )?;
-    to_value(&hub.directory.store.with(|conn| store_view(conn, &made))?)
+    to_value(
+        &hub.directory
+            .store
+            .with(|conn| store_view(conn, &made, &caller.account))?,
+    )
 }
 
 /// `GET /v1/account/vaults`: the stores that hold a device of this account, and the stores
-/// it made.
+/// it made, each as `store_view` shows it to this account.
 fn vault_list(hub: &Hub, caller: &AccountCaller) -> RelayResult<Value> {
     let views = hub.directory.store.with(|conn| {
         let mut statement = conn
@@ -2671,7 +2687,7 @@ fn vault_list(hub: &Hub, caller: &AccountCaller) -> RelayResult<Value> {
             .map_err(db)?;
         ids.iter()
             .filter_map(|id| TeamId::parse(id))
-            .map(|team| store_view(conn, &team))
+            .map(|team| store_view(conn, &team, &caller.account))
             .collect::<RelayResult<Vec<_>>>()
     })?;
     to_value(&views)
