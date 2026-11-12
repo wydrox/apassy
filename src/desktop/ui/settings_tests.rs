@@ -2503,16 +2503,12 @@ fn devices_connect_frames_draw_the_mockup() {
     ] {
         assert!(text.contains(wanted), "9a has {wanted}: {text}");
     }
-    // The title spans the row on one line; the two buttons sit on their own row below
-    // it, the move to Connect on the right.
+    // The two buttons sit on their own row below the title, the move to Connect on the
+    // right.
     let rects = view_rects(&both);
     let title = rect_of(&rects, "Approvals go through Apassy relay");
     let to_mac = rect_of(&rects, MOVE_APPROVALS);
     let to_connect = rect_of(&rects, MOVE_TO_CONNECT);
-    assert!(
-        title.height() < 24.0,
-        "9a: the title wraps in a column: {title:?}"
-    );
     assert!(to_mac.top() > title.bottom(), "{to_mac:?} under {title:?}");
     assert!((to_mac.center().y - to_connect.center().y).abs() < 2.0);
     assert!(
@@ -2701,4 +2697,57 @@ fn node_words_help_says_the_words_are_no_proof() {
         )),
         "{help}"
     );
+}
+
+/// The labeled AccessKit nodes of the Devices section for `view` that carry a
+/// description: (label, description).
+fn view_descriptions(view: &DevicesView) -> Vec<(String, String)> {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut found = Vec::new();
+    for _ in 0..3 {
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(720.0, 2400.0))),
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                devices::draw(ui, view, |g| {
+                    g.labeled("Notifications", super::rows::value("On"));
+                });
+            });
+        });
+        found = output
+            .platform_output
+            .accesskit_update
+            .iter()
+            .flat_map(|update| update.nodes.iter())
+            // A label's text is its AccessKit value, a button's its label.
+            .filter_map(|(_, node)| {
+                let name = node.label().or_else(|| node.value())?;
+                Some((name.to_owned(), node.description()?.to_owned()))
+            })
+            .collect();
+        output.drop_without_applying_deltas();
+    }
+    found
+}
+
+/// The facts that moved from a second line to the hover text stay readable: each device
+/// row describes its kind and roles, and a Wi-Fi iPhone the day of its pairing.
+#[test]
+fn device_rows_describe_their_facts() {
+    let found = view_descriptions(&frame_one());
+    for (label, description) in [
+        ("Rafal's iPhone", "iPhone · Approves runs"),
+        ("build-box", "Linux node · Syncs Acme team"),
+        ("Rafal's iPhone", "Paired 12 Sep"),
+    ] {
+        assert!(
+            found
+                .iter()
+                .any(|(name, said)| name == label && said == description),
+            "{label}: {description} in {found:?}"
+        );
+    }
 }

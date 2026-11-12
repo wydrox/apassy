@@ -201,9 +201,15 @@ pub(crate) fn reset_member(name: &str) -> String {
     format!("{name} must verify this account again.")
 }
 
-/// The spoken name of the button that ends a share for a member ([`STOP_SHARING`]).
-pub(crate) fn stop(name: &str) -> String {
-    format!("Stop Sharing with {name}…")
+/// The spoken name of the button that ends a share of `vault` for a member
+/// ([`STOP_SHARING`]): one person in two vaults has two names.
+pub(crate) fn stop(vault: &str, name: &str) -> String {
+    format!("Stop Sharing {vault} with {name}…")
+}
+
+/// The spoken name of "Share with…" of `vault`.
+pub(crate) fn share_with(vault: &str) -> String {
+    format!("Share {vault} with…")
 }
 
 /// An offer, or a store that this account joined.
@@ -238,8 +244,8 @@ pub(crate) fn sharing_ended(name: &str) -> String {
 
 /// The spoken name of the button that shares a store again with a member whose share
 /// ended ([`SHARE_AGAIN`]).
-pub(crate) fn share_again(name: &str) -> String {
-    format!("Share with {name} Again…")
+pub(crate) fn share_again(vault: &str, name: &str) -> String {
+    format!("Share {vault} with {name} Again…")
 }
 
 /// A store of another account that no vault here syncs, by the name that Connect gives it:
@@ -425,19 +431,21 @@ pub(crate) fn draw(ui: &mut Ui, view: &ShareView) -> Option<ShareAction> {
             rows::group(ui, Some(SECTION), |g| {
                 for store in &own {
                     g.row(|ui| {
-                        let share: &[(&str, Style)] = if view.in_group {
-                            &[(SHARE_WITH, Style::Bordered)]
+                        let spoken = share_with(&store.vault);
+                        let share: Vec<(&str, &str, Style)> = if view.in_group {
+                            vec![(SHARE_WITH, spoken.as_str(), Style::Bordered)]
                         } else {
-                            &[]
+                            Vec::new()
                         };
-                        if rows::text_buttons(ui, rows::label_text(&store.vault), share).is_some() {
+                        let vault = rows::label_text(&store.vault);
+                        if rows::text_buttons_named(ui, vault, &share).is_some() {
                             action = Some(ShareAction::ShareWith {
                                 team_id: store.team_id.clone(),
                                 vault: store.vault.clone(),
                             });
                         }
                         for (name, account, line) in &store.members {
-                            let spoken = stop(name);
+                            let spoken = stop(&store.vault, name);
                             let end: &[(&str, &str, Style)] =
                                 &[(STOP_SHARING, spoken.as_str(), Style::Bordered)];
                             if rows::text_buttons_named(ui, rows::note(line), end).is_some() {
@@ -449,7 +457,7 @@ pub(crate) fn draw(ui: &mut Ui, view: &ShareView) -> Option<ShareAction> {
                             }
                         }
                         for (name, account, line) in &store.ended {
-                            let spoken = share_again(name);
+                            let spoken = share_again(&store.vault, name);
                             let again: Vec<(&str, &str, Style)> = if view.in_group {
                                 vec![(SHARE_AGAIN, spoken.as_str(), Style::Bordered)]
                             } else {

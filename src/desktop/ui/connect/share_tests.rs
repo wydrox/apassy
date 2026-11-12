@@ -30,6 +30,27 @@ fn painted(mut add: impl FnMut(&egui::Context, &mut Ui)) -> String {
     text
 }
 
+/// The spoken names (AccessKit labels) of the section for `view`.
+fn spoken(view: &ShareView) -> Vec<String> {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut names = Vec::new();
+    for _ in 0..3 {
+        let output = ctx.run_ui(input(0.0, Vec::new()), |ui| {
+            draw(ui, view);
+        });
+        names = output
+            .platform_output
+            .accesskit_update
+            .iter()
+            .flat_map(|update| update.nodes.iter())
+            .filter_map(|(_, node)| node.label().map(str::to_owned))
+            .collect();
+        output.drop_without_applying_deltas();
+    }
+    names
+}
+
 fn store(team: &str, name: &str) -> VaultStoreView {
     VaultStoreView {
         team_id: team.to_owned(),
@@ -179,6 +200,30 @@ fn the_section_shows_each_state_of_a_shared_vault() {
     ] {
         assert!(text.contains(expected), "{expected} in:\n{text}");
     }
+    // Each person's button is spoken with the person and the vault.
+    let names = spoken(&view);
+    for expected in [
+        share_with("Family"),
+        stop("Family", "Ola"),
+        stop("Family", "Anna"),
+        share_again("Family", "Piotr"),
+        share_again("Family", "Ewa"),
+    ] {
+        assert!(
+            names.contains(&expected),
+            "spoken {expected:?} in {names:?}"
+        );
+    }
+    // An offer whose store Connect does not name here: "A vault, shared by Ola".
+    let unnamed: Vec<VaultStoreView> = stores()
+        .into_iter()
+        .filter(|store| store.team_id != "t_travelaaaa")
+        .collect();
+    let view = view_of(&status(), &unnamed, &local(), true, &[]);
+    let text = painted(|_, ui| {
+        draw(ui, &view);
+    });
+    assert!(text.contains(&shared_by(VAULT_OFFERED, "Ola")), "{text}");
     // A head of a key not verified yet: the joined store says so.
     let checking = view_of(
         &status(),
@@ -442,13 +487,14 @@ fn the_texts_name_nothing_of_one_platform() {
         not_joined("Ola"),
         reset_owner("Ola"),
         reset_member("Ola"),
-        stop("Ola"),
+        stop("Family", "Ola"),
+        share_with("Family"),
         shared_by("Family", "Ola"),
         shared_with("Ola"),
         stopped("Ola"),
         left_vault("Ola"),
         sharing_ended("Ola"),
-        share_again("Ola"),
+        share_again("Family", "Ola"),
         offered_at("Family", "Ola"),
         not_listed("Ola"),
         left_on("Laptop"),
@@ -701,9 +747,11 @@ fn every_row_fits_its_column_at_each_width() {
                     .filter_map(|(_, node)| node.label().map(str::to_owned))
                     .collect();
                 assert!(
-                    spoken.iter().any(|name| name == &stop(long)),
+                    spoken
+                        .iter()
+                        .any(|name| name == &stop(&view.own[0].vault, long)),
                     "at {width}: no spoken {:?} in {spoken:?}",
-                    stop(long)
+                    stop(&view.own[0].vault, long)
                 );
             }
             output.drop_without_applying_deltas();
@@ -727,4 +775,27 @@ fn the_words_name_the_person_once() {
     for tail in [CONFIRM_TAIL, MATCH_TAIL] {
         assert!(!tail.contains(")'s"), "{tail}");
     }
+}
+
+/// Without a family or team and with nothing shared, offered, left, or claimed, the
+/// section is not drawn at all; a vault of this account that nobody shares is no row.
+#[test]
+fn the_section_is_not_drawn_without_anything_to_show() {
+    let empty = painted(|_, ui| {
+        draw(ui, &ShareView::default());
+    });
+    assert!(empty.is_empty(), "{empty}");
+    let alone = ShareView {
+        own: vec![OwnStore {
+            team_id: "t_familyaaaa".to_owned(),
+            vault: "Family".to_owned(),
+            members: Vec::new(),
+            ended: Vec::new(),
+        }],
+        ..ShareView::default()
+    };
+    let text = painted(|_, ui| {
+        draw(ui, &alone);
+    });
+    assert!(text.is_empty(), "{text}");
 }

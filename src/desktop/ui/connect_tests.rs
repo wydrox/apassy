@@ -3193,7 +3193,7 @@ fn a_recovery_asks_the_owner_then_shows_the_new_code_and_the_deleted_copies() {
 /// a device) shows one text for the three causes: what to check, and the way of a device
 /// that still works; nothing changed on this device. A `429` says when to try again.
 #[test]
-fn a_refused_recovery_names_its_three_causes_and_too_many_tries_say_when() {
+fn a_refused_recovery_says_what_to_check_and_too_many_tries_say_when() {
     let connect = FakeConnect::start();
     let dir = TempDir::new().expect("temp dir");
     let mut app = connect_app(&dir, &connect);
@@ -3700,5 +3700,101 @@ fn the_account_menu_opens_and_its_items_act() {
         } else {
             assert_eq!(pressed, Some(Action::Delete));
         }
+    }
+}
+
+/// The labeled AccessKit nodes of the section that carry a description.
+fn section_descriptions(ctx: &egui::Context, view: &ConnectView) -> Vec<(String, String)> {
+    let mut found = Vec::new();
+    for _ in 0..3 {
+        let output = ctx.run_ui(input(0.0, Vec::new()), |ui| {
+            let _ = super::connect::draw(ui, view);
+        });
+        found = output
+            .platform_output
+            .accesskit_update
+            .iter()
+            .flat_map(|update| update.nodes.iter())
+            // A label's text is its AccessKit value, a button's its label.
+            .filter_map(|(_, node)| {
+                let name = node.label().or_else(|| node.value())?;
+                Some((name.to_owned(), node.description()?.to_owned()))
+            })
+            .collect();
+        output.drop_without_applying_deltas();
+    }
+    found
+}
+
+/// The facts that moved from a second line to the hover text stay readable: a device row
+/// describes its kind, the day it was added, and its key; a member row its role and since
+/// when, or Pending.
+#[test]
+fn account_rows_describe_their_facts() {
+    let mut account = menu_account(false, true);
+    if let Some(group) = account.group.as_mut() {
+        group.members = vec![
+            super::connect::Member {
+                account_id: "acc_olaaaaaaaa".to_owned(),
+                name: "Ola".to_owned(),
+                role: "member".to_owned(),
+                state: "active".to_owned(),
+                joined_at: Some(1_790_000_000),
+            },
+            super::connect::Member {
+                account_id: "acc_janaaaaaaa".to_owned(),
+                name: "Jan".to_owned(),
+                role: "admin".to_owned(),
+                state: "pending".to_owned(),
+                joined_at: None,
+            },
+        ];
+    }
+    let device = account.devices[1].clone();
+    let view = menu_view(account, false, false);
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let found = section_descriptions(&ctx, &view);
+    let day = super::connect::day(1_790_000_000);
+    for (label, description) in [
+        (device.name.clone(), super::connect::device_detail(&device)),
+        ("Ola".to_owned(), format!("Member · Since {day}")),
+        ("Jan".to_owned(), "Admin · Pending".to_owned()),
+    ] {
+        assert!(
+            found
+                .iter()
+                .any(|(name, said)| *name == label && *said == description),
+            "{label}: {description} in {found:?}"
+        );
+    }
+    assert!(
+        super::connect::device_detail(&device).contains("Key 3f0a 91c2 7be4"),
+        "the key is in the facts"
+    );
+}
+
+/// A recovery code made on another device: the line with OK, and the ⓘ beside it says that
+/// the old code no longer works and what to do when it was not you.
+#[test]
+fn a_replaced_recovery_code_says_more_behind_its_info_button() {
+    use super::connect::{RECOVERY_CHANGED_HELP, RecoveryLine};
+    assert_eq!(RECOVERY_CHANGED_HELP[0], "The old code no longer works.");
+    let mut account = menu_account(false, true);
+    account.recovery_changed = Some(RecoveryLine {
+        text: super::connect::recovery_changed(Some("MacBook Air"), Some(1_790_000_000)),
+        recovery_key: "key".to_owned(),
+    });
+    let view = menu_view(account, false, false);
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut nodes = Vec::new();
+    for _ in 0..3 {
+        nodes = section_frame(&ctx, &view, Vec::new()).1;
+    }
+    let _ = click_node(&ctx, &view, &nodes, "About Recovery Code");
+    let (text, _, _) = section_frame(&ctx, &view, Vec::new());
+    for line in RECOVERY_CHANGED_HELP {
+        assert!(text.contains(line), "{line} in {text}");
     }
 }

@@ -56,6 +56,8 @@ pub(crate) const ADD_DEVICE: &str = concat!("Add an iPhone or a ", crate::comput
 pub(crate) const MOVE_APPROVALS: &str = "Move Here…";
 /// The button of the move to Apassy Connect (frame 9a; plan s7 unit M5).
 pub(crate) const MOVE_TO_CONNECT: &str = "Move to Connect…";
+/// Its spoken name: what moves, and where.
+pub(crate) const MOVE_TO_CONNECT_SPOKEN: &str = "Move Approvals to Apassy Connect";
 /// The row of a move to Apassy Connect that waits for its first approval (frame 9c).
 pub(crate) const CONNECT_PENDING: &str = "Moving approvals to Apassy Connect";
 pub(crate) const CONNECT_PENDING_NOTE: &str =
@@ -988,10 +990,10 @@ fn move_row(g: &mut rows::Group<'_>, to_mac: bool, to_connect: bool, action: &mu
         g.row(text);
         buttons_row(g, |ui| {
             // Right to left: the second button first.
-            if kit::small_button(ui, MOVE_TO_CONNECT, Style::Bordered).clicked() {
+            if move_button(ui, MOVE_TO_CONNECT, Style::Bordered).clicked() {
                 *action = Some(Action::MoveConnect);
             }
-            if kit::small_button(ui, MOVE_APPROVALS, Style::Prominent).clicked() {
+            if move_button(ui, MOVE_APPROVALS, Style::Prominent).clicked() {
                 *action = Some(Action::Move);
             }
         });
@@ -1004,14 +1006,28 @@ fn move_row(g: &mut rows::Group<'_>, to_mac: bool, to_connect: bool, action: &mu
             .height(rows::LINE)
             .show(ui, text, |ui| {
                 if to_connect {
-                    if kit::small_button(ui, MOVE_TO_CONNECT, Style::Prominent).clicked() {
+                    if move_button(ui, MOVE_TO_CONNECT, Style::Prominent).clicked() {
                         *action = Some(Action::MoveConnect);
                     }
-                } else if kit::small_button(ui, MOVE_APPROVALS, Style::Prominent).clicked() {
+                } else if move_button(ui, MOVE_APPROVALS, Style::Prominent).clicked() {
                     *action = Some(Action::Move);
                 }
             });
     });
+}
+
+/// A move button, spoken with what it moves: "Move Approvals to This Mac", "Move Approvals
+/// to Apassy Connect".
+fn move_button(ui: &mut Ui, label: &str, style: Style) -> egui::Response {
+    let button = kit::small_button(ui, label, style);
+    let spoken = if label == MOVE_TO_CONNECT {
+        MOVE_TO_CONNECT_SPOKEN
+    } else {
+        MOVE_TITLE
+    };
+    ui.ctx()
+        .accesskit_node_builder(button.id, |node| node.set_label(spoken));
+    button
 }
 
 /// A row of buttons on the right, under the row that they act on (frames 9a and 9d).
@@ -1316,12 +1332,11 @@ fn ended_row(
     // The choices on their own row under the line, so that the line spans the row.
     if relay.can_move || relay.can_move_connect {
         buttons_row(g, |ui| {
-            if relay.can_move_connect
-                && kit::small_button(ui, MOVE_TO_CONNECT, Style::Bordered).clicked()
+            if relay.can_move_connect && move_button(ui, MOVE_TO_CONNECT, Style::Bordered).clicked()
             {
                 *action = Some(Action::MoveConnect);
             }
-            if relay.can_move && kit::small_button(ui, MOVE_APPROVALS, Style::Bordered).clicked() {
+            if relay.can_move && move_button(ui, MOVE_APPROVALS, Style::Bordered).clicked() {
                 *action = Some(Action::Move);
             }
         });
