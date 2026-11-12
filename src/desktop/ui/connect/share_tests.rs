@@ -183,7 +183,12 @@ fn the_section_shows_each_state_of_a_shared_vault() {
         SECTION,
         "Family",
         SHARE_WITH,
-        &not_joined("Ola"),
+        // One line per person: the name, and a word only for a state that is not the
+        // normal one; a problem line says the way on.
+        "Ola",
+        NOT_JOINED_STATE,
+        "Anna",
+        RESET_STATE,
         &reset_owner("Anna"),
         STOP_SHARING,
         &shared_by("Garden", "Piotr"),
@@ -191,8 +196,10 @@ fn the_section_shows_each_state_of_a_shared_vault() {
         &shared_by("Car", "Ewa"),
         &stopped("Ewa"),
         &offered_at("Travel", "Ola"),
-        &left_vault("Piotr"),
-        &sharing_ended("Ewa"),
+        "Piotr",
+        LEFT_STATE,
+        "Ewa",
+        ENDED_STATE,
         SHARE_AGAIN,
         JOIN,
         LEAVE,
@@ -206,6 +213,8 @@ fn the_section_shows_each_state_of_a_shared_vault() {
         share_with("Family"),
         stop("Family", "Ola"),
         stop("Family", "Anna"),
+        // A person who reset the account is shared with again from the same row.
+        share_again("Family", "Anna"),
         share_again("Family", "Piotr"),
         share_again("Family", "Ewa"),
     ] {
@@ -214,7 +223,7 @@ fn the_section_shows_each_state_of_a_shared_vault() {
             "spoken {expected:?} in {names:?}"
         );
     }
-    // An offer whose store Connect does not name here: "A vault, shared by Ola".
+    // An offer whose store Connect does not name here: "A vault · Ola".
     let unnamed: Vec<VaultStoreView> = stores()
         .into_iter()
         .filter(|store| store.team_id != "t_travelaaaa")
@@ -300,7 +309,7 @@ fn the_rows_of_left_void_and_absent_stores_come_from_the_status() {
         &left_on("Laptop"),
         LEFT_HERE,
         ENDED,
-        "\u{201c}Garden\u{201d} at Connect, shared by",
+        "\u{201c}Garden\u{201d} at Connect · ",
     ] {
         assert!(text.contains(expected), "{expected} in:\n{text}");
     }
@@ -492,8 +501,7 @@ fn the_texts_name_nothing_of_one_platform() {
         shared_by("Family", "Ola"),
         shared_with("Ola"),
         stopped("Ola"),
-        left_vault("Ola"),
-        sharing_ended("Ola"),
+        not_accepted("Ola"),
         share_again("Family", "Ola"),
         offered_at("Family", "Ola"),
         not_listed("Ola"),
@@ -666,20 +674,21 @@ fn every_row_fits_its_column_at_each_width() {
         own: vec![OwnStore {
             team_id: "t_familyaaaa".to_owned(),
             vault: "Family photos, documents and the passwords of the household".to_owned(),
-            members: vec![(
-                long.to_owned(),
-                "acc_olaaaaaaaa".to_owned(),
-                not_accepted(long),
-            )],
-            ended: vec![(
-                long.to_owned(),
-                "acc_ewaaaaaaaa".to_owned(),
-                sharing_ended(long),
-            )],
+            members: vec![Person {
+                name: long.to_owned(),
+                account: "acc_olaaaaaaaa".to_owned(),
+                state: PersonState::NotAccepted,
+            }],
+            ended: vec![Person {
+                name: long.to_owned(),
+                account: "acc_ewaaaaaaaa".to_owned(),
+                state: PersonState::Ended,
+            }],
         }],
         others: vec![OtherStore {
             team_id: "t_gardenaaaa".to_owned(),
             owner: "acc_piotraaaaa".to_owned(),
+            owner_name: long.to_owned(),
             title: shared_by("Garden and the summer house", long),
             joined: Some("Syncs.".to_owned()),
             download: true,

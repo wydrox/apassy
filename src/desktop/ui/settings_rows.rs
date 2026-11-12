@@ -416,7 +416,27 @@ pub(crate) fn text_buttons_named(
     text: impl Into<WidgetText>,
     buttons: &[(&str, &str, Style)],
 ) -> Option<usize> {
+    text_buttons_detailed(ui, text, None, buttons)
+}
+
+/// [`text_buttons_named`] whose text has a detail: its hover text and its description for
+/// VoiceOver (the device of a person, the account of a vault's owner).
+pub(crate) fn text_buttons_detailed(
+    ui: &mut Ui,
+    text: impl Into<WidgetText>,
+    detail: Option<&str>,
+    buttons: &[(&str, &str, Style)],
+) -> Option<usize> {
     let text = text.into();
+    let add_text = |ui: &mut Ui, text: WidgetText| {
+        let label = ui.add(Label::new(text).wrap());
+        if let Some(detail) = detail {
+            ui.ctx().accesskit_node_builder(label.id, |node| {
+                node.set_description(detail);
+            });
+            label.on_hover_text(detail);
+        }
+    };
     let width = ui.available_width();
     let needed: f32 = buttons
         .iter()
@@ -437,7 +457,7 @@ pub(crate) fn text_buttons_named(
         }
     };
     if buttons.is_empty() {
-        ui.add(Label::new(text).wrap());
+        add_text(ui, text);
     } else if needed + TEXT_MIN <= width {
         egui::Sides::new()
             .shrink_left()
@@ -446,12 +466,12 @@ pub(crate) fn text_buttons_named(
             .show(
                 ui,
                 |ui| {
-                    ui.add(Label::new(text).wrap());
+                    add_text(ui, text);
                 },
                 |ui| draw(ui, &mut pressed),
             );
     } else {
-        ui.add(Label::new(text).wrap());
+        add_text(ui, text);
         // A line of its own for the buttons: as high as a button, not the rest of the
         // column.
         ui.allocate_ui_with_layout(

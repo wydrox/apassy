@@ -83,7 +83,7 @@ pub(crate) const STOP_LEAD: &str =
     "Their devices leave the shared copy now. Every device keeps the vault.";
 pub(crate) const ACCEPTED_LEAD: &str = "Their shared vaults show in Settings › Connect.";
 /// The end of the line of a shared vault that this device left.
-pub(crate) const LEFT_HERE: &str = "left; it stays on this device";
+pub(crate) const LEFT_HERE: &str = "you left; the vault stays here";
 pub(crate) const UNPINNED: &str = "Some people who share your vaults could not be verified here.";
 pub(crate) const DOWNLOAD: &str = "Download…";
 pub(crate) const VAULT_OFFERED: &str = "A vault";
@@ -92,6 +92,13 @@ pub(crate) const CLAIM: &str = "Confirm…";
 /// [`share_again`]).
 pub(crate) const STOP_SHARING: &str = "Stop Sharing…";
 pub(crate) const SHARE_AGAIN: &str = "Share Again…";
+/// The state of a person of a shared vault, beside the name: only when it is not the
+/// normal one (syncs).
+pub(crate) const NOT_JOINED_STATE: &str = "Not joined";
+pub(crate) const NOT_COMPARED_STATE: &str = "Words not compared";
+pub(crate) const RESET_STATE: &str = "Account reset";
+pub(crate) const LEFT_STATE: &str = "Left";
+pub(crate) const ENDED_STATE: &str = "Ended";
 
 /// Every fixed text of the section, for the wording tests.
 #[cfg(test)]
@@ -99,6 +106,11 @@ pub(crate) const TEXTS: &[&str] = &[
     SECTION,
     STOP_SHARING,
     SHARE_AGAIN,
+    NOT_JOINED_STATE,
+    NOT_COMPARED_STATE,
+    RESET_STATE,
+    LEFT_STATE,
+    ENDED_STATE,
     SHARE_WITH,
     ACCEPT,
     PICK_TITLE,
@@ -186,9 +198,10 @@ pub(crate) fn not_joined(name: &str) -> String {
     format!("{name}: has not joined yet")
 }
 
-/// A member whose list does not pin this account yet: they did not finish the words.
+/// A member whose list does not pin this account yet: they did not finish the words, and
+/// the way on.
 pub(crate) fn not_accepted(name: &str) -> String {
-    format!("{name}: has not compared the words yet")
+    format!("{name} has not compared the words. Share with… makes a new code.")
 }
 
 /// The owner's line for a member that reset its account.
@@ -212,9 +225,19 @@ pub(crate) fn share_with(vault: &str) -> String {
     format!("Share {vault} with…")
 }
 
-/// An offer, or a store that this account joined.
+/// The person of a label of a verified list: "Ola" of "“Ola’s MacBook Air” (Ola)"; a
+/// name without a device is the person.
+pub(crate) fn person_of(label: &str) -> &str {
+    label
+        .strip_suffix(')')
+        .and_then(|rest| rest.rfind(" (").map(|at| &rest[at + 2..]))
+        .unwrap_or(label)
+}
+
+/// An offer, or a store that this account joined: "Garden · Piotr". The owner's device is
+/// the hover text of the row.
 pub(crate) fn shared_by(vault: &str, name: &str) -> String {
-    format!("{vault}, shared by {name}")
+    format!("{vault} · {}", person_of(name))
 }
 
 /// The result of a share.
@@ -222,24 +245,15 @@ pub(crate) fn shared_with(name: &str) -> String {
     format!("Shared with {name}")
 }
 
-/// The end of the line of a shared vault that another device of the account left.
+/// The end of the line of a shared vault that another device of the account left: who
+/// left, and where.
 pub(crate) fn left_on(device: &str) -> String {
-    format!("left on {device}")
+    format!("you left it on {device}")
 }
 
 /// A store that this account joined, whose owner ended the share (or shares it anew).
 pub(crate) fn stopped(name: &str) -> String {
     format!("{name} stopped sharing this vault.")
-}
-
-/// A member of a store of this account whose list left the share.
-pub(crate) fn left_vault(name: &str) -> String {
-    format!("{name} left this vault.")
-}
-
-/// A member of a store of this account whose share ended otherwise.
-pub(crate) fn sharing_ended(name: &str) -> String {
-    format!("Sharing with {name} ended.")
 }
 
 /// The spoken name of the button that shares a store again with a member whose share
@@ -249,9 +263,9 @@ pub(crate) fn share_again(vault: &str, name: &str) -> String {
 }
 
 /// A store of another account that no vault here syncs, by the name that Connect gives it:
-/// "“Travel” at Connect, shared by Ola".
+/// "“Travel” at Connect · Ola".
 pub(crate) fn offered_at(name: &str, owner: &str) -> String {
-    format!("\u{201c}{name}\u{201d} at Connect, shared by {owner}")
+    format!("\u{201c}{name}\u{201d} at Connect · {}", person_of(owner))
 }
 
 /// Join worked, and Connect does not list this device in the store yet.
@@ -261,16 +275,65 @@ pub(crate) fn not_listed(name: &str) -> String {
 
 // ---- The model of the section. ----
 
-/// A store of this account and its members, as the section shows it.
+/// Where a person of a shared vault of this account stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PersonState {
+    /// The person's devices sync the vault: the normal state, no word.
+    Syncs,
+    NotJoined,
+    /// The person did not finish the words.
+    NotAccepted,
+    /// The person reset the account: share again.
+    Reset,
+    /// The person left the vault (an ended share).
+    Left,
+    /// The share ended otherwise.
+    Ended,
+}
+
+/// A person of a shared vault of this account: the label of its verified list
+/// ("“Ola’s MacBook Air” (Ola)"), its account, and its state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Person {
+    pub(crate) name: String,
+    pub(crate) account: String,
+    pub(crate) state: PersonState,
+}
+
+impl Person {
+    /// The word beside the name, and its tone: none for the normal state.
+    fn state_word(&self) -> Option<(&'static str, Tone)> {
+        match self.state {
+            PersonState::Syncs => None,
+            PersonState::NotJoined => Some((NOT_JOINED_STATE, Tone::Neutral)),
+            PersonState::NotAccepted => Some((NOT_COMPARED_STATE, Tone::Warning)),
+            PersonState::Reset => Some((RESET_STATE, Tone::Warning)),
+            PersonState::Left => Some((LEFT_STATE, Tone::Neutral)),
+            PersonState::Ended => Some((ENDED_STATE, Tone::Neutral)),
+        }
+    }
+
+    /// The problem line under the row, with the way on: none for the other states.
+    pub(crate) fn problem(&self) -> Option<String> {
+        let person = person_of(&self.name);
+        match self.state {
+            PersonState::NotAccepted => Some(not_accepted(person)),
+            PersonState::Reset => Some(reset_owner(person)),
+            _ => None,
+        }
+    }
+}
+
+/// A store of this account and its people, as the section shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OwnStore {
     pub(crate) team_id: String,
     pub(crate) vault: String,
-    /// The members: name, account, the line under it.
-    pub(crate) members: Vec<(String, String, String)>,
-    /// The members whose share ended: name, account, the line under it. Each row offers
-    /// "Share with <name> Again…".
-    pub(crate) ended: Vec<(String, String, String)>,
+    /// The people of the share: each row has Stop Sharing… (and Share Again… after a
+    /// reset).
+    pub(crate) members: Vec<Person>,
+    /// The people whose share ended: each row offers Share Again….
+    pub(crate) ended: Vec<Person>,
 }
 
 /// A store of another account: joined (with its state), offered, or left.
@@ -278,6 +341,8 @@ pub(crate) struct OwnStore {
 pub(crate) struct OtherStore {
     pub(crate) team_id: String,
     pub(crate) owner: String,
+    /// The label of the owner's verified list: the hover text of the row.
+    pub(crate) owner_name: String,
     pub(crate) title: String,
     /// `None`: offered, not joined; else the line of the joined store (empty, or a
     /// problem: reset, stopped, ended, checking).
@@ -444,30 +509,36 @@ pub(crate) fn draw(ui: &mut Ui, view: &ShareView) -> Option<ShareAction> {
                                 vault: store.vault.clone(),
                             });
                         }
-                        for (name, account, line) in &store.members {
-                            let spoken = stop(&store.vault, name);
-                            let end: &[(&str, &str, Style)] =
-                                &[(STOP_SHARING, spoken.as_str(), Style::Bordered)];
-                            if rows::text_buttons_named(ui, rows::note(line), end).is_some() {
-                                action = Some(ShareAction::Stop {
-                                    team_id: store.team_id.clone(),
-                                    account: account.clone(),
-                                    name: name.clone(),
-                                });
+                        for person in store.members.iter().chain(&store.ended) {
+                            let ended = person.state == PersonState::Left
+                                || person.state == PersonState::Ended;
+                            // Share Again… after an end or a reset (in a group); Stop
+                            // Sharing… while the share holds. The rightmost first.
+                            let again = share_again(&store.vault, &person.name);
+                            let end = stop(&store.vault, &person.name);
+                            let mut buttons: Vec<(&str, &str, Style)> = Vec::new();
+                            if view.in_group && (ended || person.state == PersonState::Reset) {
+                                buttons.push((SHARE_AGAIN, again.as_str(), Style::Bordered));
                             }
-                        }
-                        for (name, account, line) in &store.ended {
-                            let spoken = share_again(&store.vault, name);
-                            let again: Vec<(&str, &str, Style)> = if view.in_group {
-                                vec![(SHARE_AGAIN, spoken.as_str(), Style::Bordered)]
-                            } else {
-                                Vec::new()
-                            };
-                            if rows::text_buttons_named(ui, rows::note(line), &again).is_some() {
-                                action = Some(ShareAction::ShareAgain {
-                                    team_id: store.team_id.clone(),
-                                    account: account.clone(),
-                                    name: name.clone(),
+                            if !ended {
+                                buttons.push((STOP_SHARING, end.as_str(), Style::Bordered));
+                            }
+                            if let Some(index) = person_row(ui, person, &buttons) {
+                                let team_id = store.team_id.clone();
+                                let account = person.account.clone();
+                                let name = person.name.clone();
+                                action = Some(if buttons[index].0 == SHARE_AGAIN {
+                                    ShareAction::ShareAgain {
+                                        team_id,
+                                        account,
+                                        name,
+                                    }
+                                } else {
+                                    ShareAction::Stop {
+                                        team_id,
+                                        account,
+                                        name,
+                                    }
                                 });
                             }
                         }
@@ -489,7 +560,9 @@ pub(crate) fn draw(ui: &mut Ui, view: &ShareView) -> Option<ShareAction> {
                             Some(_) => vec![(LEAVE, leave.as_str(), Style::Bordered)],
                         };
                         let title = rows::label_text(&store.title);
-                        if let Some(index) = rows::text_buttons_named(ui, title, &buttons) {
+                        let owner = Some(store.owner_name.as_str()).filter(|name| !name.is_empty());
+                        if let Some(index) = rows::text_buttons_detailed(ui, title, owner, &buttons)
+                        {
                             action = Some(match buttons[index].0 {
                                 JOIN => ShareAction::Join {
                                     team_id: store.team_id.clone(),
@@ -506,9 +579,19 @@ pub(crate) fn draw(ui: &mut Ui, view: &ShareView) -> Option<ShareAction> {
                                 },
                             });
                         }
-                        // A second line only for a problem of the joined store.
+                        // A second line only for a problem of the joined store, in the
+                        // problem style; the check of a new head is no problem.
                         if let Some(line) = store.joined.as_ref().filter(|line| !line.is_empty()) {
-                            ui.add(egui::Label::new(rows::note(line)).wrap());
+                            if line == CHECKING {
+                                ui.add(egui::Label::new(rows::note(line)).wrap());
+                            } else {
+                                kit::tone_note_icon(
+                                    ui,
+                                    line.as_str(),
+                                    Tone::Warning,
+                                    Font::Callout,
+                                );
+                            }
                         }
                     });
                 }
@@ -537,6 +620,38 @@ pub(crate) fn draw(ui: &mut Ui, view: &ShareView) -> Option<ShareAction> {
         }
     });
     action
+}
+
+/// One person of a shared vault: the person's name, the state word when it is not the
+/// normal one, the device as the hover text and the VoiceOver description, the buttons,
+/// and a problem line with its way on. The index of the pressed button.
+fn person_row(ui: &mut Ui, person: &Person, buttons: &[(&str, &str, Style)]) -> Option<usize> {
+    let mut text = egui::text::LayoutJob::default();
+    rows::label_text(person_of(&person.name)).append_to(
+        &mut text,
+        ui.style(),
+        egui::FontSelection::Default,
+        egui::Align::Center,
+    );
+    if let Some((word, tone)) = person.state_word() {
+        let color = match tone {
+            Tone::Neutral => kit::palette().secondary,
+            tone => tone.text(),
+        };
+        kit::text(format!("   {word}"), Font::Callout)
+            .color(color)
+            .append_to(
+                &mut text,
+                ui.style(),
+                egui::FontSelection::Default,
+                egui::Align::Center,
+            );
+    }
+    let pressed = rows::text_buttons_detailed(ui, text, Some(person.name.as_str()), buttons);
+    if let Some(line) = person.problem() {
+        kit::tone_note_icon(ui, line, Tone::Warning, Font::Callout);
+    }
+    pressed
 }
 
 fn big_words(ui: &mut Ui, words: &str) {
@@ -857,28 +972,31 @@ pub(crate) fn view_of(
             continue;
         };
         for member in &shared.members {
-            let line = if member.suspended {
-                reset_owner(&member.name)
+            let state = if member.suspended {
+                PersonState::Reset
             } else if member.joined {
-                format!("{}: syncs this vault", member.name)
+                PersonState::Syncs
             } else if !member.accepted {
-                not_accepted(&member.name)
+                PersonState::NotAccepted
             } else {
-                not_joined(&member.name)
+                PersonState::NotJoined
             };
-            store
-                .members
-                .push((member.name.clone(), member.account_id.clone(), line));
+            store.members.push(Person {
+                name: member.name.clone(),
+                account: member.account_id.clone(),
+                state,
+            });
         }
         for member in &shared.ended_members {
-            let line = if member.left {
-                left_vault(&member.name)
-            } else {
-                sharing_ended(&member.name)
-            };
-            store
-                .ended
-                .push((member.name.clone(), member.account_id.clone(), line));
+            store.ended.push(Person {
+                name: member.name.clone(),
+                account: member.account_id.clone(),
+                state: if member.left {
+                    PersonState::Left
+                } else {
+                    PersonState::Ended
+                },
+            });
         }
     }
     let mut others: Vec<OtherStore> = Vec::new();
@@ -886,6 +1004,7 @@ pub(crate) fn view_of(
         others.push(OtherStore {
             team_id: offer.team_id.clone(),
             owner: offer.owner.clone(),
+            owner_name: offer.owner_name.clone(),
             title: other_title(&offer.team_id, &offer.owner_name),
             joined: None,
             download: false,
@@ -908,8 +1027,9 @@ pub(crate) fn view_of(
         if others.iter().any(|other| other.team_id == left.team_id) {
             continue;
         }
-        // One line: "Boat, shared by Ola · left on MacBook Pro".
-        let title = other_title(&left.team_id, &status.name_of(&left.owner));
+        // One line: "Boat · Ola · you left it on MacBook Pro".
+        let owner_name = status.name_of(&left.owner);
+        let title = other_title(&left.team_id, &owner_name);
         let how = if left.here {
             LEFT_HERE.to_owned()
         } else {
@@ -918,6 +1038,7 @@ pub(crate) fn view_of(
         others.push(OtherStore {
             team_id: left.team_id.clone(),
             owner: left.owner.clone(),
+            owner_name,
             title: format!("{title} · {how}"),
             joined: None,
             download: false,
@@ -969,6 +1090,7 @@ fn joined_store(store: &StoreStatus, title: String, checking: &[String]) -> Othe
     OtherStore {
         team_id: store.team_id.clone(),
         owner: store.owner.clone().unwrap_or_default(),
+        owner_name,
         title,
         joined: Some(line),
         download: false,
