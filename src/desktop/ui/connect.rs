@@ -2066,10 +2066,11 @@ fn recover_sheet(
         g.row(|ui| {
             ui.label(rows::label_text(RECOVER_CODE));
             let response = kit::text_area(ui, code, "connect-recover-code", RECOVER_CODE_HINT, 3);
-            if response.changed() && account_id.trim().is_empty() {
-                if let Some(id) = pasted_account_id(code) {
-                    *account_id = id;
-                }
+            if response.changed()
+                && account_id.trim().is_empty()
+                && let Some(id) = pasted_account_id(code)
+            {
+                *account_id = id;
             }
             if let Some(note) = &code_note {
                 ui.add(

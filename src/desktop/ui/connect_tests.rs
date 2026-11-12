@@ -3049,7 +3049,7 @@ fn the_recovery_sheet_checks_the_id_and_the_words() {
     // The Copy button copies both, and the sheet reads both back from it.
     let copied = super::connect::recovery_copy("acc_k7m2q4x3ca", &words);
     assert!(copied.contains("acc_k7m2q4x3ca") && copied.contains(words.as_str()));
-    assert_eq!(recover_check("acc_k7m2q4x3ca", &copied, "MacBook").2, true);
+    assert!(recover_check("acc_k7m2q4x3ca", &copied, "MacBook").2);
     assert_eq!(
         crate::connect::find_account_id(&copied).as_deref(),
         Some("acc_k7m2q4x3ca")

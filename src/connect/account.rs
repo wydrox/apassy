@@ -295,6 +295,10 @@ pub fn has_pending_recovery(account_file: &Path) -> bool {
     PendingRecovery::path(account_file).is_file()
 }
 
+/// A recovered account, the new recovery code when this process still holds it, and the
+/// number of vault stores that Connect deleted when it named it.
+pub type Resumed = (ConnectAccount, Option<RecoveryCode>, Option<u64>);
+
 /// How a pending recovery ended at Connect.
 enum Settled {
     /// Connect took it: this device is the account's first device, and the account file
@@ -1418,7 +1422,7 @@ impl ConnectAccount {
     pub fn resume_recovery(
         store: &dyn DeviceKeyStore,
         path: &Path,
-    ) -> Result<Option<(Self, Option<RecoveryCode>, Option<u64>)>, ConnectError> {
+    ) -> Result<Option<Resumed>, ConnectError> {
         if !has_pending_recovery(path) {
             return Ok(None);
         }

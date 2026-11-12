@@ -109,6 +109,13 @@ struct Snapshot {
     asked: Instant,
 }
 
+/// A recovery: the note about a new device key, the account id, the words of the new code,
+/// and the number of vault copies that Connect deleted.
+type RecoveredCode = (Option<String>, String, Zeroizing<String>, Option<u64>);
+/// A settled recovery of an earlier try: the account id, the words of the new code when this
+/// process still held them, and the number of deleted copies.
+type ResumedCode = (String, Option<Zeroizing<String>>, Option<u64>);
+
 /// The result of one worker step.
 #[allow(clippy::large_enum_variant)] // One message at a time on the channel; a box buys nothing.
 enum Outcome {
@@ -117,11 +124,11 @@ enum Outcome {
     Created(Result<(Option<String>, String, Zeroizing<String>), ConnectError>),
     /// A recovery (section 9): the note about a new device key, the account id, the words
     /// of the new code, shown once, and the number of vault copies that Connect deleted.
-    Recovered(Result<(Option<String>, String, Zeroizing<String>, Option<u64>), ConnectError>),
+    Recovered(Result<RecoveredCode, ConnectError>),
     /// A recovery of an earlier try that Connect had not answered was settled: `None` when
     /// there was none or Connect did not take it; else the account id, the words of the new
     /// code when this process still held them, and the number of deleted copies.
-    RecoveryResumed(Result<Option<(String, Option<Zeroizing<String>>, Option<u64>)>, ConnectError>),
+    RecoveryResumed(Result<Option<ResumedCode>, ConnectError>),
     Refreshed(Result<(Snapshot, Option<PlansView>), ConnectError>),
     Plans(Result<PlansView, ConnectError>),
     Checkout(Result<(String, String), ConnectError>),

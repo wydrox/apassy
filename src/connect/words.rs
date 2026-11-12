@@ -543,17 +543,17 @@ pub fn read_recovery(text: &str) -> TypedRecovery {
     if words.is_empty() {
         return TypedRecovery::Empty;
     }
-    if let [single] = words.as_slice() {
-        if single.starts_with(RECOVERY_PREFIX) {
-            return if RecoveryCode::parse(single).is_some() {
-                TypedRecovery::Ready(Zeroizing::new((*single).to_owned()))
-            } else {
-                TypedRecovery::UnknownWord {
-                    position: 1,
-                    word: (*single).to_owned(),
-                }
-            };
-        }
+    if let [single] = words.as_slice()
+        && single.starts_with(RECOVERY_PREFIX)
+    {
+        return if RecoveryCode::parse(single).is_some() {
+            TypedRecovery::Ready(Zeroizing::new((*single).to_owned()))
+        } else {
+            TypedRecovery::UnknownWord {
+                position: 1,
+                word: (*single).to_owned(),
+            }
+        };
     }
     if let Some((index, word)) = words
         .iter()

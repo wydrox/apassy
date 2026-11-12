@@ -144,6 +144,12 @@ impl From<SyncError> for CoreError {
                 "removed",
                 "A Mac removed this iPhone from the vault. The vault on this iPhone stays as it is.",
             ),
+            // The iPhone has no recovery screen: it reports a store that a recovery deleted
+            // as a removal, which keeps its vault as it is (ios-core-v1 section 5.14).
+            SyncError::StoreDeleted => Self::new(
+                "removed",
+                "The copy of this vault at Apassy Connect was deleted. The vault on this iPhone stays as it is.",
+            ),
             SyncError::StaleCopy => Self::new(
                 "stale_copy",
                 "The relay has an older copy than this iPhone saw.",
