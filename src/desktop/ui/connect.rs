@@ -115,6 +115,8 @@ pub(crate) fn join_left_behind(confirmer: &str, device: &str) -> String {
 /// The title of the help of a new recovery code that another device made.
 pub(crate) const RECOVERY_ROW: &str = "Recovery Code";
 pub(crate) const NEW_RECOVERY: &str = "New Recovery Code…";
+/// The button of the Recovery Code row (spoken [`NEW_RECOVERY`]).
+pub(crate) const NEW_CODE: &str = "New Code…";
 pub(crate) const RECOVERY_UNSEEN: &str = "You have not seen this account's recovery code.";
 /// The sheet of a new recovery code that Connect took while the account file of this
 /// device could not be written (section 9.1).
@@ -335,6 +337,7 @@ pub(crate) const TEXTS: &[&str] = &[
     RECOVERY_TITLE,
     RECOVERY_LEAD,
     RECOVERY_UNRECORDED,
+    NEW_CODE,
     RECOVERY_CHANGED_HELP[0],
     RECOVERY_CHANGED_HELP[1],
     ACCOUNT_ROW,
@@ -1074,11 +1077,9 @@ fn account_section(
                 }
             });
         }
+        // The button of a code that nobody saw is the one of the Recovery Code row below.
         if account.recovery_unseen {
-            let button = (!view.locked && account.list_verified).then_some(NEW_RECOVERY);
-            if super::devices::problem_line(g, RECOVERY_UNSEEN, Tone::Warning, button, None) {
-                *action = Some(Action::NewRecoveryCode);
-            }
+            super::devices::problem_line(g, RECOVERY_UNSEEN, Tone::Warning, None, None);
         }
         if let Some(changed) = &account.recovery_changed {
             let button = (!view.locked).then_some(RECOVERY_CHANGED_OK);
@@ -1092,8 +1093,8 @@ fn account_section(
                 *action = Some(Action::RecoveryChangeSeen);
             }
         }
-        // The account, and the rare account actions in one menu (the account id, a new
-        // recovery code, forgetting this Mac, leaving the group, the deletion).
+        // The account, and the rare account actions in one menu (the account id, forgetting
+        // this Mac, the deletion).
         let who = match &account.email {
             Some(email) => format!("{} · {email}", account.name),
             None => account.name.clone(),
@@ -1101,27 +1102,59 @@ fn account_section(
         g.line(ACCOUNT_ROW, Some(rows::value(who)), |ui| {
             account_menu(ui, view, account, action);
         });
+        // The recovery code: one visible place for a new one.
+        g.line(RECOVERY_ROW, None, |ui| {
+            let enabled = !view.locked && account.list_verified;
+            if ui
+                .add_enabled_ui(enabled, |ui| {
+                    named_button(ui, NEW_CODE, NEW_RECOVERY, Style::Bordered)
+                })
+                .inner
+                .clicked()
+            {
+                *action = Some(Action::NewRecoveryCode);
+            }
+        });
         let (value, tone) = view.plan_value(plan);
         let color = match tone {
             Tone::Neutral => kit::palette().secondary,
             tone => tone.text(),
         };
-        // The buttons stay on the line of the label, and the status goes under it in
-        // full: "Connect Personal · Renews 10 Dec 2026" never ends in "…" at the width
-        // of Settings (frame 6 of the mockup).
-        g.line_note(
-            "Plan",
-            None,
-            Some(kit::text(value, Font::Body).color(color)),
-            |ui| {
-                if billing && kit::small_button(ui, MANAGE_BILLING, Style::Bordered).clicked() {
-                    *action = Some(Action::ManageBilling);
-                }
-                if can_choose && kit::small_button(ui, CHOOSE_PLAN, Style::Prominent).clicked() {
-                    *action = Some(Action::ChoosePlan);
-                }
-            },
-        );
+        // One line: the label, the status, and the buttons at the trailing edge. The
+        // status wraps rather than ends in "…" ("Connect Personal · Renews 10 Dec 2026"
+        // stays whole at the width of Settings), and the buttons go under it only when the
+        // row is too narrow.
+        g.row(|ui| {
+            let mut line = egui::text::LayoutJob::default();
+            rows::label_text("Plan").append_to(
+                &mut line,
+                ui.style(),
+                egui::FontSelection::Default,
+                egui::Align::Center,
+            );
+            kit::text(format!("   {value}"), Font::Body)
+                .color(color)
+                .append_to(
+                    &mut line,
+                    ui.style(),
+                    egui::FontSelection::Default,
+                    egui::Align::Center,
+                );
+            let mut buttons: Vec<(&str, &str, Style)> = Vec::new();
+            if billing {
+                buttons.push((MANAGE_BILLING, MANAGE_BILLING, Style::Bordered));
+            }
+            if can_choose {
+                buttons.push((CHOOSE_PLAN, CHOOSE_PLAN, Style::Prominent));
+            }
+            if let Some(index) = rows::text_buttons_named(ui, line, &buttons) {
+                *action = Some(if buttons[index].0 == MANAGE_BILLING {
+                    Action::ManageBilling
+                } else {
+                    Action::ChoosePlan
+                });
+            }
+        });
         if let Some(group) = group.filter(|group| group.manages() && plan.entitled) {
             let label = if group.kind == "team" {
                 "Seats"
@@ -1142,18 +1175,32 @@ fn account_section(
                 }
             });
         }
-        // A member's family or team: who manages it (frames 6h, 9e). Leave… is in the
-        // menu of the Account row.
+        // A member's family or team: who manages it, and Leave… (frames 6h, 9e).
         if let Some(group) = group.filter(|group| !group.manages()) {
             let (line, tone) = managed_by(&group.state, &group.owner_name);
             let color = match tone {
                 Tone::Neutral => kit::palette().secondary,
                 tone => tone.text(),
             };
+            let spoken = if group.kind == "team" {
+                LEAVE_TEAM
+            } else {
+                LEAVE_FAMILY
+            };
             g.line(
                 group.label(),
                 Some(kit::text(line, Font::Body).color(color)),
-                |_| {},
+                |ui| {
+                    if ui
+                        .add_enabled_ui(!view.locked, |ui| {
+                            named_button(ui, "Leave…", spoken, Style::Bordered)
+                        })
+                        .inner
+                        .clicked()
+                    {
+                        *action = Some(Action::Leave);
+                    }
+                },
             );
         }
         if group.is_none() && !plan.entitled {
@@ -1181,6 +1228,8 @@ fn account_section(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MenuItem {
     pub(crate) label: &'static str,
+    /// A secondary text at the trailing edge of the item (the account id).
+    pub(crate) secondary: Option<String>,
     pub(crate) enabled: bool,
     /// A destructive item, in red.
     pub(crate) red: bool,
@@ -1189,42 +1238,28 @@ pub(crate) struct MenuItem {
     pub(crate) action: Action,
 }
 
-/// The items of the ⋯ menu of the Account row, in order: Copy Account ID, a new recovery
-/// code, forgetting this Mac (only while the list holds it), leaving a family or team (a
-/// member only), and the deletion in red. Every item that needs an owner check is off
-/// while the vault is locked, and every item is off while a step runs: an open menu is
-/// its own area and does not follow the disabled pane.
+/// The items of the ⋯ menu of the Account row, in order: Copy Account ID (with the id),
+/// forgetting this Mac (only while the list holds it), and the deletion in red. Every
+/// item that needs an owner check is off while the vault is locked, and every item is off
+/// while a step runs: an open menu is its own area and does not follow the disabled
+/// pane.
 pub(crate) fn account_menu_items(view: &ConnectView, account: &Account) -> Vec<MenuItem> {
     let free = !view.busy;
     let checked = free && !view.locked;
     let item = |label, enabled, action| MenuItem {
         label,
+        secondary: None,
         enabled,
         red: false,
         separated: false,
         action,
     };
-    let mut items = vec![
-        item(COPY_ACCOUNT_ID, free, Action::CopyAccountId),
-        MenuItem {
-            separated: true,
-            ..item(
-                NEW_RECOVERY,
-                checked && account.list_verified,
-                Action::NewRecoveryCode,
-            )
-        },
-    ];
+    let mut items = vec![MenuItem {
+        secondary: Some(account.account_id.clone()),
+        ..item(COPY_ACCOUNT_ID, free, Action::CopyAccountId)
+    }];
     if let Some(index) = account.devices.iter().position(|device| device.this) {
         items.push(item(FORGET_THIS_MAC, checked, Action::Revoke(index)));
-    }
-    if let Some(group) = account.group.as_ref().filter(|group| !group.manages()) {
-        let leave = if group.kind == "team" {
-            LEAVE_TEAM
-        } else {
-            LEAVE_FAMILY
-        };
-        items.push(item(leave, checked, Action::Leave));
     }
     items.push(MenuItem {
         red: true,
@@ -1234,17 +1269,11 @@ pub(crate) fn account_menu_items(view: &ConnectView, account: &Account) -> Vec<M
     items
 }
 
-/// The ⋯ menu of the Account row: the account id, then [`account_menu_items`].
+/// The ⋯ menu of the Account row: [`account_menu_items`].
 fn account_menu(ui: &mut Ui, view: &ConnectView, account: &Account, action: &mut Option<Action>) {
     let more = kit::icon_button(ui, Icon::More, MORE_ACCOUNT, kit::Size::Small);
     egui::Popup::menu(&more).show(|ui| {
-        ui.set_min_width(220.0);
-        ui.horizontal(|ui| {
-            ui.label(kit::text(ACCOUNT_ID, Font::Callout).color(kit::palette().secondary));
-            ui.label(
-                kit::text(account.account_id.as_str(), Font::Mono).color(kit::palette().label),
-            );
-        });
+        ui.set_min_width(260.0);
         for item in account_menu_items(view, account) {
             if item.separated {
                 ui.separator();
@@ -1255,10 +1284,13 @@ fn account_menu(ui: &mut Ui, view: &ConnectView, account: &Account, action: &mut
                 kit::palette().label
             };
             let label = kit::text(item.label, Font::Body).color(color);
-            if ui
-                .add_enabled(item.enabled, egui::Button::selectable(false, label))
-                .clicked()
-            {
+            let mut button = egui::Button::selectable(false, label);
+            if let Some(secondary) = &item.secondary {
+                button = button.shortcut_text(
+                    kit::text(secondary.as_str(), Font::Mono).color(kit::palette().secondary),
+                );
+            }
+            if ui.add_enabled(item.enabled, button).clicked() {
                 *action = Some(item.action);
             }
         }
@@ -1272,27 +1304,6 @@ fn named_button(ui: &mut Ui, label: &str, spoken: &str, style: Style) -> egui::R
     ui.ctx()
         .accesskit_node_builder(button.id, |node| node.set_label(spoken));
     button
-}
-
-/// A group label with a count on the right, as "Devices ⓘ 6" of Settings > Devices.
-fn counted_label(ui: &mut Ui, title: &str, count: &str) {
-    ui.add_space(18.0);
-    ui.horizontal(|ui| {
-        ui.add_space(2.0);
-        ui.add(
-            Label::new(
-                kit::text(title, Font::Callout)
-                    .variation(b"wght", 600.0)
-                    .color(kit::palette().secondary),
-            )
-            .selectable(false),
-        );
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.add_space(2.0);
-            ui.label(kit::text(count, Font::Callout).color(kit::palette().secondary));
-        });
-    });
-    ui.add_space(6.0);
 }
 
 /// The small tile of a device: a gray rounded square with its glyph.
@@ -1375,7 +1386,8 @@ fn entity_row(
 }
 
 fn devices_group(ui: &mut Ui, view: &ConnectView, account: &Account, action: &mut Option<Action>) {
-    counted_label(ui, "Devices", &account.devices.len().to_string());
+    // The title says no count: the list shows them.
+    rows::group_label(ui, "Devices");
     if account.list_nearly_full && account.list_verified {
         rows::footnote(ui, LIST_NEARLY_FULL);
     }
@@ -1471,11 +1483,8 @@ fn group_section(
     group: &Group,
     action: &mut Option<Action>,
 ) {
-    counted_label(
-        ui,
-        group.label(),
-        &format!("{} of {}", group.active(), group.quantity),
-    );
+    // The People or Seats row says "3 of 4"; the title does not say it again.
+    rows::group_label(ui, group.label());
     rows::group_box(ui, |g| {
         for (index, member) in group.members.iter().enumerate() {
             let pending = member.state == "pending";

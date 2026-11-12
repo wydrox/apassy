@@ -2412,7 +2412,7 @@ fn an_account_without_a_seen_recovery_code_says_so_until_a_new_code() {
         painted.contains(super::connect::RECOVERY_UNSEEN),
         "{painted}"
     );
-    assert!(painted.contains(super::connect::NEW_RECOVERY), "{painted}");
+    assert!(painted.contains(super::connect::NEW_CODE), "{painted}");
     // A refresh, and a new session of the section, keep the line.
     act(&ctx, &mut app, Action::SignIn);
     settle(&ctx, &mut app);
@@ -2462,8 +2462,8 @@ fn an_account_without_a_seen_recovery_code_says_so_until_a_new_code() {
         !painted.contains(super::connect::RECOVERY_UNSEEN),
         "{painted}"
     );
-    // Without the line, "New Recovery Code…" is in the menu of the Account row only.
-    assert!(!painted.contains(super::connect::NEW_RECOVERY), "{painted}");
+    // Without the line, the Recovery Code row keeps its button.
+    assert!(painted.contains(super::connect::NEW_CODE), "{painted}");
 }
 
 // ---- Round 7: a new recovery code that Connect took without an answer. ----
@@ -3367,7 +3367,7 @@ fn a_lock_before_the_code_is_shown_leaves_the_lasting_line() {
             painted.contains(super::connect::RECOVERY_UNSEEN),
             "{case}: {painted}"
         );
-        assert!(painted.contains(super::connect::NEW_RECOVERY), "{case}");
+        assert!(painted.contains(super::connect::NEW_CODE), "{case}");
     }
 }
 
@@ -3419,7 +3419,7 @@ fn the_recovery_rows_fit_their_column_at_each_width() {
         (Shown::None, vec![super::connect::RECOVER]),
         (
             Shown::Account(account),
-            vec!["OK", "Recovered.", super::connect::NEW_RECOVERY],
+            vec!["OK", "Recovered.", super::connect::NEW_CODE],
         ),
     ] {
         let view = ConnectView {
@@ -3550,13 +3550,13 @@ fn menu_view(account: Account, locked: bool, busy: bool) -> ConnectView {
     }
 }
 
-/// The items of the ⋯ menu and whether each is on: every item that needs an owner check is
-/// off while locked, a new code also while the list is not verified, Forget This Mac only
-/// while the list holds this device, Leave only for a member, and every item while a step
-/// runs.
+/// The items of the ⋯ menu and whether each is on: Copy Account ID always (but while a
+/// step runs), Forget This Mac only while the list holds this device and off while
+/// locked, Delete Account… off while locked, and every item while a step runs. A new
+/// code and Leave… are rows of the pane: the Recovery Code row, and a member's group row.
 #[test]
 fn the_account_menu_items_follow_the_state() {
-    use super::connect::{COPY_ACCOUNT_ID, DELETE, LEAVE_FAMILY, NEW_RECOVERY, account_menu_items};
+    use super::connect::{COPY_ACCOUNT_ID, DELETE, LEAVE_FAMILY, NEW_CODE, account_menu_items};
     let items = |view: &ConnectView| {
         let Shown::Account(account) = &view.shown else {
             unreachable!();
@@ -3566,57 +3566,53 @@ fn the_account_menu_items_follow_the_state() {
             .map(|item| (item.label, item.enabled))
             .collect::<Vec<_>>()
     };
-    let organizer = menu_view(menu_account(false, true), false, false);
+    let all_on = [
+        (COPY_ACCOUNT_ID, true),
+        (FORGET_THIS_MAC, true),
+        (DELETE, true),
+    ];
     assert_eq!(
-        items(&organizer),
-        [
-            (COPY_ACCOUNT_ID, true),
-            (NEW_RECOVERY, true),
-            (FORGET_THIS_MAC, true),
-            (DELETE, true),
-        ]
+        items(&menu_view(menu_account(false, true), false, false)),
+        all_on
     );
-    let locked = menu_view(menu_account(false, true), true, false);
     assert_eq!(
-        items(&locked),
+        items(&menu_view(menu_account(false, true), true, false)),
         [
             (COPY_ACCOUNT_ID, true),
-            (NEW_RECOVERY, false),
             (FORGET_THIS_MAC, false),
             (DELETE, false),
         ]
     );
     let mut unverified = menu_account(false, true);
     unverified.list_verified = false;
-    assert_eq!(
-        items(&menu_view(unverified, false, false)),
-        [
-            (COPY_ACCOUNT_ID, true),
-            (NEW_RECOVERY, false),
-            (FORGET_THIS_MAC, true),
-            (DELETE, true),
-        ]
-    );
+    assert_eq!(items(&menu_view(unverified, false, false)), all_on);
     assert_eq!(
         items(&menu_view(menu_account(true, true), false, false)),
-        [
-            (COPY_ACCOUNT_ID, true),
-            (NEW_RECOVERY, true),
-            (FORGET_THIS_MAC, true),
-            (LEAVE_FAMILY, true),
-            (DELETE, true),
-        ]
+        all_on
     );
     assert_eq!(
         items(&menu_view(menu_account(false, false), false, false)),
-        [
-            (COPY_ACCOUNT_ID, true),
-            (NEW_RECOVERY, true),
-            (DELETE, true)
-        ]
+        [(COPY_ACCOUNT_ID, true), (DELETE, true)]
     );
     let busy = menu_view(menu_account(true, true), false, true);
     assert!(items(&busy).iter().all(|(_, on)| !on), "{:?}", items(&busy));
+    // The rows that left the menu: New Code… for everyone, Leave… for a member only.
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let member = menu_view(menu_account(true, true), false, false);
+    let (text, nodes, _) = section_frame(&ctx, &member, Vec::new());
+    assert!(text.contains(NEW_CODE) && text.contains("Leave…"), "{text}");
+    assert!(
+        nodes.iter().any(|(name, _)| name == LEAVE_FAMILY),
+        "Leave… is spoken Leave Family…: {nodes:?}"
+    );
+    let ctx = egui::Context::default();
+    let organizer = menu_view(menu_account(false, true), false, false);
+    let (text, _, _) = section_frame(&ctx, &organizer, Vec::new());
+    assert!(
+        text.contains(NEW_CODE) && !text.contains("Leave…"),
+        "{text}"
+    );
 }
 
 /// One frame of the section alone: the painted text, the labeled AccessKit nodes with
