@@ -379,6 +379,9 @@ fn a_new_device_gets_a_store_whose_older_heads_the_relay_dropped() {
         .download(&b.data.join("sync"))
         .expect("the kept chain from version 4 to the head");
     let (vault, _) = b.sync.adopt(&joined, &download, PASS).expect("adopt");
+    drop((vault, download, joined));
+    let mut vault = Vault::open(&b.vault_path).unwrap();
+    vault.unlock(PASS).unwrap();
     assert_eq!(
         titles(&vault),
         vec!["Alpha", "Beta", "Delta", "Epsilon", "Gamma"]

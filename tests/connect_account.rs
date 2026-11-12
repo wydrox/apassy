@@ -784,7 +784,8 @@ fn a_pending_creation_is_repeated_by_the_next_try() {
 }
 
 /// An id that Connect holds or held (`409 account_id_taken`) makes the device sign a new
-/// id and try again; a used key (`409 conflict`) is not tried again.
+/// id and try again; a used key (`409 conflict`) gets one more try with a new key, and a
+/// second conflict ends the creation.
 #[test]
 fn a_taken_account_id_gets_a_new_id_and_a_used_key_stops() {
     let connect = FakeConnect::start();
@@ -800,15 +801,21 @@ fn a_taken_account_id_gets_a_new_id_and_a_used_key_stops() {
     assert_ne!(ids[0], ids[1]);
     assert_ne!(ids[1], ids[2]);
     assert_eq!(account.state().account_id, ids[2]);
-    // A key that is a device already: one try, and the conflict.
+    // A key that is a device already: a new key once, and then the conflict.
     let connect = FakeConnect::start();
     connect.answer_route_error("POST /v1/account", 409, "conflict");
     let b = device();
+    let first_key = AccountSigner::open_or_create(&b.store)
+        .expect("key")
+        .public_key_b64u();
     let refused =
         ConnectAccount::create(client(&connect), &b.store, &b.path, "Rafal", "MacBook Air")
             .expect_err("conflict");
     assert_eq!(refused, ConnectError::Conflict);
-    assert_eq!(connect.count("POST /v1/account"), 1);
+    assert_eq!(connect.count("POST /v1/account"), 2);
+    let bodies = creation_bodies(&connect);
+    assert_eq!(bodies[0]["public_key"], first_key.as_str());
+    assert_ne!(bodies[1]["public_key"], first_key.as_str(), "a new key");
 }
 
 /// The join signs the device name: the confirming device shows and signs a name only when

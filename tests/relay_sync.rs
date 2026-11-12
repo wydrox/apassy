@@ -3793,6 +3793,9 @@ mod connect_sync {
             .sync
             .adopt(&joined, &download, PASS)
             .expect("adopt");
+        drop((vault, download, joined));
+        let mut vault = Vault::open(&pruned.d.mac.vault_path).expect("open");
+        vault.unlock(PASS).expect("unlock");
         assert_eq!(
             titles(&vault),
             vec!["Alpha", "Beta", "Delta", "Epsilon", "Gamma"]
