@@ -3534,7 +3534,7 @@ fn galleys(ctx: &egui::Context, view: &ConnectView) -> Vec<(String, egui::Rect)>
         match shape {
             egui::Shape::Text(text) => out.push((
                 text.galley.text().to_owned(),
-                egui::Rect::from_min_size(text.pos, text.galley.size()),
+                text.galley.rect.translate(text.pos.to_vec2()),
             )),
             egui::Shape::Vec(nested) => nested.iter().for_each(|inner| walk(inner, out)),
             _ => {}
@@ -3997,12 +3997,18 @@ fn the_plan_status_sits_at_the_trailing_edge_or_whole_under_the_label() {
         "one line: {label:?} {status:?}"
     );
     assert!(
-        status.left() > 640.0 / 2.0,
-        "the status sits at the trailing edge, not after the label: {status:?}"
+        status.left() > label.right() + 100.0,
+        "the status sits at the trailing edge, not right after the label: {label:?} {status:?}"
     );
+    // Everything painted on the line of the Plan label, for the failure message.
+    let line: Vec<&(String, egui::Rect)> = wide
+        .iter()
+        .filter(|(_, rect)| (rect.center().y - label.center().y).abs() < 12.0)
+        .collect();
     assert!(
         status.right() <= billing.left() && billing.left() - status.right() < 24.0,
-        "the status ends right before the buttons: {status:?} {billing:?}"
+        "the status ends right before the buttons: {status:?} {billing:?}; \
+         pane 640 points wide; the Plan line: {line:?}"
     );
     // Narrow: the whole status under the label.
     let narrow = placed(330.0);
@@ -4014,12 +4020,14 @@ fn the_plan_status_sits_at_the_trailing_edge_or_whole_under_the_label() {
     );
 }
 
-/// Each painted text with its galley rectangle.
+/// Each painted text with its galley rectangle. The galley's own rectangle is placed at
+/// the text's position: a right-aligned galley (a value at the trailing edge) has its
+/// anchor at its right edge, so `pos` plus `size` would point past the text.
 fn placed_texts(shape: &egui::Shape, out: &mut Vec<(String, egui::Rect)>) {
     match shape {
         egui::Shape::Text(text) => out.push((
             text.galley.text().to_owned(),
-            egui::Rect::from_min_size(text.pos, text.galley.size()),
+            text.galley.rect.translate(text.pos.to_vec2()),
         )),
         egui::Shape::Vec(nested) => nested.iter().for_each(|inner| placed_texts(inner, out)),
         _ => {}

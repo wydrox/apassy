@@ -40,7 +40,7 @@ fn layout(view: &ShareView) -> (Placed, Placed) {
         match shape {
             egui::Shape::Text(text) => out.push((
                 text.galley.text().to_owned(),
-                egui::Rect::from_min_size(text.pos, text.galley.size()),
+                text.galley.rect.translate(text.pos.to_vec2()),
             )),
             egui::Shape::Vec(nested) => nested.iter().for_each(|inner| walk(inner, out)),
             _ => {}
