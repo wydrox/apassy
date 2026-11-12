@@ -1210,7 +1210,7 @@ pub(super) fn draw_fresh_token(app: &mut DesktopApp, ctx: &egui::Context) {
                 );
                 if busy {
                     ui.horizontal(|ui| {
-                        ui.spinner();
+                        kit::spinner(ui, 16.0);
                         kit::note(ui, "Please wait. Apassy saves the host settings.");
                     });
                 }

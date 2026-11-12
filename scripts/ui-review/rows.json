@@ -41,8 +41,10 @@
      "mockups": [
       "connect-2c.png"
      ],
-     "shots": [],
-     "note": ""
+     "shots": [
+      "connect-demo-2c.png"
+     ],
+     "note": "Demo frame 2c: the creation waits for Connect after a failed first try."
     },
     {
      "title": "Account, no plan",
@@ -234,6 +236,17 @@
      "note": ""
     },
     {
+     "title": "Recovery Code row: a new code of another device (13d)",
+     "mockups": [
+      "connect-13a.png"
+     ],
+     "shots": [
+      "connect-demo-13d.png",
+      "connect-demo-13d-2.png"
+     ],
+     "note": "Demo frame 13d."
+    },
+    {
      "title": "New Recovery Code… (owner check)",
      "mockups": [
       "connect-13b.png"
@@ -253,6 +266,16 @@
       "recovery-new-code.png"
      ],
      "note": ""
+    },
+    {
+     "title": "The new code when the account file could not be written (13e)",
+     "mockups": [
+      "connect-13c.png"
+     ],
+     "shots": [
+      "connect-demo-13e.png"
+     ],
+     "note": "Demo frame 13e."
     },
     {
      "title": "Choose a Plan: Personal, monthly",
@@ -568,8 +591,7 @@
       "connect-12b.png"
      ],
      "shots": [
-      "share-pick.png",
-      "share-pick-chosen.png"
+      "share-pick.png"
      ],
      "note": ""
     },
@@ -783,8 +805,10 @@
     {
      "title": "Connect plan past due",
      "mockups": [],
-     "shots": [],
-     "note": ""
+     "shots": [
+      "sync-connect-past-due.png"
+     ],
+     "note": "The plan past due, read after a lock and an unlock."
     },
     {
      "title": "Connect read-only until a date",
@@ -885,9 +909,7 @@
      "mockups": [
       "devices-settings-6a.png"
      ],
-     "shots": [
-      "devices-demo-6a.png"
-     ],
+     "shots": [],
      "note": ""
     },
     {
@@ -1215,8 +1237,11 @@
      "mockups": [
       "connect-12g.png"
      ],
-     "shots": [],
-     "note": ""
+     "shots": [
+      "owner-check-stop.png",
+      "owner-check-leave.png"
+     ],
+     "note": "Stop Sharing… and Leave…; re-pin and the copy of a removed device are not reachable in the scripted scenes."
     }
    ]
   }

@@ -190,9 +190,9 @@ pub(crate) fn owner_note(obs: &Observation) -> String {
 pub(crate) fn lock_note(obs: &Observation) -> String {
     let agents = "Agents cannot use credentials while the vault is locked.";
     match obs.coverage() {
+        // What is not observed is listed once, in the note of "How often to ask".
         Coverage::None => format!(
-            "Lock the vault manually when you finish. Screen lock is not observed here; sleep is detected only from the clock after the wake. {} {} {agents}",
-            obs.missing().join(" "),
+            "Lock the vault manually when you finish. Apassy cannot observe the screen lock here. {} {agents}",
             obs.inactivity_source()
         ),
         Coverage::Full => format!(

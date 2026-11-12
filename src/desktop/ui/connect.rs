@@ -42,7 +42,7 @@ pub(crate) const JOIN_POLL_EVERY: std::time::Duration = std::time::Duration::fro
 // ---- Texts (plans section 5). ----
 
 pub(crate) const NOT_ON_CONNECT: &str = "Not on Connect";
-pub(crate) const INTRO: &str = "Apassy Connect is the hosted service of the Apassy project: it reaches your devices without Tailscale, keeps the encrypted copy of your vaults always online, and hosts the bouncer brain.";
+pub(crate) const INTRO: &str = "Apassy Connect is the hosted service of the Apassy project: it reaches your devices without Tailscale and keeps the encrypted copy of your vaults always online.";
 pub(crate) const SELF_HOST: &str = "Everything Connect does also runs on your own hardware, free.";
 pub(crate) const CREATE: &str = "Create a Connect Account…";
 pub(crate) const ADD_THIS_MAC: &str =
@@ -233,7 +233,7 @@ pub(crate) const FORGET_REMOVED_LEAD: &str = concat!(
 );
 pub(crate) const FORGET_LEAD: &str = concat!(
     "This ",
-    crate::computer_cap!(),
+    crate::computer!(),
     " leaves your Connect account, and its Connect key is deleted. To use the account here again, add this ",
     crate::computer!(),
     " from another device of the account."
@@ -256,6 +256,8 @@ pub(crate) const SEATS_NOTE: &str =
 pub(crate) const JOIN_GROUP_REFUSED: &str = "This account has its own plan, or is in another family or team. Cancel the plan or leave first.";
 pub(crate) const DELETE_TITLE: &str = "Delete Your Connect Account?";
 pub(crate) const DELETE_LEAD: &str = "The plan ends now, and every vault copy, device, and link of the account is deleted at Connect. Your vaults stay on your devices. Your invoices stay at Stripe.";
+pub(crate) const ACTIVE_FAMILY: &str = "Invite the people of your family in Settings › Connect.";
+pub(crate) const ACTIVE_TEAM: &str = "Invite the members of your team in Settings › Connect.";
 pub(crate) const MEMBERS_FIRST_TITLE: &str = "Remove the Members First";
 pub(crate) const MEMBERS_FIRST_LEAD: &str =
     "Your family or team still has members. Remove them, then delete the account.";
@@ -342,6 +344,8 @@ pub(crate) const TEXTS: &[&str] = &[
     JOIN_GROUP_REFUSED,
     DELETE_TITLE,
     DELETE_LEAD,
+    ACTIVE_FAMILY,
+    ACTIVE_TEAM,
     MEMBERS_FIRST_TITLE,
     MEMBERS_FIRST_LEAD,
 ];
@@ -766,6 +770,22 @@ impl ConnectView {
     }
 }
 
+/// The lines of the sheet of a plan that became active (frame 5b): its date, and for a
+/// family or a team where to invite the others, one per line.
+pub(crate) fn active_lines(plan: Option<&str>, date: &str) -> String {
+    let invite = match plan {
+        Some("family") => Some(ACTIVE_FAMILY),
+        Some("team") => Some(ACTIVE_TEAM),
+        _ => None,
+    };
+    [Some(date), invite]
+        .into_iter()
+        .flatten()
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// The line under the Plan row of a plan that needs the owner, and its tone.
 pub(crate) fn plan_note(plan: &Plan) -> Option<(String, Tone)> {
     match plan.status.as_str() {
@@ -867,7 +887,7 @@ pub(crate) fn draw(ui: &mut Ui, view: &ConnectView) -> Option<Action> {
                 }
                 g.row(|ui| {
                     ui.horizontal(|ui| {
-                        ui.add(egui::Spinner::new().size(12.0));
+                        kit::spinner(ui, 12.0);
                         ui.label(rows::value("Asking Apassy Connect…"));
                     });
                 });
@@ -883,7 +903,9 @@ pub(crate) fn draw(ui: &mut Ui, view: &ConnectView) -> Option<Action> {
                     g.labeled("Name", rows::value(name.as_str()));
                 }
                 g.labeled(THIS_DEVICE, rows::value(device_name.as_str()));
-                g.line_note(UNREACHABLE, None, Some(rows::note(note)), |ui| {
+                // The error in red, as frame 2c shows it.
+                let note = kit::text(note.as_str(), Font::Callout).color(Tone::Critical.text());
+                g.line_note(UNREACHABLE, None, Some(note), |ui| {
                     if kit::small_button(ui, ASK_AGAIN, Style::Bordered).clicked() {
                         action = Some(Action::SignIn);
                     }
@@ -939,7 +961,7 @@ fn not_on_connect(ui: &mut Ui, action: &mut Option<Action>) {
             ui.label(rows::label_text(NOT_ON_CONNECT));
             ui.add(Label::new(rows::note(INTRO)).wrap());
         });
-        g.tone_row(SELF_HOST, Tone::Accent.text());
+        g.tone_icon_row(SELF_HOST, Tone::Accent);
     });
     ui.add_space(12.0);
     ui.horizontal(|ui| {
@@ -1018,18 +1040,23 @@ fn account_section(
             } else {
                 format!("{} manages the plan and the billing.", group.owner_name)
             };
-            g.tone_row(line, kit::palette().secondary);
+            g.tone_icon_row(line, Tone::Neutral);
         }
         if let Some((line, tone)) = plan_note(plan) {
-            g.tone_row(line, tone.text());
+            g.tone_icon_row(line, tone);
         }
     });
     if view.locked {
         rows::footnote(ui, LOCKED);
     }
+    // A family or team comes before the devices (frame 9); "Join a Family or Team" of
+    // an account without one after them (frame 3).
+    if let Some(group) = group {
+        group_section(ui, view, account, group, action);
+    }
     devices_group(ui, view, account, action);
     match group {
-        Some(group) => group_section(ui, view, account, group, action),
+        Some(_) => {}
         None if !plan.entitled => {
             rows::group(ui, Some("Family or Team"), |g| {
                 g.line_note(JOIN_GROUP, None, Some(rows::note(JOIN_GROUP_NOTE)), |ui| {
@@ -1043,10 +1070,10 @@ fn account_section(
     }
     rows::group(ui, Some(RECOVERY_ROW), |g| {
         if account.recovery_unseen {
-            g.tone_row(RECOVERY_UNSEEN, Tone::Warning.text());
+            g.tone_icon_row(RECOVERY_UNSEEN, Tone::Warning);
         }
         if let Some(changed) = &account.recovery_changed {
-            g.tone_row(changed.text.as_str(), Tone::Warning.text());
+            g.tone_icon_row(changed.text.as_str(), Tone::Warning);
             g.line(RECOVERY_CHANGED_ROW, None, |ui| {
                 if ui
                     .add_enabled_ui(!view.locked, |ui| {
@@ -1188,9 +1215,7 @@ fn entity_row(
 
 fn devices_group(ui: &mut Ui, view: &ConnectView, account: &Account, action: &mut Option<Action>) {
     counted_label(ui, "Devices", &account.devices.len().to_string());
-    if !account.list_verified {
-        rows::footnote(ui, LIST_NOT_VERIFIED);
-    } else if account.list_nearly_full {
+    if account.list_nearly_full && account.list_verified {
         rows::footnote(ui, LIST_NEARLY_FULL);
     }
     rows::group_box(ui, |g| {
@@ -1253,6 +1278,12 @@ fn devices_group(ui: &mut Ui, view: &ConnectView, account: &Account, action: &mu
             );
         }
     });
+    if !account.list_verified {
+        // An error of the device list: one red line with its icon under the group that
+        // failed (the rule of every view of the mockup).
+        ui.add_space(6.0);
+        kit::tone_note_icon(ui, LIST_NOT_VERIFIED, Tone::Critical, Font::Callout);
+    }
     ui.add_space(12.0);
     ui.horizontal(|ui| {
         ui.add_enabled_ui(!view.locked, |ui| {
@@ -1488,25 +1519,8 @@ fn stepper(ui: &mut Ui, value: &mut u64, max: u64) {
 
 /// The six safety words, large, in two rows of three.
 fn big_words(ui: &mut Ui, words: &str) {
-    let list: Vec<&str> = words.split_whitespace().collect();
     ui.add_space(6.0);
-    for line in list.chunks(3) {
-        ui.vertical_centered(|ui| {
-            egui::Frame::new()
-                .fill(kit::palette().window)
-                .stroke(Stroke::new(0.5, kit::palette().border))
-                .corner_radius(8)
-                .inner_margin(egui::Margin::symmetric(14, 6))
-                .show(ui, |ui| {
-                    ui.label(
-                        kit::text(line.join("  "), Font::Title)
-                            .variation(b"wght", 600.0)
-                            .color(kit::palette().label),
-                    );
-                });
-        });
-        ui.add_space(4.0);
-    }
+    kit::word_chips(ui, words);
     ui.add_space(6.0);
 }
 
@@ -1514,7 +1528,16 @@ fn big_words(ui: &mut Ui, words: &str) {
 fn result_head(ui: &mut Ui, title: &str, lines: &[&str]) {
     ui.vertical_centered(|ui| {
         ui.add_space(6.0);
-        kit::paint_icon_in(ui, Icon::CheckCircle, 30.0, Tone::Good.mark());
+        // A green disc with a white check (frames 5b, 8c, 10b).
+        let (rect, _) = ui.allocate_exact_size(Vec2::splat(30.0), Sense::hover());
+        ui.painter()
+            .circle_filled(rect.center(), 15.0, Tone::Good.mark());
+        kit::paint_icon(
+            ui.painter(),
+            rect.shrink(8.0),
+            Icon::Check,
+            kit::palette().on_accent,
+        );
         ui.add_space(6.0);
         ui.label(kit::text(title, Font::Title3).color(kit::palette().label));
         ui.add_space(4.0);
@@ -1525,15 +1548,16 @@ fn result_head(ui: &mut Ui, title: &str, lines: &[&str]) {
     ui.add_space(10.0);
 }
 
-/// A destructive alert: the title, the lead, Cancel (the default) and the red button.
+/// A destructive alert: the red warning tile, the title, the lead, Cancel (the default)
+/// and the bordered button with the red label (frames 7c, 7d, 9c, 11a).
 fn destructive(ui: &mut Ui, title: &str, lead: &str, button: &str) -> Option<SheetChoice> {
     let mut choice = None;
-    kit::sheet_title(ui, title, Some(lead));
+    kit::alert_head(ui, Tone::Critical, title, Some(lead));
     kit::sheet_buttons(
         ui,
         |_| {},
         |ui| {
-            if kit::button(ui, button, Style::Destructive).clicked() {
+            if kit::button(ui, button, Style::DestructiveBordered).clicked() {
                 choice = Some(SheetChoice::Go);
             }
             if kit::alert_cancel(ui).clicked() {
@@ -1591,7 +1615,7 @@ fn picker(
                     if failed {
                         ui.label(rows::value(PRICES_FAILED));
                     } else {
-                        ui.add(egui::Spinner::new().size(12.0));
+                        kit::spinner(ui, 12.0);
                         ui.label(rows::value(LOADING_PRICES));
                     }
                 });
@@ -1627,37 +1651,63 @@ fn picker(
                 per(interval).to_owned()
             };
             let response = g.clickable_row(&offer.name, |ui| {
-                ui.spacing_mut().item_spacing.x = 10.0;
-                let (rect, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
-                let painter = ui.painter();
-                if selected {
-                    painter.circle_filled(rect.center(), 8.0, kit::palette().accent);
-                    painter.circle_filled(rect.center(), 3.0, kit::palette().surface);
-                } else {
-                    painter.circle_stroke(
-                        rect.center(),
-                        7.5,
-                        Stroke::new(1.0, kit::palette().border),
+                // The price at the trailing edge of the row, right-aligned, as in frame 4;
+                // a long description is cut before it.
+                egui::Sides::new()
+                    .shrink_left()
+                    .wrap_mode(egui::TextWrapMode::Truncate)
+                    .height(rows::LINE)
+                    .show(
+                        ui,
+                        |ui| {
+                            ui.spacing_mut().item_spacing.x = 10.0;
+                            let (rect, _) =
+                                ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+                            let painter = ui.painter();
+                            if selected {
+                                painter.circle_filled(rect.center(), 8.0, kit::palette().accent);
+                                painter.circle_filled(rect.center(), 3.0, kit::palette().surface);
+                            } else {
+                                painter.circle_stroke(
+                                    rect.center(),
+                                    7.5,
+                                    Stroke::new(1.0, kit::palette().border),
+                                );
+                            }
+                            ui.vertical(|ui| {
+                                ui.spacing_mut().item_spacing.y = 1.0;
+                                ui.label(rows::label_text(&offer.name));
+                                ui.add(
+                                    Label::new(rows::note(&plan_line(
+                                        offer,
+                                        interval,
+                                        &plans.currency,
+                                    )))
+                                    .truncate(),
+                                );
+                            });
+                        },
+                        |ui| {
+                            let amount =
+                                kit::text(money(&plans.currency, price.amount), Font::Body)
+                                    .variation(b"wght", 600.0)
+                                    .color(kit::palette().label);
+                            let unit = rows::note(&unit);
+                            let width = kit::galley(ui, amount.clone())
+                                .size()
+                                .x
+                                .max(kit::galley(ui, unit.clone()).size().x);
+                            ui.allocate_ui_with_layout(
+                                Vec2::new(width, rows::LINE),
+                                egui::Layout::top_down(egui::Align::Max),
+                                |ui| {
+                                    ui.spacing_mut().item_spacing.y = 1.0;
+                                    ui.label(amount);
+                                    ui.label(unit);
+                                },
+                            );
+                        },
                     );
-                }
-                ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = 1.0;
-                    ui.label(rows::label_text(&offer.name));
-                    ui.add(
-                        Label::new(rows::note(&plan_line(offer, interval, &plans.currency)))
-                            .truncate(),
-                    );
-                });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.vertical(|ui| {
-                        ui.spacing_mut().item_spacing.y = 1.0;
-                        ui.label(
-                            kit::text(money(&plans.currency, price.amount), Font::Body)
-                                .color(kit::palette().label),
-                        );
-                        ui.label(rows::note(&unit));
-                    });
-                });
             });
             if response.clicked() && !selected {
                 *plan = offer.plan.clone();
@@ -1681,15 +1731,21 @@ fn picker(
             .and_then(|offer| offer.total(interval, *count))
             .map(|cents| format!("{} {}", money(&plans.currency, cents), per(interval)))
             .unwrap_or_default();
-        g.line(
-            "Total",
-            Some(
-                kit::text(total, Font::Body)
+        g.row(|ui| {
+            rows::one_line(
+                ui,
+                kit::text("Total", Font::Body)
                     .variation(b"wght", 600.0)
-                    .color(kit::palette().label),
-            ),
-            |_| {},
-        );
+                    .color(kit::palette().label)
+                    .into(),
+                Some(
+                    kit::text(total, Font::Body)
+                        .variation(b"wght", 600.0)
+                        .color(kit::palette().label),
+                ),
+                |_| {},
+            );
+        });
     });
     ui.add_space(6.0);
     kit::note(ui, PICKER_NOTE);
@@ -1699,7 +1755,7 @@ fn picker(
         ui,
         |ui| {
             if busy {
-                ui.add(egui::Spinner::new().size(14.0));
+                kit::spinner(ui, 14.0);
             }
         },
         |ui| {
@@ -1760,7 +1816,7 @@ fn cancel_and(ui: &mut Ui, label: &str, enabled: bool, busy: bool) -> Option<She
         ui,
         |ui| {
             if busy {
-                ui.add(egui::Spinner::new().size(14.0));
+                kit::spinner(ui, 14.0);
             }
         },
         |ui| {
@@ -1884,7 +1940,7 @@ fn sheet_body(
             kit::sheet_title(ui, WAIT_TITLE, Some(WAIT_LEAD));
             ui.vertical_centered(|ui| {
                 ui.horizontal(|ui| {
-                    ui.add(egui::Spinner::new().size(14.0));
+                    kit::spinner(ui, 14.0);
                     ui.label(rows::value(WAIT_LINE));
                 });
             });
@@ -1907,7 +1963,7 @@ fn sheet_body(
             .or(choice);
             choice
         }
-        Sheet::Active { title, line } => done_sheet(ui, title, &[line.as_str()]),
+        Sheet::Active { title, line } => done_sheet(ui, title, &line.lines().collect::<Vec<_>>()),
         Sheet::AddDevice { code, expires_at } => {
             let mut choice = None;
             kit::sheet_title(ui, ADD_TITLE, Some(ADD_LEAD));
@@ -1933,7 +1989,7 @@ fn sheet_body(
             ui.add_space(8.0);
             ui.vertical_centered(|ui| {
                 ui.horizontal(|ui| {
-                    ui.add(egui::Spinner::new().size(12.0));
+                    kit::spinner(ui, 12.0);
                     ui.label(rows::value(ADD_WAITING));
                 });
             });
@@ -1980,7 +2036,7 @@ fn sheet_body(
                 pair(
                     ui,
                     |ui| {
-                        kit::button(ui, "Refuse", Style::Destructive)
+                        kit::button(ui, "Refuse", Style::DestructiveBordered)
                             .clicked()
                             .then_some(SheetChoice::Refuse)
                     },
@@ -2044,7 +2100,9 @@ fn sheet_body(
             kit::sheet_buttons(
                 ui,
                 |ui| {
-                    ui.add(egui::Spinner::new().size(14.0));
+                    // Frame 8b: the spinner and what it waits for.
+                    kit::spinner(ui, 14.0);
+                    ui.label(rows::value("Waiting…"));
                 },
                 |ui| {
                     if kit::alert_cancel(ui).clicked() {
@@ -2200,7 +2258,7 @@ fn sheet_body(
                 concat!(
                     "{} confirms you on their ",
                     crate::computer!(),
-                    ". Then the plan of the group covers you."
+                    ". Then their plan covers you."
                 ),
                 owner_name
             )],
@@ -2208,7 +2266,12 @@ fn sheet_body(
         Sheet::Delete => destructive(ui, DELETE_TITLE, DELETE_LEAD, "Delete…"),
         Sheet::MembersFirst => {
             let mut choice = None;
-            kit::sheet_title(ui, MEMBERS_FIRST_TITLE, Some(MEMBERS_FIRST_LEAD));
+            kit::alert_head(
+                ui,
+                Tone::Warning,
+                MEMBERS_FIRST_TITLE,
+                Some(MEMBERS_FIRST_LEAD),
+            );
             kit::sheet_buttons(
                 ui,
                 |_| {},

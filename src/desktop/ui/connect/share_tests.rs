@@ -365,8 +365,8 @@ fn each_sheet_shows_its_text() {
             },
             vec![
                 asks("Ola", "MacBook Air"),
-                confirm_tail("Ola"),
-                "audio  coyote  forest".into(),
+                CONFIRM_TAIL.into(),
+                "coyote".into(),
                 "Confirm…".into(),
                 "Refuse".into(),
             ],
@@ -384,7 +384,8 @@ fn each_sheet_shows_its_text() {
                 words: "audio coyote forest mint magnet apple".into(),
             },
             vec![
-                match_tail("Rafal"),
+                shares_with_you("Rafal", "MacBook Pro"),
+                MATCH_TAIL.into(),
                 format!("{WORDS_MATCH}…"),
                 WORDS_DIFFER.into(),
             ],
@@ -440,8 +441,7 @@ fn the_texts_name_nothing_of_one_platform() {
     let made = [
         send_to("Ola"),
         asks("Ola", "Laptop"),
-        confirm_tail("Ola"),
-        match_tail("Ola"),
+        shares_with_you("Ola", "Laptop"),
         not_joined("Ola"),
         reset_owner("Ola"),
         reset_member("Ola"),
@@ -582,4 +582,109 @@ fn a_store_is_decided_only_by_lists_that_verified() {
         "the own list was not read"
     );
     assert_eq!(status.asked_for("t_unknownaaa"), None);
+}
+
+/// Item A1 of the 0.5.20 review: every row of Shared Vaults stays inside its column, from
+/// the width of Settings in the smallest window (`MIN_WINDOW`, about 340 points for the
+/// section) to the 1100-point window. Long names and long button labels wrap or are cut
+/// with "…" inside the row, each button stays whole, and the footer keeps "Accept a
+/// Shared Vault…".
+#[test]
+fn every_row_fits_its_column_at_each_width() {
+    let long = "\u{201c}Aleksandra's MacBook Air in the study upstairs\u{201d} (Aleksandra Nowak-Kowalska)";
+    let view = ShareView {
+        own: vec![OwnStore {
+            team_id: "t_familyaaaa".to_owned(),
+            vault: "Family photos, documents and the passwords of the household".to_owned(),
+            members: vec![(
+                long.to_owned(),
+                "acc_olaaaaaaaa".to_owned(),
+                not_accepted(long),
+            )],
+            ended: vec![(
+                long.to_owned(),
+                "acc_ewaaaaaaaa".to_owned(),
+                sharing_ended(long),
+            )],
+        }],
+        others: vec![OtherStore {
+            team_id: "t_gardenaaaa".to_owned(),
+            owner: "acc_piotraaaaa".to_owned(),
+            title: shared_by("Garden and the summer house", long),
+            joined: Some("Syncs.".to_owned()),
+            note: None,
+            download: true,
+            left: false,
+        }],
+        in_group: true,
+        busy: false,
+        error: None,
+        notes: Vec::new(),
+        // A store whose earlier shares count again: its line and its button fit too.
+        claims: vec![(
+            "t_familyaaaa".to_owned(),
+            "Family photos, documents and the passwords of the household".to_owned(),
+        )],
+    };
+    for width in [300.0_f32, 340.0, 560.0] {
+        let ctx = egui::Context::default();
+        let left = 20.0;
+        for frame in 0..3 {
+            let screen = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1000.0, 3000.0),
+                )),
+                ..Default::default()
+            };
+            let output = ctx.run_ui(screen, |ui| {
+                let rect =
+                    egui::Rect::from_min_size(egui::pos2(left, 0.0), egui::vec2(width, 3000.0));
+                ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                    let _ = draw(ui, &view);
+                });
+            });
+            if frame == 2 {
+                let mut text = String::new();
+                for clipped in &output.shapes {
+                    collect(&clipped.shape, &mut text);
+                    let right = clipped.shape.visual_bounding_rect().right();
+                    assert!(
+                        right <= left + width + 3.0,
+                        "at {width}: a shape ends at {right}, past {}: {:?}",
+                        left + width,
+                        clipped.shape
+                    );
+                }
+                for whole in [ACCEPT, SHARE_WITH, LEAVE, DOWNLOAD, SECTION, CLAIM] {
+                    assert!(text.contains(whole), "at {width}: no {whole:?} in\n{text}");
+                }
+                // The person's button keeps its start, cut with "…" at most.
+                assert!(text.contains("Stop Sharing with"), "at {width}:\n{text}");
+                assert!(
+                    text.contains("Each of you compares six words once."),
+                    "at {width}:\n{text}"
+                );
+            }
+            output.drop_without_applying_deltas();
+        }
+    }
+}
+
+/// The words sheets name the person once: the label of its verified list, without the
+/// device name again and without a possessive after a parenthesis.
+#[test]
+fn the_words_name_the_person_once() {
+    let name = "\u{201c}Ola's MacBook Air\u{201d} (Ola)";
+    assert_eq!(
+        asks(name, "Ola's MacBook Air"),
+        "\u{201c}Ola's MacBook Air\u{201d} (Ola) asks to share vaults with you."
+    );
+    assert_eq!(
+        shares_with_you(name, "Ola's iMac"),
+        "\u{201c}Ola's MacBook Air\u{201d} (Ola) on \u{201c}Ola's iMac\u{201d} shares vaults with you."
+    );
+    for tail in [CONFIRM_TAIL, MATCH_TAIL] {
+        assert!(!tail.contains(")'s"), "{tail}");
+    }
 }

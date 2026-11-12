@@ -80,6 +80,10 @@ place_window() {
   done
   [ -n "$wid" ] || return 1
   xdotool windowmove "$wid" 0 0 windowsize "$wid" "$W" "$H" 2>/dev/null || true
+  # Without a window manager no window gets the keyboard focus, and egui then draws no
+  # focus ring and no caret in a text field (`Response::has_focus` needs a focused
+  # window). Give it the focus, as a desktop does for the window in front.
+  xdotool windowfocus "$wid" 2>/dev/null || true
   echo "$wid"
 }
 
@@ -153,8 +157,8 @@ demo_part() {
   local code name
   # Settings › Connect: the frames of docs/design/connect-mockup.html, and the states
   # of the vault build without a frame (T1 to T8).
-  for code in 1 2a 2b 3 S T1 4a 4b 4c 5a 5b 5c 6a 6b 6c 6d 6e 6f 6g 6h 7a 7b 7c 7d T8 \
-    8a 8b 8c 9 9a 9b 9c 9d 9e 10a 10b 10c 11a 11b 13a 13c T2 T3 T4 T5 T6 T7; do
+  for code in 1 2a 2b 2c 3 S T1 4a 4b 4c 5a 5b 5c 6a 6b 6c 6d 6e 6f 6g 6h 7a 7b 7c 7d T8 \
+    8a 8b 8c 9 9a 9b 9c 9d 9e 10a 10b 10c 11a 11b 13a 13c 13d 13e T2 T3 T4 T5 T6 T7; do
     demo_frame "connect-demo-$code" APASSY_DEMO_DEVICES=1 APASSY_DEMO_CONNECT="$code"
   done
   # Settings › Devices: the frames of docs/design/devices-settings-mockup.html.

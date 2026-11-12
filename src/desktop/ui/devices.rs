@@ -50,14 +50,19 @@ pub(crate) const ROUTE_ON: &str = concat!(
     crate::computer!(),
     " directly."
 );
-/// The subline of the switch while the route is off or cannot be on.
+/// The subline of the switch while the route is off or cannot be on, and the approvals
+/// go through Apassy relay (or the vault is locked, so the window cannot tell).
 pub(crate) const ROUTE_OFF: &str = "Approvals go through Apassy relay.";
+/// The same while the questions of the vault do not go through the relay: they wait on
+/// this Mac.
+pub(crate) const ROUTE_OFF_HERE: &str = concat!("Approvals stay on this ", crate::computer!(), ".");
 /// The subline of the switch while the vault is locked.
 pub(crate) const ROUTE_LOCKED: &str = "Stopped while the vault is locked.";
 /// The one add button of the section.
 pub(crate) const ADD_DEVICE: &str = concat!("Add an iPhone or a ", crate::computer!(), "…");
 /// The button of the move row (frame 4).
-pub(crate) const MOVE_APPROVALS: &str = concat!("Move Approvals to This ", crate::computer!(), "…");
+pub(crate) const MOVE_APPROVALS: &str =
+    concat!("Move Approvals to This ", crate::computer_cap!(), "…");
 /// The button of the move to Apassy Connect (frame 9a; plan s7 unit M5).
 pub(crate) const MOVE_TO_CONNECT: &str = "Move Approvals to Connect…";
 /// The row of a move to Apassy Connect that waits for its first approval (frame 9c).
@@ -786,6 +791,30 @@ fn switch_row(
     });
 }
 
+/// The subline of a route that is off: "Approvals go through Apassy relay." only while
+/// they do (or while the vault is locked or not open, when the window cannot tell).
+fn route_off_line(view: &DevicesView) -> &'static str {
+    match view.relay.as_ref().map(|relay| relay.questions) {
+        None | Some(Questions::On | Questions::Locked) => ROUTE_OFF,
+        Some(_) => ROUTE_OFF_HERE,
+    }
+}
+
+/// The moves of the row of frame 4 and 9a in the This Mac group: (to this Mac, to
+/// Apassy Connect), or `None` without a row. Once the hosted relay ended the approvals
+/// (frame 9d) the same choices sit under its line in the Relay group only.
+fn move_choices(view: &DevicesView) -> Option<(bool, bool)> {
+    if view
+        .relay
+        .as_ref()
+        .is_some_and(|relay| relay.ended.is_some())
+    {
+        return None;
+    }
+    let to_mac = view.can_move && matches!(view.node, NodeState::On { address: Some(_) });
+    (to_mac || view.can_move_connect).then_some((to_mac, view.can_move_connect))
+}
+
 fn this_mac_group(
     ui: &mut Ui,
     view: &DevicesView,
@@ -793,9 +822,10 @@ fn this_mac_group(
     action: &mut Option<Action>,
 ) {
     rows::group(ui, Some(concat!("This ", crate::computer!())), |g| {
+        let off = route_off_line(view);
         let (subline, enabled) = match &view.node {
-            NodeState::Missing | NodeState::NotConnected => (ROUTE_OFF, false),
-            NodeState::Off => (ROUTE_OFF, !view.locked),
+            NodeState::Missing | NodeState::NotConnected => (off, false),
+            NodeState::Off => (off, !view.locked),
             NodeState::Locked => (ROUTE_LOCKED, false),
             NodeState::On { .. } => (ROUTE_ON, !view.locked),
         };
@@ -841,9 +871,8 @@ fn this_mac_group(
             }
             NodeState::On { address } => on_rows(g, view, address.as_ref(), action),
         }
-        let to_mac = view.can_move && matches!(view.node, NodeState::On { address: Some(_) });
-        if to_mac || view.can_move_connect {
-            move_row(g, to_mac, view.can_move_connect, action);
+        if let Some((to_mac, to_connect)) = move_choices(view) {
+            move_row(g, to_mac, to_connect, action);
         }
         if view.connect_pending {
             connect_pending_row(g, action);
@@ -907,7 +936,7 @@ fn on_rows(
         g.row(|ui| {
             rows::one_line(ui, rows::label_text("Address").into(), None, |ui| {
                 ui.label(rows::value("Starting…"));
-                ui.add(egui::Spinner::new().size(12.0));
+                kit::spinner(ui, 12.0);
             });
         });
         return;
@@ -984,44 +1013,62 @@ fn move_row(g: &mut rows::Group<'_>, to_mac: bool, to_connect: bool, action: &mu
         ),
         _ => "Move them here to keep them on your tailnet.",
     };
+    let text = |ui: &mut Ui| {
+        ui.horizontal_top(|ui| {
+            kit::icon_tile_sized(ui, Icon::Globe, kit::palette().accent, 22.0);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 1.0;
+                ui.label(
+                    kit::medium("Approvals go through Apassy relay", Font::Body)
+                        .color(kit::palette().label),
+                );
+                ui.add(Label::new(rows::note(note)).wrap());
+            });
+        });
+    };
+    // Frame 9a: the text spans the row, and the two buttons have their own row below.
+    if to_mac && to_connect {
+        g.row(text);
+        buttons_row(g, |ui| {
+            // Right to left: the second button first.
+            if kit::small_button(ui, MOVE_TO_CONNECT, Style::Bordered).clicked() {
+                *action = Some(Action::MoveConnect);
+            }
+            if kit::small_button(ui, MOVE_APPROVALS, Style::Prominent).clicked() {
+                *action = Some(Action::Move);
+            }
+        });
+        return;
+    }
     g.row(|ui| {
         egui::Sides::new()
             .shrink_left()
             .wrap_mode(egui::TextWrapMode::Wrap)
             .height(rows::LINE)
-            .show(
-                ui,
-                |ui| {
-                    ui.horizontal_top(|ui| {
-                        kit::icon_tile_sized(ui, Icon::Globe, kit::palette().accent, 22.0);
-                        ui.vertical(|ui| {
-                            ui.spacing_mut().item_spacing.y = 1.0;
-                            ui.label(
-                                kit::medium("Approvals go through Apassy relay", Font::Body)
-                                    .color(kit::palette().label),
-                            );
-                            ui.add(Label::new(rows::note(note)).wrap());
-                        });
-                    });
-                },
-                |ui| {
-                    // Right to left: the second button first.
-                    if to_mac && to_connect {
-                        if kit::small_button(ui, MOVE_TO_CONNECT, Style::Bordered).clicked() {
-                            *action = Some(Action::MoveConnect);
-                        }
-                        if kit::small_button(ui, MOVE_APPROVALS, Style::Prominent).clicked() {
-                            *action = Some(Action::Move);
-                        }
-                    } else if to_connect {
-                        if kit::small_button(ui, MOVE_TO_CONNECT, Style::Prominent).clicked() {
-                            *action = Some(Action::MoveConnect);
-                        }
-                    } else if kit::small_button(ui, MOVE_APPROVALS, Style::Prominent).clicked() {
-                        *action = Some(Action::Move);
+            .show(ui, text, |ui| {
+                if to_connect {
+                    if kit::small_button(ui, MOVE_TO_CONNECT, Style::Prominent).clicked() {
+                        *action = Some(Action::MoveConnect);
                     }
-                },
-            );
+                } else if kit::small_button(ui, MOVE_APPROVALS, Style::Prominent).clicked() {
+                    *action = Some(Action::Move);
+                }
+            });
+    });
+}
+
+/// A row of buttons on the right, under the row that they act on (frames 9a and 9d).
+/// `add` adds them right to left: the first is the rightmost.
+fn buttons_row(g: &mut rows::Group<'_>, add: impl FnOnce(&mut Ui)) {
+    g.row(|ui| {
+        ui.allocate_ui_with_layout(
+            Vec2::new(ui.available_width(), rows::LINE),
+            Layout::right_to_left(Align::Center),
+            |ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                add(ui);
+            },
+        );
     });
 }
 
@@ -1064,17 +1111,17 @@ fn devices_group(ui: &mut Ui, view: &DevicesView, action: &mut Option<Action>) {
             }
         }
         if view.devices.len() <= 1 {
-            g.row(|ui| {
-                ui.add(Label::new(rows::label_text(ONLY_THIS_MAC)).wrap());
-            });
+            // A hint, in the note style (frame 7).
+            g.note_row(ONLY_THIS_MAC);
         }
         for (note, tone) in &view.notes {
             g.tone_row(note.as_str(), tone.text());
         }
     });
     ui.add_space(12.0);
-    // One blue button for each view: the move row has it in frame 4.
-    let style = if view.can_move || view.can_move_connect {
+    // One blue button for each view: the move row has it in frame 4. The choices under
+    // the end of the hosted approvals (frame 9d) are bordered.
+    let style = if move_choices(view).is_some() {
         Style::Bordered
     } else {
         Style::Prominent
@@ -1152,7 +1199,7 @@ fn device_row(g: &mut rows::Group<'_>, device: &DeviceEntry, now: u64) -> Option
                             if device.target == Target::ThisMac {
                                 kit::cap_toned(
                                     ui,
-                                    concat!("This ", crate::computer!()),
+                                    concat!("This ", crate::computer_cap!()),
                                     Tone::Neutral,
                                 );
                             }
@@ -1249,8 +1296,8 @@ fn relay_group(ui: &mut Ui, relay: &RelayView, action: &mut Option<Action>) {
 }
 
 /// Frame 9d: the hosted relay ended the approvals of the vault (`410`). One line, its
-/// help, and the choices of the notice that this Mac can take now; without either, the
-/// help says where to turn them on.
+/// help, and on a row below the choices of the notice that this Mac can take now;
+/// without either, a note says where to turn them on.
 fn ended_row(
     g: &mut rows::Group<'_>,
     relay: &RelayView,
@@ -1294,19 +1341,22 @@ fn ended_row(
                 },
                 |ui| {
                     kit::help_button(ui, RELAY_GROUP, &help);
-                    if relay.can_move_connect
-                        && kit::small_button(ui, MOVE_TO_CONNECT, Style::Bordered).clicked()
-                    {
-                        *action = Some(Action::MoveConnect);
-                    }
-                    if relay.can_move
-                        && kit::small_button(ui, MOVE_APPROVALS, Style::Bordered).clicked()
-                    {
-                        *action = Some(Action::Move);
-                    }
                 },
             );
     });
+    // The choices on their own row under the line, so that the line spans the row.
+    if relay.can_move || relay.can_move_connect {
+        buttons_row(g, |ui| {
+            if relay.can_move_connect
+                && kit::small_button(ui, MOVE_TO_CONNECT, Style::Bordered).clicked()
+            {
+                *action = Some(Action::MoveConnect);
+            }
+            if relay.can_move && kit::small_button(ui, MOVE_APPROVALS, Style::Bordered).clicked() {
+                *action = Some(Action::Move);
+            }
+        });
+    }
 }
 
 /// The warning line of the end of the free approvals (ADR 0037 D14).
@@ -1493,7 +1543,7 @@ pub(crate) fn revoke_sheet(
             ui,
             |_| {},
             |ui| {
-                if kit::button(ui, "Revoke", Style::Destructive).clicked() {
+                if kit::button(ui, "Revoke", Style::DestructiveBordered).clicked() {
                     choice = Some(Choice::Confirm);
                 }
                 if kit::alert_cancel(ui).clicked() {
@@ -1542,7 +1592,7 @@ pub(crate) fn linux_sheet(
         let mut done = false;
         kit::sheet_buttons(
             ui,
-            |ui| revoke = kit::button(ui, "Revoke…", Style::Destructive).clicked(),
+            |ui| revoke = kit::button(ui, "Revoke…", Style::DestructiveBordered).clicked(),
             |ui| done = kit::alert_default_button(ui, "Done").clicked(),
         );
         if revoke {
@@ -1625,7 +1675,7 @@ pub(crate) const ADDED_TAILSCALE: &str = concat!(
     crate::computer!(),
     "."
 );
-pub(crate) const MOVE_TITLE: &str = concat!("Move Approvals to This ", crate::computer!());
+pub(crate) const MOVE_TITLE: &str = concat!("Move Approvals to This ", crate::computer_cap!());
 pub(crate) const MOVE_LEAD: &str = concat!(
     "Your iPhone pairs again, with this ",
     crate::computer!(),
@@ -1776,7 +1826,11 @@ pub(crate) fn link_step(
                 );
             }
             if let Some(seconds) = step.seconds_left {
-                g.labeled(EXPIRES_IN, rows::value(expires_in(seconds)));
+                // The countdown in orange, as the mockup (frame 2a).
+                g.labeled(
+                    EXPIRES_IN,
+                    rows::value(expires_in(seconds)).color(Tone::Warning.text()),
+                );
             }
         });
         if step.shown.is_some() {
@@ -1848,7 +1902,7 @@ pub(crate) fn join_step(
     ui.add_enabled_ui(enabled, |ui| {
         kit::sheet_buttons(
             ui,
-            |ui| refuse = kit::button(ui, "Refuse", Style::Destructive).clicked(),
+            |ui| refuse = kit::button(ui, "Refuse", Style::DestructiveBordered).clicked(),
             |ui| confirm = kit::button(ui, "Confirm…", Style::Prominent).clicked(),
         );
     });
@@ -1865,7 +1919,15 @@ pub(crate) fn join_step(
 fn result_head(ui: &mut Ui, icon: Icon, tone: Tone, title: &str, lines: &[(&str, bool)]) {
     ui.vertical_centered(|ui| {
         ui.add_space(6.0);
-        kit::paint_icon_in(ui, icon, 30.0, tone.mark());
+        if matches!(icon, Icon::CheckCircle) {
+            // Done (frames 2c and 4c): a white check in a filled circle.
+            let (rect, _) = ui.allocate_exact_size(Vec2::splat(30.0), Sense::hover());
+            ui.painter().circle_filled(rect.center(), 15.0, tone.mark());
+            let inner = Rect::from_center_size(rect.center(), Vec2::splat(15.0));
+            kit::paint_icon(ui.painter(), inner, Icon::Check, kit::palette().on_accent);
+        } else {
+            kit::paint_icon_in(ui, icon, 30.0, tone.mark());
+        }
         ui.add_space(6.0);
         ui.label(kit::text(title, Font::Title3).color(kit::palette().label));
         ui.add_space(4.0);
@@ -1959,7 +2021,7 @@ fn move_step_row(g: &mut rows::Group<'_>, number: u8, title: &str, line: Option<
                 }
             });
             if state == 0 && number == 3 {
-                ui.add(egui::Spinner::new().size(12.0));
+                kit::spinner(ui, 12.0);
             }
         });
     });

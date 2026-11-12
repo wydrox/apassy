@@ -720,7 +720,7 @@ fn access_block(ui: &mut Ui, access: &AccessView, has_remote: bool) -> Option<Ac
         if access.reading {
             s.row(|ui| {
                 ui.horizontal(|ui| {
-                    ui.spinner();
+                    kit::spinner(ui, 16.0);
                     ui.label(
                         kit::text("Checking Tailscale…", Font::Callout)
                             .color(kit::palette().secondary),
@@ -824,7 +824,7 @@ fn connect_block(ui: &mut Ui, row: &ConnectRow) -> Option<Action> {
                             );
                             ui.horizontal(|ui| {
                                 if row.state == ConnectState::Connecting {
-                                    ui.spinner();
+                                    kit::spinner(ui, 16.0);
                                 }
                                 ui.add(
                                     Label::new(

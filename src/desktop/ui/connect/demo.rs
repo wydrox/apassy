@@ -18,6 +18,9 @@ use crate::desktop::DesktopApp;
 /// "Now" of the fixtures: Tue 10 Nov 2026, 14:20 UTC, as the mockup.
 const NOW: u64 = 1_794_320_400;
 const DAY: u64 = 86_400;
+/// The text of `ConnectError` for a Connect that cannot be reached.
+const UNREACHABLE_NOTE: &str =
+    "Apassy Connect could not be reached. Check the internet connection and try again.";
 /// 21 Sep 2026: the account and this Mac.
 const CREATED: u64 = 1_790_000_000;
 
@@ -26,6 +29,7 @@ const FRAMES: &[(&str, &str)] = &[
     ("1", "Frame 1: Not on Connect"),
     ("2a", "Frame 2a: Create the Account"),
     ("2b", "Frame 2b: Recovery Code"),
+    ("2c", "Frame 2c: Create, Busy and Error"),
     ("3", "Frame 3: Account, No Plan"),
     ("S", "Frame S: Signed Out"),
     ("4a", "Frame 4a: Picker, Personal"),
@@ -62,6 +66,8 @@ const FRAMES: &[(&str, &str)] = &[
     ("11b", "Frame 11b: Members First"),
     ("13a", "Frame 13a: Code Never Shown"),
     ("13c", "Frame 13c: The New Code"),
+    ("13d", "Frame 13d: A New Code of Another Device"),
+    ("13e", "Frame 13e: The New Code, Not Recorded"),
     // The states of the vault build that the mockup has no frame for.
     ("T1", "Asking Connect"),
     ("T2", "Connect Unreachable"),
@@ -130,6 +136,17 @@ pub(crate) fn fixture_plans() -> Plans {
     }
 }
 
+/// The name and the platform of this device in the demo: a Mac on macOS, a Linux
+/// computer on Linux, as the vault build names it there.
+#[cfg(not(target_os = "linux"))]
+const THIS_NAME: &str = "Mac mini (office)";
+#[cfg(not(target_os = "linux"))]
+const THIS_PLATFORM: &str = "mac";
+#[cfg(target_os = "linux")]
+const THIS_NAME: &str = "Linux desktop";
+#[cfg(target_os = "linux")]
+const THIS_PLATFORM: &str = "linux";
+
 fn devices() -> Vec<Device> {
     // The demo has no keys: each device shows a fixed fingerprint of the form of
     // `connect::key_fingerprint`, so the demo builds without the vault feature.
@@ -152,8 +169,8 @@ fn devices() -> Vec<Device> {
     vec![
         device(
             "dev_mmmmmmmmma",
-            "Mac mini (office)",
-            "mac",
+            THIS_NAME,
+            THIS_PLATFORM,
             CREATED,
             None,
             true,
@@ -265,7 +282,7 @@ fn frame(code: &str) -> (Shown, Option<Sheet>) {
             Shown::None,
             Some(Sheet::Create {
                 name: "Alex".to_owned(),
-                device_name: "Mac mini (office)".to_owned(),
+                device_name: THIS_NAME.to_owned(),
             }),
         ),
         "2b" => (
@@ -281,7 +298,7 @@ fn frame(code: &str) -> (Shown, Option<Sheet>) {
         "S" => (
             Shown::SignedOut {
                 name: Some("Alex".to_owned()),
-                device_name: "Mac mini (office)".to_owned(),
+                device_name: THIS_NAME.to_owned(),
             },
             None,
         ),
@@ -311,7 +328,7 @@ fn frame(code: &str) -> (Shown, Option<Sheet>) {
             family_owner(),
             Some(Sheet::Active {
                 title: "Connect Family Is Active".to_owned(),
-                line: "Renews 10 Nov 2027.".to_owned(),
+                line: super::active_lines(Some("family"), "Renews 10 Nov 2027."),
             }),
         ),
         "6a" => (personal(), None),
@@ -403,7 +420,7 @@ fn frame(code: &str) -> (Shown, Option<Sheet>) {
             personal(),
             Some(Sheet::Revoke {
                 index: 0,
-                name: "Mac mini (office)".to_owned(),
+                name: THIS_NAME.to_owned(),
                 this: true,
             }),
         ),
@@ -485,6 +502,33 @@ fn frame(code: &str) -> (Shown, Option<Sheet>) {
             }),
             None,
         ),
+        "13d" => (
+            Shown::Account(Account {
+                recovery_changed: Some(super::RecoveryLine {
+                    text: super::recovery_changed(Some("Alex's iPhone"), Some(NOW - DAY)),
+                    recovery_key: String::new(),
+                }),
+                ..account(active("personal", renews), None)
+            }),
+            None,
+        ),
+        "13e" => (
+            personal(),
+            Some(Sheet::Recovery {
+                words: Zeroizing::new(
+                    "amber lotus quiet prism walnut ember falcon meadow pilot cobalt summit river nickel violet canyon tulip"
+                        .to_owned(),
+                ),
+                unrecorded: true,
+            }),
+        ),
+        "2c" => (
+            Shown::None,
+            Some(Sheet::Create {
+                name: "Alex".to_owned(),
+                device_name: THIS_NAME.to_owned(),
+            }),
+        ),
         "13c" => (
             personal(),
             Some(Sheet::Recovery {
@@ -504,8 +548,8 @@ fn frame(code: &str) -> (Shown, Option<Sheet>) {
         "T2" => (
             Shown::Unreachable {
                 name: Some("Alex".to_owned()),
-                device_name: "Mac mini (office)".to_owned(),
-                note: "Apassy Connect could not be reached. Check the internet connection and try again."
+                device_name: THIS_NAME.to_owned(),
+                note: UNREACHABLE_NOTE
                     .to_owned(),
             },
             None,
@@ -513,7 +557,7 @@ fn frame(code: &str) -> (Shown, Option<Sheet>) {
         "T3" | "T4" => (
             Shown::Removed {
                 name: Some("Alex".to_owned()),
-                device_name: "Mac mini (office)".to_owned(),
+                device_name: THIS_NAME.to_owned(),
                 note: super::REMOVED_NOTE.to_owned(),
             },
             (code == "T4").then_some(Sheet::ForgetRemoved),
@@ -624,7 +668,12 @@ pub(crate) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     }
     let plans = view.plans.clone();
     let choice = app.ui.connect.sheet.as_mut().and_then(|sheet| {
-        super::sheet(&ctx, sheet, plans.as_ref(), false, None, NOW, &|ui, _| {
+        // Frame 2c: the creation waits for Connect after a first try failed.
+        let (busy, error) = match app.ui.connect.demo.code() {
+            "2c" => (true, Some(UNREACHABLE_NOTE)),
+            _ => (false, None),
+        };
+        super::sheet(&ctx, sheet, plans.as_ref(), busy, error, NOW, &|ui, _| {
             // The demo build has no QR encoder; the mockup's code is decorative too.
             ui.add_space(4.0);
         })

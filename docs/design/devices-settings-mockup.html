@@ -684,7 +684,7 @@ svg{display:block}
         <p>Approvals already use this Mac.</p>
         <p style="color:var(--sec)">Apassy relay did not answer the removal.</p>
       </div>
-      <div class="sbar"><span class="btn">Later</span><span class="btn pri">Try Again</span></div>
+      <div class="sbar"><span class="btn pri">Later</span></div>
     </div>
   </div>
   <ul class="fnotes">
@@ -693,7 +693,7 @@ svg{display:block}
     <li><b>4b</b> runs <code>Node::move_approvals</code>: step 1 at open, step 2 is the frame 2 flow (2b words, owner check), step 3 after the confirmed join.</li>
     <li><b>Cancel</b> before the join deletes the new node team; the hosted team stays. After the join there is no cancel; step 3 runs.</li>
     <li><b>4c</b> names each device that joined. The watch has its own key (ADR 0039), so it must pair again; the note says so only when a watch was paired.</li>
-    <li><b>4d</b> when <code>DELETE /v1/devices/{id}</code> fails. Later keeps the row "Old entry still on Apassy relay" with Try Again in the This Mac group.</li>
+    <li><b>4d</b> when <code>DELETE /v1/devices/{id}</code> fails. Later keeps the row "Old entry still on Apassy relay" with its ⓘ in the This Mac group. There is no Try Again: a move that ended keeps no hosted team to ask again.</li>
   </ul>
 </section>
 
@@ -937,6 +937,7 @@ svg{display:block}
       <h2>Use a vault from another Mac</h2>
       <p class="lead">No vault of your account waits for this Mac. On the other Mac, open Settings › Vault › Sync and select Apassy Connect.</p>
       <p class="lead" style="color:var(--sec)">Signed out: "Sign in to Apassy Connect in Settings › Connect first. Then the vaults of your account show here."</p>
+      <p class="lead" style="color:var(--sec)">Not in an account: "This Mac is not in an Apassy Connect account yet. On a device of the account, choose Add a Device…, then add this Mac with the code that it shows." and the button "Add This Mac to an Account…".</p>
     </div>
     <div class="shc">
       <div class="plabel">10c · The passphrase</div>

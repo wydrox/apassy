@@ -435,8 +435,8 @@ Apassy Connect (ADR 0037 stage 7; plan s7 unit M3) keeps the encrypted copy of a
 
 ### 18.1 Turn it on
 
-1. Settings › Connect: an account on this Mac, signed in ("Sign In…" after each unlock), with a plan that pushes (active, trialing, or past due in its grace).
-2. Settings › Vault › Sync, the vault's row, "Apassy relay": the sheet offers **Apassy Connect** first. Select "Turn on".
+1. Settings › Connect: an account on this Mac with a plan that pushes (active, trialing, or past due in its grace). The account session opens with the unlock of the vault (one read of the key; with a Touch ID unlock, the key that it offered), and closes at the lock; "Sign In…" shows only when that read failed.
+2. Settings › Vault › Sync, the vault's row: the picker offers **Apassy Connect** after "Apassy relay" while the account can sync; it opens the sheet on its "Apassy Connect" choice (the sheet of "Apassy relay" offers the same choice first). Select "Turn on". The row, the Vault row of Settings, the sidebar, and the vault list then name the sync "Apassy Connect", and the row offers "Devices of the Account…" (Settings › Connect) instead of the device links of the relay.
 3. Apassy makes the store (`POST /v1/account/vaults`; the same vault again answers the existing store), signs in to it with the account key, and pushes version 1. Then it adds the other live devices of the account to the store (`POST /v1/account/vaults/{team}/devices`). Those devices joined the account with the safety words and Touch ID on a live device; each still needs the vault passphrase.
 
 The account row, the sync state, and the link of the vault list are stored only after the first push worked. "This account is not on Apassy Connect, or its plan is read-only." means no plan that pushes: nothing turned on.

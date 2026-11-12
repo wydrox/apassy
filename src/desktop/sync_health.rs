@@ -68,6 +68,8 @@ pub(crate) fn sync_log_path(data_dir: &Path) -> PathBuf {
 pub(crate) enum SyncKind {
     Folder,
     Relay,
+    /// A vault store of Apassy Connect (plan s7 unit M3).
+    Connect,
 }
 
 impl SyncKind {
@@ -75,6 +77,7 @@ impl SyncKind {
         match self {
             Self::Folder => "folder",
             Self::Relay => "relay",
+            Self::Connect => "connect",
         }
     }
 }

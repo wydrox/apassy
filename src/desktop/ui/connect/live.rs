@@ -1313,7 +1313,7 @@ fn apply(app: &mut DesktopApp, ctx: &egui::Context, outcome: Outcome) {
                 };
                 app.ui.connect.sheet = Some(Sheet::Active {
                     title: format!("{name} Is Active"),
-                    line,
+                    line: super::active_lines(view.plan.plan.as_deref(), &line),
                 });
                 refresh(app, ctx);
             }

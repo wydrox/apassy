@@ -220,16 +220,17 @@ fn share_request_action(request: OwnerRequest) -> OwnerAction {
 /// device list signed, the short fingerprint of its pinned root, and its name at Connect
 /// beside them as a hint only.
 fn person_text(name: &str, hint: &str, fingerprint: &str) -> String {
-    let (name, hint, fingerprint) = (page_text(name), page_text(hint), page_text(fingerprint));
-    let verified = if name.is_empty() {
-        "an account that this device has not verified yet".to_owned()
-    } else {
-        format!("\u{201c}{name}\u{201d} (account key {fingerprint})")
-    };
-    if hint.is_empty() || hint == name {
-        verified
-    } else {
-        format!("{verified}, which Apassy Connect calls \u{201c}{hint}\u{201d},")
+    let (name, hint) = (page_text(name), page_text(hint));
+    // The key that the owner compares stays on one line.
+    let fingerprint = page_text(fingerprint).replace(' ', "\u{a0}");
+    // One form, as the rows of Shared Vaults: the verified name, then the name at
+    // Connect and the key in brackets, so no clause ends the question.
+    match (name.is_empty(), hint.is_empty() || hint == name) {
+        (true, _) => "an account that this device has not verified yet".to_owned(),
+        (false, true) => format!("\u{201c}{name}\u{201d} (account key {fingerprint})"),
+        (false, false) => {
+            format!("\u{201c}{name}\u{201d} ({hint}, account key {fingerprint})")
+        }
     }
 }
 
@@ -2078,18 +2079,18 @@ impl OwnerRequest {
                 this_device: true,
                 ..
             } => format!(
-                concat!("Forget this ", crate::computer!(), " (\"{}\", key {}) in your Apassy Connect account? It leaves every vault store of the account and signs out. Your vaults stay on this ", crate::computer!(), "."),
+                concat!("Forget this ", crate::computer!(), " (\u{201c}{}\u{201d}, key {}) in your Apassy Connect account? It leaves every vault copy at Connect and signs out. Your vaults stay on this ", crate::computer!(), "."),
                 page_text(device_name),
-                page_text(fingerprint)
+                page_text(fingerprint).replace(' ', "\u{a0}")
             ),
             Self::RevokeConnectDevice {
                 device_name,
                 fingerprint,
                 ..
             } => format!(
-                "Remove \"{}\" (key {}) from your Apassy Connect account? It signs out at once and leaves every vault store of the account. Its key fingerprint is shown in Settings › Connect on that device.",
+                "Revoke \u{201c}{}\u{201d} (key {})? It leaves your Apassy Connect account and every vault copy at Connect, and signs out at once. Its key fingerprint is shown in Settings › Connect on that device.",
                 page_text(device_name),
-                page_text(fingerprint)
+                page_text(fingerprint).replace(' ', "\u{a0}")
             ),
             Self::DeleteConnectAccount { .. } => "Delete your Apassy Connect account? The subscription ends now, and every vault store, device, and link of the account is deleted at Connect. Your vaults stay on your devices.".to_owned(),
             Self::NewRecoveryCode { .. } => "Make a new recovery code for your Apassy Connect account? Apassy shows the new code once. The old recovery code stops working.".to_owned(),
@@ -2171,7 +2172,7 @@ impl OwnerRequest {
                 words,
                 ..
             } if words.is_empty() => format!(
-                "Share \"{}\" with {} through Apassy Connect? Their devices can then read and change the encrypted copy; they still need the passphrase to open the vault.",
+                "Share \u{201c}{}\u{201d} with {} through Apassy Connect? Their devices can then read and change the encrypted copy; they still need the passphrase to open the vault.",
                 page_text(vault_name),
                 person_text(peer_name, peer_hint, fingerprint)
             ),
@@ -2183,7 +2184,7 @@ impl OwnerRequest {
                 words,
                 ..
             } => format!(
-                "Share \"{}\" with {} through Apassy Connect? Both devices show: {}. Their devices can then read and change the encrypted copy of this vault; they still need its passphrase.",
+                "Share \u{201c}{}\u{201d} with {} through Apassy Connect? Both devices show: {}. Their devices can then read and change the encrypted copy of this vault; they still need its passphrase.",
                 page_text(vault_name),
                 person_text(peer_name, peer_hint, fingerprint),
                 page_text(words)
@@ -2243,7 +2244,7 @@ impl OwnerRequest {
                 let hint = if vault_hint.is_empty() {
                     String::new()
                 } else {
-                    format!(" Apassy Connect calls it \"{}\".", page_text(vault_hint))
+                    format!(" Apassy Connect calls it \u{201c}{}\u{201d}.", page_text(vault_hint))
                 };
                 format!(
                     "Join a vault shared by {}?{hint} This device downloads the shared copy and syncs it; you need the passphrase of the vault to open it.",
@@ -2257,7 +2258,7 @@ impl OwnerRequest {
                 vault_name,
                 ..
             } => format!(
-                "Join \"{}\", shared by {}, again? This device syncs the shared copy again.",
+                "Join \u{201c}{}\u{201d}, shared by {}, again? This device syncs the shared copy again.",
                 page_text(vault_name),
                 person_text(peer_name, peer_hint, fingerprint)
             ),
@@ -2269,7 +2270,7 @@ impl OwnerRequest {
                 leave: false,
                 ..
             } => format!(
-                "Stop sharing \"{}\" with {}? Their devices leave the shared copy now.",
+                "Stop sharing \u{201c}{}\u{201d} with {}? Their devices leave the shared copy now.",
                 page_text(vault_name),
                 person_text(peer_name, peer_hint, fingerprint)
             ),
@@ -2281,7 +2282,7 @@ impl OwnerRequest {
                 leave: true,
                 ..
             } => format!(
-                "Leave \"{}\", shared by {}? This device stops syncing the shared copy; the vault stays here.",
+                "Leave \u{201c}{}\u{201d}, shared by {}? This device stops syncing the shared copy; the vault stays here.",
                 page_text(vault_name),
                 person_text(peer_name, peer_hint, fingerprint)
             ),
@@ -2292,7 +2293,7 @@ impl OwnerRequest {
                 // name that Connect gives beside it).
                 let people: Vec<String> = people.iter().map(|person| page_text(person)).collect();
                 format!(
-                    "Confirm that this account made \"{}\"? It was shared before Apassy recorded which account made a vault, so its shares do not count yet. After this, the shares of this vault count again: {} can sync it.",
+                    "Confirm that this account made \u{201c}{}\u{201d}? It was shared before Apassy recorded which account made a vault, so its shares do not count yet. After this, the shares of this vault count again: {} can sync it.",
                     page_text(vault_name),
                     if people.is_empty() {
                         "the people you shared it with".to_owned()
@@ -2310,7 +2311,7 @@ impl OwnerRequest {
                 ..
             } => format!(
                 concat!(
-                    "Take the copy of \"{vault}\" on the relay without its earlier history? Version {version} was saved by {device} on {day}. ",
+                    "Take the copy of \u{201c}{vault}\u{201d} on the relay without its earlier history? Version {version} was saved by {device} on {day}. ",
                     "Some earlier versions were saved by devices that this ",
                     crate::computer!(),
                     " cannot verify (a person who shares the vault reset their account), so Apassy does not check them. {then}"
@@ -4400,7 +4401,7 @@ mod connect_proof_tests {
         assert_eq!(claim.action(), action);
         assert!(!action.allowed_without_vault());
         let text = claim.describe();
-        assert!(text.contains("\"Family\""), "{text}");
+        assert!(text.contains("\u{201c}Family\u{201d}"), "{text}");
         assert!(
             text.contains(": \u{201c}Ola\u{201d} can sync it."),
             "{text}"

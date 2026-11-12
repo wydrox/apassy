@@ -156,6 +156,11 @@ pub struct RelayLink {
     /// for a hosted relay and in an older list.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub alt: Vec<String>,
+    /// The team is a vault store of the Apassy Connect account of this device (plan s7
+    /// unit M3): the app names the sync "Apassy Connect". A label only: the vault
+    /// (`key_source = 'account'`) decides how the sync signs. `false` in an older list.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub connect: bool,
     /// Fields of a later Apassy. They stay when this version writes the list.
     #[serde(flatten)]
     extra: Map<String, Value>,
@@ -169,6 +174,7 @@ impl RelayLink {
             device_id,
             pin: None,
             alt: Vec::new(),
+            connect: false,
             extra: Map::new(),
         }
     }
@@ -1086,6 +1092,44 @@ mod tests {
         // Sync off writes no field.
         registry.entry_mut(&id).expect("entry").sync = None;
         assert!(!registry.to_json().contains("\"sync\""));
+    }
+
+    /// The label of a vault store of Apassy Connect round-trips; a relay link of the
+    /// relay writes no `connect` field, and an older list reads as a relay link.
+    #[test]
+    fn the_connect_label_of_a_relay_link_round_trips() {
+        let mut registry = Registry::new();
+        let id = registry
+            .add("Personal", Path::new("/tmp/apassy-connect.db"), 1)
+            .expect("add");
+        let mut link = RelayLink::new("https://apassy-relay.wyderka.cc", "t_7k2m9q4x8c", 2);
+        registry.entry_mut(&id).expect("entry").sync = Some(SyncLink::relay(&id, link.clone()));
+        let text = registry.to_json();
+        assert!(!text.contains("\"connect\""), "{text}");
+        assert!(
+            !Registry::parse(&text)
+                .expect("parse")
+                .get(&id)
+                .expect("entry")
+                .sync_relay()
+                .expect("relay")
+                .connect
+        );
+        link.connect = true;
+        registry.entry_mut(&id).expect("entry").sync = Some(SyncLink::relay(&id, link));
+        let text = registry.to_json();
+        assert!(
+            text.contains("\"connect\": true") || text.contains("\"connect\":true"),
+            "{text}"
+        );
+        let read = Registry::parse(&text).expect("parse");
+        assert!(
+            read.get(&id)
+                .expect("entry")
+                .sync_relay()
+                .expect("relay")
+                .connect
+        );
     }
 
     /// ADR 0022: a relay link round-trips, has no file, and an older list without

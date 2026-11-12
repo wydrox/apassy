@@ -603,6 +603,47 @@ fn linux_screens_name_nothing_of_the_mac() {
     );
 }
 
+/// The texts of syncing through Apassy Connect (the "Apassy Connect" choice of the setup
+/// sheet, the status lines of a vault store, the results of turning it on) need an
+/// account with a plan to show; on Linux they name no Mac, no Keychain, and no "Macs".
+#[cfg(target_os = "linux")]
+#[test]
+fn the_connect_sync_texts_use_the_linux_words() {
+    use super::sync::relay;
+    use crate::desktop::sync_worker::{ConnectState, UiStatus};
+    let mut texts = vec![
+        relay::CONNECT_SETUP_LEAD.to_owned(),
+        relay::CONNECT_SETUP_WORDS.to_owned(),
+        relay::CONNECT_NEEDS_PLAN.to_owned(),
+        relay::CONNECT_DEVICES_NOTE.to_owned(),
+        relay::CONNECT_UNREACHABLE.to_owned(),
+        relay::MOVE_OLD_DELETED.to_owned(),
+    ];
+    for status in [
+        UiStatus::UpToDate(None),
+        UiStatus::Syncing,
+        UiStatus::Damaged,
+        UiStatus::Waiting,
+        UiStatus::Connect(ConnectState::SignedOut),
+        UiStatus::Connect(ConnectState::ReadOnly {
+            until: Some(1_800_000_000),
+        }),
+        UiStatus::Connect(ConnectState::Suspended {
+            delete_at: Some(1_800_000_000),
+        }),
+        UiStatus::Connect(ConnectState::Suspended { delete_at: None }),
+    ] {
+        texts.push(relay::words_of(&status, None, true));
+    }
+    let all = texts.join("\n");
+    assert_eq!(mac_words(&all), Vec::<String>::new(), "{all}");
+    assert!(
+        all.contains("The account key of this computer signs each change"),
+        "{all}"
+    );
+    assert!(all.contains("Saved to Apassy Connect."), "{all}");
+}
+
 /// The guard sees what it guards: the Linux words are on the screens, among them the
 /// Linux shortcuts in Settings > Updates and in the sidebar names.
 #[cfg(target_os = "linux")]
