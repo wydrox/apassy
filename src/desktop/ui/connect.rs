@@ -137,6 +137,8 @@ pub(crate) const MORE_ACCOUNT: &str = "More account actions";
 pub(crate) const COPY_ACCOUNT_ID: &str = "Copy Account ID";
 /// The row of an account without a family or team, with "Join…".
 pub(crate) const JOIN_ROW: &str = "Family or Team";
+/// The cap of a member that waits for the organizer's confirmation.
+pub(crate) const PENDING_MEMBER: &str = "Pending";
 
 /// The line of a new recovery code that another device made (section 9.1): `device`, the
 /// signed name of that device when the device list holds it, and `at`, the time of the
@@ -336,6 +338,7 @@ pub(crate) const TEXTS: &[&str] = &[
     MORE_ACCOUNT,
     COPY_ACCOUNT_ID,
     JOIN_ROW,
+    PENDING_MEMBER,
     ACCOUNT_ID,
     RECOVER,
     RECOVER_TITLE,
@@ -1280,7 +1283,7 @@ fn entity_row(
     g: &mut rows::Group<'_>,
     glyph: impl FnOnce(&mut Ui),
     title: &str,
-    cap: Option<(&str, Tone)>,
+    caps: &[(&str, Tone)],
     subline: &str,
     detail: Option<&str>,
     controls: impl FnOnce(&mut Ui),
@@ -1305,8 +1308,8 @@ fn entity_row(
                                 });
                                 name.on_hover_text(detail);
                             }
-                            if let Some((cap, tone)) = cap {
-                                kit::cap_toned(ui, cap, tone);
+                            for (cap, tone) in caps {
+                                kit::cap_toned(ui, cap, *tone);
                             }
                         });
                     };
@@ -1338,18 +1341,18 @@ fn devices_group(ui: &mut Ui, view: &ConnectView, account: &Account, action: &mu
             let detail = device_detail(device);
             let key =
                 (!device.fingerprint.is_empty()).then(|| format!("Key {}", device.fingerprint));
-            let cap = if device.this {
-                Some((THIS_DEVICE, Tone::Neutral))
+            let caps: &[(&str, Tone)] = if device.this {
+                &[(THIS_DEVICE, Tone::Neutral)]
             } else if !device.verified {
-                Some((NOT_VERIFIED, Tone::Warning))
+                &[(NOT_VERIFIED, Tone::Warning)]
             } else {
-                None
+                &[]
             };
             entity_row(
                 g,
                 |ui| device_glyph(ui, &device.platform),
                 &device.name,
-                cap,
+                caps,
                 "",
                 Some(detail.as_str()),
                 |ui| {
@@ -1398,6 +1401,17 @@ fn devices_group(ui: &mut Ui, view: &ConnectView, account: &Account, action: &mu
 }
 
 /// The role cap of a member: the owner of a family is its organizer.
+/// The facts of a member in one line: its role and the day it joined, "Admin · Since 22
+/// Sep 2026", "Member · Pending". The hover text of its row and its VoiceOver description.
+pub(crate) fn member_detail(kind: &str, member: &Member) -> String {
+    let role = role_cap(kind, &member.role).unwrap_or("Member");
+    match (member.state == "pending", member.joined_at) {
+        (true, _) => format!("{role} · {PENDING_MEMBER}"),
+        (false, Some(at)) => format!("{role} · Since {}", day(at)),
+        (false, None) => role.to_owned(),
+    }
+}
+
 fn role_cap(kind: &str, role: &str) -> Option<&'static str> {
     match (kind, role) {
         ("family", "owner") => Some("Organizer"),
@@ -1422,12 +1436,15 @@ fn group_section(
     rows::group_box(ui, |g| {
         for (index, member) in group.members.iter().enumerate() {
             let pending = member.state == "pending";
-            let since = member.joined_at.map(|at| format!("Since {}", day(at)));
-            let cap = if pending {
-                Some(("Pending", Tone::Warning))
-            } else {
-                role_cap(&group.kind, &member.role).map(|cap| (cap, Tone::Neutral))
-            };
+            // The role stays beside "Pending" (an organizer confirms an admin knowingly),
+            // and is in the hover text with the day the member joined.
+            let role = role_cap(&group.kind, &member.role);
+            let mut caps: Vec<(&str, Tone)> =
+                role.map(|cap| (cap, Tone::Neutral)).into_iter().collect();
+            if pending {
+                caps.push((PENDING_MEMBER, Tone::Warning));
+            }
+            let detail = member_detail(&group.kind, member);
             let removable = member.role != "owner"
                 && member.account_id != account.account_id
                 && (group.role == "owner" || member.role == "member");
@@ -1437,9 +1454,9 @@ fn group_section(
                     kit::avatar(ui, &member.name, 28.0);
                 },
                 &member.name,
-                cap,
+                &caps,
                 "",
-                since.as_deref(),
+                Some(detail.as_str()),
                 |ui| {
                     ui.add_enabled_ui(!view.locked, |ui| {
                         let confirm = format!("Confirm {}", member.name);

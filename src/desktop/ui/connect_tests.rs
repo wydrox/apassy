@@ -3461,3 +3461,29 @@ fn the_recovery_rows_fit_their_column_at_each_width() {
         }
     }
 }
+
+/// A pending member keeps its role: the cap beside "Pending", and the hover text and
+/// VoiceOver description of its row ("Admin · Pending"); an active one says since when.
+#[test]
+fn a_pending_member_keeps_its_role() {
+    use super::connect::{Member, member_detail};
+    let member = |role: &str, state: &str| Member {
+        account_id: "acc_janaaaaaaa".to_owned(),
+        name: "Jan".to_owned(),
+        role: role.to_owned(),
+        state: state.to_owned(),
+        joined_at: Some(1_790_000_000),
+    };
+    assert_eq!(
+        member_detail("team", &member("admin", "pending")),
+        "Admin · Pending"
+    );
+    assert_eq!(
+        member_detail("family", &member("member", "pending")),
+        "Member · Pending"
+    );
+    assert_eq!(
+        member_detail("team", &member("admin", "active")),
+        format!("Admin · Since {}", super::connect::day(1_790_000_000))
+    );
+}
