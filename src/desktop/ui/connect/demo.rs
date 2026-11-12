@@ -268,6 +268,37 @@ fn account(plan: Plan, group: Option<Group>) -> Account {
 /// The words of the recovery code that frame 14 types (synthetic).
 const OLD_WORDS: &str = "blaze cable flute board seal tiger maple orbit cedar lemon quartz otter harbor mango piano river";
 
+/// The words of the recovery codes of the frames, the only words that the demo build
+/// knows (it has no word list).
+const NEW_WORDS: &str = "amber lotus quiet prism walnut ember falcon meadow pilot cobalt summit river nickel violet canyon tulip";
+
+/// A typed recovery code as the vault build reads it, with the words of the frames as the
+/// list.
+pub(super) fn typed_code(code: &str) -> super::Typed {
+    let words: Vec<String> = code
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .map(str::to_lowercase)
+        .filter(|word| !word.is_empty() && !word.bytes().all(|byte| byte.is_ascii_digit()))
+        .collect();
+    if words.is_empty() {
+        return super::Typed::Empty;
+    }
+    let known = |word: &str| {
+        OLD_WORDS
+            .split(' ')
+            .chain(NEW_WORDS.split(' '))
+            .any(|w| w == word)
+    };
+    if let Some((index, word)) = words.iter().enumerate().find(|(_, word)| !known(word)) {
+        return super::Typed::Unknown(index + 1, word.clone());
+    }
+    if words.len() == 16 {
+        super::Typed::Ready
+    } else {
+        super::Typed::Count(words.len())
+    }
+}
+
 /// Frame 14a and its states: the recovery sheet with `account_id` and `code` typed.
 fn recover_sheet(account_id: &str, code: &str) -> Sheet {
     Sheet::Recover {

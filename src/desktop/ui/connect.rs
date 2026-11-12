@@ -1961,6 +1961,62 @@ pub(crate) fn recovery_copy(account_id: &str, words: &str) -> String {
     format!("{ACCOUNT_ID}: {account_id}\n{RECOVER_CODE}: {words}")
 }
 
+/// What the recovery sheet reads in a typed recovery code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Typed {
+    Empty,
+    Ready,
+    /// The word at this place (from 1) is not a word of the list.
+    Unknown(usize, String),
+    /// Every word is of the list, and there are this many, not 16.
+    Count(usize),
+}
+
+/// The vault build reads a typed code with the word list of `crate::connect`.
+#[cfg(feature = "vault")]
+fn typed_code(code: &str) -> Typed {
+    use crate::connect::{TypedRecovery, read_recovery};
+    match read_recovery(code) {
+        TypedRecovery::Empty => Typed::Empty,
+        TypedRecovery::Ready(_) => Typed::Ready,
+        TypedRecovery::UnknownWord { position, word } => Typed::Unknown(position, word),
+        TypedRecovery::Count(count) => Typed::Count(count),
+    }
+}
+
+/// The demo build has no word list: it reads the synthetic words of its frames.
+#[cfg(not(feature = "vault"))]
+fn typed_code(code: &str) -> Typed {
+    demo::typed_code(code)
+}
+
+/// Whether `text` is an account id (`acc_` and 10 characters of `a-z2-7`).
+#[cfg(feature = "vault")]
+fn account_id_ok(text: &str) -> bool {
+    crate::connect::words::valid_account_id(text)
+}
+
+#[cfg(not(feature = "vault"))]
+fn account_id_ok(text: &str) -> bool {
+    text.strip_prefix("acc_").is_some_and(|rest| {
+        rest.len() == 10
+            && rest
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || (b'2'..=b'7').contains(&byte))
+    })
+}
+
+/// The account id in a pasted text (the Copy button of a recovery code).
+#[cfg(feature = "vault")]
+fn pasted_account_id(text: &str) -> Option<String> {
+    crate::connect::find_account_id(text)
+}
+
+#[cfg(not(feature = "vault"))]
+fn pasted_account_id(_text: &str) -> Option<String> {
+    None
+}
+
 /// What the recovery sheet says of what the owner typed: the problem with the account id,
 /// the problem with the words, and whether "Recover…" may run.
 pub(crate) fn recover_check(
@@ -1968,17 +2024,14 @@ pub(crate) fn recover_check(
     code: &str,
     device_name: &str,
 ) -> (Option<&'static str>, Option<String>, bool) {
-    use crate::connect::{TypedRecovery, read_recovery};
     let id = account_id.trim().to_ascii_lowercase();
-    let id_ok = crate::connect::words::valid_account_id(&id);
+    let id_ok = account_id_ok(&id);
     let id_note = (!id.is_empty() && !id_ok).then_some(RECOVER_ID_WRONG);
-    let (code_note, code_ok) = match read_recovery(code) {
-        TypedRecovery::Empty => (None, false),
-        TypedRecovery::Ready(_) => (None, true),
-        TypedRecovery::UnknownWord { position, word } => {
-            (Some(recover_word_wrong(position, &word)), false)
-        }
-        TypedRecovery::Count(count) => (Some(recover_count_wrong(count)), false),
+    let (code_note, code_ok) = match typed_code(code) {
+        Typed::Empty => (None, false),
+        Typed::Ready => (None, true),
+        Typed::Unknown(position, word) => (Some(recover_word_wrong(position, &word)), false),
+        Typed::Count(count) => (Some(recover_count_wrong(count)), false),
     };
     (
         id_note,
@@ -2014,7 +2067,7 @@ fn recover_sheet(
             ui.label(rows::label_text(RECOVER_CODE));
             let response = kit::text_area(ui, code, "connect-recover-code", RECOVER_CODE_HINT, 3);
             if response.changed() && account_id.trim().is_empty() {
-                if let Some(id) = crate::connect::find_account_id(code) {
+                if let Some(id) = pasted_account_id(code) {
                     *account_id = id;
                 }
             }
