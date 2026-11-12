@@ -32,9 +32,17 @@ const BUTTON_GAP: f32 = 8.0;
 
 /// The label of a group: 12 points, semibold, secondary.
 pub(crate) fn group_label(ui: &mut Ui, title: &str) {
+    group_label_with_help(ui, title, &[]);
+}
+
+/// [`group_label`] with an ⓘ beside the title when `help` has lines. The ⓘ is drawn in a
+/// child area centred on the title, so it never makes the title row taller: the group
+/// starts as far under this title as under every other.
+pub(crate) fn group_label_with_help(ui: &mut Ui, title: &str, help: &[&str]) {
+    const HELP_SIZE: f32 = 18.0;
     ui.add_space(LABEL_TOP);
     // A frame, not a horizontal row: a row would be one control high.
-    Frame::NONE
+    let label = Frame::NONE
         .inner_margin(Margin {
             left: 2,
             ..Margin::ZERO
@@ -47,8 +55,24 @@ pub(crate) fn group_label(ui: &mut Ui, title: &str) {
                         .color(kit::palette().secondary),
                 )
                 .selectable(false),
-            );
-        });
+            )
+        })
+        .inner;
+    if !help.is_empty() {
+        let rect = egui::Rect::from_center_size(
+            egui::pos2(
+                label.rect.right() + 4.0 + HELP_SIZE / 2.0,
+                label.rect.center().y,
+            ),
+            Vec2::splat(HELP_SIZE),
+        );
+        let mut child = ui.new_child(
+            UiBuilder::new()
+                .max_rect(rect)
+                .layout(Layout::left_to_right(Align::Center)),
+        );
+        kit::help_button(&mut child, title, help);
+    }
     ui.add_space(6.0);
 }
 

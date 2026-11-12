@@ -657,9 +657,6 @@ pub(crate) fn origin_host(origin: &str) -> String {
 
 // ---- Drawing. ----
 
-/// The space above a group label, as `rows::group_label`.
-const LABEL_TOP: f32 = 18.0;
-
 /// Draw the section. `notifications` draws the notification rows of the This Mac group.
 pub(crate) fn draw(
     ui: &mut Ui,
@@ -1060,28 +1057,8 @@ fn buttons_row(g: &mut rows::Group<'_>, add: impl FnOnce(&mut Ui)) {
 /// "Devices ⓘ": the title of the list, without a count (the header says how many), and
 /// the ⓘ of the routes while the list has more than this Mac.
 fn devices_label(ui: &mut Ui, count: usize) {
-    ui.add_space(LABEL_TOP);
-    let mut text_bottom = f32::NEG_INFINITY;
-    let row = ui.horizontal(|ui| {
-        ui.add_space(2.0);
-        ui.spacing_mut().item_spacing.x = 4.0;
-        let title = ui.add(
-            Label::new(
-                kit::text("Devices", Font::Callout)
-                    .variation(b"wght", 600.0)
-                    .color(kit::palette().secondary),
-            )
-            .selectable(false),
-        );
-        text_bottom = title.rect.bottom();
-        if count > 1 {
-            kit::help_button(ui, "Devices", &DEVICES_HELP);
-        }
-    });
-    // The ⓘ makes the row taller than its text: the group starts as far under the text as
-    // under the title of every other group ([`rows::group_label`]).
-    let below_text = (row.response.rect.bottom() - text_bottom).max(0.0);
-    ui.add_space((6.0 - below_text).max(0.0));
+    let help: &[&str] = if count > 1 { &DEVICES_HELP } else { &[] };
+    rows::group_label_with_help(ui, "Devices", help);
 }
 
 fn devices_group(ui: &mut Ui, view: &DevicesView, action: &mut Option<Action>) {
