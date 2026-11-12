@@ -5,14 +5,16 @@
 //! tailnet ("Reachable on Your Tailnet", its address, port, and Node Words, one line for
 //! each problem, "Move to This Mac…" when the approvals still go through
 //! Apassy relay, and the notifications), the Devices list with one row for each device of
-//! each team (kind, roles, the route word, the last contact, and Revoke… or Details…),
-//! the one add button, and the Wi-Fi Pairing group while a Wi-Fi iPhone is paired
-//! (`companion.rs`, ADR 0028 stage 3).
+//! each team (one line: the name, a route chip only where its route differs from the
+//! most common route of the list, the last contact, and Revoke… or Details…; the kind and
+//! the roles on hover), the one add button, the Relay group, and the Wi-Fi Pairing group
+//! while a Wi-Fi iPhone is paired (`companion.rs`, ADR 0028 stage 3).
 //!
-//! Apassy Connect (plan s7 unit M5; mockup frames 9a to 9e): "Move Approvals to
-//! Connect…" beside the move to this Mac while the node runs on Connect, the row of a
-//! move that waits for its first approval through Connect ("Undo"), the route word "via
-//! Apassy Connect" for a device that reaches a node with only the Connect route, and the
+//! Apassy Connect (plan s7 unit M5; mockup frames 9a to 9e): "Move to Connect…" beside
+//! the move to this Mac while the node runs on Connect, the row of a move that waits for
+//! its first approval through Connect ("Undo"), the route "via Apassy Connect" for a
+//! device that reaches a node with only the Connect route (named once by the This Mac
+//! group when it is the most common route), and the
 //! state of approvals that the hosted relay ended (`410`) with the same two choices as
 //! the notice.
 //!

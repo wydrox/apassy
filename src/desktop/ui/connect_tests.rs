@@ -3752,15 +3752,20 @@ fn the_account_menu_opens_and_its_items_act() {
         }
         assert_eq!(click_node(&ctx, view, &nodes, MORE_ACCOUNT), None);
         let (text, nodes, _) = section_frame(&ctx, view, Vec::new());
-        for shown in ["Copy Account ID", "acc_k7m2q4x3ca", FORGET, DELETE] {
+        for shown in ["Copy Account ID", FORGET, DELETE] {
             assert!(text.contains(shown), "the menu shows {shown}: {text}");
         }
         click_node(&ctx, view, &nodes, item)
     };
     let open = menu_view(menu_account(false, true), false, false);
     assert_eq!(press(&open, COPY), Some(Action::CopyAccountId));
-    assert_eq!(press(&open, FORGET), Some(Action::Revoke(0)));
     assert_eq!(press(&open, DELETE), Some(Action::Delete));
+    // This device is the second of the list here: Forget names its own index.
+    let mut later = menu_account(false, true);
+    later.devices.reverse();
+    assert!(later.devices[1].this, "this device is second");
+    let later = menu_view(later, false, false);
+    assert_eq!(press(&later, FORGET), Some(Action::Revoke(1)));
     let locked = menu_view(menu_account(false, true), true, false);
     assert_eq!(press(&locked, COPY), Some(Action::CopyAccountId));
     assert_eq!(
@@ -3791,6 +3796,44 @@ fn the_account_menu_opens_and_its_items_act() {
         new_code(&menu_view(unverified, false, false)),
         None,
         "New Code… is off while the device list did not verify"
+    );
+    // What each item opens, on a live account: its own view drawn, its press acted on.
+    let dir = TempDir::new().expect("temp dir");
+    let connect = FakeConnect::start();
+    let mut app = connect_app(&dir, &connect);
+    let ctx = egui::Context::default();
+    let account_id = create_account(&ctx, &mut app, "Rafal");
+    let live_view = live::view(&app);
+    let copy = format!("Copy Account ID {account_id}");
+    let copied = act(
+        &ctx,
+        &mut app,
+        press(&live_view, &copy).expect("Copy Account ID acts"),
+    );
+    assert!(
+        copied
+            .iter()
+            .any(|command| matches!(command, OutputCommand::CopyText(text) if *text == account_id)),
+        "Copy Account ID copies the ID: {copied:?}"
+    );
+    act(
+        &ctx,
+        &mut app,
+        press(&live_view, FORGET).expect("Forget This Mac… acts"),
+    );
+    assert!(
+        matches!(app.ui.connect.sheet, Some(Sheet::Revoke { this: true, .. })),
+        "Forget This Mac… opens the alert of this device"
+    );
+    app.ui.connect.sheet = None;
+    act(
+        &ctx,
+        &mut app,
+        press(&live_view, DELETE).expect("Delete Account… acts"),
+    );
+    assert!(
+        matches!(app.ui.connect.sheet, Some(Sheet::Delete)),
+        "Delete Account… opens its alert"
     );
 }
 
@@ -3856,6 +3899,130 @@ fn account_rows_describe_their_facts() {
                 .any(|(name, said)| *name == label && *said == description),
             "{label}: {description} in {found:?}"
         );
+        let hover = hovered(&view, label);
+        assert!(
+            hover.contains(description),
+            "the hover text of {label} is {description}: {hover}"
+        );
+    }
+}
+
+/// The painted text of the section after the pointer rests on the node named `name` (a
+/// label's text or a button's name) long enough for its hover text.
+fn hovered(view: &ConnectView, name: &str) -> String {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut at = None;
+    for _ in 0..3 {
+        let output = ctx.run_ui(input(0.0, Vec::new()), |ui| {
+            let _ = super::connect::draw(ui, view);
+        });
+        at = output
+            .platform_output
+            .accesskit_update
+            .iter()
+            .flat_map(|update| update.nodes.iter())
+            .find_map(|(_, node)| {
+                (node.label().or_else(|| node.value()) == Some(name))
+                    .then(|| node.bounds())
+                    .flatten()
+            })
+            .map(|bounds| {
+                egui::pos2(
+                    ((bounds.x0 + bounds.x1) / 2.0) as f32,
+                    ((bounds.y0 + bounds.y1) / 2.0) as f32,
+                )
+            });
+        output.drop_without_applying_deltas();
+    }
+    let at = at.unwrap_or_else(|| panic!("no node {name}"));
+    let mut text = String::new();
+    for (time, events) in [
+        (0.1, vec![egui::Event::PointerMoved(at)]),
+        (1.0, Vec::new()),
+        (2.0, Vec::new()),
+        (2.1, Vec::new()),
+    ] {
+        let output = ctx.run_ui(input(time, events), |ui| {
+            let _ = super::connect::draw(ui, view);
+        });
+        text.clear();
+        for clipped in &output.shapes {
+            collect(&clipped.shape, &mut text);
+        }
+        output.drop_without_applying_deltas();
+    }
+    text
+}
+
+/// The Plan row puts its status at the trailing edge, on the line of its label, as the
+/// Account and People rows put their values, while it fits beside the buttons; in a
+/// narrower row the whole status goes under the label, never cut with "…".
+#[test]
+fn the_plan_status_sits_at_the_trailing_edge_or_whole_under_the_label() {
+    const STATUS: &str = "Connect Family · Renews 18 Nov 2026";
+    let view = menu_view(menu_account(false, true), false, false);
+    let placed = |width: f32| {
+        let ctx = egui::Context::default();
+        let mut out = Vec::new();
+        for _ in 0..3 {
+            let output = ctx.run_ui(input(0.0, Vec::new()), |ui| {
+                ui.allocate_ui(egui::vec2(width, 1200.0), |ui| {
+                    ui.set_max_width(width);
+                    let _ = super::connect::draw(ui, &view);
+                });
+            });
+            out.clear();
+            for clipped in &output.shapes {
+                placed_texts(&clipped.shape, &mut out);
+            }
+            output.drop_without_applying_deltas();
+        }
+        out
+    };
+    let find = |texts: &[(String, egui::Rect)], text: &str| {
+        texts
+            .iter()
+            .find(|(painted, _)| painted == text)
+            .map(|(_, rect)| *rect)
+            .unwrap_or_else(|| panic!("no {text:?} in {texts:?}"))
+    };
+    // Wide: the status on the line of "Plan", its right edge with the values beside it.
+    let wide = placed(640.0);
+    let label = find(&wide, "Plan");
+    let status = find(&wide, STATUS);
+    let billing = find(&wide, "Manage Billing…");
+    assert!(
+        (status.center().y - label.center().y).abs() < 4.0,
+        "one line: {label:?} {status:?}"
+    );
+    assert!(
+        status.left() > 640.0 / 2.0,
+        "the status sits at the trailing edge, not after the label: {status:?}"
+    );
+    assert!(
+        status.right() <= billing.left() && billing.left() - status.right() < 24.0,
+        "the status ends right before the buttons: {status:?} {billing:?}"
+    );
+    // Narrow: the whole status under the label.
+    let narrow = placed(330.0);
+    let label = find(&narrow, "Plan");
+    let status = find(&narrow, STATUS);
+    assert!(
+        status.top() >= label.bottom(),
+        "the status goes under the label: {label:?} {status:?}"
+    );
+}
+
+/// Each painted text with its galley rectangle.
+fn placed_texts(shape: &egui::Shape, out: &mut Vec<(String, egui::Rect)>) {
+    match shape {
+        egui::Shape::Text(text) => out.push((
+            text.galley.text().to_owned(),
+            egui::Rect::from_min_size(text.pos, text.galley.size()),
+        )),
+        egui::Shape::Vec(nested) => nested.iter().for_each(|inner| placed_texts(inner, out)),
+        _ => {}
     }
 }
 

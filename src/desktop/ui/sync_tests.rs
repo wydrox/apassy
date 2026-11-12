@@ -4904,3 +4904,18 @@ fn the_sync_line_does_not_repeat_its_tag() {
         "Up to date as a.apassy in iCloud Drive."
     );
 }
+
+/// The Sync row's move of a hosted relay copy starts at once, without a sheet, so its
+/// name has no "…" and differs from the approvals move of Settings › Devices; VoiceOver
+/// reads the vault in it.
+#[test]
+fn the_move_copy_button_names_the_vault() {
+    use super::sync::relay::{MOVE_COPY, move_copy_spoken};
+    assert_eq!(MOVE_COPY, "Move Copy to Connect");
+    assert!(!MOVE_COPY.ends_with('…'), "{MOVE_COPY}");
+    assert_ne!(MOVE_COPY, super::devices::MOVE_TO_CONNECT);
+    assert_eq!(
+        move_copy_spoken("Personal"),
+        "Move the copy of Personal to Apassy Connect"
+    );
+}
