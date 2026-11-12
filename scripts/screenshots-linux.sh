@@ -80,6 +80,10 @@ place_window() {
   done
   [ -n "$wid" ] || return 1
   xdotool windowmove "$wid" 0 0 windowsize "$wid" "$W" "$H" 2>/dev/null || true
+  # Without a window manager no window gets the keyboard focus, and egui then draws no
+  # focus ring and no caret in a text field (`Response::has_focus` needs a focused
+  # window). Give it the focus, as a desktop does for the window in front.
+  xdotool windowfocus "$wid" 2>/dev/null || true
   echo "$wid"
 }
 
