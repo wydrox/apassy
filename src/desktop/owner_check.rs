@@ -2288,10 +2288,9 @@ impl OwnerRequest {
             Self::ClaimConnectStore {
                 vault_name, people, ..
             } => {
-                let people: Vec<String> = people
-                    .iter()
-                    .map(|person| format!("\u{201c}{}\u{201d}", page_text(person)))
-                    .collect();
+                // Each name is a label already (the verified name in quotes, with the
+                // name that Connect gives beside it).
+                let people: Vec<String> = people.iter().map(|person| page_text(person)).collect();
                 format!(
                     "Confirm that this account made \"{}\"? It was shared before Apassy recorded which account made a vault, so its shares do not count yet. After this, the shares of this vault count again: {} can sync it.",
                     page_text(vault_name),
@@ -4355,6 +4354,57 @@ mod connect_proof_tests {
         let proof = flows.take_connect_proof().expect("the proof");
         assert_eq!(proof.check(&action, &[1; 32]), Ok(()));
         assert!(flows.take_connect_proof().is_none());
+    }
+
+    /// K2, K4: "Take This Copy Without Its Earlier History…" names the store, the head, its
+    /// version, its device, and its time; "Count Its Shares Again…" names the vault and the
+    /// people whose shares count again, each name once in its quotes.
+    #[test]
+    fn the_copy_without_history_and_the_store_claim_name_their_actions() {
+        let team = "t_7k2m5q4x3c".to_owned();
+        let take = OwnerRequest::TakeCopyWithoutHistory {
+            team_id: team.clone(),
+            version: 7,
+            head: "a".repeat(64),
+            device_name: "\u{201c}Synthetic iMac\u{201d}".to_owned(),
+            time: 1_790_000_000,
+            vault_name: "Personal".to_owned(),
+            start: true,
+        };
+        assert_eq!(
+            take.action(),
+            OwnerAction::TakeCopyWithoutHistory {
+                team_id: team.clone(),
+                version: 7,
+                head: "a".repeat(64),
+            }
+        );
+        assert!(take.action().allowed_without_vault());
+        let text = take.describe();
+        assert!(text.contains("Version 7"), "{text}");
+        assert!(text.contains("\u{201c}Synthetic iMac\u{201d}"), "{text}");
+        assert!(!text.contains(&team), "{text}");
+        let entries = vec![crate::broker::approvals::ShareEntry::new(
+            "store",
+            None,
+            Some(&team),
+        )];
+        let action = OwnerAction::ClaimConnectStore {
+            account_id: "acc_k7m2q4x3ca".to_owned(),
+            team_id: team.clone(),
+            vault_name: "Family".to_owned(),
+            people: vec!["\u{201c}Ola\u{201d}".to_owned()],
+            entries,
+        };
+        let claim = OwnerRequest::from_share_action(action.clone()).expect("a share request");
+        assert_eq!(claim.action(), action);
+        assert!(!action.allowed_without_vault());
+        let text = claim.describe();
+        assert!(text.contains("\"Family\""), "{text}");
+        assert!(
+            text.contains(": \u{201c}Ola\u{201d} can sync it."),
+            "{text}"
+        );
     }
 
     /// B-M1: the store requests name their exact actions, and their texts name the vault

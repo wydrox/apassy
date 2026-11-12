@@ -88,6 +88,11 @@ const MAX_RATE_WAIT: u64 = 300;
 /// A chain answer has at most 1000 heads, oldest first; a Mac reads at most this many
 /// answers (the relay keeps 10000 heads).
 const MAX_CHAIN_PAGES: usize = 20;
+/// The heads of a store that a relay keeps (relay-sync-v1 section 12, a fixed part of the
+/// contract; the relay's maintenance uses this constant): it drops a head only while this
+/// many newer ones stay. A first download takes a chain that starts above version 1
+/// (`kept_from`) only when the relay keeps at least this many heads of it.
+pub const KEPT_HEADS: u64 = 10_000;
 /// The longest long poll that the relay holds.
 pub(crate) const MAX_WAIT: Duration = Duration::from_secs(25);
 /// An access token lasts 15 minutes.
@@ -1157,6 +1162,9 @@ pub(crate) struct HeadNotes {
     /// The head of a first download whose chain holds an entry by a key that no list
     /// verifies, after the lists were read again ([`SyncError::HistoryUnverified`]).
     history: Mutex<Option<DepartedHead>>,
+    /// The heads that the relay keeps by contract ([`KEPT_HEADS`] when `None`); only a test
+    /// of a relay that keeps fewer sets it ([`JoinedDevice::set_kept_heads_for_test`]).
+    kept_heads: Mutex<Option<u64>>,
     /// When the newest device list that verified on this Mac was asked of Connect
     /// ([`RelaySync::note_device_list`]); `None` before one.
     listed: Mutex<Option<Instant>>,
@@ -1618,6 +1626,13 @@ impl RelayTransport {
                     && view.kept_from == view.chain_from
                     && first.fields.version <= head.fields.version =>
                 {
+                    // A relay keeps the newest `KEPT_HEADS` heads: a cut that keeps fewer is
+                    // not its rule, and only the owner's choice takes such a copy.
+                    let kept = head.fields.version - first.fields.version + 1;
+                    let rule = lock(&self.notes.kept_heads).unwrap_or(KEPT_HEADS);
+                    if kept < rule && !self.takes_without_history(head) {
+                        return Err(self.history_refused(head, &view.signers));
+                    }
                     (
                         first.fields.version.saturating_sub(1),
                         first.fields.previous.clone(),
@@ -4027,6 +4042,14 @@ impl JoinedDevice {
     /// ([`SyncError::WaitsForAccountDevice`]): a device that left the account pushed it.
     pub fn waiting_head(&self) -> Option<DepartedHead> {
         lock(&self.notes.waiting).clone()
+    }
+
+    /// Tests of a relay that keeps fewer heads than [`KEPT_HEADS`] (its `limits.kept_heads`):
+    /// the first download of this device takes a chain of at least `kept` heads that starts
+    /// above version 1.
+    #[doc(hidden)]
+    pub fn set_kept_heads_for_test(&self, kept: u64) {
+        *lock(&self.notes.kept_heads) = Some(kept);
     }
 
     /// The head of the last download whose earlier history holds an entry by a key that no

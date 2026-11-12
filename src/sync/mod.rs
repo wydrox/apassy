@@ -57,12 +57,12 @@ pub use relay::connect::{
     waits_for_account,
 };
 pub use relay::{
-    DepartedHead, DeviceView, JoinedDevice, KeySource, LINK_INVALID_TEXT, LINK_UPDATE_TEXT,
-    LinkCode, LinkKind, LinkRefusal, MAX_LINK_BYTES, MAX_NODE_NAME_CHARS, PIN_CHANGED_TEXT,
-    PairedLink, PendingJoin, PendingLink, Receipt, RelayAdoptReport, RelayCallError, RelayConfig,
-    RelayDownload, RelayEnableReport, RelayMember, RelayPoll, RelaySync, RelayTransport,
-    SignerPolicy, StoreSigners, clean_node_name, clear_relay_work, encode_node_name,
-    membership_relay_url,
+    DepartedHead, DeviceView, JoinedDevice, KEPT_HEADS, KeySource, LINK_INVALID_TEXT,
+    LINK_UPDATE_TEXT, LinkCode, LinkKind, LinkRefusal, MAX_LINK_BYTES, MAX_NODE_NAME_CHARS,
+    PIN_CHANGED_TEXT, PairedLink, PendingJoin, PendingLink, Receipt, RelayAdoptReport,
+    RelayCallError, RelayConfig, RelayDownload, RelayEnableReport, RelayMember, RelayPoll,
+    RelaySync, RelayTransport, SignerPolicy, StoreSigners, clean_node_name, clear_relay_work,
+    encode_node_name, membership_relay_url,
 };
 pub use relay_crypto::{
     DeviceKey, HeadFields, MAX_SNAPSHOT_BYTES, NO_PREVIOUS, SignedHead, WORDS, decode_b64u,
