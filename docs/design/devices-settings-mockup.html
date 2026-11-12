@@ -345,9 +345,15 @@ svg{display:block}
 .hpop.below::before{content:"";position:absolute;top:-6px;right:18px;width:12px;height:12px;background:#fff;transform:rotate(45deg);box-shadow:-.5px -.5px 0 rgba(0,0,0,.12)}
 /* A note for the reader inside a panel (another state, a quote): not a text of the window. */
 .dn{font-style:italic}
+/* Reader notes stay hidden until the Notes button shows them; the windows and panels never change. */
+body:not(.show-notes) :is(.fnotes,.dn,.notes,.intro>p){display:none}
+.notes-toggle{position:fixed;top:12px;right:16px;z-index:100;font:500 12.5px var(--font,system-ui);padding:5px 12px;border-radius:7px;border:0;box-shadow:0 0 0 .5px rgba(0,0,0,.2),0 1px 2px rgba(0,0,0,.08);background:#fff;cursor:pointer}
+body.show-notes .notes-toggle{background:var(--accent);color:#fff}
+.intro ol a{color:inherit}
 </style>
 </head>
 <body>
+<button class="notes-toggle" type="button" onclick="document.body.classList.toggle('show-notes')">Notes</button>
 
 <!-- The icons, used with <use href="#…">. -->
 <svg class="sprite" aria-hidden="true">
@@ -393,18 +399,21 @@ svg{display:block}
   <h1>Apassy · Settings → Devices</h1>
   <p>Mockup for N7 of implementation-plan-s2-s3.md (D9, with W1). Final frames for the implementer. Synthetic data, light appearance only. This Mac: Mac mini (office), tailnet address 100.101.7.12, port 8444. Now: Tue 3 Nov 2026, 14:20. Exact texts, help texts, choices, and open questions are at the end.</p>
   <ol>
-    <li>Devices · tailnet on</li>
-    <li>Add an iPhone over the tailnet</li>
-    <li>Node states</li>
-    <li>Move approvals to this Mac</li>
-    <li>Revoke</li>
-    <li>Wi-Fi pairing notice</li>
-    <li>First run · no Tailscale</li>
+    <li><a href="#f1">Devices · tailnet on</a></li>
+    <li><a href="#f2">Add an iPhone over the tailnet</a></li>
+    <li><a href="#f3">Node states</a></li>
+    <li><a href="#f4">Move approvals to this Mac</a></li>
+    <li><a href="#f5">Revoke</a></li>
+    <li><a href="#f6">Wi-Fi pairing notice</a></li>
+    <li><a href="#f7">First run · no Tailscale</a></li>
+    <li><a href="#f8">Devices · approvals through Apassy relay</a></li>
+    <li><a href="#f9">Apassy Connect · the move and the end of the free path</a></li>
+    <li><a href="#f10">Use a vault from another Mac › Apassy Connect</a></li>
   </ol>
 </div>
 
 <!-- ============================================================ 1 -->
-<section class="frame">
+<section class="frame" id="f1">
   <div class="flabel"><b><span class="fnum">1</span>Devices · tailnet on</b>
     <span>The node group, every kind of device, and the Wi-Fi group in its notice state.</span></div>
   <div class="win" style="min-height:820px">
@@ -439,7 +448,7 @@ svg{display:block}
           <div class="fr"><div class="k">Notifications</div><div class="v">On</div></div>
         </div>
 
-        <div class="gl">Devices <span class="hi" style="margin-left:0"><svg><use href="#i-info"/></svg></span><span>6</span></div>
+        <div class="gl">Devices <span class="hi" style="margin-left:0"><svg><use href="#i-info"/></svg></span></div>
         <div class="grp">
           <div class="fr" title="Mac · Hosts approvals"><div class="dv"><svg><use href="#i-mini"/></svg></div><div class="kn"><div>Mac mini (office) <span class="cap">This Mac</span></div></div><span class="when">Now</span><span class="pb" style="visibility:hidden">Revoke…</span></div>
           <div class="fr" title="iPhone · Approves runs"><div class="dv"><svg><use href="#i-phone"/></svg></div><div class="kn"><div>Rafal's iPhone</div></div><span class="route mac">via your Mac</span><span class="when">Now</span><span class="pb">Revoke…</span></div>
@@ -461,10 +470,10 @@ svg{display:block}
     </section>
   </div>
   <ul class="fnotes">
-    <li><b>Order:</b> This Mac (the node), Devices, the add button, Wi-Fi Pairing. Wi-Fi Pairing shows only while a Wi-Fi iPhone is paired.</li>
+    <li><b>Order:</b> This Mac (the node), Devices, the add button, Relay (frame 8; in this state it also comes under the add button, because MacBook Pro syncs through the relay: this frame leaves it out to show the Wi-Fi group), Wi-Fi Pairing. Wi-Fi Pairing shows only while a Wi-Fi iPhone is paired.</li>
     <li><b>Data:</b> <code>Node::status().tailnet</code> gives on, origin, bound, <code>pin_words</code>, devices. Other Macs come from the sync link, build-box from a pinned <code>RelayLink</code>.</li>
     <li><b>One row per device.</b> A device in two teams gets one row; its roles join with " · ". The node's own team for cloud agents has no device rows.</li>
-    <li><b>Route</b> is one of four words: <code>via your Mac</code>, <code>via Apassy relay</code>, <code>Tailnet</code>, <code>Wi-Fi</code>. For a device in two teams, the approvals route wins.</li>
+    <li><b>Route</b> is one of five words: <code>via your Mac</code>, <code>via Apassy relay</code>, <code>via Apassy Connect</code>, <code>Tailnet</code>, <code>Wi-Fi</code>. For a device in two teams, the approvals route wins. A row has a chip only when its route differs from the most common route of the list: with one route for every device (frames 4 and 8) no row has one; with a tie for the most common (here two via your Mac and two via Apassy relay) every routed row keeps its chip.</li><li><b>Facts on hover</b>: the kind and the roles ("iPhone · Approves runs") are the hover text of the name and its VoiceOver description; rows are one line, centred on the glyph.</li>
     <li><b>Last contact:</b> "Now" under a minute, then "4 min ago", "3 h ago", "Yesterday", "12 Sep".</li>
     <li><b>Owner checks:</b> the switch (<code>SetTailnetRoute</code>, Touch ID glyph beside it) and every Revoke… (<code>RevokeNodeDevice</code>, frame 5). The Linux node row opens the relay sheet (L4) with Details…, not Revoke.</li>
     <li><b>One primary button:</b> Add an iPhone or a Mac…. It replaces "Get approvals on your iPhone" and the relay group's add button.</li>
@@ -472,7 +481,7 @@ svg{display:block}
 </section>
 
 <!-- ============================================================ 2 -->
-<section class="frame">
+<section class="frame" id="f2">
   <div class="flabel"><b><span class="fnum">2</span>Add an iPhone over the tailnet</b>
     <span>The sheet of "Add an iPhone or a Mac…": the link, the safety words, done.</span></div>
   <div class="pgrid three">
@@ -520,7 +529,7 @@ svg{display:block}
 </section>
 
 <!-- ============================================================ 3 -->
-<section class="frame">
+<section class="frame" id="f3">
   <div class="flabel"><b><span class="fnum">3</span>Node states</b>
     <span>The This Mac group in each state. One line and at most one button per problem.</span></div>
   <div class="pgrid">
@@ -597,7 +606,7 @@ svg{display:block}
 </section>
 
 <!-- ============================================================ 4 -->
-<section class="frame">
+<section class="frame" id="f4">
   <div class="flabel"><b><span class="fnum">4</span>Move approvals to this Mac</b>
     <span>A hosted questions team exists and the route is on: the move is the one primary action.</span></div>
   <div class="win" style="min-height:640px">
@@ -629,16 +638,16 @@ svg{display:block}
           <div class="fr"><div class="kn"><div>Reachable on Your Tailnet</div></div><span class="hi"><svg><use href="#i-info"/></svg></span><svg style="width:15px;height:15px;color:var(--ter)"><use href="#i-touch"/></svg><span class="sw on"></span></div>
           <div class="fr"><div class="k">Address</div><div class="v mono" style="color:var(--label)">100.101.7.12:8444</div><span class="pb"><svg><use href="#i-copy"/></svg>Copy</span></div>
           <div class="fr"><div class="k">Node Words</div><div class="v words">harbor lemon quartz otter cedar mango</div><span class="hi"><svg><use href="#i-info"/></svg></span></div>
-          <div class="fr"><div class="att"><div class="ai" style="background:var(--accent)"><svg><use href="#i-relay"/></svg></div><div><div class="t1">Approvals go through Apassy relay</div></div></div><span class="pb pri">Move Here…</span></div>
+          <div class="fr"><div class="att"><div class="ai" style="background:var(--accent)"><svg><use href="#i-relay"/></svg></div><div><div class="t1">Approvals go through Apassy relay</div></div></div><span class="pb pri">Move to This Mac…</span></div>
         </div>
 
-        <div class="gl">Devices <span class="hi" style="margin-left:0"><svg><use href="#i-info"/></svg></span><span>5</span></div>
+        <div class="gl">Devices <span class="hi" style="margin-left:0"><svg><use href="#i-info"/></svg></span></div>
         <div class="grp">
           <div class="fr" title="Mac · Asks for approvals"><div class="dv"><svg><use href="#i-mini"/></svg></div><div class="kn"><div>Mac mini (office) <span class="cap">This Mac</span></div></div><span class="when">Now</span><span class="pb" style="visibility:hidden">Revoke…</span></div>
-          <div class="fr" title="iPhone · Approves runs"><div class="dv"><svg><use href="#i-phone"/></svg></div><div class="kn"><div>Rafal's iPhone</div></div><span class="route hosted">via Apassy relay</span><span class="when">Now</span><span class="pb">Revoke…</span></div>
-          <div class="fr" title="Apple Watch · Sees requests"><div class="dv"><svg><use href="#i-watch"/></svg></div><div class="kn"><div>Rafal's Apple Watch</div></div><span class="route hosted">via Apassy relay</span><span class="when">9 min ago</span><span class="pb">Revoke…</span></div>
-          <div class="fr" title="Mac · Syncs Personal"><div class="dv"><svg><use href="#i-laptop"/></svg></div><div class="kn"><div>MacBook Pro</div></div><span class="route hosted">via Apassy relay</span><span class="when">2 min ago</span><span class="pb">Revoke…</span></div>
-          <div class="fr" title="Mac · Syncs Personal"><div class="dv"><svg><use href="#i-mini"/></svg></div><div class="kn"><div>Mac mini (studio)</div></div><span class="route hosted">via Apassy relay</span><span class="when">1 h ago</span><span class="pb">Revoke…</span></div>
+          <div class="fr" title="iPhone · Approves runs"><div class="dv"><svg><use href="#i-phone"/></svg></div><div class="kn"><div>Rafal's iPhone</div></div><span class="when">Now</span><span class="pb">Revoke…</span></div>
+          <div class="fr" title="Apple Watch · Sees requests"><div class="dv"><svg><use href="#i-watch"/></svg></div><div class="kn"><div>Rafal's Apple Watch</div></div><span class="when">9 min ago</span><span class="pb">Revoke…</span></div>
+          <div class="fr" title="Mac · Syncs Personal"><div class="dv"><svg><use href="#i-laptop"/></svg></div><div class="kn"><div>MacBook Pro</div></div><span class="when">2 min ago</span><span class="pb">Revoke…</span></div>
+          <div class="fr" title="Mac · Syncs Personal"><div class="dv"><svg><use href="#i-mini"/></svg></div><div class="kn"><div>Mac mini (studio)</div></div><span class="when">1 h ago</span><span class="pb">Revoke…</span></div>
         </div>
         <div style="margin-top:12px"><span class="btn">Add an iPhone or a Mac…</span></div>
       </div></div>
@@ -685,7 +694,7 @@ svg{display:block}
   </div>
   <ul class="fnotes">
     <li><b>Shows when</b> the vault has a hosted questions membership and the route is on. With the route off, the row is absent; the iPhone stays on the relay.</li>
-    <li><b>The move row</b> holds the only primary button; Add an iPhone or a Mac… turns bordered in this state.</li>
+    <li><b>The move row</b> holds the only primary button; Add an iPhone or a Mac… turns bordered in this state.</li><li><b>No route chips</b>: every device goes through Apassy relay, and the move row says so. The Relay group under the list is the one of frame 8.</li>
     <li><b>4b</b> runs <code>Node::move_approvals</code>: step 1 at open, step 2 is the frame 2 flow (2b words, owner check), step 3 after the confirmed join.</li>
     <li><b>Cancel</b> before the join deletes the new node team; the hosted team stays. After the join there is no cancel; step 3 runs.</li>
     <li><b>4c</b> names each device that joined. The watch has its own key (ADR 0039), so it must pair again; the note says so only when a watch was paired.</li>
@@ -694,7 +703,7 @@ svg{display:block}
 </section>
 
 <!-- ============================================================ 5 -->
-<section class="frame">
+<section class="frame" id="f5">
   <div class="flabel"><b><span class="fnum">5</span>Revoke</b>
     <span>Revoke… on a device row: the confirmation, then the list without it.</span></div>
   <div class="pgrid three" style="grid-template-columns:1fr 1fr 1.45fr">
@@ -733,7 +742,7 @@ svg{display:block}
 </section>
 
 <!-- ============================================================ 6 -->
-<section class="frame">
+<section class="frame" id="f6">
   <div class="flabel"><b><span class="fnum">6</span>Wi-Fi pairing notice</b>
     <span>ADR 0028 stage 3: shown once, then a quiet line in Devices; removal two releases later.</span></div>
   <div class="pgrid">
@@ -793,7 +802,7 @@ svg{display:block}
 </section>
 
 <!-- ============================================================ 7 -->
-<section class="frame">
+<section class="frame" id="f7">
   <div class="flabel"><b><span class="fnum">7</span>First run · no Tailscale</b>
     <span>Only this Mac. Never an empty pane: the list has a row and the add button.</span></div>
   <div class="win" style="min-height:520px">
@@ -827,7 +836,7 @@ svg{display:block}
           <div class="fr"><div class="k">Notifications</div><div class="v">On</div></div>
         </div>
 
-        <div class="gl">Devices<span>1</span></div>
+        <div class="gl">Devices</div>
         <div class="grp">
           <div class="fr" title="Mac · Asks for approvals"><div class="dv"><svg><use href="#i-mini"/></svg></div><div class="kn"><div>Mac mini (office) <span class="cap">This Mac</span></div></div><span class="when">Now</span></div>
           <div class="fr"><div class="kn" style="color:var(--sec);font-size:12.5px">Add an iPhone to approve runs with Face ID.</div></div>
@@ -843,8 +852,71 @@ svg{display:block}
   </ul>
 </section>
 
+<!-- ============================================================ 8 -->
+<section class="frame" id="f8">
+  <div class="flabel"><b><span class="fnum">8</span>Devices · approvals through Apassy relay</b>
+    <span>The tailnet route is off and the vault syncs through the relay: the Relay group in its normal state.</span></div>
+  <div class="win" style="min-height:720px">
+    <aside class="side">
+      <div class="chrome"><div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div><span class="sidetoggle"><svg><use href="#i-sidebar"/></svg></span></div>
+      <div class="scroll">
+        <div class="sh">Personal</div>
+        <div class="si"><svg><use href="#i-key"/></svg><span class="lbl">All credentials</span><span class="cnt">14</span></div>
+        <div class="si l1"><svg><use href="#i-folder"/></svg><span class="lbl">Work</span><span class="cnt">9</span></div>
+        <div class="si l1"><svg><use href="#i-folder"/></svg><span class="lbl">Infra</span><span class="cnt">5</span></div>
+        <div class="sh">Shared</div>
+        <div class="si"><span class="sq" style="background:#0a84ff">A</span><span class="lbl">Acme team</span><span class="cnt">3</span></div>
+        <div class="sh">Bouncer</div>
+        <div class="si"><svg><use href="#i-chart"/></svg><span class="lbl">Overview</span></div>
+        <div class="si"><svg><use href="#i-checkc"/></svg><span class="lbl">Decisions</span></div>
+        <div class="si"><svg><use href="#i-agent"/></svg><span class="lbl">Agents</span><span class="cnt">3</span></div>
+        <div class="si"><svg><use href="#i-logs"/></svg><span class="lbl">Logs</span></div>
+      </div>
+      <div class="foot"><div class="me"><div class="av">R</div><div class="t">Rafal<small>Unlocked</small></div><span class="ib on"><svg><use href="#i-gear"/></svg></span></div></div>
+    </aside>
+    <section class="listcol set"><div class="tb"><div class="ttl"><b>Settings</b></div></div><div class="rows"><div class="r"><div class="tile" style="background:rgb(0,122,255)"><svg><use href="#i-db"/></svg></div><div class="tx"><div class="ttl2">Vault</div><div class="sub">Personal · Apassy relay</div></div></div><div class="r"><div class="tile" style="background:rgb(88,86,214)"><svg><use href="#i-lock"/></svg></div><div class="tx"><div class="ttl2">Security</div><div class="sub">Unlock with Touch ID</div></div></div><div class="r on"><div class="tile" style="background:rgb(48,160,200)"><svg><use href="#i-laptop"/></svg></div><div class="tx"><div class="ttl2">Devices</div><div class="sub">4 devices</div></div></div><div class="r"><div class="tile" style="background:rgb(175,82,222)"><svg><use href="#i-shield"/></svg></div><div class="tx"><div class="ttl2">Bouncer</div><div class="sub">Brain: Ready</div></div></div><div class="r"><div class="tile" style="background:rgb(99,99,102)"><svg><use href="#i-term"/></svg></div><div class="tx"><div class="ttl2">Tools</div><div class="sub">Command line · Extension</div></div></div><div class="r"><div class="tile" style="background:rgb(142,142,147)"><svg><use href="#i-dl"/></svg></div><div class="tx"><div class="ttl2">Updates</div><div class="sub">Apassy 0.5.18</div></div></div></div></section>
+    <section class="detail">
+      <div class="tb"></div>
+      <div class="dscroll"><div class="dpad">
+        <div class="hdr"><div class="tile" style="background:rgb(48,160,200)"><svg><use href="#i-laptop"/></svg></div><div><h1>Devices</h1><div class="s">4 devices</div></div></div>
+
+        <div class="gl">This Mac</div>
+        <div class="grp">
+          <div class="fr"><div class="kn"><div>Reachable on Your Tailnet</div><div class="nt">Approvals go through Apassy relay.</div></div><span class="hi"><svg><use href="#i-info"/></svg></span><svg style="width:15px;height:15px;color:var(--ter)"><use href="#i-touch"/></svg><span class="sw"></span></div>
+          <div class="fr"><div class="k">Notifications</div><div class="v">On</div></div>
+        </div>
+
+        <div class="gl">Devices <span class="hi" style="margin-left:0"><svg><use href="#i-info"/></svg></span></div>
+        <div class="grp">
+          <div class="fr" title="Mac · Asks for approvals"><div class="dv"><svg><use href="#i-mini"/></svg></div><div class="kn"><div>Mac mini (office) <span class="cap">This Mac</span></div></div><span class="when">Now</span><span class="pb" style="visibility:hidden">Revoke…</span></div>
+          <div class="fr" title="iPhone · Approves runs"><div class="dv"><svg><use href="#i-phone"/></svg></div><div class="kn"><div>Rafal's iPhone</div></div><span class="when">Now</span><span class="pb">Revoke…</span></div>
+          <div class="fr" title="Apple Watch · Sees requests"><div class="dv"><svg><use href="#i-watch"/></svg></div><div class="kn"><div>Rafal's Apple Watch</div></div><span class="when">9 min ago</span><span class="pb">Revoke…</span></div>
+          <div class="fr" title="Mac · Syncs Personal"><div class="dv"><svg><use href="#i-laptop"/></svg></div><div class="kn"><div>MacBook Pro</div></div><span class="when">2 min ago</span><span class="pb">Revoke…</span></div>
+        </div>
+        <div style="margin-top:12px"><span class="btn pri">Add an iPhone or a Mac…</span></div>
+
+        <div class="gl">Relay</div>
+        <div class="grp">
+          <div class="fr"><div class="kn"><div>Send Questions Through the Relay</div></div><span class="hi"><svg><use href="#i-info"/></svg></span><span class="sw on"></span></div>
+          <div class="fr"><div class="kn"><div>Show Agents on My Other Devices</div></div><span class="hi"><svg><use href="#i-info"/></svg></span><span class="sw on"></span></div>
+          <div class="fr"><div class="k">Other Macs</div><div class="v"></div><span class="pb">Devices…</span><span class="pb">Add a Mac…</span></div>
+          <div class="fr"><div class="tn warn" style="flex:1"><svg><use href="#i-warn"/></svg><span>Free approvals through Apassy relay end with Apassy 0.5.20.</span></div><span class="hi"><svg><use href="#i-info"/></svg></span></div>
+        </div>
+      </div></div>
+    </section>
+  </div>
+  <ul class="fnotes">
+    <li><b>Order:</b> This Mac, Devices, the add button, Relay, then Wi-Fi Pairing when a Wi-Fi iPhone is paired (here none).</li>
+    <li><b>No route chips</b>: every device goes through Apassy relay (the rule of frame 1).</li>
+    <li><b>Send Questions Through the Relay</b>: on says nothing more; its ⓘ: "End-to-end encrypted. The relay sees no command or credential." "Questions also reach your other devices of this vault." "Turning it on needs Touch ID. Off needs none." Off, it has a subline ("Off. Answer on your other devices away from this network." and the other states of the switch).</li>
+    <li><b>Show Agents on My Other Devices</b> shows only while questions go through the relay; its ⓘ: "Your iPhone and your other Macs of this vault show this Mac's agents." "Only this Mac changes them." "Off: Apassy deletes this Mac's feed from the relay."</li>
+    <li><b>Other Macs</b>: only for a vault that syncs through the relay. <b>Devices…</b> opens the other Macs of the vault and <b>Add a Mac…</b> the link (both also in Vault › Sync). After the relay removed this Mac the row says "Removed from the relay", without buttons.</li>
+    <li><b>The free-end line</b> and its ⓘ: "Free approvals through apassy-relay.wyderka.cc end with Apassy 0.5.20." "Keep them free over Tailscale with this Mac as the node." "Or use Apassy Connect (paid)." After the end it becomes frame 9d.</li>
+  </ul>
+</section>
+
 <!-- ============================================================ 9 -->
-<section class="frame">
+<section class="frame" id="f9">
   <div class="flabel"><b><span class="fnum">9</span>Apassy Connect · the move and the end of the free path</b>
     <span>Plan s7 unit M5. The shipped rows of this section, with new texts only; no new look.</span></div>
   <div class="pgrid three">
@@ -853,7 +925,7 @@ svg{display:block}
       <div class="gl">This Mac</div>
       <div class="grp">
         <div class="fr"><div class="att"><div class="ai" style="background:var(--accent)"><svg><use href="#i-relay"/></svg></div><div><div class="t1">Approvals go through Apassy relay</div></div></div></div>
-        <div class="fr" style="justify-content:flex-end;gap:6px"><span class="pb pri">Move Here…</span><span class="pb">Move to Connect…</span></div>
+        <div class="fr" style="justify-content:flex-end;gap:6px"><span class="pb pri">Move to This Mac…</span><span class="pb">Move to Connect…</span></div>
       </div>
     </div>
     <div class="shc">
@@ -878,16 +950,17 @@ svg{display:block}
       <div class="grp">
         <div class="fr"><div class="kn"><div>Send Questions Through the Relay</div><div class="nt">Stopped. Questions wait on this Mac.</div></div><span class="hi"><svg><use href="#i-info"/></svg></span><span class="sw on"></span></div>
         <div class="fr"><div class="tn warn" style="flex:1"><svg><use href="#i-warn"/></svg><span>Free approvals through apassy-relay.wyderka.cc ended with Apassy 0.5.20.</span></div><span class="hi"><svg><use href="#i-info"/></svg></span></div>
-        <div class="fr" style="justify-content:flex-end;gap:6px"><span class="pb">Move Here…</span><span class="pb">Move to Connect…</span></div>
+        <div class="fr" style="justify-content:flex-end;gap:6px"><span class="pb">Move to This Mac…</span><span class="pb">Move to Connect…</span></div>
       </div>
       <p class="lead dn" style="margin-top:8px">Without either choice: "Turn on “Reachable on Your Tailnet” above, or Apassy Connect for this Mac in Bouncer › Agents." With <code>hosted_retired</code>: "apassy-relay.wyderka.cc no longer carries these approvals."</p>
     </div>
     <div class="shc">
       <div class="plabel">9e · A device through Connect</div>
-      <div class="gl">Devices <span class="hi" style="margin-left:0"><svg><use href="#i-info"/></svg></span><span>2</span></div>
+      <div class="gl">Devices <span class="hi" style="margin-left:0"><svg><use href="#i-info"/></svg></span></div>
       <div class="grp">
         <div class="fr" title="Mac · Hosts approvals"><div class="dv"><svg><use href="#i-mini"/></svg></div><div class="kn"><div>Mac mini (office) <span class="cap">This Mac</span></div></div><span class="when">Now</span><span class="pb" style="visibility:hidden">Revoke…</span></div>
         <div class="fr" title="iPhone · Approves runs"><div class="dv"><svg><use href="#i-phone"/></svg></div><div class="kn"><div>Rafal's iPhone</div></div><span class="route mac">via Apassy Connect</span><span class="when">4 min ago</span><span class="pb">Revoke…</span></div>
+        <div class="fr" title="Mac · Syncs Personal"><div class="dv"><svg><use href="#i-laptop"/></svg></div><div class="kn"><div>MacBook Pro</div></div><span class="route hosted">via Apassy relay</span><span class="when">2 min ago</span><span class="pb">Revoke…</span></div>
       </div>
     </div>
     <div class="shc">
@@ -904,13 +977,13 @@ svg{display:block}
     <li><b>Move to Connect…</b> runs the move of frame 4 with a code that carries the Connect route. After the confirmation the vault asks through this Mac; the hosted membership stays (9c) until the first approval went round through Apassy Connect, then its devices leave Apassy relay. <b>Undo</b> puts the old path back before that; nothing needs Touch ID, because nothing new can approve.</li>
     <li><b>The code</b> carries the Connect route only while the node is on Connect. Otherwise it is the code of today: an older iPhone app refuses a code with the new fields.</li>
     <li><b>9d</b> replaces the notice once the hosted relay answers <code>410</code>. Apassy asks it nothing more; the questions wait on this Mac; Activity says it once.</li>
-    <li><b>9e</b>: "via Apassy Connect" when the node runs with only the Connect route. With the tailnet route on as well the row keeps "via your Mac": both routes reach this Mac, and the node does not record which one a request used yet.</li>
+    <li><b>9e</b>: "via Apassy Connect" when the node runs with only the Connect route. The chips show here because the two devices take two routes; an iPhone alone would have none. With the tailnet route on as well the row keeps "via your Mac": both routes reach this Mac, and the node does not record which one a request used yet.</li>
     <li><b>9f</b>: the row of Settings › Vault › Sync and the sidebar ("Relay copy ended"); the worker and the waiter stop calling the hosted relay for that copy.</li>
   </ul>
 </section>
 
 <!-- ============================================================ 10 -->
-<section class="frame">
+<section class="frame" id="f10">
   <div class="flabel"><b><span class="fnum">10</span>Use a vault from another Mac › Apassy Connect</b>
     <span>A Mac of the same account that does not have the vault yet. No link: the store lists this Mac already.</span></div>
   <div class="pgrid three">
@@ -958,10 +1031,10 @@ svg{display:block}
     <tr><td>Node rows</td><td>Address · Node Words · Notifications</td><td>Address is the Tailscale IPv4 and the port, <code>100.101.7.12:8444</code>; Copy copies the origin <code>https://100.101.7.12:8444</code>. Locked: no Address row (the subline says that it stopped).</td></tr>
     <tr><td>Node problems</td><td>Tailscale is not installed. / Tailscale is not connected. / Another app uses port 8444. / The address changed. Paired devices must pair again.</td><td>Buttons: Get Tailscale… / Check Again / Use Port 8445 / Pair Again….</td></tr>
     <tr><td>Device hover</td><td>&lt;Kind&gt; · &lt;Role&gt;[ · &lt;Role&gt;]</td><td>One line per device; this text is the hover text of the name and its VoiceOver description. Kinds: Mac, iPhone, Apple Watch, Linux node. Roles: Hosts approvals, Asks for approvals, Approves runs, Sees requests, Syncs &lt;vault&gt;. A Wi-Fi iPhone: "Paired 12 Sep".</td></tr>
-    <tr><td>Route</td><td>via your Mac · via Apassy relay · via Apassy Connect · Tailnet · Wi-Fi</td><td>Lowercase "via", as D9 writes it. Colors: green, grey, green, blue, orange. The Wi-Fi Pairing group names its route itself: its rows have no chip.</td></tr>
+    <tr><td>Route</td><td>via your Mac · via Apassy relay · via Apassy Connect · Tailnet · Wi-Fi</td><td>Lowercase "via", as D9 writes it. Colors: green, grey, green, blue, orange. A chip only where the route differs from the most common one (frame 1). The Wi-Fi Pairing group names its route itself: its rows have no chip.</td></tr><tr><td>Relay group</td><td>Relay / Send Questions Through the Relay / Show Agents on My Other Devices / Other Macs · Devices… · Add a Mac…</td><td>Frame 8. Removed: "Removed from the relay". The end of the free path: frame 9d.</td></tr>
     <tr><td>Connect (frame 9)</td><td>Move to Connect… / Moving approvals to Apassy Connect / The old path stays until an approval goes through Connect. / Undo</td><td>Ended: "Free approvals through apassy-relay.wyderka.cc ended with Apassy &lt;version&gt;." and "Stopped. Questions wait on this Mac."</td></tr>
     <tr><td>Row buttons</td><td>Revoke… · Details… · Remove…</td><td>Revoke… for node and relay devices, Details… for a Linux node, Remove… for Wi-Fi iPhones (today's word).</td></tr>
-    <tr><td>Primary</td><td>Add an iPhone or a Mac… · Move Here…</td><td>Only one is blue at a time (frame 4).</td></tr>
+    <tr><td>Primary</td><td>Add an iPhone or a Mac… · Move to This Mac…</td><td>Only one is blue at a time (frame 4). The move buttons are spoken "Move Approvals to This Mac" and "Move Approvals to Apassy Connect".</td></tr>
     <tr><td>Add sheet</td><td>Add a Device / Scan with the Apassy app on the iPhone. / Expires In / On a Mac, paste the link instead.</td><td>Expired: "The link expired." + New Link.</td></tr>
     <tr><td>Join check</td><td>&lt;Device&gt; Wants to Join / Confirm only if the iPhone shows these words.</td><td>"the Mac" for a Mac. Buttons Refuse, Confirm….</td></tr>
     <tr><td>Added</td><td>&lt;Device&gt; Added / It approves runs through this Mac. / The iPhone needs Tailscale on to reach this Mac.</td><td>Last line only for a node device.</td></tr>
@@ -975,14 +1048,14 @@ svg{display:block}
   <h2>Help behind ⓘ</h2>
   <ul>
     <li><b>Reachable on Your Tailnet</b> (frame 3e, open): only tailnet devices connect, nothing opens to the internet; Touch ID to switch; stops when the vault locks.</li>
-    <li><b>Node Words</b>: "Your iPhone shows them in Settings → Devices." "Other words there: revoke that iPhone and pair again."</li>
+    <li><b>Node Words</b>: "Safety words to compare: six words from this Mac's certificate." "Your iPhone shows them in Settings → Devices." "Other words there: revoke that iPhone and pair again." "The same words are not proof of this Mac. The iPhone checks the whole certificate."</li><li><b>Send Questions Through the Relay</b>, <b>Show Agents on My Other Devices</b>, and the free-end line: frame 8.</li>
     <li><b>Devices</b> (the ⓘ by the group title): "via your Mac: straight to this Mac over your tailnet." "via Apassy relay: through apassy-relay.wyderka.cc, end-to-end encrypted." "via Apassy Connect: to this Mac through Apassy Connect, pinned to its certificate." "Tailnet: your own Linux node." "Wi-Fi: the old pairing. It ends soon."</li>
     <li><b>Wi-Fi Pairing</b> (frame 6c, open).</li>
   </ul>
 
   <h2>Choices made in this mockup</h2>
   <ul>
-    <li>One <b>Devices</b> list for every device of every team, instead of today's "Other Macs" and "Relay" groups. The Wi-Fi iPhones stay in their own group until W2, because they are another pairing of the same phone.</li>
+    <li>One <b>Devices</b> list for every device of every team. The Relay group keeps only the relay switches, the Other Macs row of a relay vault, and the free-end line (frame 8). The Wi-Fi iPhones stay in their own group until W2, because they are another pairing of the same phone.</li>
     <li><b>Node words</b>: six words of <code>WORDS</code> from the pin (bytes 0–5 of SHA-256 of the DER), monospace, no separators. The join keeps today's two safety words.</li>
     <li><b>Port</b> is shown in the Address, not edited. It changes only through 3g before the first pairing.</li>
     <li>Revoke is a <b>button on each row</b> (as "Can see → Remove" in the cloud-agents mockup), not a menu.</li>

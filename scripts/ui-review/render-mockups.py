@@ -37,7 +37,7 @@ COLLECT = r"""
     if (n.nodeValue.includes(from)) n.nodeValue = n.nodeValue.split(from).join(to);
     if (n.nodeValue.includes(from.toLowerCase())) n.nodeValue = n.nodeValue.split(from.toLowerCase()).join(to.toLowerCase());
   }
-  document.querySelectorAll('.av').forEach(a => { if (a.textContent.trim() === from[0]) a.textContent = to[0]; });
+  document.querySelectorAll('.av, .avl').forEach(a => { if (a.textContent.trim() === from[0]) a.textContent = to[0]; });
   const out = [];
   document.querySelectorAll('section.frame').forEach((frame, i) => {
     const num = frame.querySelector('.fnum');

@@ -363,9 +363,23 @@ svg{display:block}
 .mini{font-size:11px;font-weight:600;color:rgba(0,0,0,.45);margin:0 0 6px 2px}
 /* A note for the reader inside a panel (another state, a quote): not a text of the window. */
 .dn{font-style:italic}
+/* Reader notes stay hidden until the Notes button shows them; the windows and panels never change. */
+body:not(.show-notes) :is(.fnotes,.dn,.notes,.intro>p){display:none}
+.notes-toggle{position:fixed;top:12px;right:16px;z-index:100;font:500 12.5px var(--font,system-ui);padding:5px 12px;border-radius:7px;border:0;box-shadow:0 0 0 .5px rgba(0,0,0,.2),0 1px 2px rgba(0,0,0,.08);background:#fff;cursor:pointer}
+body.show-notes .notes-toggle{background:var(--accent);color:#fff}
+.intro ol a{color:inherit}
+/* The plan row on one line: the label, the status, the buttons. */
+.fr .v.pv{text-align:left;white-space:normal}
+.fr .k:has(+.pv){min-width:0;margin-right:8px}
+/* A vault row of Shared Vaults with its people under it, inside one row. */
+.fr.stack{flex-direction:column;align-items:stretch;gap:7px}
+.fr.stack>.ln{display:flex;align-items:center;gap:8px;min-height:22px}
+.fr.stack>.ln>.nm{flex:1;min-width:0}
+.stw{margin-left:10px;font-size:12px;color:var(--sec)}.stw.warn{color:var(--t-warn)}
 </style>
 </head>
 <body>
+<button class="notes-toggle" type="button" onclick="document.body.classList.toggle('show-notes')">Notes</button>
 
 <!-- The icons, used with <use href="#…">. -->
 <svg class="sprite" aria-hidden="true">
@@ -412,19 +426,20 @@ svg{display:block}
   <h1>Apassy · Settings → Connect</h1>
   <p>Mockup for unit M2 of implementation-plan-s7-connect.md (ADR 0037 stage 7): the Connect account on the Mac, the plans and the checkout through Stripe in the browser, the Customer Portal, the devices of the account, families and teams, and the deletion. Synthetic data, light appearance only. This Mac: Mac mini (office). Now: Tue 10 Nov 2026, 14:20 UTC. The look is the shipped Settings: no new direction.</p>
   <ol>
-    <li>Not on Connect</li>
-    <li>Create the account, the recovery code</li>
-    <li>Account, no plan</li>
-    <li>The plan picker</li>
-    <li>Continue in the browser</li>
-    <li>The plan row in each state</li>
-    <li>Devices</li>
-    <li>This Mac joins an account</li>
-    <li>Family or Team members</li>
-    <li>Join a family or team</li>
-    <li>Delete the account</li>
-    <li>Shared Vaults</li>
-    <li>A new recovery code</li>
+    <li><a href="#f1">Not on Connect</a></li>
+    <li><a href="#f2">Create the account, the recovery code</a></li>
+    <li><a href="#f3">Account, no plan</a></li>
+    <li><a href="#f4">The plan picker</a></li>
+    <li><a href="#f5">Continue in the browser</a></li>
+    <li><a href="#f6">The plan row in each state</a></li>
+    <li><a href="#f7">Devices</a></li>
+    <li><a href="#f8">This Mac joins an account</a></li>
+    <li><a href="#f9">Family or Team members</a></li>
+    <li><a href="#f10">Join a family or team</a></li>
+    <li><a href="#f11">Delete the account</a></li>
+    <li><a href="#f12">Shared Vaults</a></li>
+    <li><a href="#f13">A new recovery code</a></li>
+    <li><a href="#f14">Recover an account</a></li>
   </ol>
 </div>
 
@@ -528,10 +543,11 @@ svg{display:block}
         <div class="gl">Apassy Connect</div>
         <div class="grp">
           <div class="fr"><div class="k">Account</div><div class="v">Rafal · rafal@example.com</div><span class="ib" title="More account actions"><svg><use href="#i-dots"/></svg></span></div>
-          <div class="fr"><div class="k">Plan</div><div class="v">No plan</div><span class="pb pri">Choose a Plan…</span></div>
+          <div class="fr"><div class="k">Recovery Code</div><div class="v"></div><span class="pb" title="New Recovery Code…">New Code…</span></div>
+          <div class="fr"><div class="k">Plan</div><div class="v pv">No plan</div><span class="pb pri">Choose a Plan…</span></div>
           <div class="fr"><div class="k">Family or Team</div><div class="v"></div><span class="pb" title="Join a Family or Team">Join…</span></div>
         </div>
-        <div class="gl">Devices<span>3</span></div>
+        <div class="gl">Devices</div>
         <div class="grp">
 <div class="fr" title="Mac · Added 21 Sep 2026 · Key 3f0a 91c2 7be4"><div class="dv"><svg><use href="#i-mini"/></svg></div><div class="kn"><div>Mac mini (office) <span class="cap">This Mac</span></div></div><span class="when mono">Key 3f0a 91c2 7be4</span></div><div class="fr" title="Mac · Added 22 Sep 2026 · Key c815 2d6e a093"><div class="dv"><svg><use href="#i-laptop"/></svg></div><div class="kn"><div>MacBook Pro</div></div><span class="when">2 h ago</span><span class="pb" title="Revoke MacBook Pro">Revoke…</span></div><div class="fr" title="iPhone · Added 22 Sep 2026 · Key 5e7b 0c48 f21d"><div class="dv"><svg><use href="#i-phone"/></svg></div><div class="kn"><div>Rafal's iPhone</div></div><span class="when">Yesterday</span><span class="pb" title="Revoke Rafal's iPhone">Revoke…</span></div>
         </div>
@@ -553,7 +569,7 @@ svg{display:block}
         <div class="fr"><div class="v" style="text-align:left;display:flex;gap:7px;align-items:center"><span class="spin"></span>Asking Apassy Connect…</div></div>
       </div></div>
   </div>
-  <ul class="fnotes"><li><b>Account</b>: the name, and the email only when Connect has one (copied from Stripe after a checkout; never written to disk). Its ⋯ holds the account ID with Copy Account ID, New Recovery Code…, Forget This Mac… (frame 7d), and Delete Account… (frame 11): frame 9f.</li><li><b>Choose a Plan…</b> opens frame 4. It is the one primary button of the view.</li><li><b>Devices</b>: one line each. This Mac shows its key; another device its last contact and <b>Revoke…</b> (frame 7c, spoken "Revoke MacBook Pro"). The kind, the day it was added, and the key are its hover text and its VoiceOver description.</li><li><b>Join…</b> (spoken "Join a Family or Team"): frame 10.</li><li><b>3b</b>: after the app starts, a lock, or a new unlock, the account key is not in memory. The section shows the account file (no secret) and <b>Sign In…</b>, which reads the key from the Keychain (Touch ID) and asks Connect (3c). The app never asks Touch ID by itself when the section opens.</li></ul>
+  <ul class="fnotes"><li><b>Account</b>: the name, and the email only when Connect has one (copied from Stripe after a checkout; never written to disk). Its ⋯ holds Copy Account ID (the ID beside it), Forget This Mac… (frame 7d), and Delete Account… (frame 11): frame 9f.</li><li><b>Recovery Code</b>: <b>New Code…</b> (spoken "New Recovery Code…"), frame 13. Off while the vault is locked and while the device list did not verify.</li><li><b>Choose a Plan…</b> opens frame 4. It is the one primary button of the view.</li><li><b>Devices</b>: one line each. This Mac shows its key; another device its last contact and <b>Revoke…</b> (frame 7c, spoken "Revoke MacBook Pro"). The kind, the day it was added, and the key are its hover text and its VoiceOver description.</li><li><b>Join…</b> (spoken "Join a Family or Team"): frame 10.</li><li><b>3b</b>: after the app starts, a lock, or a new unlock, the account key is not in memory. The section shows the account file (no secret) and <b>Sign In…</b>, which reads the key from the Keychain (Touch ID) and asks Connect (3c). The app never asks Touch ID by itself when the section opens.</li></ul>
 </section>
 <!-- ============================================================ 4 -->
 <section class="frame" id="f4">
@@ -623,30 +639,30 @@ svg{display:block}
     <span>The Plan row of the Apassy Connect group, from the PlanView of GET /v1/account (connect-billing-v1 section 8).</span></div>
   <div class="pgrid"><div class="pcard"><div class="plabel">6a · Active<small>Status line: Connect Personal · Renews 10 Dec 2026</small></div>
       <div class="grp" style="margin-top:10px">
-<div class="fr pl"><div class="k">Plan</div><div class="v"></div><span class="pb">Manage Billing…</span><div class="pst">Connect Personal · Renews 10 Dec 2026</div></div>
+<div class="fr"><div class="k">Plan</div><div class="v pv">Connect Personal · Renews 10 Dec 2026</div><span class="pb">Manage Billing…</span></div>
       </div></div><div class="pcard"><div class="plabel">6b · Canceled at the end of the period<small>Status line: Connect Personal · Ends 10 Dec 2026</small></div>
       <div class="grp" style="margin-top:10px">
-<div class="fr pl"><div class="k">Plan</div><div class="v"></div><span class="pb">Manage Billing…</span><div class="pst">Connect Personal · Ends 10 Dec 2026</div></div>
+<div class="fr"><div class="k">Plan</div><div class="v pv">Connect Personal · Ends 10 Dec 2026</div><span class="pb">Manage Billing…</span></div>
       </div></div><div class="pcard"><div class="plabel">6c · Past due (grace)<small>Status line: Connect Personal · Past due</small></div>
       <div class="grp" style="margin-top:10px">
-<div class="fr pl"><div class="k">Plan</div><div class="v"></div><span class="pb">Manage Billing…</span><div class="pst" style="color:var(--t-warn)">Connect Personal · Past due</div></div><div class="fr"><div class="tn warn" style="flex:1"><svg><use href="#i-warn"/></svg><span>Payment failed. Update the payment method by 17 Nov 2026.</span></div></div>
+<div class="fr"><div class="k">Plan</div><div class="v pv" style="color:var(--t-warn)">Connect Personal · Past due</div><span class="pb">Manage Billing…</span></div><div class="fr"><div class="tn warn" style="flex:1"><svg><use href="#i-warn"/></svg><span>Payment failed. Update the payment method by 17 Nov 2026.</span></div></div>
       </div></div><div class="pcard"><div class="plabel">6d · Read-only until a date<small>Status line: Read-only until 4 Jan 2027</small></div>
       <div class="grp" style="margin-top:10px">
-<div class="fr pl"><div class="k">Plan</div><div class="v"></div><span class="pb pri">Choose a Plan…</span><span class="pb">Manage Billing…</span><div class="pst" style="color:var(--t-warn)">Read-only until 4 Jan 2027</div></div><div class="fr"><div class="tn warn" style="flex:1"><svg><use href="#i-warn"/></svg><span>Nothing is uploaded; copies at Connect are deleted on 3 Mar 2027.</span></div></div>
+<div class="fr"><div class="k">Plan</div><div class="v pv" style="color:var(--t-warn)">Read-only until 4 Jan 2027</div><span class="pb pri">Choose a Plan…</span><span class="pb">Manage Billing…</span></div><div class="fr"><div class="tn warn" style="flex:1"><svg><use href="#i-warn"/></svg><span>Nothing is uploaded; copies at Connect are deleted on 3 Mar 2027.</span></div></div>
       </div></div><div class="pcard"><div class="plabel">6e · Suspended<small>Status line: Connect ended</small></div>
       <div class="grp" style="margin-top:10px">
-<div class="fr pl"><div class="k">Plan</div><div class="v"></div><span class="pb pri">Choose a Plan…</span><span class="pb">Manage Billing…</span><div class="pst" style="color:var(--t-crit)">Ended</div></div><div class="fr"><div class="tn crit" style="flex:1"><svg><use href="#i-warn"/></svg><span>Choose a plan before 3 Mar 2027 to keep your copies at Connect.</span></div></div>
+<div class="fr"><div class="k">Plan</div><div class="v pv" style="color:var(--t-crit)">Ended</div><span class="pb pri">Choose a Plan…</span><span class="pb">Manage Billing…</span></div><div class="fr"><div class="tn crit" style="flex:1"><svg><use href="#i-warn"/></svg><span>Choose a plan before 3 Mar 2027 to keep your copies at Connect.</span></div></div>
       </div></div><div class="pcard"><div class="plabel">6f · Waiting for the payment<small>Status line: Waiting for the payment</small></div>
       <div class="grp" style="margin-top:10px">
-<div class="fr pl"><div class="k">Plan</div><div class="v"></div><span class="pb">Manage Billing…</span><div class="pst">Waiting for the payment</div></div>
+<div class="fr"><div class="k">Plan</div><div class="v pv">Waiting for the payment</div><span class="pb">Manage Billing…</span></div>
       </div></div><div class="pcard"><div class="plabel">6g · Connect Family, organizer<small>Status line: Connect Family · 3 of 4 people</small></div>
       <div class="grp" style="margin-top:10px">
-<div class="fr pl"><div class="k">Plan</div><div class="v"></div><span class="pb">Manage Billing…</span><div class="pst">Connect Family · Renews 10 Nov 2027</div></div><div class="fr"><div class="k">People</div><div class="v">3 of 4</div><span class="pb">Change…</span></div>
+<div class="fr"><div class="k">Plan</div><div class="v pv">Connect Family · Renews 10 Nov 2027</div><span class="pb">Manage Billing…</span></div><div class="fr"><div class="k">People</div><div class="v">3 of 4</div><span class="pb">Change…</span></div>
       </div></div><div class="pcard"><div class="plabel">6h · Member of a family<small>Status line: Connect Family · Renews 10 Nov 2027</small></div>
       <div class="grp" style="margin-top:10px">
-<div class="fr pl"><div class="k">Plan</div><div class="v"></div><div class="pst">Connect Family · Renews 10 Nov 2027</div></div><div class="fr"><div class="k">Family</div><div class="v">Managed by Rafal</div></div>
+<div class="fr"><div class="k">Plan</div><div class="v pv">Connect Family · Renews 10 Nov 2027</div></div><div class="fr"><div class="k">Family</div><div class="v">Managed by Rafal</div><span class="pb" title="Leave Family…">Leave…</span></div>
       </div></div></div>
-  <ul class="fnotes"><li><b>active</b> and <b>trialing</b>: "Renews &lt;renews_at&gt;", or "Ends &lt;ends_at&gt;" when the plan is canceled at the end of the period. <b>past_due</b>: the warning line with <code>grace_until</code>. <b>read_only</b>: <code>read_only_until</code> and <code>delete_at</code>. <b>suspended</b>: <code>delete_at</code>. <b>pending</b>: "Waiting for the payment". <b>none</b>: "No plan" with Choose a Plan… (frame 3).</li><li><b>Manage Billing…</b>: <code>POST /v1/account/portal</code>, then the URL that Connect returned opens in the default browser. No owner check: the portal changes nothing in Apassy, and Stripe asks for its own confirmation. It shows only for the account that pays (no group, or the owner of the group).</li><li>The status goes under the label in full and wraps at the width of Settings; it never ends in "…". The buttons stay on the line of the label.</li><li>Dates are UTC days, "10 Dec 2026". The list row and the header show the status line under each card.</li><li>A member of a family or team sees the plan without a price, a button, or the billing (6h).</li></ul>
+  <ul class="fnotes"><li><b>active</b> and <b>trialing</b>: "Renews &lt;renews_at&gt;", or "Ends &lt;ends_at&gt;" when the plan is canceled at the end of the period. <b>past_due</b>: the warning line with <code>grace_until</code>. <b>read_only</b>: <code>read_only_until</code> and <code>delete_at</code>. <b>suspended</b>: <code>delete_at</code>. <b>pending</b>: "Waiting for the payment". <b>none</b>: "No plan" with Choose a Plan… (frame 3).</li><li><b>Manage Billing…</b>: <code>POST /v1/account/portal</code>, then the URL that Connect returned opens in the default browser. No owner check: the portal changes nothing in Apassy, and Stripe asks for its own confirmation. It shows only for the account that pays (no group, or the owner of the group).</li><li>One line: the label, the status, and the buttons at the trailing edge. The status wraps at the width of Settings and never ends in "…"; the buttons go under it only when the row is too narrow.</li><li>Dates are UTC days, "10 Dec 2026". The list row and the header show the status line under each card.</li><li>A member of a family or team sees the plan without a price, a button, or the billing, and the row of the group with <b>Leave…</b> (6h, frame 9e).</li></ul>
 </section>
 <!-- ============================================================ 7 -->
 <section class="frame" id="f7">
@@ -678,7 +694,7 @@ svg{display:block}
       <div class="plabel">7c · Revoke another device</div>
       <div class="alert"><div class="aic" style="background:#ff3b30"><svg><use href="#i-warn"/></svg></div>
         <h2>Revoke MacBook Pro?</h2>
-        <p>It leaves your Connect account. Its vaults stay on it.</p>
+        <p>It leaves your Connect account and every vault copy at Connect. Its vaults stay on it.</p>
         <p style="color:var(--sec)">Mac · Added 22 Sep 2026 · Key c815 2d6e a093</p>
       </div>
       <div class="sbar"><span class="btn">Cancel</span><span class="btn des">Revoke…</span></div>
@@ -687,12 +703,12 @@ svg{display:block}
       <div class="plabel">7d · Forget this Mac</div>
       <div class="alert"><div class="aic" style="background:#ff3b30"><svg><use href="#i-warn"/></svg></div>
         <h2>Forget This Mac?</h2>
-        <p>This Mac leaves your Connect account. To come back, add it from another device.</p>
+        <p>This Mac leaves your Connect account, and its Connect key is deleted. To come back, add it from another device.</p>
       </div>
       <div class="sbar"><span class="btn">Cancel</span><span class="btn des">Forget…</span></div>
     </div>
   </div>
-  <ul class="fnotes"><li><b>7a</b>: <code>ConnectAccount::start_link</code>; the code is text with Copy and a QR code of the same text (error correction M). Connect never sees the code. The sheet asks <code>GET /v1/account/devices/pending</code> every 5 s and moves to 7b when a device asks.</li><li><b>7b</b>: the six words of <code>safety_words</code> (connect-account-v1 section 7.3). <b>Confirm…</b> runs the owner check <code>OwnerAction::ConfirmConnectDevice</code> (Touch ID), then <code>confirm_join</code>. <b>Refuse</b> needs no check.</li><li><b>7c</b> and <b>7d</b>: Cancel is the default button. Revoke… and Forget… run the owner check <code>OwnerAction::RevokeConnectDevice</code> first. After 7d this Mac is "Not on Connect" (frame 1).</li><li>Rows: the platform glyph, the name, "Mac · Added 21 Sep 2026", the last contact ("Now", "2 h ago", "Yesterday", "12 Sep").</li></ul>
+  <ul class="fnotes"><li><b>7a</b>: <code>ConnectAccount::start_link</code>; the code is text with Copy and a QR code of the same text (error correction M). Connect never sees the code. The sheet asks <code>GET /v1/account/devices/pending</code> every 5 s and moves to 7b when a device asks.</li><li><b>7b</b>: the six words of <code>safety_words</code> (connect-account-v1 section 7.3). <b>Confirm…</b> runs the owner check <code>OwnerAction::ConfirmConnectDevice</code> (Touch ID), then <code>confirm_join</code>. <b>Refuse</b> needs no check.</li><li><b>7c</b> and <b>7d</b>: Cancel is the default button. Revoke… and Forget… run the owner check <code>OwnerAction::RevokeConnectDevice</code> first. After 7d this Mac is "Not on Connect" (frame 1).</li><li>Rows: the platform glyph, the name, and the last contact ("2 h ago", "Yesterday", "12 Sep"); this Mac shows its key instead. "Mac · Added 21 Sep 2026 · Key …" is the hover text and the VoiceOver description, and the second line of 7c.</li><li><b>7d after Connect removed this Mac</b> ("Removed from the account"; the note says "Apassy Connect removed this Mac from its account. Forget this Mac here."): "The Connect key and the account file of this Mac are deleted, and the vault copies of the account stop syncing on this Mac. To come back, add it from another device."</li></ul>
 </section>
 <!-- ============================================================ 8 -->
 <section class="frame" id="f8">
@@ -730,7 +746,7 @@ svg{display:block}
 <section class="frame" id="f9">
   <div class="flabel"><b><span class="fnum">9</span>Family or Team members</b>
     <span>The organizer's view of Connect Family: members, a pending confirmation, Invite, Remove, and the people.</span></div>
-  <div class="win" style="min-height:980px">
+  <div class="win" style="min-height:960px">
     <aside class="side">
       <div class="chrome"><div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div><span class="sidetoggle"><svg><use href="#i-sidebar"/></svg></span></div>
       <div class="scroll">
@@ -753,19 +769,26 @@ svg{display:block}
         <div class="gl">Apassy Connect</div>
         <div class="grp">
           <div class="fr"><div class="k">Account</div><div class="v">Rafal · rafal@example.com</div><span class="ib" title="More account actions"><svg><use href="#i-dots"/></svg></span></div>
-<div class="fr"><div class="k">Plan</div><div class="v">Connect Family · Renews 10 Nov 2027</div><span class="pb">Manage Billing…</span></div>
+          <div class="fr"><div class="k">Recovery Code</div><div class="v"></div><span class="pb" title="New Recovery Code…">New Code…</span></div>
+<div class="fr"><div class="k">Plan</div><div class="v pv">Connect Family · Renews 10 Nov 2027</div><span class="pb">Manage Billing…</span></div>
           <div class="fr"><div class="k">People</div><div class="v">3 of 4</div><span class="pb">Change…</span></div>
         </div>
-        <div class="gl">Family<span>3 of 4</span></div>
+        <div class="gl">Family</div>
         <div class="grp">
-<div class="fr" title="Since 21 Sep 2026"><div class="avl" style="background:#ff9500">R</div><div class="kn"><div>Rafal <span class="cap">Organizer</span></div></div></div><div class="fr" title="Since 22 Sep 2026"><div class="avl" style="background:#34c759">O</div><div class="kn"><div>Ola</div></div><span class="pb" title="Remove Ola">Remove…</span></div><div class="fr"><div class="avl" style="background:#5856d6">J</div><div class="kn"><div>Jan <span class="cap" style="background:rgba(255,149,0,.14);color:var(--t-warn)">Pending</span></div></div><span class="pb" title="Remove Jan">Remove…</span><span class="pb" title="Confirm Jan">Confirm…</span></div>
+<div class="fr" title="Organizer · Since 21 Sep 2026"><div class="avl" style="background:#ff9500">R</div><div class="kn"><div>Rafal <span class="cap">Organizer</span></div></div></div><div class="fr" title="Member · Since 22 Sep 2026"><div class="avl" style="background:#34c759">O</div><div class="kn"><div>Ola</div></div><span class="pb" title="Remove Ola">Remove…</span></div><div class="fr" title="Member · Pending"><div class="avl" style="background:#5856d6">J</div><div class="kn"><div>Jan <span class="cap" style="background:rgba(255,149,0,.14);color:var(--t-warn)">Pending</span></div></div><span class="pb" title="Remove Jan">Remove…</span><span class="pb" title="Confirm Jan">Confirm…</span></div>
         </div>
         <div style="margin-top:12px"><span class="btn">Invite…</span></div>
-        <div class="gl">Devices<span>3</span></div>
+        <div class="gl">Devices</div>
         <div class="grp">
 <div class="fr" title="Mac · Added 21 Sep 2026 · Key 3f0a 91c2 7be4"><div class="dv"><svg><use href="#i-mini"/></svg></div><div class="kn"><div>Mac mini (office) <span class="cap">This Mac</span></div></div><span class="when mono">Key 3f0a 91c2 7be4</span></div><div class="fr" title="Mac · Added 22 Sep 2026 · Key c815 2d6e a093"><div class="dv"><svg><use href="#i-laptop"/></svg></div><div class="kn"><div>MacBook Pro</div></div><span class="when">2 h ago</span><span class="pb" title="Revoke MacBook Pro">Revoke…</span></div><div class="fr" title="iPhone · Added 22 Sep 2026 · Key 5e7b 0c48 f21d"><div class="dv"><svg><use href="#i-phone"/></svg></div><div class="kn"><div>Rafal's iPhone</div></div><span class="when">Yesterday</span><span class="pb" title="Revoke Rafal's iPhone">Revoke…</span></div>
         </div>
         <div style="margin-top:12px"><span class="btn">Add a Device…</span></div>
+        <div class="gl">Shared Vaults</div>
+        <div class="grp">
+          <div class="fr stack"><div class="ln"><div class="k nm">Family</div><span class="pb" title="Share Family with…">Share with…</span></div><div class="ln" title="“Ola’s MacBook Air” (Ola)"><div class="nm">Ola</div><span class="pb" title="Stop Sharing Family with “Ola’s MacBook Air” (Ola)…">Stop Sharing…</span></div></div>
+          <div class="fr" title="Piotr"><div class="k" style="flex:1">Garden · Piotr</div><span class="pb" title="Leave Garden · Piotr">Leave…</span></div>
+        </div>
+        <div style="margin-top:12px"><span class="btn">Accept Shared Vault…</span></div>
       </div></div>
     </section>
   </div>
@@ -789,7 +812,7 @@ svg{display:block}
       <div class="plabel">9c · Remove a member</div>
       <div class="alert"><div class="aic" style="background:#ff3b30"><svg><use href="#i-warn"/></svg></div>
         <h2>Remove Ola?</h2>
-        <p>Ola leaves your family and its shared vaults.</p>
+        <p>Ola leaves your family and its shared vaults. Ola keeps an Apassy Connect account without a plan.</p>
       </div>
       <div class="sbar"><span class="btn">Cancel</span><span class="btn des">Remove…</span></div>
     </div>
@@ -804,29 +827,34 @@ svg{display:block}
     </div>
     <div class="shc">
       <div class="plabel">9f · ⋯ of the Account row</div>
-      <div class="menu" style="position:static;min-width:0;box-shadow:0 0 0 .5px rgba(0,0,0,.2)">
-        <div class="mi"><span class="ck"></span><span style="color:var(--sec)">Account ID</span>&nbsp;<span class="mono">acc_k7m2q4x3ca</span></div>
-        <div class="mi"><span class="ck"></span>Copy Account ID</div>
-        <hr>
-        <div class="mi"><span class="ck"></span>New Recovery Code…</div>
+      <div class="menu" style="position:static;min-width:260px;white-space:nowrap;box-shadow:0 0 0 .5px rgba(0,0,0,.2)">
+        <div class="mi"><span class="ck"></span>Copy Account ID<small class="mono">acc_k7m2q4x3ca</small></div>
         <div class="mi"><span class="ck"></span>Forget This Mac…</div>
         <hr>
         <div class="mi" style="color:var(--red)"><span class="ck"></span>Delete Account…</div>
       </div>
-      <div class="note dn">A member also has "Leave Family…" (or "Leave Team…") above the deletion. Items that need an owner check are off while the vault is locked.</div>
+      <div class="note dn">Every item is off while a step runs; Forget This Mac… and Delete Account… also while the vault is locked. Forget This Mac… shows only while the device list holds this Mac.</div>
     </div>
     <div class="shc">
       <div class="plabel">9e · A member's view (rows of the Apassy Connect group)</div>
       <div class="grp">
-        <div class="fr"><div class="k">Family</div><div class="v">Managed by Rafal</div></div>
+        <div class="fr"><div class="k">Family</div><div class="v">Managed by Rafal</div><span class="pb" title="Leave Family…">Leave…</span></div>
       </div>
       <div class="mini" style="margin-top:14px">Pending</div>
       <div class="grp">
-        <div class="fr"><div class="k">Family</div><div class="v" style="color:var(--t-warn)">Waiting for Rafal</div></div>
+        <div class="fr"><div class="k">Family</div><div class="v" style="color:var(--t-warn)">Waiting for Rafal to confirm you</div><span class="pb" title="Leave Family…">Leave…</span></div>
       </div>
     </div>
+    <div class="shc">
+      <div class="plabel">9g · Leave the family</div>
+      <div class="alert"><div class="aic" style="background:#ff3b30"><svg><use href="#i-warn"/></svg></div>
+        <h2>Leave the family?</h2>
+        <p>You leave the family and its shared vaults. Your Connect account stays, without a plan.</p>
+      </div>
+      <div class="sbar"><span class="btn">Cancel</span><span class="btn des">Leave…</span></div>
+    </div>
   </div>
-  <ul class="fnotes"><li><b>Group label</b>: "Family" or "Team", with "3 of 4" (active members of <code>quantity</code>). Roles: the Family owner is "Organizer"; a Team has "Owner" and "Admin" caps.</li><li><b>Confirm…</b> on a pending member runs the owner check <code>OwnerAction::ChangeConnectGroup</code> (ConfirmMember), then <code>POST …/members/{id}/confirm</code>. <b>Remove…</b> (9c) runs the check (RemoveMember), then <code>DELETE …/members/{id}</code>. <b>Change…</b> (9d) runs the check (SetSeats), then <code>POST /v1/account/group/seats</code>; the new count shows when Stripe confirms it.</li><li><b>Invite…</b> (owner or admin): <code>POST /v1/account/group/invites</code>; the link that Connect returned, with Copy. A Team owner chooses Member or Admin first (9b); a Family and a Team admin invite members at once (9a).</li><li><b>9e</b>: a member sees one row, who manages the group; "Leave Family…" is in the ⋯ menu of the Account row (the owner check, then <code>DELETE …/members/&lt;own id&gt;</code>). Seats below the members: "seat_limit" shows as "Remove members first, or choose more."</li></ul>
+  <ul class="fnotes"><li><b>Group label</b>: "Family" or "Team", without a count: the People (or Seats) row says "3 of 4" (active members of <code>quantity</code>). Roles: the Family owner is "Organizer"; a Team has "Owner" and "Admin" caps, and a pending admin keeps "Admin" beside "Pending". The role and the day the member joined ("Member · Since 22 Sep 2026", "Member · Pending") are the hover text and the VoiceOver description.</li><li><b>Confirm…</b> on a pending member runs the owner check <code>OwnerAction::ChangeConnectGroup</code> (ConfirmMember), then <code>POST …/members/{id}/confirm</code>. <b>Remove…</b> (9c) runs the check (RemoveMember), then <code>DELETE …/members/{id}</code>. <b>Change…</b> (9d) runs the check (SetSeats), then <code>POST /v1/account/group/seats</code>; the new count shows when Stripe confirms it.</li><li><b>Invite…</b> (owner or admin): <code>POST /v1/account/group/invites</code>; the link that Connect returned, with Copy. A Team owner chooses Member or Admin first (9b); a Family and a Team admin invite members at once (9a).</li><li><b>9e</b>: a member sees one row, who manages the group, with <b>Leave…</b> (spoken "Leave Family…" or "Leave Team…"): the alert 9g, the owner check ("Leave your Apassy Connect family or team? Your account stays, without a plan, and leaves the vaults that are shared with you."), then <code>DELETE …/members/&lt;own id&gt;</code>. Seats below the members: "seat_limit" shows as "Remove members first, or choose more."</li><li><b>Shared Vaults</b> (frame 12) comes under Devices when it has something to show.</li></ul>
 </section>
 <!-- ============================================================ 10 -->
 <section class="frame" id="f10">
@@ -863,13 +891,13 @@ svg{display:block}
 <!-- ============================================================ 11 -->
 <section class="frame" id="f11">
   <div class="flabel"><b><span class="fnum">11</span>Delete the account</b>
-    <span>The red row at the end of the section.</span></div>
+    <span>The last item of the ⋯ menu of the Account row.</span></div>
   <div class="pgrid three">
     <div class="shc">
       <div class="plabel">11a · Delete Account…</div>
       <div class="alert"><div class="aic" style="background:#ff3b30"><svg><use href="#i-warn"/></svg></div>
         <h2>Delete Your Connect Account?</h2>
-        <p>The plan ends and Connect deletes the account for good. Your vaults stay on your devices.</p>
+        <p>The plan ends now, and every vault copy, device, and link of the account is deleted at Connect. Your vaults stay on your devices.</p>
       </div>
       <div class="sbar"><span class="btn">Cancel</span><span class="btn des">Delete…</span></div>
     </div>
@@ -900,21 +928,27 @@ svg{display:block}
       <div class="plabel">12a · The section: one family, one vault shared each way</div>
       <h2>Shared Vaults</h2>
       <div class="grp">
-        <div class="fr"><div class="k" style="min-width:110px">Family</div><div class="v"></div><span class="pb">Share with…</span></div>
-        <div class="fr"><div class="v" style="text-align:left;color:var(--secondary)">“Ola’s MacBook Air” (Ola): syncs this vault</div><span class="pb" title="Stop Sharing with “Ola’s MacBook Air” (Ola)…">Stop Sharing…</span></div>
-        <div class="fr"><div class="k" style="min-width:110px">Garden, shared by “Piotr’s MacBook” (Piotr)</div><div class="v"></div><span class="pb" title="Leave Garden, shared by “Piotr’s MacBook” (Piotr)">Leave…</span></div>
+        <div class="fr stack"><div class="ln"><div class="k nm">Family</div><span class="pb" title="Share Family with…">Share with…</span></div><div class="ln" title="“Ola’s MacBook Air” (Ola)"><div class="nm">Ola</div><span class="pb" title="Stop Sharing Family with “Ola’s MacBook Air” (Ola)…">Stop Sharing…</span></div></div>
+        <div class="fr" title="Piotr"><div class="k" style="flex:1">Garden · Piotr</div><span class="pb" title="Leave Garden · Piotr">Leave…</span></div>
       </div>
       <div style="margin-top:12px"><span class="btn">Accept Shared Vault…</span></div>
-      <table class="dn" style="margin-top:14px;font-size:11.5px;color:rgba(0,0,0,.6);border-collapse:collapse">
-        <tr><th style="text-align:left;padding-right:10px">Row</th><th style="text-align:left;padding-right:10px">Line</th><th style="text-align:left">Button</th></tr>
-        <tr><td>Person</td><td>“…” (Ola): has not joined yet · has not compared the words yet · reset the account. Share again.</td><td>Stop Sharing…</td></tr>
-        <tr><td>Person, ended</td><td>“…” (Piotr) left this vault. · Sharing with “…” (Jan) ended.</td><td>Share Again…</td></tr>
-        <tr><td>Joined vault</td><td>Car, shared by “…” (Ewa); second line only for a problem: stopped sharing this vault · must verify this account again · The share ended. The vault stays here. · Checking who shares this vault…</td><td>Leave…, and Download… when no vault here syncs it</td></tr>
-        <tr><td>Offer</td><td>“Travel” at Connect, shared by Ola (or "A vault, shared by Ola")</td><td>Join</td></tr>
-        <tr><td>Left</td><td>Boat, shared by Ola · left on MacBook Pro (here: · left; it stays on this device)</td><td>—</td></tr>
-        <tr><td>Claim</td><td>Sharing of “Family” is paused. Confirm that this account made it.</td><td>Confirm…</td></tr>
-      </table>
-      <div class="note dn">Outside a family or team: no Share with… and no Accept…, and a vault that nobody shares is not drawn; without any row, there is no section. The spoken names carry the person or the vault ("Stop Sharing with “Ola’s MacBook Air” (Ola)…", "Join “Travel” at Connect, shared by Ola", "Download the copy of …").</div>
+    </div>
+    <div class="shc">
+      <div class="plabel">12i · People in other states</div>
+      <h2>Shared Vaults</h2>
+      <div class="grp">
+        <div class="fr stack"><div class="ln"><div class="k nm">Family</div><span class="pb" title="Share Family with…">Share with…</span></div><div class="ln" title="“Ola’s MacBook Air” (Ola)"><div class="nm">Ola<span class="stw warn">Account reset</span></div><span class="pb" title="Stop Sharing Family with “Ola’s MacBook Air” (Ola)…">Stop Sharing…</span><span class="pb" title="Share Family with “Ola’s MacBook Air” (Ola) Again…">Share Again…</span></div><div class="tn warn"><svg><use href="#i-warn"/></svg><span>Ola reset the account. Share again.</span></div><div class="ln" title="“Jan’s MacBook” (Jan)"><div class="nm">Jan<span class="stw">Not joined</span></div><span class="pb" title="Stop Sharing Family with “Jan’s MacBook” (Jan)…">Stop Sharing…</span></div><div class="ln" title="“Piotr’s MacBook” (Piotr)"><div class="nm">Piotr<span class="stw">Left</span></div><span class="pb" title="Share Family with “Piotr’s MacBook” (Piotr) Again…">Share Again…</span></div></div>
+      </div>
+    </div>
+    <div class="shc">
+      <div class="plabel">12j · Vaults of other accounts in other states</div>
+      <h2>Shared Vaults</h2>
+      <div class="grp">
+        <div class="fr stack" title="Ewa"><div class="ln"><div class="k nm">Car · Ewa</div><span class="pb" title="Leave Car · Ewa">Leave…</span><span class="pb" title="Download the copy of Car · Ewa">Download Copy…</span></div><div class="tn warn"><svg><use href="#i-warn"/></svg><span>Ewa stopped sharing this vault.</span></div></div>
+        <div class="fr" title="Ola"><div class="k" style="flex:1">“Travel” at Connect · Ola</div><span class="pb" title="Join “Travel” at Connect · Ola">Join</span></div>
+        <div class="fr" title="Ola"><div class="k" style="flex:1">Boat · Ola · you left it on MacBook Pro</div></div>
+        <div class="fr"><div class="nt" style="flex:1;color:var(--sec)">Sharing of “Family” is paused. Confirm that this account made it.</div><span class="pb" title="Confirm that this account made Family">Confirm…</span></div>
+      </div>
     </div>
     <div class="shc">
       <div class="plabel">12b · Share with… (pick a member)</div>
@@ -981,7 +1015,7 @@ svg{display:block}
       </div>
     </div>
   </div>
-  <ul class="fnotes"><li><b>12a</b>: the section is under the account in Settings › Connect, from <code>ConnectAccount::refresh_shares</code> (the lists verified from the pinned roots, never the group view). "Share with…" and "Accept Shared Vault…" show only in an active family or team. Every line comes from the lists, so it says the same after a restart: a member whose verified list left the share ("left this vault.") or whose share ended otherwise ("Sharing with … ended.") gets "Share Again…"; a joined vault whose owner ended the share says "… stopped sharing this vault." until the owner shares it again (then it is offered: Join); a vault that this account left says on which device. A vault of another account that no vault of this Mac syncs is named by Connect's name ("“Travel” at Connect, shared by Ola"), else "A vault, shared by …"; a joined one offers "Download…".</li><li><b>12b</b>: the members of the group view are only a list to pick from. A member that this account pinned before, and whose verified list pins this account, needs no code: Continue runs the owner check <code>ShareConnectVault</code> without words. A member who did not finish the words gets a new code (12c); nothing is signed twice.</li><li><b>12c</b>: <code>start_share</code>; Connect never sees the code; the sheet asks <code>GET /v1/account/peers/pending</code> every 5 s and moves to 12d with the first answer that verifies.</li><li><b>12d</b>: <b>Confirm…</b> runs the owner check <code>ShareConnectVault</code> with the words, then <code>confirm_share</code> (it signs <code>peer</code> and <code>share</code> and adds the member's verified devices). For an account that was reset the check is <code>RepinConnectPeer</code>: it names both account keys and the vaults whose shares end first. Refuse signs nothing. Each owner check names the vault by its name on this Mac, the person by the device name that their verified list signed with the short key fingerprint, and Connect's name for them as a hint beside it.</li><li><b>12e</b> and <b>12f</b>: <code>accept_code</code> checks the code against the account that answered; <b>The Words Match…</b> runs <code>AcceptConnectShare</code>, then <code>accept_share</code>. The Words Differ withdraws the answer and signs nothing.</li><li><b>Join</b> runs the owner check <code>JoinConnectShare</code> ("Join a vault shared by …?", with Connect's name of the vault as a hint; the name on this Mac when one of its vaults synced it before), signs <code>join</code> naming the share that it answers, reads the lists of the other people of the vault, then opens "Use a Vault from Another Mac" › Apassy Connect: the passphrase of the copy opens it. When Connect does not list this Mac in the copy yet: "… adds this device when they next open Apassy. Then choose Download…". No store that this account made (its <code>store</code> entry), that this Mac syncs as its own, or that this account's list holds, is offered.</li><li><b>12g</b>: Cancel is the default. Both always run the owner check <code>EndConnectShare</code>. Leave turns off the sync of that vault here; the other devices of the account do the same when they read the <code>leave</code> (the third note of 12a). The account ends a share by itself, without an owner check, only when the person's verified list left that share, when Connect's group answer shows this account active and not the person, or when Connect marks the share void; an error or an unclear group answer ends nothing. Each owner check names the exact entries that it signs.</li><li><b>12h</b>: a head whose signer is not verified yet ("Checking the device list" of the sync) shows the first line for 10 minutes, once for each head (a lock does not start it again), while the lists are read again after 30 s and then after twice the last wait, up to 10 minutes; then the error shows. A head of a device that left, after this Mac's last sync, shows the second.</li></ul>
+  <ul class="fnotes"><li><b>The rows of 12a, 12i and 12j</b>:<table style="margin-top:6px;font-size:11.5px;border-collapse:collapse"><tr><th style="text-align:left;padding-right:10px">Row</th><th style="text-align:left;padding-right:10px">Text</th><th style="text-align:left">Buttons</th></tr><tr><td>Own vault</td><td>Family (the name on this Mac)</td><td>Share with… (in a family or team)</td></tr><tr><td>Person</td><td>Ola; a state word only off the normal state: Not joined · Words not compared · Account reset · Left · Ended. A problem line under it: "Ola has not compared the words. Share with… makes a new code." · "Ola reset the account. Share again."</td><td>Stop Sharing… while the share holds; Share Again… after Left, Ended, or a reset</td></tr><tr><td>Joined vault</td><td>Car · Ewa; a problem line only for a problem: "Ewa stopped sharing this vault." · "Ewa must verify this account again." · "The share ended. The vault stays here."; "Checking who shares this vault…" as a note</td><td>Leave…, and Download Copy… when no vault here syncs it</td></tr><tr><td>Offer</td><td>“Travel” at Connect · Ola (or "A vault · Ola")</td><td>Join</td></tr><tr><td>Left</td><td>Boat · Ola · you left it on MacBook Pro (here: "you left; the vault stays here")</td><td>—</td></tr><tr><td>Claim</td><td>Sharing of “Family” is paused. Confirm that this account made it.</td><td>Confirm…</td></tr></table></li><li>The device of a person (“Ola’s MacBook Air” (Ola)) and the owner of another account's vault are the hover text and the VoiceOver description of the name. The spoken names carry the vault and the person ("Stop Sharing Family with “Ola’s MacBook Air” (Ola)…", "Share Family with…", "Join “Travel” at Connect · Ola", "Download the copy of Car · Ewa"). Outside a family or team: no Share with… and no Accept…, and a vault that nobody shares is not drawn; without any row, there is no section.</li><li><b>12a</b>: the section is under the devices in Settings › Connect, from <code>ConnectAccount::refresh_shares</code> (the lists verified from the pinned roots, never the group view). "Share with…" and "Accept Shared Vault…" show only in an active family or team. Every line comes from the lists, so it says the same after a restart: a member whose verified list left the share ("Left") or whose share ended otherwise ("Ended") gets "Share Again…"; a joined vault whose owner ended the share says "… stopped sharing this vault." until the owner shares it again (then it is offered: Join); a vault that this account left says on which device. A vault of another account that no vault of this Mac syncs is named by Connect's name ("“Travel” at Connect · Ola"), else "A vault · Ola"; a joined one offers "Download Copy…".</li><li><b>12b</b>: the members of the group view are only a list to pick from. A member that this account pinned before, and whose verified list pins this account, needs no code: Continue runs the owner check <code>ShareConnectVault</code> without words. A member who did not finish the words gets a new code (12c); nothing is signed twice.</li><li><b>12c</b>: <code>start_share</code>; Connect never sees the code; the sheet asks <code>GET /v1/account/peers/pending</code> every 5 s and moves to 12d with the first answer that verifies.</li><li><b>12d</b>: <b>Confirm…</b> runs the owner check <code>ShareConnectVault</code> with the words, then <code>confirm_share</code> (it signs <code>peer</code> and <code>share</code> and adds the member's verified devices). For an account that was reset the check is <code>RepinConnectPeer</code>: it names both account keys and the vaults whose shares end first. Refuse signs nothing. Each owner check names the vault by its name on this Mac, the person by the device name that their verified list signed with the short key fingerprint, and Connect's name for them as a hint beside it.</li><li><b>12e</b> and <b>12f</b>: <code>accept_code</code> checks the code against the account that answered; <b>The Words Match…</b> runs <code>AcceptConnectShare</code>, then <code>accept_share</code>. The Words Differ withdraws the answer and signs nothing.</li><li><b>Join</b> runs the owner check <code>JoinConnectShare</code> ("Join a vault shared by …?", with Connect's name of the vault as a hint; the name on this Mac when one of its vaults synced it before), signs <code>join</code> naming the share that it answers, reads the lists of the other people of the vault, then opens "Use a Vault from Another Mac" › Apassy Connect: the passphrase of the copy opens it. When Connect does not list this Mac in the copy yet: "… adds this device when they next open Apassy. Then choose Download Copy…". No store that this account made (its <code>store</code> entry), that this Mac syncs as its own, or that this account's list holds, is offered.</li><li><b>12g</b>: Cancel is the default. Both always run the owner check <code>EndConnectShare</code>. Leave turns off the sync of that vault here; the other devices of the account do the same when they read the <code>leave</code> (the third note of 12a). The account ends a share by itself, without an owner check, only when the person's verified list left that share, when Connect's group answer shows this account active and not the person, or when Connect marks the share void; an error or an unclear group answer ends nothing. Each owner check names the exact entries that it signs.</li><li><b>12h</b>: a head whose signer is not verified yet ("Checking the device list" of the sync) shows the first line for 10 minutes, once for each head (a lock does not start it again), while the lists are read again after 30 s and then after twice the last wait, up to 10 minutes; then the error shows. A head of a device that left, after this Mac's last sync, shows the second.</li></ul>
 </section>
 <!-- ============================================================ 13 -->
 <section class="frame" id="f13">
@@ -991,9 +1025,11 @@ svg{display:block}
     <div class="shc">
       <div class="plabel">13a · An account whose code was never shown</div>
       <div class="grp" style="margin-top:6px">
-        <div class="fr"><div class="tn warn" style="flex:1;color:var(--t-warn)"><svg><use href="#i-warn"/></svg><span>You have not seen this account's recovery code.</span></div><span class="pb">New Recovery Code…</span></div>
+        <div class="fr"><div class="tn warn" style="flex:1;color:var(--t-warn)"><svg><use href="#i-warn"/></svg><span>You have not seen this account's recovery code.</span></div></div>
+        <div class="fr"><div class="k">Account</div><div class="v">Rafal · rafal@example.com</div><span class="ib" title="More account actions"><svg><use href="#i-dots"/></svg></span></div>
+        <div class="fr"><div class="k">Recovery Code</div><div class="v"></div><span class="pb" title="New Recovery Code…">New Code…</span></div>
       </div>
-      <div class="note dn">The first row of the Apassy Connect group. It stays through every refresh and restart until a new code is made and its sheet is closed with “I Saved It”. Without it, New Recovery Code… is in the ⋯ menu of the Account row.</div>
+      <div class="note dn">The first row of the Apassy Connect group; its button is New Code… of the Recovery Code row. It stays through every refresh and restart until a new code is made and its sheet is closed with “I Saved It”.</div>
       <div class="plabel" style="margin-top:14px">13d · A new code of another device</div>
       <div class="grp" style="margin-top:6px">
         <div class="fr"><div class="tn warn" style="flex:1;color:var(--t-warn)"><svg><use href="#i-warn"/></svg><span>Your recovery code was replaced on MacBook Air on 11 Nov 2026.</span></div><span class="hi" title="The old code no longer works. Not you? Revoke that device, then make a new code."><svg><use href="#i-info"/></svg></span><span class="pb">OK</span></div>
@@ -1002,7 +1038,7 @@ svg{display:block}
     <div class="shc">
       <div class="plabel">13b · The owner check</div>
       <div class="alert"><div class="aic" style="background:#007aff"><svg><use href="#i-lock"/></svg></div>
-        <h2>Make a New Recovery Code?</h2>
+        <h2>Confirm that it is you</h2>
         <p>Make a new recovery code? The old code stops working.</p>
       </div>
       <div class="sbar"><span class="btn">Cancel</span><span class="btn pri">Touch ID…</span></div>
@@ -1017,7 +1053,7 @@ svg{display:block}
       <div class="note dn" style="color:var(--t-warn)">13e, the same sheet when the account file could not be written: “This Mac could not record the new code. It works: save it now.” under the lead.</div>
     </div>
   </div>
-  <ul class="fnotes"><li><b>New Recovery Code…</b> runs the owner check <code>OwnerAction::NewRecoveryCode</code> (Touch ID or the passphrase), then <code>ConnectAccount::new_recovery_code</code>: a new code on this Mac, and <code>POST /v1/account/recovery</code> with its public key, signed by the device key over the key that Connect holds now. The button is off while the vault is locked and while the device list did not verify.</li><li><b>13c</b> is the sheet of 2b: the account ID and the 16 words once; Apassy never stores the words. After it the old code recovers nothing.</li><li>The warning of 13a comes from the account file (<code>recovery_unseen</code>), on from the moment an account is made or recovered (2b, 14d) and before each new code is sent; only “I Saved It” of the sheet of the code clears it, so a lock or a quit before it keeps the line.</li><li>The account file holds the pending rotation (public keys and the signed statement, never the code) until Connect names the new key; a lost answer sends the same body again. A Connect that names another key gives no code: “Apassy Connect did not take the new recovery code. Your current recovery code still works; nothing changed.”</li><li><b>13d</b>: another device made a new code (<code>recovery_rotated_by</code> and <code>recovery_rotated_at</code> of the account view, against the key that this device pinned). “OK” pins the new key and ends the line.</li></ul>
+  <ul class="fnotes"><li><b>New Code…</b> of the Recovery Code row (spoken "New Recovery Code…") runs the owner check <code>OwnerAction::NewRecoveryCode</code> (Touch ID or the passphrase), then <code>ConnectAccount::new_recovery_code</code>: a new code on this Mac, and <code>POST /v1/account/recovery</code> with its public key, signed by the device key over the key that Connect holds now. The button is off while the vault is locked and while the device list did not verify.</li><li><b>13c</b> is the sheet of 2b: the account ID and the 16 words once; Apassy never stores the words. After it the old code recovers nothing.</li><li>The warning of 13a comes from the account file (<code>recovery_unseen</code>), on from the moment an account is made or recovered (2b, 14d) and before each new code is sent; only “I Saved It” of the sheet of the code clears it, so a lock or a quit before it keeps the line.</li><li>The account file holds the pending rotation (public keys and the signed statement, never the code) until Connect names the new key; a lost answer sends the same body again. A Connect that names another key gives no code: “Apassy Connect did not take the new recovery code. Your current recovery code still works; nothing changed.”</li><li><b>13b</b> and <b>14b</b>: every owner check has the title "Confirm that it is you"; its body is the question, which is also the reason of the Touch ID prompt.</li><li><b>13d</b>: another device made a new code (<code>recovery_rotated_by</code> and <code>recovery_rotated_at</code> of the account view, against the key that this device pinned). “OK” pins the new key and ends the line.</li></ul>
 </section>
 <!-- ============================================================ 14 -->
 <section class="frame" id="f14">
@@ -1028,6 +1064,7 @@ svg{display:block}
       <div class="plabel">14a · The sheet</div>
       <h2>Recover an Account</h2>
       <p class="lead">Use this only if no device of the account is left.</p>
+      <div class="note" style="margin-top:0">The vault copies at Connect are deleted; the vaults on your devices stay.</div>
       <div class="grp" style="margin-top:10px">
         <div class="fr pl"><div class="k">Account ID</div><div class="pst"><span class="mono" style="display:block;background:#fff;border-radius:6px;box-shadow:0 0 0 .5px rgba(0,0,0,.15);padding:4px 8px;color:var(--label)">acc_k7m2q4x3ca</span></div></div>
         <div class="fr pl"><div class="k">Recovery Code</div><div class="pst"><span class="mono" style="display:block;background:#fff;border-radius:6px;box-shadow:0 0 0 .5px rgba(0,0,0,.15);padding:4px 8px;color:var(--label)">BLAZE CABLE FLUTE BOARD SEAL TIGER MAPLE ORBITT CEDAR LEMON QUARTZ OTTER HARBOR MANGO PIANO RIVER</span><span style="display:block;color:var(--t-crit);margin-top:4px">Word 8, “orbitt”, is not a word of a recovery code.</span></div></div>
@@ -1038,7 +1075,7 @@ svg{display:block}
     <div class="shc">
       <div class="plabel">14b · The owner check</div>
       <div class="alert"><div class="aic" style="background:#007aff"><svg><use href="#i-lock"/></svg></div>
-        <h2>Recover the Apassy Connect Account?</h2>
+        <h2>Confirm that it is you</h2>
         <p>Recover the Apassy Connect account acc_k7m2q4x3ca? This Mac becomes its first device and its vault copies at Connect are deleted. Your vaults stay on your devices.</p>
       </div>
       <div class="sbar"><span class="btn">Cancel</span><span class="btn pri">Touch ID…</span></div>
@@ -1065,7 +1102,8 @@ svg{display:block}
       <div class="grp" style="margin-top:6px">
         <div class="fr"><div class="nt" style="flex:1;color:var(--label)">Recovered. Connect deleted 2 vault copies. Sync again in Vault › Sync.</div><div class="v"><span class="btn">OK</span></div></div>
         <div class="fr"><div class="k">Account</div><div class="v">Alex</div><span class="ib" title="More account actions"><svg><use href="#i-dots"/></svg></span></div>
-        <div class="fr pl"><div class="k">Plan</div><div class="pst">Connect Personal · Renews 10 Dec 2026</div></div>
+        <div class="fr"><div class="k">Recovery Code</div><div class="v"></div><span class="pb" title="New Recovery Code…">New Code…</span></div>
+        <div class="fr"><div class="k">Plan</div><div class="v pv">Connect Personal · Renews 10 Dec 2026</div></div>
       </div>
       <div class="note dn">The vault on this Mac whose copy went says once: “The copy at Apassy Connect was deleted by the account recovery.”, with <b>Sync Again…</b> (a new copy at Connect).</div>
     </div>

@@ -247,7 +247,7 @@
      "note": "Demo frame 13d."
     },
     {
-     "title": "⋯ › New Recovery Code… (owner check)",
+     "title": "Recovery Code › New Code… (owner check)",
      "mockups": [
       "connect-13b.png"
      ],
@@ -899,7 +899,7 @@
    "title": "5. Settings › Devices (demo frames)",
    "rows": [
     {
-     "title": "Both moves: Move Here… / Move to Connect…",
+     "title": "Both moves: Move to This Mac… / Move to Connect…",
      "mockups": [
       "devices-settings-9a.png"
      ],

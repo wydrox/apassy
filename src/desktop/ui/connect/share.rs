@@ -937,8 +937,7 @@ pub(crate) fn view_of(
         })
     };
     // A store of another account: by its name on this computer, else by the name that
-    // Connect gives it ("“Travel” at Connect, shared by Ola"), else as "a vault shared by"
-    // the person.
+    // Connect gives it ("“Travel” at Connect · Ola"), else as "A vault · Ola".
     let other_title = |team: &str, owner_name: &str| match local.get(team) {
         Some(vault) => shared_by(vault, owner_name),
         None => stores
