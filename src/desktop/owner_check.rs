@@ -2105,7 +2105,7 @@ impl OwnerRequest {
                 concat!(
                     "Recover the Apassy Connect account {}? This ",
                     crate::computer!(),
-                    " becomes its first device and its vault copies at Connect are deleted."
+                    " becomes its first device and its vault copies at Connect are deleted. Your vaults stay on your devices."
                 ),
                 page_text(account_id)
             ),

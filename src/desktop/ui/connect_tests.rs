@@ -3148,7 +3148,7 @@ fn a_recovery_asks_the_owner_then_shows_the_new_code_and_the_deleted_copies() {
         assert!(painted.contains(line), "{line:?} in {painted}");
     }
     assert!(!painted.contains(account_id.as_str()), "{painted}");
-    assert!(!painted.contains(super::connect::RECOVER_ROW), "{painted}");
+    assert!(!painted.contains(super::connect::RECOVER), "{painted}");
     let copied = act(&ctx, &mut app, Action::CopyAccountId);
     assert!(
         copied

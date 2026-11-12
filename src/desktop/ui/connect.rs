@@ -155,7 +155,6 @@ pub(crate) fn recovery_changed(device: Option<&str>, at: Option<u64>) -> String 
 /// Settings › Connect without an account: the recovery of an account that has no device
 /// left (connect-account-v1 section 9).
 pub(crate) const RECOVER: &str = "Recover an Account…";
-pub(crate) const RECOVER_ROW: &str = "Lost every device of your account?";
 pub(crate) const RECOVER_TITLE: &str = "Recover an Account";
 /// The start screen's Apassy Connect path without an account file: the way of a person
 /// who has no other device of the account.
@@ -214,7 +213,7 @@ pub(crate) fn recovered_line(deleted: Option<u64>) -> String {
 }
 
 pub(crate) const PICKER_TITLE: &str = "Choose a Plan";
-pub(crate) const PICKER_NOTE: &str = "VAT included.";
+pub(crate) const PICKER_NOTE: &str = "VAT included. Apassy never sees your card.";
 pub(crate) const LOADING_PRICES: &str = "Loading prices…";
 /// The picker when `GET /v1/plans` failed: the error shows under the sheet.
 pub(crate) const PRICES_FAILED: &str = "The prices did not load.";
@@ -259,9 +258,10 @@ pub(crate) const OLD_FILE_TITLE: &str = "Join the account again";
 pub(crate) const OLD_FILE: &str = concat!(
     "This ",
     crate::computer!(),
-    "'s account file is from an earlier Apassy. Forget the account, then join it again from another device."
+    "'s account file is from an earlier Apassy. Forget this ",
+    crate::computer!(),
+    ", then add it again from another device."
 );
-pub(crate) const FORGET_OLD_FILE: &str = "Forget Account…";
 pub(crate) const FORGET_REMOVED_LEAD: &str = concat!(
     "The Connect key of this ",
     crate::computer!(),
@@ -333,7 +333,6 @@ pub(crate) const TEXTS: &[&str] = &[
     JOIN_ROW,
     ACCOUNT_ID,
     RECOVER,
-    RECOVER_ROW,
     RECOVER_TITLE,
     START_NO_DEVICE,
     RECOVER_LEAD,
@@ -371,7 +370,6 @@ pub(crate) const TEXTS: &[&str] = &[
     FORGET_THIS_MAC,
     OLD_FILE_TITLE,
     OLD_FILE,
-    FORGET_OLD_FILE,
     FORGET_REMOVED_LEAD,
     JOIN_ACCOUNT_TITLE,
     JOIN_ACCOUNT_LEAD,
@@ -736,7 +734,7 @@ pub(crate) enum Shown {
         note: String,
     },
     /// The account file is from an earlier version of Apassy: this Mac must join its
-    /// account again, after "Forget Account…" (an owner check).
+    /// account again, after "Forget This Mac…" (an owner check).
     OldFile,
     Account(Account),
 }
@@ -903,7 +901,7 @@ pub(crate) enum Action {
     Revoke(usize),
     /// "Forget This Mac…" of a Mac that Connect removed from its account.
     ForgetRemoved,
-    /// "Forget Account…" of an account file of an earlier version.
+    /// "Forget This Mac…" of an account file of an earlier version.
     ForgetOld,
     Invite,
     /// Confirm… of the member with this index.
@@ -1008,7 +1006,7 @@ pub(crate) fn draw(ui: &mut Ui, view: &ConnectView) -> Option<Action> {
                 g.line_note(OLD_FILE_TITLE, None, Some(rows::note(OLD_FILE)), |ui| {
                     if ui
                         .add_enabled_ui(!view.locked, |ui| {
-                            kit::small_button(ui, FORGET_OLD_FILE, Style::Bordered)
+                            kit::small_button(ui, FORGET_THIS_MAC, Style::Bordered)
                         })
                         .inner
                         .clicked()
@@ -1023,16 +1021,17 @@ pub(crate) fn draw(ui: &mut Ui, view: &ConnectView) -> Option<Action> {
     action
 }
 
+/// Frame 1: what Connect does, the line on self-hosting, and the three ways in. The
+/// header says "Not on Connect"; the recovery is the borderless third button.
 fn not_on_connect(ui: &mut Ui, action: &mut Option<Action>) {
     rows::group(ui, Some(GROUP_LABEL), |g| {
         g.row(|ui| {
-            ui.label(rows::label_text(NOT_ON_CONNECT));
-            ui.add(Label::new(rows::note(INTRO)).wrap());
+            ui.add(Label::new(rows::label_text(INTRO)).wrap());
         });
         g.tone_icon_row(SELF_HOST, Tone::Accent);
     });
     ui.add_space(12.0);
-    // The two buttons wrap onto two lines in a narrow window.
+    // The buttons wrap onto two lines in a narrow window.
     ui.horizontal_wrapped(|ui| {
         if kit::button(ui, CREATE, Style::Prominent).clicked() {
             *action = Some(Action::Create);
@@ -1040,15 +1039,9 @@ fn not_on_connect(ui: &mut Ui, action: &mut Option<Action>) {
         if kit::button(ui, ADD_THIS_MAC, Style::Bordered).clicked() {
             *action = Some(Action::AddThisMac);
         }
-    });
-    rows::group(ui, None, |g| {
-        g.row(|ui| {
-            if rows::text_buttons(ui, rows::note(RECOVER_ROW), &[(RECOVER, Style::Bordered)])
-                .is_some()
-            {
-                *action = Some(Action::Recover);
-            }
-        });
+        if kit::button(ui, RECOVER, Style::Link).clicked() {
+            *action = Some(Action::Recover);
+        }
     });
 }
 
@@ -2211,8 +2204,10 @@ fn sheet_body(
                         .clicked()
                         .then_some(SheetChoice::OpenAgain)
                 },
+                // "Close", not "Cancel": closing the sheet does not cancel a payment that
+                // the owner finishes in the browser. Escape still closes it.
                 |ui| {
-                    kit::alert_cancel(ui)
+                    kit::alert_default_button(ui, "Close")
                         .clicked()
                         .then_some(SheetChoice::Cancel)
                 },
@@ -2392,7 +2387,8 @@ fn sheet_body(
             } else {
                 "Invite to Your Family"
             };
-            kit::sheet_title(ui, title, Some(INVITE_LEAD));
+            // The lead belongs to the link: before it, the sheet has the role only (9b).
+            kit::sheet_title(ui, title, link.is_some().then_some(INVITE_LEAD));
             if let Some((url, expires_at)) = link {
                 let mut choice = None;
                 rows::group_box(ui, |g| {

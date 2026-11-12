@@ -454,17 +454,14 @@ svg{display:block}
         <div class="hdr"><div class="tile" style="background:rgb(52,199,89)"><svg><use href="#i-cloud"/></svg></div><div><h1>Connect</h1><div class="s">Not on Connect</div></div></div>
         <div class="gl">Apassy Connect</div>
         <div class="grp">
-          <div class="fr top"><div class="kn"><div>Not on Connect</div><div class="nt">Syncs your vaults and reaches your devices, without Tailscale.</div></div></div>
+          <div class="fr top"><div class="kn"><div>Syncs your vaults and reaches your devices, without Tailscale.</div></div></div>
           <div class="fr"><div class="tn acc" style="flex:1"><svg><use href="#i-info"/></svg><span>Everything Connect does also runs on your own hardware, free.</span></div></div>
         </div>
-        <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap"><span class="btn pri">Create Account…</span><span class="btn">Add This Mac…</span></div>
-        <div class="grp" style="margin-top:10px">
-          <div class="fr"><div class="nt" style="flex:1">Lost every device of your account?</div><div class="v"><span class="btn">Recover an Account…</span></div></div>
-        </div>
+        <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap"><span class="btn pri">Create Account…</span><span class="btn">Add This Mac…</span><span class="btn" style="background:none;box-shadow:none;color:var(--link)">Recover an Account…</span></div>
       </div></div>
     </section>
   </div>
-  <ul class="fnotes"><li><b>Status line</b> of the list row and the header: <code>Not on Connect</code>.</li><li><b>Create Account…</b> opens frame 2a. <b>Add This Mac…</b> opens frame 8 (this Mac joins as a device, connect-account-v1 section 7.2). <b>Recover an Account…</b> opens frame 14a (connect-account-v1 section 9); it shows only without an account file.</li><li>No price on this view: prices show only in the plan picker, from <code>GET /v1/plans</code>.</li><li>Text rules (plans section 5): "free" only for what is self-hosted; relay sync and shared vaults are never called the paid part; the hosted relay is never "for teams".</li></ul>
+  <ul class="fnotes"><li><b>Status line</b> of the list row and the header: <code>Not on Connect</code>.</li><li><b>Create Account…</b> opens frame 2a. <b>Add This Mac…</b> opens frame 8 (this Mac joins as a device, connect-account-v1 section 7.2). <b>Recover an Account…</b>, the borderless third button, opens frame 14a (connect-account-v1 section 9); it shows only without an account file.</li><li>No price on this view: prices show only in the plan picker, from <code>GET /v1/plans</code>.</li><li>Text rules (plans section 5): "free" only for what is self-hosted; relay sync and shared vaults are never called the paid part; the hosted relay is never "for teams".</li></ul>
 </section>
 <!-- ============================================================ 2 -->
 <section class="frame" id="f2">
@@ -568,7 +565,7 @@ svg{display:block}
       <div style="display:flex;justify-content:center;margin:0 0 10px"><div class="seg"><span class="on">Monthly</span><span>Yearly</span></div></div>
       <div class="grp"><div class="plan on"><span class="rad"></span><div class="tx"><div class="t1">Connect Personal</div><div class="t2">One person and all of their devices</div></div><div class="pr">€3<small>a month</small></div></div><div class="plan"><span class="rad"></span><div class="tx"><div class="t1">Connect Family</div><div class="t2">4 people; each further person €1 a month</div></div><div class="pr">€5<small>a month</small></div></div><div class="plan"><span class="rad"></span><div class="tx"><div class="t1">Connect Team</div><div class="t2">Members, roles, and billing per seat</div></div><div class="pr">€4<small>a member a month</small></div></div></div>
       <div class="grp" style="margin-top:10px"><div class="fr"><div class="k" style="min-width:76px"><b>Total</b></div><div class="v" style="color:var(--label);font-weight:600">€3 a month</div></div></div>
-      <div class="note">VAT included.</div>
+      <div class="note">VAT included. Apassy never sees your card.</div>
       <div class="sbar"><span class="btn">Cancel</span><span class="btn pri">Continue to Payment…</span></div>
     </div><div class="shc">
       <div class="plabel">4b · Connect Family, yearly, 6 people</div>
@@ -576,7 +573,7 @@ svg{display:block}
       <div style="display:flex;justify-content:center;margin:0 0 10px"><div class="seg"><span>Monthly</span><span class="on">Yearly</span></div></div>
       <div class="grp"><div class="plan"><span class="rad"></span><div class="tx"><div class="t1">Connect Personal</div><div class="t2">One person and all of their devices</div></div><div class="pr">€30<small>a year</small></div></div><div class="plan on"><span class="rad"></span><div class="tx"><div class="t1">Connect Family</div><div class="t2">4 people; each further person €10 a year</div></div><div class="pr">€50<small>a year</small></div></div><div class="plan"><span class="rad"></span><div class="tx"><div class="t1">Connect Team</div><div class="t2">Members, roles, and billing per seat</div></div><div class="pr">€40<small>a member a year</small></div></div></div>
       <div class="grp" style="margin-top:10px"><div class="fr"><div class="k" style="min-width:76px">People</div><div class="v"></div><span class="step3"><span>−</span><b>6</b><span>+</span></span></div><div class="fr"><div class="k" style="min-width:76px"><b>Total</b></div><div class="v" style="color:var(--label);font-weight:600">€70 a year</div></div></div>
-      <div class="note">VAT included.</div>
+      <div class="note">VAT included. Apassy never sees your card.</div>
       <div class="sbar"><span class="btn">Cancel</span><span class="btn pri">Continue to Payment…</span></div>
     </div><div class="shc">
       <div class="plabel">4c · Connect Team, monthly, 5 seats</div>
@@ -584,7 +581,7 @@ svg{display:block}
       <div style="display:flex;justify-content:center;margin:0 0 10px"><div class="seg"><span class="on">Monthly</span><span>Yearly</span></div></div>
       <div class="grp"><div class="plan"><span class="rad"></span><div class="tx"><div class="t1">Connect Personal</div><div class="t2">One person and all of their devices</div></div><div class="pr">€3<small>a month</small></div></div><div class="plan"><span class="rad"></span><div class="tx"><div class="t1">Connect Family</div><div class="t2">4 people; each further person €1 a month</div></div><div class="pr">€5<small>a month</small></div></div><div class="plan on"><span class="rad"></span><div class="tx"><div class="t1">Connect Team</div><div class="t2">Members, roles, and billing per seat</div></div><div class="pr">€4<small>a member a month</small></div></div></div>
       <div class="grp" style="margin-top:10px"><div class="fr"><div class="k" style="min-width:76px">Seats</div><div class="v"></div><span class="step3"><span>−</span><b>5</b><span>+</span></span></div><div class="fr"><div class="k" style="min-width:76px"><b>Total</b></div><div class="v" style="color:var(--label);font-weight:600">€20 a month</div></div></div>
-      <div class="note">VAT included.</div>
+      <div class="note">VAT included. Apassy never sees your card.</div>
       <div class="sbar"><span class="btn">Cancel</span><span class="btn pri">Continue to Payment…</span></div>
     </div></div>
   <ul class="fnotes"><li><b>Prices</b>: only from <code>GET /v1/plans</code> (connect-billing-v1 section 2). Nothing in the app holds an amount. While the plans load, the rows show "Loading prices…"; if Connect does not answer, the sheet shows the error under the rows and <b>Continue</b> stays off; Cancel and Choose a Plan… ask again.</li><li><b>Total</b> = <code>amount + max(0, n − included) × extra</code>, for 1 ≤ n ≤ max: a Family of 2 pays the price of 4. The stepper stays inside 1…max (Family 10, Team 250, from the plans).</li><li><b>Yearly</b> shows the year prices. The segment says nothing about savings: the app does not compute a discount.</li><li><b>Continue to Payment…</b>: <code>POST /v1/account/checkout</code>, then the URL that Connect returned opens in the default browser. Then frame 5.</li><li>Plan names: Connect Personal, Connect Family, Connect Team (plans section 5), as Connect sends them.</li></ul>
@@ -599,7 +596,7 @@ svg{display:block}
       <h2>Finish in Your Browser</h2>
       <p class="lead">Pay in your browser. This sheet closes when the plan is active.</p>
       <div class="bwait" style="margin:18px 0 8px"><span class="spin"></span>Waiting for Connect…</div>
-      <div class="sbar"><span class="btn left">Open Page Again</span><span class="btn">Cancel</span></div>
+      <div class="sbar"><span class="btn left">Open Page Again</span><span class="btn">Close</span></div>
     </div>
     <div class="shc">
       <div class="plabel">5b · Confirmed</div>
@@ -618,7 +615,7 @@ svg{display:block}
       <div class="sbar"><span class="btn left">Check Again</span><span class="btn pri">Close</span></div>
     </div>
   </div>
-  <ul class="fnotes"><li><b>Polling</b>: <code>GET /v1/account</code> every 3 s while the sheet is open; it stops on an entitled plan (5b), on Cancel, or after 30 minutes (5c). The browser's return never changes the plan: only the webhook does.</li><li><b>Open Page Again</b> opens the same Checkout URL again. Cancel closes the sheet; a payment that the owner still finishes in the browser shows on the next refresh of the section.</li><li><b>No link back to the app</b>: the app bundle registers no URL scheme, and eframe gives no open-URL event; polling is the only path (the plan allows it). The done page says "Apassy on your Mac shows your plan in a moment. You can close this page." as text, with no link.</li></ul>
+  <ul class="fnotes"><li><b>Polling</b>: <code>GET /v1/account</code> every 3 s while the sheet is open; it stops on an entitled plan (5b), on Close, or after 30 minutes (5c). The browser's return never changes the plan: only the webhook does.</li><li><b>Open Page Again</b> opens the same Checkout URL again. Close (or Escape) closes the sheet and cancels nothing; a payment that the owner still finishes in the browser shows on the next refresh of the section.</li><li><b>No link back to the app</b>: the app bundle registers no URL scheme, and eframe gives no open-URL event; polling is the only path (the plan allows it). The done page says "Apassy on your Mac shows your plan in a moment. You can close this page." as text, with no link.</li></ul>
 </section>
 <!-- ============================================================ 6 -->
 <section class="frame" id="f6">
@@ -784,7 +781,6 @@ svg{display:block}
     <div class="shc">
       <div class="plabel">9b · Invite to a team (owner)</div>
       <h2>Invite to Your Team</h2>
-      <p class="lead">Send this link to the person. It works once.</p>
       <div class="grp"><div class="fr"><div class="k" style="min-width:60px">Role</div><div class="v"></div><div class="seg"><span class="on">Member</span><span>Admin</span></div></div></div>
       <div class="note">Admins manage members; only you change the seats and billing.</div>
       <div class="sbar"><span class="btn">Cancel</span><span class="btn pri">Create Link</span></div>
@@ -1046,7 +1042,7 @@ svg{display:block}
       <div class="plabel">14b · The owner check</div>
       <div class="alert"><div class="aic" style="background:#007aff"><svg><use href="#i-lock"/></svg></div>
         <h2>Recover the Apassy Connect Account?</h2>
-        <p>Recover the Apassy Connect account acc_k7m2q4x3ca? This Mac becomes its first device and its vault copies at Connect are deleted.</p>
+        <p>Recover the Apassy Connect account acc_k7m2q4x3ca? This Mac becomes its first device and its vault copies at Connect are deleted. Your vaults stay on your devices.</p>
       </div>
       <div class="sbar"><span class="btn">Cancel</span><span class="btn pri">Touch ID…</span></div>
     </div>

@@ -89,7 +89,7 @@ pub(crate) enum Guarded {
     Recover {
         account_id: String,
     },
-    /// "Forget Account…" of an account file of an earlier version.
+    /// "Forget This Mac…" of an account file of an earlier version.
     ForgetOld,
     Group {
         group_id: String,

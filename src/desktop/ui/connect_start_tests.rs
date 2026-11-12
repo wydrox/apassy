@@ -17,7 +17,7 @@ use super::connect::live;
 use zeroize::Zeroizing;
 
 use super::connect::{
-    ADD_THIS_MAC, Action, FORGET_OLD_FILE, JOIN_ACCOUNT_TITLE, JOINED_TITLE, OLD_FILE,
+    ADD_THIS_MAC, Action, FORGET_THIS_MAC, JOIN_ACCOUNT_TITLE, JOINED_TITLE, OLD_FILE,
     OLD_FILE_TITLE, REMOVED, SIGN_IN, Sheet, SheetChoice, Shown, TRY_AGAIN,
 };
 use super::connect_tests::fake_connect::FakeConnect;
@@ -559,7 +559,7 @@ fn an_old_account_file_says_join_the_account_again() {
     let text = frame(&ctx, &mut app) + &frame(&ctx, &mut app);
     assert!(text.contains(title), "{text}");
     assert!(text.contains(OLD_FILE), "{text}");
-    assert!(text.contains(FORGET_OLD_FILE), "{text}");
+    assert!(text.contains(FORGET_THIS_MAC), "{text}");
     assert!(!text.contains(REMOVED), "{text}");
 }
 

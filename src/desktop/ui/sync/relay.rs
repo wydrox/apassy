@@ -6905,7 +6905,9 @@ pub(crate) const CONNECT_OPEN_JOIN: &str = concat!(
 pub(crate) const CONNECT_OPEN_OLD_FILE: &str = concat!(
     "This ",
     crate::computer!(),
-    "'s account file is from an earlier Apassy. Forget the account in Settings › Connect, then join it again."
+    "'s account file is from an earlier Apassy. Forget this ",
+    crate::computer!(),
+    " in Settings › Connect, then add it again from another device."
 );
 /// The key of the account is being read for this step.
 pub(crate) const CONNECT_OPEN_SIGNING_IN: &str = "Apassy signs in to Apassy Connect…";
