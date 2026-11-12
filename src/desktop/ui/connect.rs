@@ -84,8 +84,7 @@ pub(crate) const CREATE_TITLE: &str = "Create a Connect Account";
 pub(crate) const CREATE_LEAD: &str = "No password or email needed. You choose a plan later.";
 pub(crate) const CREATE_NOTE: &str = "Members of your family or team see this name.";
 pub(crate) const RECOVERY_TITLE: &str = "Save Your Recovery Code";
-pub(crate) const RECOVERY_LEAD: &str =
-    "Shown once. Save it and the account ID in another password manager.";
+pub(crate) const RECOVERY_LEAD: &str = "It recovers the account if every device is lost. Shown once. Save it and the account ID in another password manager.";
 pub(crate) const SAVED_IT: &str = "I Saved It";
 /// A join whose key is in the account already (connect-account-v1 section 7.2).
 pub(crate) const JOIN_FINISHING_TITLE: &str = "Finishing the Join…";
@@ -296,7 +295,8 @@ pub(crate) const JOINED_TITLE: &str = concat!("This ", crate::computer_cap!(), "
 pub(crate) const INVITE_LEAD: &str = "Send this link to the person. It works once.";
 pub(crate) const ADMIN_NOTE: &str = "Admins manage members; only you change the seats and billing.";
 pub(crate) const CREATE_LINK: &str = "Create Link";
-pub(crate) const SEATS_NOTE: &str = "Stripe charges or credits the difference for this period.";
+pub(crate) const SEATS_NOTE: &str =
+    "Stripe charges or credits the difference for the rest of the period.";
 pub(crate) const JOIN_GROUP_REFUSED: &str =
     "This account has a plan or another family or team. Cancel or leave it first.";
 pub(crate) const DELETE_TITLE: &str = "Delete Your Connect Account?";

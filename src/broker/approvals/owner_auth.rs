@@ -1138,7 +1138,7 @@ impl OwnerAction {
                 "make a new recovery code for your Apassy Connect account; the old code stops working".to_owned()
             }
             Self::RecoverConnectAccount { account_id } => format!(
-                "recover the Apassy Connect account {}; its vault copies at Connect are deleted",
+                "recover the Apassy Connect account {}; the account's vault copies at Connect are deleted",
                 account_id
                     .chars()
                     .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
@@ -1163,7 +1163,15 @@ impl OwnerAction {
             Self::AddStoreDevice { .. } => {
                 "let another device sync the relay copy of this vault at Apassy Connect".to_owned()
             }
-            Self::ChangeConnectGroup { change, .. } => match change {
+            Self::ChangeConnectGroup {
+                account_id: own,
+                change,
+                ..
+            } => match change {
+                // A member's own leave removes the account of this device: it leaves.
+                ConnectGroupChange::RemoveMember { account_id, .. } if account_id == own => {
+                    "leave your Apassy Connect family or team".to_owned()
+                }
                 ConnectGroupChange::ConfirmMember { name, .. } => format!(
                     "add \"{}\" to your Apassy Connect family or team",
                     short_device_name(name)
@@ -2693,6 +2701,28 @@ mod evaluation_tests {
             days: 90,
         };
         assert!(!LocalWindowSource::LocalOwner.permits(&remote));
+    }
+
+    /// A member's own leave reads as a leave in the Touch ID prompt and the activity log;
+    /// an organizer's removal of another member names the person.
+    #[test]
+    fn a_members_own_leave_reads_as_a_leave() {
+        let change = |member: &str| OwnerAction::ChangeConnectGroup {
+            account_id: "acc_k7m2q4x3ca".into(),
+            group_id: "grp_f4m6n2p7qa".into(),
+            change: ConnectGroupChange::RemoveMember {
+                account_id: member.into(),
+                name: "Ola".into(),
+            },
+        };
+        assert_eq!(
+            change("acc_k7m2q4x3ca").reason(),
+            "leave your Apassy Connect family or team"
+        );
+        assert_eq!(
+            change("acc_m3n5p7q2rb").reason(),
+            "remove \"Ola\" from your Apassy Connect family or team"
+        );
     }
 
     /// The Apassy Connect account actions (plan s7 M1) always need a fresh check on this

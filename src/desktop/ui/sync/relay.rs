@@ -1309,8 +1309,7 @@ pub(crate) const CONNECT_NEEDS_PLAN: &str =
 
 /// The words of the "Apassy Connect" choice (plan s7 unit M3).
 /// The lead of the setup sheet on "Apassy Connect".
-pub(crate) const CONNECT_SETUP_LEAD: &str =
-    "Your Apassy Connect account keeps one encrypted copy of this vault.";
+pub(crate) const CONNECT_SETUP_LEAD: &str = "Your Apassy Connect account keeps one encrypted copy of this vault. Connect never gets the passphrase.";
 pub(crate) const CONNECT_SETUP_WORDS: &str =
     "Your other devices of the account turn it on the same way, without a link code.";
 

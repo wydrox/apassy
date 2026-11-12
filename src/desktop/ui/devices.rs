@@ -1529,7 +1529,10 @@ pub(crate) fn revoke_sheet(
                     "."
                 )),
             ),
-            _ => ("It can no longer see or answer questions.".to_owned(), None),
+            _ => (
+                "It can no longer see or answer questions.".to_owned(),
+                Some("To use it again, pair it again."),
+            ),
         };
         kit::sheet_title(ui, &title, Some(&lead));
         if !watches.is_empty() {

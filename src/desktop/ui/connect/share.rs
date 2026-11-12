@@ -84,7 +84,7 @@ pub(crate) const STOP_LEAD: &str =
 pub(crate) const ACCEPTED_LEAD: &str = "Their shared vaults show in Settings › Connect.";
 /// The end of the line of a shared vault that this device left.
 pub(crate) const LEFT_HERE: &str = "you left; the vault stays here";
-pub(crate) const UNPINNED: &str = "Some people who share your vaults could not be verified here.";
+pub(crate) const UNPINNED: &str = "Some people who share your vaults could not be verified here. Their devices sign nothing here.";
 pub(crate) const DOWNLOAD: &str = "Download Copy…";
 pub(crate) const VAULT_OFFERED: &str = "A vault";
 pub(crate) const CLAIM: &str = "Confirm…";

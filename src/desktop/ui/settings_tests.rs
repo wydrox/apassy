@@ -846,6 +846,7 @@ fn devices_sheets_draw_the_mockup() {
     for expected in [
         "Revoke Rafal's iPhone?",
         "It can no longer see or answer questions.",
+        "To use it again, pair it again.",
         "Also revoke Rafal's Apple Watch",
         "Cancel",
         "Revoke",

@@ -2100,12 +2100,12 @@ impl OwnerRequest {
                 page_text(fingerprint).replace(' ', "\u{a0}")
             ),
             Self::DeleteConnectAccount { .. } => "Delete your Apassy Connect account? The plan ends now, and every vault copy, device, and link of the account is deleted at Connect. Your vaults stay on your devices.".to_owned(),
-            Self::NewRecoveryCode { .. } => "Make a new recovery code? The old code stops working.".to_owned(),
+            Self::NewRecoveryCode { .. } => "Make a new recovery code? Apassy shows it once. The old code stops working.".to_owned(),
             Self::RecoverConnectAccount { account_id } => format!(
                 concat!(
                     "Recover the Apassy Connect account {}? This ",
                     crate::computer!(),
-                    " becomes its first device and its vault copies at Connect are deleted. Your vaults stay on your devices."
+                    " becomes its first device, the account's vault copies at Connect are deleted, and a new recovery code replaces the old one. Your vaults stay on your devices."
                 ),
                 page_text(account_id)
             ),
