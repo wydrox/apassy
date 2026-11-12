@@ -2827,7 +2827,7 @@ fn devices_frame(
         texts_of(&clipped.shape, clipped.clip_rect, &mut texts);
     }
     let mut nodes = Vec::new();
-    for update in &output.platform_output.accesskit_update {
+    if let Some(update) = &output.platform_output.accesskit_update {
         for (_, node) in &update.nodes {
             if let (Some(name), Some(at)) = (node.label(), node.bounds()) {
                 nodes.push((

@@ -30,9 +30,12 @@ fn painted(mut add: impl FnMut(&egui::Context, &mut Ui)) -> String {
     text
 }
 
+/// Painted texts or spoken names, each with its rectangle.
+type Placed = Vec<(String, egui::Rect)>;
+
 /// The painted galleys (each text with its rectangle) and the AccessKit buttons (each
 /// spoken name with its rectangle) of the section for `view`.
-fn layout(view: &ShareView) -> (Vec<(String, egui::Rect)>, Vec<(String, egui::Rect)>) {
+fn layout(view: &ShareView) -> (Placed, Placed) {
     fn walk(shape: &egui::Shape, out: &mut Vec<(String, egui::Rect)>) {
         match shape {
             egui::Shape::Text(text) => out.push((
@@ -56,7 +59,7 @@ fn layout(view: &ShareView) -> (Vec<(String, egui::Rect)>, Vec<(String, egui::Re
         for clipped in &output.shapes {
             walk(&clipped.shape, &mut texts);
         }
-        for update in &output.platform_output.accesskit_update {
+        if let Some(update) = &output.platform_output.accesskit_update {
             for (_, node) in &update.nodes {
                 if node.role() == egui::accesskit::Role::Button
                     && let (Some(name), Some(at)) = (node.label(), node.bounds())
