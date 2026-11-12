@@ -603,8 +603,8 @@ pub enum OwnerAction {
         entries: Vec<ShareEntry>,
         vault_hint: String,
     },
-    /// End a vault shared between accounts: the owner's `unshare` ("Stop Sharing with
-    /// <name>…", `leave` false) or a member's `leave` ("Leave Vault…").
+    /// End a vault shared between accounts: the owner's `unshare` ("Stop Sharing…",
+    /// `leave` false) or a member's `leave` ("Leave…").
     EndConnectShare {
         account_id: String,
         peer_account: String,

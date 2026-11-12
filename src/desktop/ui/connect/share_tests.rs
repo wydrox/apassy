@@ -164,18 +164,15 @@ fn the_section_shows_each_state_of_a_shared_vault() {
         SHARE_WITH,
         &not_joined("Ola"),
         &reset_owner("Anna"),
-        &stop("Ola"),
-        &stop("Anna"),
+        STOP_SHARING,
         &shared_by("Garden", "Piotr"),
         &reset_member("Piotr"),
         &shared_by("Car", "Ewa"),
         &stopped("Ewa"),
-        &shared_by(VAULT_OFFERED, "Ola"),
-        &connect_calls("Travel"),
+        &offered_at("Travel", "Ola"),
         &left_vault("Piotr"),
         &sharing_ended("Ewa"),
-        &share_again("Piotr"),
-        &share_again("Ewa"),
+        SHARE_AGAIN,
         JOIN,
         LEAVE,
         ACCEPT,
@@ -221,7 +218,7 @@ fn the_section_shows_each_state_of_a_shared_vault() {
         draw(ui, &alone);
     });
     assert!(
-        !text.contains(SHARE_WITH) && !text.contains(ACCEPT) && !text.contains(&share_again("Ewa")),
+        !text.contains(SHARE_WITH) && !text.contains(ACCEPT) && !text.contains(SHARE_AGAIN),
         "{text}"
     );
 }
@@ -258,7 +255,7 @@ fn the_rows_of_left_void_and_absent_stores_come_from_the_status() {
         &left_on("Laptop"),
         LEFT_HERE,
         ENDED,
-        &connect_calls("Garden"),
+        "\u{201c}Garden\u{201d} at Connect, shared by",
     ] {
         assert!(text.contains(expected), "{expected} in:\n{text}");
     }
@@ -452,7 +449,7 @@ fn the_texts_name_nothing_of_one_platform() {
         left_vault("Ola"),
         sharing_ended("Ola"),
         share_again("Ola"),
-        connect_calls("Family"),
+        offered_at("Family", "Ola"),
         not_listed("Ola"),
         left_on("Laptop"),
     ];
@@ -614,8 +611,8 @@ fn a_store_is_decided_only_by_lists_that_verified() {
 /// Item A1 of the 0.5.20 review: every row of Shared Vaults stays inside its column, from
 /// the width of Settings in the smallest window (`MIN_WINDOW`, about 340 points for the
 /// section) to the 1100-point window. Long names and long button labels wrap or are cut
-/// with "…" inside the row, each button stays whole, and the footer keeps "Accept a
-/// Shared Vault…".
+/// with "…" inside the row, each short button stays whole, the spoken names carry the
+/// person, and "Accept Shared Vault…" stays under the group.
 #[test]
 fn every_row_fits_its_column_at_each_width() {
     let long = "\u{201c}Aleksandra's MacBook Air in the study upstairs\u{201d} (Aleksandra Nowak-Kowalska)";
@@ -639,7 +636,6 @@ fn every_row_fits_its_column_at_each_width() {
             owner: "acc_piotraaaaa".to_owned(),
             title: shared_by("Garden and the summer house", long),
             joined: Some("Syncs.".to_owned()),
-            note: None,
             download: true,
             left: false,
         }],
@@ -655,6 +651,7 @@ fn every_row_fits_its_column_at_each_width() {
     };
     for width in [300.0_f32, 340.0, 560.0] {
         let ctx = egui::Context::default();
+        ctx.enable_accesskit();
         let left = 20.0;
         for frame in 0..3 {
             let screen = egui::RawInput {
@@ -683,12 +680,31 @@ fn every_row_fits_its_column_at_each_width() {
                         clipped.shape
                     );
                 }
-                for whole in [ACCEPT, SHARE_WITH, LEAVE, DOWNLOAD, SECTION, CLAIM] {
+                // The short labels stay whole; the spoken names carry the person.
+                for whole in [
+                    ACCEPT,
+                    SHARE_WITH,
+                    LEAVE,
+                    DOWNLOAD,
+                    SECTION,
+                    CLAIM,
+                    STOP_SHARING,
+                    SHARE_AGAIN,
+                ] {
                     assert!(text.contains(whole), "at {width}: no {whole:?} in\n{text}");
                 }
-                // The person's button keeps its start, cut with "…" at most.
-                assert!(text.contains("Stop Sharing with"), "at {width}:\n{text}");
-                assert!(text.contains(SECTION_NOTE), "at {width}:\n{text}");
+                let spoken: Vec<String> = output
+                    .platform_output
+                    .accesskit_update
+                    .iter()
+                    .flat_map(|update| update.nodes.iter())
+                    .filter_map(|(_, node)| node.label().map(str::to_owned))
+                    .collect();
+                assert!(
+                    spoken.iter().any(|name| name == &stop(long)),
+                    "at {width}: no spoken {:?} in {spoken:?}",
+                    stop(long)
+                );
             }
             output.drop_without_applying_deltas();
         }

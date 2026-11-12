@@ -930,7 +930,7 @@ pub enum OwnerRequest {
         entries: Vec<crate::broker::approvals::ShareEntry>,
         vault_hint: String,
     },
-    /// "Stop Sharing with <name>…" or "Leave Vault…".
+    /// "Stop Sharing…" or "Leave…".
     EndConnectShare {
         account_id: String,
         peer_account: String,
@@ -942,7 +942,7 @@ pub enum OwnerRequest {
         leave: bool,
         entries: Vec<crate::broker::approvals::ShareEntry>,
     },
-    /// "Count Shares Again…" of a vault store made before the `store` entry existed:
+    /// "Confirm…" of a vault store made before the `store` entry existed:
     /// the shares with `people` count again.
     ClaimConnectStore {
         account_id: String,
@@ -4374,7 +4374,7 @@ mod connect_proof_tests {
     }
 
     /// K2, K4: "Take This Copy Without Its Earlier History…" names the store, the head, its
-    /// version, its device, and its time; "Count Shares Again…" names the vault and the
+    /// version, its device, and its time; "Confirm…" names the vault and the
     /// people whose shares count again, each name once in its quotes.
     #[test]
     fn the_copy_without_history_and_the_store_claim_name_their_actions() {

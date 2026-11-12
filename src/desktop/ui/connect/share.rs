@@ -16,7 +16,7 @@
 //!   show here: "<vault>, shared by <name>: Join". Join runs an owner check that names the
 //!   vault and the person, signs the `join`, and opens the download of "Use a Vault from
 //!   Another Mac" with the passphrase of the copy.
-//! - **Stop Sharing with <name>…** and **Leave Vault…** sign `unshare` and
+//! - **Stop Sharing…** and **Leave…** sign `unshare` and
 //!   `leave` after an owner check. Leave turns off the sync of that vault here and keeps the
 //!   vault; the other devices of the account do the same when they read the `leave`. The
 //!   ends that need no owner check (a member who left, a member outside the family or team)
@@ -56,7 +56,6 @@ use crate::desktop::owner_check::{OwnerRequest, Task, TaskPoll};
 // ---- Texts (plain English, the style of the other Connect screens). ----
 
 pub(crate) const SECTION: &str = "Shared Vaults";
-pub(crate) const SECTION_NOTE: &str = "Share a vault with someone in your family or team.";
 pub(crate) const SHARE_WITH: &str = "Share with…";
 pub(crate) const ACCEPT: &str = "Accept Shared Vault…";
 pub(crate) const PICK_TITLE: &str = "Share a Vault";
@@ -74,7 +73,7 @@ pub(crate) const DIFFERENT: &str =
 pub(crate) const MISMATCH: &str = "The code does not match the account that answered.";
 pub(crate) const EXPIRED: &str = "The code expired. Make a new code.";
 pub(crate) const JOIN: &str = "Join";
-pub(crate) const LEAVE: &str = "Leave Vault…";
+pub(crate) const LEAVE: &str = "Leave…";
 pub(crate) const CHECKING: &str = "Checking who shares this vault…";
 pub(crate) const WAITING_SHARED: &str = "Waiting for a device that shares this vault";
 pub(crate) const ENDED: &str = "The share ended. The vault stays here.";
@@ -83,17 +82,23 @@ pub(crate) const LEAVE_LEAD: &str =
 pub(crate) const STOP_LEAD: &str =
     "Their devices leave the shared copy now. Every device keeps the vault.";
 pub(crate) const ACCEPTED_LEAD: &str = "Their shared vaults show in Settings › Connect.";
-pub(crate) const LEFT_HERE: &str = "You left this shared vault. It stays on this device.";
+/// The end of the line of a shared vault that this device left.
+pub(crate) const LEFT_HERE: &str = "left; it stays on this device";
 pub(crate) const UNPINNED: &str = "Some people who share your vaults could not be verified here.";
-pub(crate) const DOWNLOAD: &str = "Download Copy…";
+pub(crate) const DOWNLOAD: &str = "Download…";
 pub(crate) const VAULT_OFFERED: &str = "A vault";
-pub(crate) const CLAIM: &str = "Count Shares Again…";
+pub(crate) const CLAIM: &str = "Confirm…";
+/// The buttons of a person's row; their spoken names carry the person ([`stop`],
+/// [`share_again`]).
+pub(crate) const STOP_SHARING: &str = "Stop Sharing…";
+pub(crate) const SHARE_AGAIN: &str = "Share Again…";
 
 /// Every fixed text of the section, for the wording tests.
 #[cfg(test)]
 pub(crate) const TEXTS: &[&str] = &[
     SECTION,
-    SECTION_NOTE,
+    STOP_SHARING,
+    SHARE_AGAIN,
     SHARE_WITH,
     ACCEPT,
     PICK_TITLE,
@@ -129,7 +134,7 @@ pub(crate) const TEXTS: &[&str] = &[
 /// A store of this account made before Apassy recorded which account made a vault, with
 /// shares already: they count again after an owner check.
 pub(crate) fn claim_line(vault: &str) -> String {
-    format!("Confirm that this account made “{vault}” to count its shares again.")
+    format!("Sharing of “{vault}” is paused. Confirm that this account made it.")
 }
 
 /// Two verified lists claim the store of an offer: it is not offered.
@@ -196,7 +201,7 @@ pub(crate) fn reset_member(name: &str) -> String {
     format!("{name} must verify this account again.")
 }
 
-/// The button that ends a share for a member.
+/// The spoken name of the button that ends a share for a member ([`STOP_SHARING`]).
 pub(crate) fn stop(name: &str) -> String {
     format!("Stop Sharing with {name}…")
 }
@@ -211,9 +216,9 @@ pub(crate) fn shared_with(name: &str) -> String {
     format!("Shared with {name}")
 }
 
-/// A note on another device of the account that left a shared vault.
+/// The end of the line of a shared vault that another device of the account left.
 pub(crate) fn left_on(device: &str) -> String {
-    format!("You left this shared vault on {device}.")
+    format!("left on {device}")
 }
 
 /// A store that this account joined, whose owner ended the share (or shares it anew).
@@ -231,14 +236,16 @@ pub(crate) fn sharing_ended(name: &str) -> String {
     format!("Sharing with {name} ended.")
 }
 
-/// The button that shares a store again with a member whose share ended.
+/// The spoken name of the button that shares a store again with a member whose share
+/// ended ([`SHARE_AGAIN`]).
 pub(crate) fn share_again(name: &str) -> String {
     format!("Share with {name} Again…")
 }
 
-/// The name that Connect gives a store of another account: a hint beside it.
-pub(crate) fn connect_calls(name: &str) -> String {
-    format!("Apassy Connect calls it \u{201c}{name}\u{201d}.")
+/// A store of another account that no vault here syncs, by the name that Connect gives it:
+/// "“Travel” at Connect, shared by Ola".
+pub(crate) fn offered_at(name: &str, owner: &str) -> String {
+    format!("\u{201c}{name}\u{201d} at Connect, shared by {owner}")
 }
 
 /// Join worked, and Connect does not list this device in the store yet.
@@ -266,10 +273,9 @@ pub(crate) struct OtherStore {
     pub(crate) team_id: String,
     pub(crate) owner: String,
     pub(crate) title: String,
-    /// `None`: offered, not joined; else the line of the joined store.
+    /// `None`: offered, not joined; else the line of the joined store (empty, or a
+    /// problem: reset, stopped, ended, checking).
     pub(crate) joined: Option<String>,
-    /// A line under an offer (the name that Connect gives the store), or of a left store.
-    pub(crate) note: Option<String>,
     /// Joined, and no vault of this computer syncs it: the row offers the download.
     pub(crate) download: bool,
     /// This account left it: the row has no button.
@@ -387,9 +393,22 @@ pub(crate) enum ShareChoice {
 
 // ---- Drawing (pure: the view in, a press out). ----
 
-/// The "Shared Vaults" group.
+/// The "Shared Vaults" group: only while the account is in a family or team, or a vault
+/// is shared, offered, left, or waits for a claim. One line for each person and vault;
+/// a second line only for a problem. The buttons are short; their spoken names carry the
+/// person or the vault.
 pub(crate) fn draw(ui: &mut Ui, view: &ShareView) -> Option<ShareAction> {
     let mut action = None;
+    // A vault of this account outside a family or team that nobody shares is not drawn.
+    let own: Vec<&OwnStore> = view
+        .own
+        .iter()
+        .filter(|store| view.in_group || !store.members.is_empty() || !store.ended.is_empty())
+        .collect();
+    let has_rows = !own.is_empty() || !view.others.is_empty() || !view.claims.is_empty();
+    if !has_rows && !view.in_group && view.error.is_none() && view.notes.is_empty() {
+        return None;
+    }
     if let Some(error) = &view.error {
         rows::footnote_colored(ui, error.as_str(), Tone::Critical.text());
     }
@@ -400,109 +419,114 @@ pub(crate) fn draw(ui: &mut Ui, view: &ShareView) -> Option<ShareAction> {
     // window: the text wraps, and the buttons go under it when the row is narrow
     // ([`rows::text_buttons`]).
     ui.add_enabled_ui(!view.busy, |ui| {
-        rows::group(ui, Some(SECTION), |g| {
-            for store in &view.own {
-                g.row(|ui| {
-                    let share: &[(&str, Style)] = if view.in_group {
-                        &[(SHARE_WITH, Style::Bordered)]
-                    } else {
-                        &[]
-                    };
-                    if rows::text_buttons(ui, rows::label_text(&store.vault), share).is_some() {
-                        action = Some(ShareAction::ShareWith {
-                            team_id: store.team_id.clone(),
-                            vault: store.vault.clone(),
-                        });
-                    }
-                    for (name, account, line) in &store.members {
-                        let label = stop(name);
-                        if rows::text_buttons(ui, rows::note(line), &[(&label, Style::Bordered)])
-                            .is_some()
-                        {
-                            action = Some(ShareAction::Stop {
-                                team_id: store.team_id.clone(),
-                                account: account.clone(),
-                                name: name.clone(),
-                            });
-                        }
-                    }
-                    for (name, account, line) in &store.ended {
-                        let label = share_again(name);
-                        let again: &[(&str, Style)] = if view.in_group {
-                            &[(&label, Style::Bordered)]
+        if !has_rows {
+            rows::group_label(ui, SECTION);
+        } else {
+            rows::group(ui, Some(SECTION), |g| {
+                for store in &own {
+                    g.row(|ui| {
+                        let share: &[(&str, Style)] = if view.in_group {
+                            &[(SHARE_WITH, Style::Bordered)]
                         } else {
                             &[]
                         };
-                        if rows::text_buttons(ui, rows::note(line), again).is_some() {
-                            action = Some(ShareAction::ShareAgain {
+                        if rows::text_buttons(ui, rows::label_text(&store.vault), share).is_some() {
+                            action = Some(ShareAction::ShareWith {
                                 team_id: store.team_id.clone(),
-                                account: account.clone(),
-                                name: name.clone(),
+                                vault: store.vault.clone(),
                             });
                         }
-                    }
-                });
-            }
-            for store in &view.others {
-                g.row(|ui| {
-                    // The rightmost button first.
-                    let buttons: Vec<(&str, Style)> = match &store.joined {
-                        _ if store.left => Vec::new(),
-                        None => vec![(JOIN, Style::Bordered)],
-                        Some(_) if store.download => {
-                            vec![(DOWNLOAD, Style::Bordered), (LEAVE, Style::Bordered)]
+                        for (name, account, line) in &store.members {
+                            let spoken = stop(name);
+                            let end: &[(&str, &str, Style)] =
+                                &[(STOP_SHARING, spoken.as_str(), Style::Bordered)];
+                            if rows::text_buttons_named(ui, rows::note(line), end).is_some() {
+                                action = Some(ShareAction::Stop {
+                                    team_id: store.team_id.clone(),
+                                    account: account.clone(),
+                                    name: name.clone(),
+                                });
+                            }
                         }
-                        Some(_) => vec![(LEAVE, Style::Bordered)],
-                    };
-                    let pressed = rows::text_buttons(ui, rows::label_text(&store.title), &buttons);
-                    if let Some(index) = pressed {
-                        action = Some(match buttons[index].0 {
-                            JOIN => ShareAction::Join {
-                                team_id: store.team_id.clone(),
-                                owner: store.owner.clone(),
-                            },
-                            LEAVE => ShareAction::Leave {
-                                team_id: store.team_id.clone(),
-                                owner: store.owner.clone(),
-                                name: store.title.clone(),
-                            },
-                            _ => ShareAction::Download {
-                                team_id: store.team_id.clone(),
-                                owner: store.owner.clone(),
-                            },
-                        });
-                    }
-                    for line in store
-                        .joined
-                        .iter()
-                        .chain(&store.note)
-                        .filter(|line| !line.is_empty())
-                    {
-                        ui.add(egui::Label::new(rows::note(line)).wrap());
-                    }
-                });
-            }
-            for (team_id, vault) in &view.claims {
-                g.row(|ui| {
-                    let claim = rows::note(&claim_line(vault));
-                    if rows::text_buttons(ui, claim, &[(CLAIM, Style::Bordered)]).is_some() {
-                        action = Some(ShareAction::Claim {
-                            team_id: team_id.clone(),
-                        });
-                    }
-                });
-            }
-            g.row(|ui| {
-                let accept: &[(&str, Style)] = if view.in_group {
-                    &[(ACCEPT, Style::Bordered)]
-                } else {
-                    &[]
-                };
-                if rows::text_buttons(ui, rows::label_text(SECTION_NOTE), accept).is_some() {
+                        for (name, account, line) in &store.ended {
+                            let spoken = share_again(name);
+                            let again: Vec<(&str, &str, Style)> = if view.in_group {
+                                vec![(SHARE_AGAIN, spoken.as_str(), Style::Bordered)]
+                            } else {
+                                Vec::new()
+                            };
+                            if rows::text_buttons_named(ui, rows::note(line), &again).is_some() {
+                                action = Some(ShareAction::ShareAgain {
+                                    team_id: store.team_id.clone(),
+                                    account: account.clone(),
+                                    name: name.clone(),
+                                });
+                            }
+                        }
+                    });
+                }
+                for store in &view.others {
+                    g.row(|ui| {
+                        let join = format!("Join {}", store.title);
+                        let leave = format!("Leave {}", store.title);
+                        let download = format!("Download the copy of {}", store.title);
+                        // The rightmost button first.
+                        let buttons: Vec<(&str, &str, Style)> = match &store.joined {
+                            _ if store.left => Vec::new(),
+                            None => vec![(JOIN, join.as_str(), Style::Bordered)],
+                            Some(_) if store.download => vec![
+                                (DOWNLOAD, download.as_str(), Style::Bordered),
+                                (LEAVE, leave.as_str(), Style::Bordered),
+                            ],
+                            Some(_) => vec![(LEAVE, leave.as_str(), Style::Bordered)],
+                        };
+                        let title = rows::label_text(&store.title);
+                        if let Some(index) = rows::text_buttons_named(ui, title, &buttons) {
+                            action = Some(match buttons[index].0 {
+                                JOIN => ShareAction::Join {
+                                    team_id: store.team_id.clone(),
+                                    owner: store.owner.clone(),
+                                },
+                                LEAVE => ShareAction::Leave {
+                                    team_id: store.team_id.clone(),
+                                    owner: store.owner.clone(),
+                                    name: store.title.clone(),
+                                },
+                                _ => ShareAction::Download {
+                                    team_id: store.team_id.clone(),
+                                    owner: store.owner.clone(),
+                                },
+                            });
+                        }
+                        // A second line only for a problem of the joined store.
+                        if let Some(line) = store.joined.as_ref().filter(|line| !line.is_empty()) {
+                            ui.add(egui::Label::new(rows::note(line)).wrap());
+                        }
+                    });
+                }
+                for (team_id, vault) in &view.claims {
+                    g.row(|ui| {
+                        let spoken = format!("Confirm that this account made {vault}");
+                        let claim = rows::note(&claim_line(vault));
+                        let confirm: &[(&str, &str, Style)] =
+                            &[(CLAIM, spoken.as_str(), Style::Bordered)];
+                        if rows::text_buttons_named(ui, claim, confirm).is_some() {
+                            action = Some(ShareAction::Claim {
+                                team_id: team_id.clone(),
+                            });
+                        }
+                    });
+                }
+            });
+        }
+        if view.in_group {
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                if kit::button(ui, ACCEPT, Style::Bordered).clicked() {
                     action = Some(ShareAction::Accept);
                 }
             });
-        });
+        }
     });
     action
 }
@@ -789,17 +813,18 @@ pub(crate) fn view_of(
                 .map_or_else(|| "A shared vault".to_owned(), |store| store.name.clone())
         })
     };
-    // A store of another account: by its name on this computer, else as "a vault shared
-    // by" the person, with Connect's name of it as a hint.
+    // A store of another account: by its name on this computer, else by the name that
+    // Connect gives it ("“Travel” at Connect, shared by Ola"), else as "a vault shared by"
+    // the person.
     let other_title = |team: &str, owner_name: &str| match local.get(team) {
-        Some(vault) => (shared_by(vault, owner_name), None),
-        None => (
-            shared_by(VAULT_OFFERED, owner_name),
-            stores
-                .iter()
-                .find(|store| store.team_id == team)
-                .map(|store| connect_calls(&store.name)),
-        ),
+        Some(vault) => shared_by(vault, owner_name),
+        None => stores
+            .iter()
+            .find(|store| store.team_id == team)
+            .map_or_else(
+                || shared_by(VAULT_OFFERED, owner_name),
+                |store| offered_at(&store.name, owner_name),
+            ),
     };
     let theirs = |team: &str| {
         status.offers.iter().any(|offer| offer.team_id == team)
@@ -850,13 +875,11 @@ pub(crate) fn view_of(
     }
     let mut others: Vec<OtherStore> = Vec::new();
     for offer in &status.offers {
-        let (title, note) = other_title(&offer.team_id, &offer.owner_name);
         others.push(OtherStore {
             team_id: offer.team_id.clone(),
             owner: offer.owner.clone(),
-            title,
+            title: other_title(&offer.team_id, &offer.owner_name),
             joined: None,
-            note,
             download: false,
             left: false,
         });
@@ -867,27 +890,28 @@ pub(crate) fn view_of(
             continue;
         }
         let owner_name = store.owner_name.clone().unwrap_or_default();
-        let (title, note) = other_title(&store.team_id, &owner_name);
+        let title = other_title(&store.team_id, &owner_name);
         others.push(OtherStore {
             download: !local.contains_key(&store.team_id) && !store.ended && !store.void,
-            ..joined_store(store, title, note, checking)
+            ..joined_store(store, title, checking)
         });
     }
     for left in &status.left {
         if others.iter().any(|other| other.team_id == left.team_id) {
             continue;
         }
-        let (title, _) = other_title(&left.team_id, &status.name_of(&left.owner));
+        // One line: "Boat, shared by Ola · left on MacBook Pro".
+        let title = other_title(&left.team_id, &status.name_of(&left.owner));
+        let how = if left.here {
+            LEFT_HERE.to_owned()
+        } else {
+            left_on(&left.device)
+        };
         others.push(OtherStore {
             team_id: left.team_id.clone(),
             owner: left.owner.clone(),
-            title,
+            title: format!("{title} · {how}"),
             joined: None,
-            note: Some(if left.here {
-                LEFT_HERE.to_owned()
-            } else {
-                left_on(&left.device)
-            }),
             download: false,
             left: true,
         });
@@ -921,12 +945,7 @@ pub(crate) fn view_of(
     }
 }
 
-fn joined_store(
-    store: &StoreStatus,
-    title: String,
-    note: Option<String>,
-    checking: &[String],
-) -> OtherStore {
+fn joined_store(store: &StoreStatus, title: String, checking: &[String]) -> OtherStore {
     let owner_name = store.owner_name.clone().unwrap_or_default();
     let line = if store.owner_suspended {
         reset_member(&owner_name)
@@ -944,7 +963,6 @@ fn joined_store(
         owner: store.owner.clone().unwrap_or_default(),
         title,
         joined: Some(line),
-        note,
         download: false,
         left: false,
     }
