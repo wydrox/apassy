@@ -220,8 +220,10 @@ fn a_computer_without_a_vault_joins_the_account_and_gets_a_vault_from_connect() 
     pass(&ctx, &mut b, |app, ctx| {
         live::act(app, ctx, Action::AddThisMac)
     });
-    let text = frame(&ctx, &mut b);
-    assert!(text.contains(JOIN_ACCOUNT_TITLE), "the join sheet: {text}");
+    // The sheet paints from its second frame on.
+    frames_until(&ctx, &mut b, "the join sheet", |text| {
+        text.contains(JOIN_ACCOUNT_TITLE)
+    });
 
     // A makes the code; B pastes it and shows the words and the name of A.
     pass(&a_ctx, &mut a, |app, ctx| {

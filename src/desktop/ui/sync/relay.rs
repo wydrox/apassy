@@ -7460,8 +7460,8 @@ mod access_repair_tests {
     }
 
     /// The plan states of a vault store of Apassy Connect (plan s7 unit M3): the tag
-    /// and the sentence name the state and its date, say that pulls go on and that the
-    /// changes of this Mac stay, and never name a price or a purchase (plans section 5).
+    /// and the sentence name the state and its date, say when the changes made here go
+    /// up, and never name a price or a purchase (plans section 5).
     #[test]
     fn the_connect_states_say_what_works_with_their_date() {
         use crate::sync::StorePlan;
@@ -7479,8 +7479,10 @@ mod access_repair_tests {
             words.starts_with("Connect: read-only until 4 Jan 2027."),
             "{words}"
         );
-        assert!(words.contains("downloads the changes of your other devices"));
-        assert!(words.contains(concat!("stay on this ", crate::computer!())));
+        assert!(
+            words.contains("Changes made here upload when the plan is active again."),
+            "{words}"
+        );
         assert_eq!(connect_tag(read_only).0, "Connect: read-only");
         assert_eq!(
             ConnectState::refused(None),

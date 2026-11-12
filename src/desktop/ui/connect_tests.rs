@@ -3178,8 +3178,8 @@ fn a_recovery_asks_the_owner_then_shows_the_new_code_and_the_deleted_copies() {
 }
 
 /// Connect's one refusal (a wrong code, an unknown account id, an account that still has
-/// a device) shows one text that names the three causes and what to do for each; nothing
-/// changed on this device. A `429` says when to try again.
+/// a device) shows one text for the three causes: what to check, and the way of a device
+/// that still works; nothing changed on this device. A `429` says when to try again.
 #[test]
 fn a_refused_recovery_names_its_three_causes_and_too_many_tries_say_when() {
     let connect = FakeConnect::start();
@@ -3212,13 +3212,10 @@ fn a_refused_recovery_names_its_three_causes_and_too_many_tries_say_when() {
             live::error_for_test(&app).as_deref(),
             Some(super::connect::RECOVER_REFUSED)
         );
+        // One text for the three causes: what to check, and the way of a device that
+        // still works.
         let painted = text(&ctx, &mut app);
-        for cause in [
-            "recovery code is not the current code",
-            "account ID is wrong",
-            "device of the account still works",
-            "Add a Device…",
-        ] {
+        for cause in ["account ID", "the code", "a device that still works"] {
             assert!(painted.contains(cause), "{cause:?} in {painted}");
         }
         assert!(matches!(app.ui.connect.sheet, Some(Sheet::Recover { .. })));
