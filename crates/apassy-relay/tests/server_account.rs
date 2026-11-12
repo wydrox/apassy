@@ -4248,6 +4248,25 @@ fn a_new_recovery_code_needs_the_signature_of_a_live_device_over_the_stored_key(
     assert_eq!(stored(&c), recovery_key(&[6u8; 16]).public_key_b64());
 }
 
+/// A new recovery code of a directory file from before `account.recovery_rotated_by` has a
+/// time and no device: the view names neither, as for the key of the creation, so no
+/// device shows a time of a change without the device that made it.
+#[test]
+fn a_new_code_without_its_device_shows_neither_a_time_nor_a_device() {
+    let c = start();
+    let code: [u8; 16] = std::array::from_fn(|index| 16 + index as u8);
+    let next: [u8; 16] = std::array::from_fn(|index| 80 + index as u8);
+    let a = create_with_code(&c, &code);
+    let token = sign_in(&c, &a);
+    let body = rotate_body(&c, &a, &code, &next);
+    c.ok("POST", "/v1/account/recovery", Some(&token), Some(&body));
+    c.edit_directory("UPDATE account SET recovery_rotated_by = NULL");
+    let view = c.ok("GET", "/v1/account", Some(&token), None);
+    assert_eq!(view["recovery_key"], recovery_key(&next).public_key_b64());
+    assert_eq!(view["recovery_rotated_at"], Value::Null, "{view}");
+    assert_eq!(view["recovery_rotated_by"], Value::Null, "{view}");
+}
+
 /// A 1006 file of a build before `account.recovery_rotated_by` opens: the column is added
 /// in place, empty, and the rows stay.
 #[test]

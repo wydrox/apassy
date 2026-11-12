@@ -68,7 +68,7 @@ use super::relay_crypto::{
     link_code_team, safety_words, same_words, sha256_hex, sign_in_message, valid_team_code,
 };
 use super::relay_http::{self, Answer, Body, Cancel, HttpError, RelayUrl, Request, TlsTrust};
-use super::state::{self, SyncState, TransportKind};
+use super::state::{self, ApprovedHead, SyncState, TransportKind};
 use super::transport::{Precondition, Remote, RemoteHead, SyncTransport};
 use super::{RelayRefusal, SyncError, SyncOutcome, TempFile, copy_error, device_name, unix_now};
 use crate::vault::{
@@ -960,6 +960,10 @@ pub(crate) struct HeadView {
     chain: Vec<ChainEntry>,
     #[serde(default)]
     chain_from: Option<u64>,
+    /// The oldest version whose head the relay keeps (relay-sync-v1 section 9): a first
+    /// download checks the chain from there.
+    #[serde(default)]
+    kept_from: Option<u64>,
     #[serde(default)]
     receipts: Vec<Receipt>,
     #[serde(default)]
@@ -1544,8 +1548,10 @@ impl RelayTransport {
     /// account (no anchor), from the answer `view` of `since=0` on: the entries link to each other and
     /// end at `head`, each is of this team and vault, and each is signed by a device of the
     /// list or a key that left it, as at any later check. Only the entries that the relay
-    /// serves can be checked: a chain that does not start at version 1 is `Damaged`, except
-    /// a chain of the head alone when it is the head of a device that left that the owner
+    /// serves can be checked: the chain must start at version 1, or at the oldest head that
+    /// the relay says it keeps (`kept_from`, above 1 once it dropped older heads), and reach
+    /// the head with no gap. A chain that starts later than that is `Damaged`, except a
+    /// chain of the head alone when it is the head of a device that left that the owner
     /// took ([`Self::with_departed`]).
     /// A signer that this device does not know yet waits for the device list
     /// ([`Self::unlisted`]); any other break is `Damaged`.
@@ -1564,6 +1570,17 @@ impl RelayTransport {
             let (from, anchor) = match &link {
                 Some(hash) => (since, hash.clone()),
                 None if view.chain_from == Some(1) => (0, NO_PREVIOUS.to_owned()),
+                // The relay dropped the heads below the ones it keeps: the chain is checked
+                // from the oldest kept head, whose `previous` names a head that is gone.
+                None if view.chain_from.is_some_and(|from| from > 1)
+                    && view.kept_from == view.chain_from
+                    && first.fields.version <= head.fields.version =>
+                {
+                    (
+                        first.fields.version.saturating_sub(1),
+                        first.fields.previous.clone(),
+                    )
+                }
                 // A cut history: the entries below the head are not there to check. Only the
                 // head of a device that left, which the owner took by its owner check, goes.
                 None if entries.len() == 1
@@ -2452,15 +2469,23 @@ impl RelaySync {
         Ok(session)
     }
 
+    /// The transport of `state`: its anchor, and without one the head that the owner chose
+    /// ([`SyncState::approved_head`]), which is then the only head that it takes.
     fn transport(&self, session: Arc<Session>, state: &SyncState) -> RelayTransport {
-        RelayTransport::new(
+        let transport = RelayTransport::new(
             session,
             Some(&state.vault_id),
             state.last_remote_version,
             state.last_head_sha256.as_deref(),
             self.max_bytes,
         )
-        .with_notes(Arc::clone(&self.notes))
+        .with_notes(Arc::clone(&self.notes));
+        match &state.approved_head {
+            Some(approved) if !has_anchor(state) => {
+                transport.with_approved_head(approved.version, &approved.head_sha256)
+            }
+            _ => transport,
+        }
     }
 
     /// The head that the last check of this vault store waits on
@@ -2540,6 +2565,14 @@ impl RelaySync {
             return Err(SyncError::Damaged);
         }
         *lock(&self.refused) = None;
+        // The owner's check named this head: it replaces a head that an earlier check of
+        // "Use the relay copy…" named.
+        if state.approved_head.is_some() {
+            state.approved_head = Some(ApprovedHead {
+                version: head.version,
+                head_sha256: head.head_hash.clone(),
+            });
+        }
         let transport = self
             .transport(Arc::clone(&session), &state)
             .with_departed(head.clone());
@@ -3039,7 +3072,10 @@ impl RelaySync {
     /// passphrase, or its bytes are damaged) keeps the forgotten anchor in the state, so
     /// the next step of the owner ("Type the passphrase of the copy…", which keeps the
     /// passphrase of this vault ([`Self::keeps_passphrase`]), or "Replace with this Mac's
-    /// vault…") starts from the copy as it is now too.
+    /// vault…") starts from the copy as it is now too. The head that the owner's check
+    /// named stays with it ([`SyncState::approved_head`]): until a head is merged, every
+    /// sync takes only that head, and another one is [`SyncError::StaleCopy`], which asks
+    /// for the owner check again.
     fn use_relay_copy_in<A: VaultAccess + ?Sized>(
         &self,
         vault: &mut A,
@@ -3050,10 +3086,11 @@ impl RelaySync {
         *lock(&self.refused) = None;
         state.last_remote_version = 0;
         state.last_head_sha256 = None;
-        let mut transport = self.transport(Arc::clone(&session), &state);
-        if let Some(approved) = approved {
-            transport = transport.with_approved_head(approved.version, &approved.head_hash);
-        }
+        state.approved_head = approved.map(|approved| ApprovedHead {
+            version: approved.version,
+            head_sha256: approved.head_hash.clone(),
+        });
+        let transport = self.transport(Arc::clone(&session), &state);
         let mut result = ended_by_lock(
             &session,
             self.rounds(vault, &mut state, &transport, true, None),

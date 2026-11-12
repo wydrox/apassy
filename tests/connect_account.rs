@@ -784,7 +784,8 @@ fn a_pending_creation_is_repeated_by_the_next_try() {
 }
 
 /// An id that Connect holds or held (`409 account_id_taken`) makes the device sign a new
-/// id and try again; a used key (`409 conflict`) is not tried again.
+/// id and try again; a used key (`409 conflict`) gets one more try with a new key, and a
+/// second conflict ends the creation.
 #[test]
 fn a_taken_account_id_gets_a_new_id_and_a_used_key_stops() {
     let connect = FakeConnect::start();
@@ -800,15 +801,21 @@ fn a_taken_account_id_gets_a_new_id_and_a_used_key_stops() {
     assert_ne!(ids[0], ids[1]);
     assert_ne!(ids[1], ids[2]);
     assert_eq!(account.state().account_id, ids[2]);
-    // A key that is a device already: one try, and the conflict.
+    // A key that is a device already: a new key once, and then the conflict.
     let connect = FakeConnect::start();
     connect.answer_route_error("POST /v1/account", 409, "conflict");
     let b = device();
+    let first_key = AccountSigner::open_or_create(&b.store)
+        .expect("key")
+        .public_key_b64u();
     let refused =
         ConnectAccount::create(client(&connect), &b.store, &b.path, "Rafal", "MacBook Air")
             .expect_err("conflict");
     assert_eq!(refused, ConnectError::Conflict);
-    assert_eq!(connect.count("POST /v1/account"), 1);
+    assert_eq!(connect.count("POST /v1/account"), 2);
+    let bodies = creation_bodies(&connect);
+    assert_eq!(bodies[0]["public_key"], first_key.as_str());
+    assert_ne!(bodies[1]["public_key"], first_key.as_str(), "a new key");
 }
 
 /// The join signs the device name: the confirming device shows and signs a name only when
@@ -1676,6 +1683,43 @@ fn an_account_file_of_an_earlier_version_is_forgotten_with_an_owner_check() {
     assert!(!a.store.has_key());
     ConnectAccount::create(client(&connect), &a.store, &a.path, "Rafal", "MacBook Pro")
         .expect("a new account works");
+}
+
+/// An account file that this device cannot read now (its folder takes no reads: a
+/// permission change, a busy disk) is no file of an earlier version: "Forget the
+/// Account…" is refused with a request to try again, and the file and the key stay. A file
+/// that was read and does not parse is forgotten with the owner check.
+#[test]
+fn an_account_file_that_cannot_be_read_now_is_never_forgotten() {
+    use std::os::unix::fs::PermissionsExt;
+    let connect = FakeConnect::start();
+    let owner = owner();
+    let a = device();
+    let (account, _) = create(&connect, &a);
+    drop(account);
+    let dir = a.path.parent().unwrap().to_owned();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let unreadable = AccountState::load(&a.path).map(|_| ()).unwrap_err();
+    let old = apassy::connect::is_old_account_file(&a.path);
+    let (proof, epoch) = owner.proof(OwnerAction::ForgetOldConnectAccount);
+    let forgot = apassy::connect::forget_old_account_file(&a.store, &a.path, proof, &epoch);
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(unreadable, ConnectError::AccountFileUnreadable);
+    assert!(!old, "not a file of an earlier version");
+    assert_eq!(forgot.unwrap_err(), ConnectError::AccountFileUnreadable);
+    assert!(a.path.exists());
+    assert!(a.store.has_key(), "the account key stays");
+    assert!(
+        AccountState::load(&a.path).unwrap().is_some(),
+        "it reads again"
+    );
+    // A file that does not parse is one that this version cannot take.
+    std::fs::write(&a.path, b"{ not an account file").unwrap();
+    assert!(apassy::connect::is_old_account_file(&a.path));
+    let (proof, epoch) = owner.proof(OwnerAction::ForgetOldConnectAccount);
+    apassy::connect::forget_old_account_file(&a.store, &a.path, proof, &epoch).expect("forget");
+    assert!(!a.path.exists());
+    assert!(!a.store.has_key());
 }
 
 /// The list hash of the last entry of `list` of `account`, computed as a device does.
@@ -2853,6 +2897,30 @@ fn an_unanswered_rotation_is_settled_by_the_next_read() {
     recovers(&connect, &account_id, &old.words()).expect("the old code still recovers");
 }
 
+/// A `429` of the new recovery code is not sent again: this device holds every call to
+/// Connect until its `Retry-After`, so a repeat would never reach Connect. The step ends
+/// at once without an answer, with no wait, and the pending rotation stays for the next
+/// read.
+#[test]
+fn a_rate_limited_rotation_ends_at_once_and_stays_pending() {
+    let connect = FakeConnect::start();
+    let owner = owner();
+    let a = device();
+    let (mut account, _) = create(&connect, &a);
+    let (sleeper, waits) = recorded_waits();
+    account.set_sleeper(sleeper);
+    connect.answer_route_error("POST /v1/account/recovery", 429, "rate_limited");
+    let (proof, epoch) = owner.proof(account.new_recovery_code_action());
+    assert_eq!(
+        account.new_recovery_code(proof, &epoch).unwrap_err(),
+        ConnectError::RecoveryUnanswered
+    );
+    assert_eq!(*waits.lock().unwrap(), Vec::<Duration>::new(), "no repeats");
+    assert_eq!(connect.count("POST /v1/account/recovery"), 1);
+    let state = AccountState::load(&a.path).unwrap().unwrap();
+    assert!(state.recovery_pending.is_some(), "the next read settles it");
+}
+
 /// The rotation succeeds and Apassy quits before the sheet with the code closes: the
 /// account file keeps the mark, so the next start shows the lasting line.
 #[test]
@@ -2986,6 +3054,88 @@ fn a_new_code_of_another_device_shows_until_ok_pins_it() {
     assert!(account.view().expect("view").recovery_changed.is_none());
 }
 
+/// Connect holds a new recovery key that names this device as its maker while this device
+/// has nothing pending (a request of an earlier try that reached Connect after that try
+/// was dropped): nobody saw that code. The account says so with the lasting mark, never
+/// with a line that "OK" would end.
+#[test]
+fn a_late_rotation_of_this_device_is_a_code_that_nobody_saw() {
+    let connect = FakeConnect::start();
+    let a = device();
+    let (mut account, _) = create(&connect, &a);
+    let account_id = account.state().account_id.clone();
+    let device_id = account.state().device_id.clone();
+    assert!(account.view().expect("view").recovery_changed.is_none());
+    connect.rotate_recovery_by(&account_id, &[9u8; 32], &device_id);
+    let view = account.view().expect("view");
+    assert!(view.recovery_changed.is_none(), "no line about this device");
+    let state = AccountState::load(&a.path).unwrap().unwrap();
+    assert!(state.recovery_unseen, "a code that nobody saw");
+    assert_eq!(
+        state.recovery_key.as_deref(),
+        Some(encode_b64u(&[9u8; 32]).as_str())
+    );
+    assert!(account.state().recovery_unseen);
+}
+
+/// An account file of a build before the pin of the recovery key: the first read pins the
+/// key that Connect holds only when no other device made it. A key that another device
+/// made shows its change line, and "OK" pins it.
+#[test]
+fn a_file_without_a_pin_shows_a_code_that_another_device_made() {
+    let connect = FakeConnect::start();
+    let owner = owner();
+    let a = device();
+    let (mut account, _) = create(&connect, &a);
+    let b = device();
+    let mut other = join(&connect, &mut account, &b, &owner);
+    let (proof, epoch) = owner.proof(other.new_recovery_code_action());
+    let rotated = other.new_recovery_code(proof, &epoch).expect("the code");
+    other.recovery_code_seen().expect("I Saved It");
+    let key = rotated.code.key().unwrap().public_key_b64u();
+    drop(account);
+    // The file of the earlier build has no pin.
+    let mut file: Value = serde_json::from_slice(&std::fs::read(&a.path).unwrap()).unwrap();
+    file.as_object_mut().unwrap().remove("recovery_key");
+    std::fs::write(&a.path, serde_json::to_vec(&file).unwrap()).unwrap();
+    assert_eq!(
+        AccountState::load(&a.path).unwrap().unwrap().recovery_key,
+        None
+    );
+    let mut account = ConnectAccount::open(&a.store, &a.path)
+        .unwrap()
+        .expect("account");
+    account.set_sleeper(recorded_waits().0);
+    let changed = account
+        .view()
+        .expect("view")
+        .recovery_changed
+        .expect("the change of the other device");
+    assert_eq!(changed.recovery_key, key);
+    assert_eq!(changed.device_name.as_deref(), Some("iPhone"));
+    account.recovery_change_seen(&key).expect("OK");
+    assert!(account.view().expect("view").recovery_changed.is_none());
+    // A file without a pin whose key no other device made pins it at once.
+    let c = device();
+    let (fresh, _) = create(&connect, &c);
+    drop(fresh);
+    let mut file: Value = serde_json::from_slice(&std::fs::read(&c.path).unwrap()).unwrap();
+    file.as_object_mut().unwrap().remove("recovery_key");
+    std::fs::write(&c.path, serde_json::to_vec(&file).unwrap()).unwrap();
+    let mut fresh = ConnectAccount::open(&c.store, &c.path)
+        .unwrap()
+        .expect("account");
+    fresh.set_sleeper(recorded_waits().0);
+    assert!(fresh.view().expect("view").recovery_changed.is_none());
+    assert!(
+        AccountState::load(&c.path)
+            .unwrap()
+            .unwrap()
+            .recovery_key
+            .is_some()
+    );
+}
+
 /// A join that waited on disk resumes, and Connect serves a list that verifies but is of
 /// another root, or a valid prefix older than the list of the join answer: both are
 /// refused, no account file is written, and the pending join ends.
@@ -3112,6 +3262,70 @@ fn a_creation_or_a_recovery_ends_a_pending_join() {
     )
     .expect("recover");
     assert!(!pending.exists(), "the recovery ended the join");
+}
+
+/// A join of account A that A confirmed after this device had left it, then a creation or
+/// a recovery on this device: Connect counts the key as used (`409 conflict`), so this
+/// device first removes itself from A with a signed removal of its own key, then makes a
+/// new key, and the account says so.
+#[test]
+fn a_creation_or_a_recovery_after_a_late_confirmed_join_leaves_it_and_makes_a_new_key() {
+    let connect = FakeConnect::start();
+    let owner = owner();
+    let x = device();
+    let (account_x, old) = create(&connect, &x);
+    let x_id = account_x.state().account_id.clone();
+    connect.revoke(&account_x.state().device_id.clone());
+    drop(account_x);
+    for case in ["create", "recover"] {
+        let a = device();
+        let (mut account_a, _) = create(&connect, &a);
+        let a_id = account_a.state().account_id.clone();
+        let b = device();
+        let link = account_a.start_link().expect("link");
+        drop(
+            JoinRequest::start(client(&connect), &b.store, &b.path, link.code(), "iPhone")
+                .expect("join"),
+        );
+        let joins = account_a.pending_joins(&link).expect("pending");
+        let (proof, epoch) = owner.proof(joins[0].owner_action(&a_id));
+        let added = account_a
+            .confirm_join(&link, &joins[0], proof, &epoch)
+            .expect("late confirmation");
+        let key_of = |store: &MemoryKeyStore| {
+            AccountSigner::open(store)
+                .expect("store")
+                .expect("a key")
+                .public_key_b64u()
+        };
+        let earlier_key = key_of(&b.store);
+        let made = match case {
+            "create" => {
+                ConnectAccount::create(client(&connect), &b.store, &b.path, "Ola", "iPhone")
+                    .expect(case)
+                    .0
+            }
+            _ => {
+                ConnectAccount::recover(
+                    client(&connect),
+                    &b.store,
+                    &b.path,
+                    &x_id,
+                    &old.words(),
+                    "iPhone",
+                )
+                .expect(case)
+                .0
+            }
+        };
+        assert!(made.made_new_key(), "{case}");
+        assert_eq!(made.left_in_other_account(), None, "{case}");
+        assert_ne!(key_of(&b.store), earlier_key, "{case}");
+        assert!(
+            !connect.live_devices(&a_id).contains(&added.device_id),
+            "{case}: this device removed itself from A"
+        );
+    }
 }
 
 /// A join of account A that A confirmed after this device had left it, then a join of

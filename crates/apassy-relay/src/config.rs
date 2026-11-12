@@ -297,6 +297,9 @@ pub struct Limits {
     /// The feed long polls that Connect teams hold at once, all of them together, out of
     /// `feed_long_polls`. A poll over this is answered at once.
     pub connect_feed_long_polls: usize,
+    /// The heads of each vault store that maintenance keeps: the newest ones
+    /// (`server::sync::KEPT_HEADS`). Only tests make it smaller.
+    pub kept_heads: u64,
 }
 
 impl Default for Limits {
@@ -313,6 +316,7 @@ impl Default for Limits {
             feed_long_polls: DEFAULT_FEED_LONG_POLLS,
             feed_long_polls_per_team: DEFAULT_FEED_LONG_POLLS_PER_TEAM,
             connect_feed_long_polls: DEFAULT_CONNECT_FEED_LONG_POLLS,
+            kept_heads: crate::server::sync::KEPT_HEADS,
         }
     }
 }

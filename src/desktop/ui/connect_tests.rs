@@ -2468,6 +2468,56 @@ fn an_account_without_a_seen_recovery_code_says_so_until_a_new_code() {
     assert!(painted.contains(super::connect::NEW_RECOVERY), "{painted}");
 }
 
+// ---- Round 7: a new recovery code that Connect took without an answer. ----
+
+/// "New Recovery Code…" gets no answer, and Connect did take the new key: the section
+/// says at once that the account has no code that the owner saw, and the next read of the
+/// account, in the same session, settles it: the error that asked to keep the current
+/// code goes, and the lasting line stays.
+#[test]
+fn an_unanswered_new_code_that_connect_took_shows_the_lasting_line_in_the_session() {
+    let dir = TempDir::new().expect("temp dir");
+    let connect = FakeConnect::start();
+    let mut app = connect_app(&dir, &connect);
+    let ctx = egui::Context::default();
+    let account_id = create_account(&ctx, &mut app, "Rafal");
+    act(&ctx, &mut app, Action::SignIn);
+    settle(&ctx, &mut app);
+    assert!(!shown(&app).expect("account").recovery_unseen);
+    // The repeats of the request do not sleep in this test.
+    app.ui
+        .connect
+        .live
+        .session()
+        .slot()
+        .lock()
+        .unwrap()
+        .as_mut()
+        .expect("the account")
+        .set_sleeper(Arc::new(|_| {}));
+    let before = connect.recovery_key(&account_id);
+    connect.lose_next_answers("POST /v1/account/recovery", 50);
+    act(&ctx, &mut app, Action::NewRecoveryCode);
+    confirm_with(&mut app, &ctx, PASS);
+    until(&ctx, &mut app, "no answer", |app| {
+        live::error_for_test(app).as_deref()
+            == Some(ConnectError::RecoveryUnanswered.to_string().as_str())
+    });
+    assert_ne!(connect.recovery_key(&account_id), before, "Connect took it");
+    assert!(shown(&app).expect("account").recovery_unseen, "at once");
+    connect.keep_answers();
+    // A refresh of the account in the same session settles it.
+    act(&ctx, &mut app, Action::SignIn);
+    settle(&ctx, &mut app);
+    assert!(shown(&app).expect("account").recovery_unseen);
+    assert_eq!(live::error_for_test(&app), None, "the earlier error went");
+    let painted = text(&ctx, &mut app);
+    assert!(
+        painted.contains(super::connect::RECOVERY_UNSEEN),
+        "{painted}"
+    );
+}
+
 // ---- Round 6: the recovery code after a lock, and a new code of another device. ----
 
 /// A new code whose sheet a lock closed before "I Saved It": the next unlock shows the

@@ -1839,7 +1839,9 @@ fn view(hub: &Hub, caller: &AccountCaller, now: u64) -> RelayResult<Value> {
             group,
             device_list: list_entries(conn, &caller.account)?,
             recovery_key: encode_b64(&recovery_key),
-            recovery_rotated_at: rotated_at.map(to_u),
+            // Both or neither: a key of a directory file from before the device column
+            // has a time and no device, and shows as the key of the creation.
+            recovery_rotated_at: rotated_at.filter(|_| rotated_by.is_some()).map(to_u),
             recovery_rotated_by: rotated_by,
         })
     })?;

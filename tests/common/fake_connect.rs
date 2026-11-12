@@ -357,6 +357,8 @@ struct State {
     /// The next creations answer `409 account_id_taken` whatever their id.
     taken_ids: usize,
     lost_answers: Vec<(String, usize)>,
+    /// The next requests that start with the prefix wait this long before their step.
+    slow_answers: Vec<(String, usize, std::time::Duration)>,
     /// Requests that start with the prefix answer this status and error code instead.
     route_errors: Vec<(String, u16, String)>,
     /// `GET /v1/account/group` answers this view instead (a Connect that shows a group
@@ -744,6 +746,14 @@ impl FakeConnect {
             .push((prefix.to_owned(), count));
     }
 
+    /// The next `count` requests that start with `prefix` wait `delay` before their step
+    /// (a slow Connect).
+    pub fn slow_next_answers(&self, prefix: &str, count: usize, delay: std::time::Duration) {
+        lock(&self.shared)
+            .slow_answers
+            .push((prefix.to_owned(), count, delay));
+    }
+
     /// `GET /v1/account/group` answers `view` from now on (`None`: the group again).
     pub fn answer_group(&self, view: Option<Value>) {
         lock(&self.shared).group_view = view;
@@ -1122,6 +1132,17 @@ fn handle(shared: &Arc<Mutex<State>>, mut stream: TcpStream) {
             .map(|(_, left)| *left -= 1)
             .is_some()
     };
+    let slow = lock(shared)
+        .slow_answers
+        .iter_mut()
+        .find(|(prefix, left, _)| *left > 0 && line.starts_with(prefix.as_str()))
+        .map(|(_, left, delay)| {
+            *left -= 1;
+            *delay
+        });
+    if let Some(delay) = slow {
+        std::thread::sleep(delay);
+    }
     let forced = lock(shared)
         .route_errors
         .iter()
@@ -1825,6 +1846,15 @@ fn route(shared: &Arc<Mutex<State>>, request: &Incoming) -> Outgoing {
             });
             if live || !proven {
                 return fail(403, "forbidden");
+            }
+            // A key that is or was a device of an account (the relay's `key_used`), checked
+            // after the recovery signature, as the relay does.
+            if state
+                .devices
+                .iter()
+                .any(|device| device.public_key == public_key)
+            {
+                return fail(409, "conflict");
             }
             let deleted = state
                 .stores
