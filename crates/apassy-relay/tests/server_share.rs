@@ -608,7 +608,8 @@ fn a_share_code_works_once_for_its_member_and_ten_minutes() {
         Some(&json!({"link_hash": other_hash, "account_id": member.account})),
     );
     c.edit_directory(&format!(
-        "UPDATE account_peer_link SET expires_at = 1 WHERE link_hash = '{other_hash}';"
+        "UPDATE account_peer_link SET expires_at = CAST(strftime('%s', 'now') AS INTEGER) - 1 \
+         WHERE link_hash = '{other_hash}';"
     ));
     let message = device::peer_join_message(
         c.origin(),
@@ -1119,10 +1120,13 @@ fn a_used_code_counts_until_it_expires_and_pending_answers_are_bounded() {
         code(&make_code(c, owner, &member.account, &share_code(owner, 3))),
         (403, Some("account_limit"))
     );
-    // Codes that expire make room; their answers keep their own time.
+    // Codes that expire make room; their answers keep their own time. They end a moment
+    // ago, not long ago: the maintenance pass deletes a code a day after its end, and it
+    // may run at any time in this test.
     for index in 3..11 {
         c.edit_directory(&format!(
-            "UPDATE account_peer_link SET expires_at = 1 WHERE device_id = '{}';",
+            "UPDATE account_peer_link SET expires_at = CAST(strftime('%s', 'now') AS INTEGER) - 1 \
+             WHERE device_id = '{}';",
             owner.id
         ));
         let hash = share_code(owner, index);
