@@ -3618,7 +3618,8 @@ mod connect_sync {
     /// A relay that serves the chain of a vault store only from its head on, over a history
     /// that holds an entry by a key that the device list never held: a new device checks
     /// only what the relay serves, so it refuses a chain that does not start at version 1,
-    /// and downloads nothing. With the whole chain served, the foreign entry is refused too.
+    /// and downloads nothing. With the whole chain served, the foreign entry below a head of
+    /// a device of the account ends the download in the owner's choice: nothing is taken.
     #[test]
     fn a_new_device_refuses_a_chain_cut_to_the_head_over_a_foreign_entry() {
         let cloud = cloud();
@@ -3664,10 +3665,16 @@ mod connect_sync {
             .expect("D is in the store");
         let work = d.mac.data.join("sync");
         let joined = RelaySync::joined_from_store(&mut account_d, &store).expect("joined");
+        // The whole chain holds the foreign entry below A's head: nothing is taken, and only
+        // the owner's "Take This Copy Without Its Earlier History…" could take that head.
         assert_eq!(
             joined.download(&work).unwrap_err(),
-            SyncError::Damaged,
+            SyncError::HistoryUnverified,
             "the whole chain holds the foreign entry"
+        );
+        assert_eq!(
+            joined.unverified_history_head().map(|head| head.version),
+            Some(top_version)
         );
         // The relay serves the head alone: the entries below it cannot be checked.
         cloud.relay.cut_chain_below(&team, top_version);
@@ -3783,6 +3790,8 @@ mod connect_sync {
     fn a_new_device_gets_a_store_whose_relay_dropped_its_oldest_heads() {
         let mut pruned = pruned_store();
         let joined = pruned.joined();
+        // This fake relay keeps the newest 3 heads (the contract says 10000).
+        joined.set_kept_heads_for_test(3);
         let work = pruned.d.mac.data.join("sync");
         let download = joined
             .download(&work)
@@ -3800,6 +3809,57 @@ mod connect_sync {
             titles(&vault),
             vec!["Alpha", "Beta", "Delta", "Epsilon", "Gamma"]
         );
+    }
+
+    /// A relay that says it keeps only the head of a store with 50 versions (`kept_from` is
+    /// the head) breaks the rule of relay-sync-v1 section 12, which would skip the check of
+    /// the chain: the first download refuses it, and only the owner's "Take This Copy
+    /// Without Its Earlier History…" takes that head.
+    #[test]
+    fn a_new_device_refuses_a_relay_that_keeps_fewer_heads_than_the_contract() {
+        let cloud = cloud();
+        let a = connect_mac(&cloud, "a");
+        let mut account_a = new_account(&cloud, &a, "Rafal", true);
+        let mut vault_a = a.mac.create();
+        vault_a.add(item("Alpha", "SYNTH-alpha")).expect("add");
+        let team = a
+            .mac
+            .sync
+            .enable_on_connect(&mut vault_a, &mut account_a, "Personal")
+            .expect("enable")
+            .team_id;
+        for index in 2..=50 {
+            vault_a
+                .add(item(&format!("Item {index}"), "SYNTH-item"))
+                .expect("add");
+            assert!(a.mac.sync.sync(&mut vault_a).expect("push").pushed);
+        }
+        assert_eq!(cloud.relay.version_of(&team), 50);
+        cloud.relay.prune_store_below(&team, 50);
+        let d = connect_mac(&cloud, "d");
+        let mut account_d = join_account(&cloud, &mut account_a, &d, "Synthetic iMac");
+        a.mac
+            .sync
+            .register_account_devices(&mut account_a)
+            .expect("register D");
+        let store = account_d
+            .vault_stores()
+            .expect("stores")
+            .into_iter()
+            .find(|store| store.team_id == team)
+            .expect("D is in the store");
+        let joined = RelaySync::joined_from_store(&mut account_d, &store).expect("joined");
+        let work = d.mac.data.join("sync");
+        assert_eq!(
+            joined.download(&work).unwrap_err(),
+            SyncError::HistoryUnverified
+        );
+        let head = joined.unverified_history_head().expect("the head");
+        assert_eq!(head.version, 50);
+        let download = joined
+            .download_without_history(&work, &head)
+            .expect("the owner's choice");
+        assert_eq!(download.version(), 50);
     }
 
     /// A chain that starts later than the history that the relay says it keeps cannot be

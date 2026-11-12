@@ -366,6 +366,7 @@
         "team_id": "t_7k2m5q4x3c",
         "vault_id": "0f3c2a10-5b7e-4d9a-8c21-6f0e4b1d9a77",
         "name": "Personal",
+        "account_id": "acc_k7m2q4x3ca",
         "created_at": 1790000400,
         "shared": false,
         "devices": [
@@ -387,6 +388,7 @@
           "team_id": "t_7k2m5q4x3c",
           "vault_id": "0f3c2a10-5b7e-4d9a-8c21-6f0e4b1d9a77",
           "name": "Personal",
+          "account_id": "acc_k7m2q4x3ca",
           "created_at": 1790000400,
           "shared": true,
           "devices": [

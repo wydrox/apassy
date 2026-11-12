@@ -375,6 +375,8 @@ fn a_new_device_gets_a_store_whose_older_heads_the_relay_dropped() {
         .find(|store| store.team_id == team)
         .expect("B is in the store");
     let joined = RelaySync::joined_from_store(&mut account_b, &store).expect("joined");
+    // This relay keeps the newest 2 heads (`limits.kept_heads`; the contract says 10000).
+    joined.set_kept_heads_for_test(2);
     let download = joined
         .download(&b.data.join("sync"))
         .expect("the kept chain from version 4 to the head");

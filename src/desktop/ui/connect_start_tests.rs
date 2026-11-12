@@ -891,6 +891,106 @@ fn the_start_screen_takes_the_copy_of_a_removed_device_only_after_an_owner_check
     drop(s.connect);
 }
 
+/// K2: on the start screen, a copy whose head a live device of the account signed, while an
+/// earlier version is by a key that no list holds, is taken only with "Take This Copy
+/// Without Its Earlier History…": the screen names the version, the device by its signed
+/// name, and its time; nothing downloads before the owner check, a proof of another
+/// session changes nothing, and the proof of the step takes exactly that head.
+#[test]
+fn the_start_screen_takes_a_copy_without_its_earlier_history_only_after_an_owner_check() {
+    let held = Arc::new(std::sync::Mutex::new(None));
+    let keep = Arc::clone(&held);
+    let mut s = on_start(move |a, a_ctx, connect, relay, team| {
+        let dir = TempDir::new().expect("dir");
+        // A key that no list holds pushes, then a live device of the account over it.
+        let stranger_keys = MemoryKeyStore::new();
+        let stranger =
+            crate::connect::AccountSigner::open_or_create(&stranger_keys).expect("a key");
+        relay.add_store_device(team, "Synthetic stranger", stranger.public_key());
+        removed_device_push(a, relay, team, &stranger, dir.path());
+        let store = MemoryKeyStore::new();
+        let file = crate::connect::account_file(dir.path());
+        let account = join_with_core(a, a_ctx, connect, &store, &file, "Synthetic iMac");
+        let signer = account.signer().expect("the iMac's key");
+        removed_device_push(a, relay, team, &signer, dir.path());
+        *keep.lock().unwrap() = Some((dir, signer));
+    });
+    let (imac_dir, imac_signer) = held.lock().unwrap().take().expect("the iMac");
+    let version = s.relay.version_of(&s.team);
+    let store = s.store.clone();
+    s.b.relay_connect_use(store, None);
+    s.b.relay_settle_for_test();
+    assert!(
+        matches!(
+            s.b.sync.relay.join_view(None),
+            Some(JoinView::WithoutHistory { .. })
+        ),
+        "{:?} {:?}",
+        s.b.sync.relay.join_view(None),
+        s.b.sync.relay.join_error
+    );
+    let ctx = s.ctx.clone();
+    let text = frames_until(&ctx, &mut s.b, "the step of the copy", |text| {
+        text.contains(super::sync::relay::WITHOUT_HISTORY)
+    });
+    assert!(text.contains(&format!("Version {version}")), "{text}");
+    assert!(text.contains("“Synthetic iMac”"), "{text}");
+    s.b.relay_take_without_history_for_test(&ctx);
+    let action =
+        s.b.owner
+            .check
+            .as_ref()
+            .map(|check| check.request.action())
+            .expect("an owner check");
+    assert!(
+        matches!(
+            &action,
+            crate::broker::approvals::OwnerAction::TakeCopyWithoutHistory {
+                team_id,
+                version: v,
+                ..
+            } if *team_id == s.team && *v == version
+        ),
+        "{action:?}"
+    );
+    assert!(action.allowed_without_vault());
+    s.b.relay_settle_for_test();
+    assert!(matches!(
+        s.b.sync.relay.join_view(None),
+        Some(JoinView::WithoutHistory { .. })
+    ));
+    // A proof of another session changes nothing.
+    s.b.finish_owner_check_with(crate::broker::approvals::OwnerProof::issue_for_test(
+        action.clone(),
+        [9; 32],
+        Instant::now(),
+    ));
+    s.b.relay_settle_for_test();
+    assert!(matches!(
+        s.b.sync.relay.join_view(None),
+        Some(JoinView::WithoutHistory { .. })
+    ));
+    // The proof of the step: the copy downloads.
+    s.b.relay_take_without_history_for_test(&ctx);
+    let epoch = s.b.connect_session().start_epoch().expect("the step");
+    s.b.finish_owner_check_with(crate::broker::approvals::OwnerProof::issue_for_test(
+        action,
+        epoch,
+        Instant::now(),
+    ));
+    s.b.relay_settle_for_test();
+    assert_eq!(
+        s.b.sync.relay.join_view(None),
+        Some(JoinView::Ready {
+            team: "Personal".to_owned()
+        }),
+        "{:?}",
+        s.b.sync.relay.join_error
+    );
+    drop((imac_dir, imac_signer));
+    drop(s.connect);
+}
+
 /// B on the start screen with the copy of the store downloaded (the account key held by
 /// the join).
 fn ready_on_start() -> OnStart {
