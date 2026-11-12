@@ -152,6 +152,112 @@ pub(crate) fn tone_note(ui: &mut Ui, value: impl Into<String>, tone: Tone) {
     paragraph(ui, value, Font::Footnote, tone.text());
 }
 
+/// A wrapping note in a status color with the icon of its tone in front: a warning
+/// triangle for a warning or an error, a circled i for a hint.
+pub(crate) fn tone_note_icon(ui: &mut Ui, value: impl Into<String>, tone: Tone, font: Font) {
+    let icon = match tone {
+        Tone::Good => Icon::Check,
+        Tone::Warning | Tone::Critical => Icon::Warning,
+        Tone::Neutral | Tone::Accent => Icon::Info,
+    };
+    let value = value.into();
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        let size = if font == Font::Body { 15.0 } else { 13.0 };
+        // The icon sits on the first line of the text.
+        ui.add_space(0.0);
+        ui.vertical(|ui| {
+            ui.add_space(1.0);
+            paint_icon_in(ui, icon, size, tone.mark());
+        });
+        ui.add(Label::new(text(value, font).color(tone.text())).wrap());
+    });
+}
+
+/// A ring spinner, as `ProgressView` on macOS: a light track and an accent arc that
+/// turns. `size` is its diameter in points.
+pub(crate) fn spinner(ui: &mut Ui, size: f32) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    if ui.is_rect_visible(rect) {
+        ui.ctx().request_repaint();
+        let width = (size / 7.0).clamp(1.5, 2.5);
+        let radius = size / 2.0 - width / 2.0;
+        let center = rect.center();
+        let painter = ui.painter();
+        painter.circle_stroke(center, radius, Stroke::new(width, palette().fill_pressed));
+        let turn = ui.input(|input| input.time) * std::f64::consts::TAU * 0.9;
+        let start = turn as f32;
+        let sweep = std::f32::consts::FRAC_PI_2 * 1.2;
+        let points: Vec<Pos2> = (0..=16)
+            .map(|step| {
+                let angle = start + sweep * step as f32 / 16.0;
+                center + radius * Vec2::new(angle.cos(), angle.sin())
+            })
+            .collect();
+        painter.add(egui::Shape::line(
+            points,
+            Stroke::new(width, palette().accent),
+        ));
+    }
+    response
+}
+
+/// The six safety words as chips in rows of three, centred and bold (the frames of the
+/// words in the mockups). Screen readers get the words of a row as one label, in order.
+pub(crate) fn word_chips(ui: &mut Ui, words: &str) {
+    let list: Vec<&str> = words.split_whitespace().collect();
+    let gap = 8.0;
+    for line in list.chunks(3) {
+        let chips: Vec<_> = line
+            .iter()
+            .map(|word| {
+                galley(
+                    ui,
+                    text(*word, Font::Title3)
+                        .variation(b"wght", 650.0)
+                        .color(palette().label),
+                )
+            })
+            .collect();
+        let pad = Vec2::new(14.0, 7.0);
+        let width: f32 = chips
+            .iter()
+            .map(|chip| chip.size().x + 2.0 * pad.x)
+            .sum::<f32>()
+            + gap * (chips.len().saturating_sub(1)) as f32;
+        let height = chips.iter().map(|chip| chip.size().y).fold(0.0, f32::max) + 2.0 * pad.y;
+        let (rect, response) =
+            ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
+        response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, line.join(" ")));
+        let mut x = rect.center().x - width / 2.0;
+        for chip in chips {
+            let size = Vec2::new(chip.size().x + 2.0 * pad.x, height);
+            let chip_rect = Rect::from_min_size(Pos2::new(x, rect.top()), size);
+            let painter = ui.painter();
+            painter.rect_filled(chip_rect, 8, palette().window);
+            painter.rect_stroke(
+                chip_rect,
+                8,
+                Stroke::new(0.5, palette().border),
+                StrokeKind::Inside,
+            );
+            let at = chip_rect.center() - chip.size() / 2.0;
+            painter.galley(at, chip, palette().label);
+            x += size.x + gap;
+        }
+        ui.add_space(4.0);
+    }
+}
+
+/// The head of an alert that removes or ends something: the warning tile in the color
+/// of `tone` (red for an action that removes, orange for a step that must come first),
+/// the title, and the line of explanation.
+pub(crate) fn alert_head(ui: &mut Ui, tone: Tone, title: &str, lead: Option<&str>) {
+    icon_tile_sized(ui, Icon::Warning, tone.mark(), 36.0);
+    ui.add_space(4.0);
+    sheet_title(ui, title, lead);
+}
+
 // ---- Time. ----
 
 /// Seconds since the Unix epoch.
@@ -800,6 +906,9 @@ pub(crate) enum Style {
     Destructive,
     /// The confirm button of a destructive alert.
     DestructiveProminent,
+    /// `.bordered` with the label in red: the action of an alert that removes or ends
+    /// something and asks again (an owner check) before it acts.
+    DestructiveBordered,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -832,6 +941,52 @@ pub(crate) fn button(ui: &mut Ui, label: &str, style: Style) -> Response {
 
 pub(crate) fn small_button(ui: &mut Ui, label: &str, style: Style) -> Response {
     button_with(ui, None, label, style, Size::Small)
+}
+
+/// The width of a button with `label`, as [`button_with`] draws it without an icon.
+pub(crate) fn button_width(ui: &Ui, label: &str, style: Style, size: Size) -> f32 {
+    let font = size.font();
+    let strong = matches!(style, Style::Prominent | Style::DestructiveProminent);
+    let label_text = if strong {
+        medium(label, font)
+    } else {
+        text(label, font)
+    };
+    galley(ui, label_text).size().x + 2.0 * button_pad(style, size)
+}
+
+/// A small button that is at most `max` points wide: a longer label is cut with "…", and
+/// the whole label is its name for screen readers and its hover text. A row whose
+/// buttons name a person or a device ("Stop Sharing with …") keeps them whole in the
+/// window this way.
+pub(crate) fn small_button_fit(ui: &mut Ui, label: &str, style: Style, max: f32) -> Response {
+    if button_width(ui, label, style, Size::Small) <= max {
+        return small_button(ui, label, style);
+    }
+    let chars: Vec<char> = label.trim_end_matches('…').chars().collect();
+    let mut keep = chars.len();
+    let mut short = String::new();
+    while keep > 1 {
+        keep -= 1;
+        short = chars[..keep]
+            .iter()
+            .collect::<String>()
+            .trim_end()
+            .to_owned()
+            + "…";
+        if button_width(ui, &short, style, Size::Small) <= max {
+            break;
+        }
+    }
+    button_named(ui, None, &short, Some(label), style, Size::Small, 0.0, 0.0).on_hover_text(label)
+}
+
+fn button_pad(style: Style, size: Size) -> f32 {
+    match (style, size) {
+        (Style::Link | Style::Destructive, Size::Small) => BORDERLESS_SMALL_PAD,
+        (_, Size::Small) => 8.0,
+        _ => 12.0,
+    }
 }
 
 /// A small borderless button ([`Style::Link`] or [`Style::Destructive`]) at the trailing
@@ -916,11 +1071,7 @@ fn button_named(
     } else {
         0.0
     };
-    let pad = match (style, size) {
-        (Style::Link | Style::Destructive, Size::Small) => BORDERLESS_SMALL_PAD,
-        (_, Size::Small) => 8.0,
-        _ => 12.0,
-    };
+    let pad = button_pad(style, size);
     let width = (galley.size().x + icon_space + 2.0 * pad - bleed).max(min_width);
     let (allocated, response) =
         ui.allocate_exact_size(Vec2::new(width, size.height()), Sense::click());
@@ -955,7 +1106,7 @@ fn button_named(
             },
             palette().on_accent,
         ),
-        Style::Bordered => (
+        Style::Bordered | Style::DestructiveBordered => (
             if pressed {
                 palette().fill_pressed
             } else if hovered {
@@ -963,7 +1114,11 @@ fn button_named(
             } else {
                 palette().fill
             },
-            palette().label,
+            if style == Style::DestructiveBordered {
+                Tone::Critical.text()
+            } else {
+                palette().label
+            },
         ),
         Style::Link | Style::Destructive => (
             if pressed {
@@ -980,10 +1135,13 @@ fn button_named(
             },
         ),
     };
-    let (fill, fg) = if enabled {
-        (fill, fg)
-    } else {
-        (fill.gamma_multiply(0.5), fg.gamma_multiply(0.45))
+    // A button that is off keeps a label that can be read: a gray label on the gray
+    // fill for a button with a fill (white on a pale blue could not be read), a faded
+    // label for a borderless one.
+    let (fill, fg) = match (enabled, style) {
+        (true, _) => (fill, fg),
+        (false, Style::Link | Style::Destructive) => (fill, fg.gamma_multiply(0.45)),
+        (false, _) => (palette().fill, palette().secondary),
     };
     let radius = if size == Size::Large { 8 } else { 6 };
     let painter = ui.painter();
