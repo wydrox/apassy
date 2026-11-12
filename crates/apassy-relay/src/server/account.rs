@@ -97,6 +97,10 @@ pub const LINKS_PER_DEVICE: u64 = 3;
 pub const MAX_DEVICES: u64 = 10;
 /// Vault stores for each person of the plan (`403 account_limit`).
 pub const STORES_PER_PERSON: u64 = 10;
+/// The `store` entries of one device list over its life, also of stores deleted since
+/// (`403 account_limit`): a bound well above the store limit of a plan, so that stores
+/// made and deleted again do not use up the versions of the list that add something.
+pub const MAX_STORE_ENTRIES: u64 = 256;
 /// Devices of one account in one vault store at most (`403 account_limit`).
 pub const STORE_DEVICES_PER_ACCOUNT: u64 = 10;
 /// Failed recovery signatures of one account in one hour at most (`429 rate_limited`).
@@ -1114,11 +1118,22 @@ pub(crate) fn list_head(conn: &Connection, account: &str) -> RelayResult<(u64, S
 
 /// The device list of `account`, from version 1, with the entries of section 16.
 pub(crate) fn list_entries(conn: &Connection, account: &str) -> RelayResult<Vec<ListEntry>> {
+    entries_of(conn, "account_list", account)
+}
+
+/// The last device list of `account` before its last recovery (`account_list_reset`),
+/// empty for none (connect-account-v1 section 16.4).
+pub(crate) fn reset_list_entries(conn: &Connection, account: &str) -> RelayResult<Vec<ListEntry>> {
+    entries_of(conn, "account_list_reset", account)
+}
+
+/// The entries of `account` in the list table `table`, from version 1.
+fn entries_of(conn: &Connection, table: &str, account: &str) -> RelayResult<Vec<ListEntry>> {
     let mut statement = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT version, op, key, link_hash, name, by_key, signature, peer_account, peer_root, team_id \
-             FROM account_list WHERE account_id = ?1 ORDER BY version",
-        )
+             FROM {table} WHERE account_id = ?1 ORDER BY version"
+        ))
         .map_err(db)?;
     let rows = statement
         .query_map(params![account], |row| {
@@ -1243,7 +1258,10 @@ fn write_list_entry(
 
 /// A new device list of `account` with the checked root entry `root` (`root_change`) as
 /// its version 1: at the account's creation and at a recovery, which drops the list
-/// before, with the share marks of section 16 that name its versions.
+/// before, with the share marks of section 16 that name its versions. The list before a
+/// recovery is kept as the account's list before its reset (`account_list_reset`, the last
+/// one only): the other accounts of its stores verify it from the root that their lists
+/// pinned for it then (connect-account-v1 section 16.4).
 fn start_list(
     conn: &Connection,
     origin: &str,
@@ -1251,6 +1269,28 @@ fn start_list(
     root: &ListChange<'_>,
     now: u64,
 ) -> RelayResult<()> {
+    let had_list: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM account_list WHERE account_id = ?1)",
+            params![account],
+            |row| row.get(0),
+        )
+        .map_err(db)?;
+    if had_list {
+        conn.execute(
+            "DELETE FROM account_list_reset WHERE account_id = ?1",
+            params![account],
+        )
+        .map_err(db)?;
+        conn.execute(
+            &format!(
+                "INSERT INTO account_list_reset ({ACCOUNT_LIST_ENTRY_COLUMNS}) \
+                 SELECT {ACCOUNT_LIST_ENTRY_COLUMNS} FROM account_list WHERE account_id = ?1"
+            ),
+            params![account],
+        )
+        .map_err(db)?;
+    }
     for sql in [
         "DELETE FROM account_list WHERE account_id = ?1",
         "DELETE FROM account_share_void WHERE account_id = ?1",
@@ -1260,6 +1300,10 @@ fn start_list(
     }
     write_list_entry(conn, origin, account, 1, None, root, now).map(drop)
 }
+
+/// The columns of a list entry in `account_list` and `account_list_reset`.
+const ACCOUNT_LIST_ENTRY_COLUMNS: &str = "account_id, version, op, key, link_hash, name, by_key, \
+     signature, hash, created_at, peer_account, peer_root, team_id";
 
 /// The checks of every new entry of the list of `caller`'s account, inside the
 /// transaction of the change: `version` must be the head's version and 1 (409 `conflict`
@@ -2446,11 +2490,30 @@ fn store_view(conn: &Connection, team: &TeamId) -> RelayResult<VaultStoreView> {
         team_id: team.clone(),
         vault_id: row.vault_id.unwrap_or_default(),
         name: row.name,
+        account_id: owner.clone(),
         created_at: row.created_at,
         shared: devices.iter().any(|device| device.account_id != owner),
         devices,
         void,
     })
+}
+
+/// 403 `account_limit` when the list of `account` holds [`MAX_STORE_ENTRIES`] `store`
+/// entries (of stores that exist or were deleted).
+fn store_entries_room(conn: &Connection, account: &str) -> RelayResult<()> {
+    let entries: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM account_list WHERE account_id = ?1 AND op = 'store'",
+            params![account],
+            |row| row.get(0),
+        )
+        .map_err(db)?;
+    if to_u(entries) >= MAX_STORE_ENTRIES {
+        return Err(account_limit(
+            "This account made 256 vault stores with its device list, also counting deleted ones. A recovery of the account starts a new device list.",
+        ));
+    }
+    Ok(())
 }
 
 /// The stores of an account (made by it), by id.
@@ -2472,7 +2535,8 @@ fn store_id_taken(hub: &Hub, conn: &Connection, team: &TeamId) -> RelayResult<bo
     let named: bool = conn
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM team WHERE id = ?1) \
-             OR EXISTS(SELECT 1 FROM account_list WHERE team_id = ?1)",
+             OR EXISTS(SELECT 1 FROM account_list WHERE team_id = ?1) \
+             OR EXISTS(SELECT 1 FROM account_list_reset WHERE team_id = ?1)",
             params![team.as_str()],
             |row| row.get(0),
         )
@@ -2545,6 +2609,7 @@ fn vault_create(
         if to_u(owned_stores(conn, &caller.account)?.len() as i64) >= limit {
             return Err(full());
         }
+        store_entries_room(conn, &caller.account)?;
         if store_id_taken(hub, conn, &team)? {
             return Err(store_id_taken_error());
         }
@@ -2562,9 +2627,11 @@ fn vault_create(
             if to_u(owned_stores(tx, &caller.account)?.len() as i64) >= limit {
                 return Err(full());
             }
+            store_entries_room(tx, &caller.account)?;
             let named: bool = tx
                 .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM account_list WHERE team_id = ?1)",
+                    "SELECT EXISTS(SELECT 1 FROM account_list WHERE team_id = ?1) \
+                     OR EXISTS(SELECT 1 FROM account_list_reset WHERE team_id = ?1)",
                     params![team.as_str()],
                     |row| row.get(0),
                 )
@@ -3245,6 +3312,17 @@ pub fn prune(hub: &Hub, now: u64) -> RelayResult<(usize, usize)> {
             params![before],
         )
         .map_err(db)?;
+        // A list before a reset stays while a vault store that exists names its account:
+        // the account made it, or the list of the account that made it has a `share` of
+        // it with that account.
+        tx.execute(
+            "DELETE FROM account_list_reset WHERE account_id NOT IN ( \
+               SELECT account_id FROM team WHERE kind = 'account' AND account_id IS NOT NULL \
+               UNION SELECT l.peer_account FROM account_list l JOIN team t ON t.id = l.team_id \
+               WHERE l.op = 'share' AND t.kind = 'account' AND l.account_id = t.account_id)",
+            [],
+        )
+        .map_err(db)?;
         Ok((links, audit))
     })
 }
@@ -3272,17 +3350,19 @@ const ACTIVE_SHARE: &str = "EXISTS(SELECT 1 FROM account_list l WHERE l.account_
        = (SELECT r.key FROM account_list r WHERE r.account_id = l.peer_account AND r.version = 1)\
      <join>)";
 
-/// The part of [`ACTIVE_SHARE`] for a sign-in: the member's list has an active `join` of
-/// the store naming the owner (no later `leave`), whose last `join` answered the share `l`
-/// (`account_join_share`: the version of the share that the last `join` named). The owner may add the member's devices to the store before
-/// it; they sign in only after it.
+/// The part of [`ACTIVE_SHARE`] for a sign-in: the member's last `join` of the store naming
+/// the owner names a share (a join without one, of an earlier build, signs in nothing), no
+/// `leave` came after it, and it answered the share `l` (`account_join_share`: the version
+/// of the share that the last `join` named). The owner may add the member's devices to the
+/// store before it; they sign in only after it.
 const MEMBER_JOINED: &str = " AND EXISTS(SELECT 1 FROM account_list j \
        JOIN account_join_share js ON js.account_id = j.account_id AND js.team_id = j.team_id \
        WHERE j.account_id = l.peer_account AND j.team_id = l.team_id \
-       AND j.peer_account = l.account_id AND j.op = 'join' AND js.share_version = l.version \
+       AND j.peer_account = l.account_id AND j.op = 'join' AND j.peer_root IS NOT NULL \
+       AND js.share_version = l.version \
        AND NOT EXISTS(SELECT 1 FROM account_list e WHERE e.account_id = j.account_id \
-         AND e.team_id = j.team_id AND e.peer_account = j.peer_account AND e.op = 'leave' \
-         AND e.version > j.version))";
+         AND e.team_id = j.team_id AND e.peer_account = j.peer_account \
+         AND e.op IN ('join', 'leave') AND e.version > j.version))";
 
 /// [`ACTIVE_SHARE`] with its three values, and the member's `join` when `joined`.
 fn active_share_sql(owner: &str, team: &str, member: &str, joined: bool) -> String {

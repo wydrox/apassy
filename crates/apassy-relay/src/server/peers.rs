@@ -44,9 +44,10 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 
 use crate::api::{
-    AccountLinkCreated, AccountListAppend, AccountListAppended, EmptyRequest, ListOp, PeerDevice,
-    PeerInviter, PeerJoinRequest, PeerJoinView, PeerJoined, PeerLinkRequest, PeerListItem,
-    PeerLists, PeerListsRequest, PeerPending, PeerView, PlanView, Platform, TeamKind, VoidShare,
+    AccountLinkCreated, AccountListAppend, AccountListAppended, EmptyRequest, ListEntry, ListOp,
+    PeerDevice, PeerInviter, PeerJoinRequest, PeerJoinView, PeerJoined, PeerLinkRequest,
+    PeerListItem, PeerLists, PeerListsRequest, PeerPending, PeerView, PlanView, Platform, TeamKind,
+    VoidShare,
 };
 use crate::device;
 use crate::error::{RelayError, RelayResult, codes};
@@ -265,6 +266,9 @@ struct ListState {
     shares: Vec<(String, String)>,
     joins: Vec<(String, String, Option<Vec<u8>>)>,
     stores: Vec<String>,
+    /// Every share that a `join` of this list answered (store, account, share hash), also
+    /// a join that a `leave` ended: the same share is not joined twice.
+    joined: Vec<(String, String, Vec<u8>)>,
 }
 
 impl ListState {
@@ -311,6 +315,10 @@ impl ListState {
             (ListOp::Join, Some(account), Some(team)) => {
                 self.joins
                     .retain(|(store, held, _)| (store, held) != (&team, &account));
+                if let Some(share) = &root {
+                    self.joined
+                        .push((team.clone(), account.clone(), share.clone()));
+                }
                 self.joins.push((team, account, root));
             }
             (ListOp::Leave, Some(account), Some(team)) => self
@@ -364,9 +372,15 @@ impl ListState {
             }
             (ListOp::Join, Some(account), Some(team)) => {
                 let earlier = self.join_of(team);
+                let again = root.is_some_and(|root| {
+                    self.joined.iter().any(|(store, held, share)| {
+                        store == team && held == account && share.as_slice() == root
+                    })
+                });
                 if !self.is_peer(account)
                     || self.shared(team)
                     || self.holds_store(team)
+                    || again
                     || earlier.is_some_and(|(_, held, answered)| {
                         held != account || answered.as_deref() == root
                     })
@@ -1257,20 +1271,26 @@ fn join_end(hub: &Hub, caller: &AccountCaller, join_id: u64, now: u64) -> RelayR
 
 // ---- The lists of other accounts (section 16.4). ----
 
-/// The accounts that take part in a vault store that exists with `account`, `account`
-/// left out: for each store that `account` made or that a `share` of its maker's list
-/// names `account` in, the maker and every account that a `share` of that store in the
-/// maker's list names (active or ended). It ends with the deletion of the store.
+/// The accounts that joined a vault store that exists with `account`, `account` left out:
+/// for each store that `account` made, every account that joined it; for each store that
+/// `account` joined, the account that made it and every other account that joined it. An
+/// account joined a store when its list has a `join` of it naming the account that made it
+/// (active or ended), or Connect holds its join of it (`account_join_share`). A share that
+/// was never answered gives nothing. It ends with the deletion of the store.
 fn store_participants(conn: &Connection, account: &str) -> RelayResult<HashSet<String>> {
     let mut statement = conn
         .prepare(
-            "WITH mine(team, owner) AS ( \
+            "WITH joins(team, account) AS ( \
+               SELECT t.id, j.account_id FROM account_list j JOIN team t ON t.id = j.team_id \
+               WHERE j.op = 'join' AND t.kind = 'account' AND j.peer_account = t.account_id \
+               UNION SELECT t.id, js.account_id FROM account_join_share js JOIN team t ON t.id = js.team_id \
+               WHERE t.kind = 'account'), \
+             mine(team, owner) AS ( \
                SELECT id, account_id FROM team WHERE kind = 'account' AND account_id = ?1 \
-               UNION SELECT t.id, t.account_id FROM account_list s JOIN team t ON t.id = s.team_id \
-               WHERE s.peer_account = ?1 AND s.op = 'share' AND t.kind = 'account' AND s.account_id = t.account_id) \
+               UNION SELECT t.id, t.account_id FROM joins j JOIN team t ON t.id = j.team \
+               WHERE j.account = ?1) \
              SELECT owner FROM mine \
-             UNION SELECT s.peer_account FROM mine m JOIN account_list s \
-               ON s.team_id = m.team AND s.account_id = m.owner AND s.op = 'share'",
+             UNION SELECT j.account FROM mine m JOIN joins j ON j.team = m.team",
         )
         .map_err(db)?;
     let mut accounts = statement
@@ -1283,8 +1303,8 @@ fn store_participants(conn: &Connection, account: &str) -> RelayResult<HashSet<S
 }
 
 /// Whether `caller` may read the list of `account` (connect-account-v1 section 16.4):
-/// both are active members of one group, or `account` is in `participants`, the
-/// participants of the caller's stores (`store_participants`).
+/// both are active members of one group, or `account` is in `participants`, the accounts
+/// that joined a store with the caller (`store_participants`).
 fn may_read(
     hub: &Hub,
     caller: &AccountCaller,
@@ -1343,19 +1363,39 @@ fn view(hub: &Hub, caller: &AccountCaller, account: &str, now: u64) -> RelayResu
             .map_err(db)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(db)?;
-        Ok((name, devices, void_shares(conn, account, None)?))
+        Ok((name, devices, void_between(conn, account, &caller.account)?))
     })?;
     let device_list = hub
         .directory
         .store
         .with(|conn| list_entries(conn, account))?;
+    let reset_list = hub
+        .directory
+        .store
+        .with(|conn| reset_entries(conn, account))?;
     to_value(&PeerView {
         account_id: account.to_string(),
         name,
         devices,
         device_list,
         void,
+        reset_list,
     })
+}
+
+/// The void shares of the list of `owner` that name `caller` (`void_shares`): a read shows
+/// only the shares between the two accounts.
+fn void_between(conn: &Connection, owner: &str, caller: &str) -> RelayResult<Vec<VoidShare>> {
+    let mut void = void_shares(conn, owner, None)?;
+    void.retain(|share| share.account_id == caller);
+    Ok(void)
+}
+
+/// The last list of `account` before its last recovery (`account_list_reset`), in the form
+/// of a device list; `None` without one.
+fn reset_entries(conn: &Connection, account: &str) -> RelayResult<Option<Vec<ListEntry>>> {
+    let entries = crate::server::account::reset_list_entries(conn, account)?;
+    Ok((!entries.is_empty()).then_some(entries))
 }
 
 /// The name of `account` and the version and hash of the head of its list, or `None` for
@@ -1376,9 +1416,12 @@ fn named_head(conn: &Connection, account: &str) -> RelayResult<Option<(String, u
 /// `head`, `0` and `""` for none), answered in the asked order: `refused` for an account
 /// that the caller may not read (`may_read`) or that does not exist; `same` with the void
 /// marks when the head of its list is the pin; else `newer` with its name, its list from
-/// version 1, and the void marks, while the lists of the answer stay within
-/// `LIST_READ_BYTES` together (the first `newer` list always comes), and `later` for a
-/// list past it. Each account is read in locks of its own.
+/// version 1 (and its list before its last recovery, when it has one), and the void marks,
+/// while the lists of the answer stay within `LIST_READ_BYTES` together (the first `newer`
+/// list always comes). From the first list that does not fit on, every account whose head
+/// differs from its pin is `later`, decided from its head row alone: no list of it is
+/// read. Each account is read in locks of its own, and no lock is held while a list is
+/// written out.
 fn lists(
     hub: &Hub,
     caller: &AccountCaller,
@@ -1411,6 +1454,7 @@ fn lists(
         .with(|conn| store_participants(conn, &caller.account))?;
     let mut carried = 0usize;
     let mut newer = false;
+    let mut full = false;
     let mut items = Vec::with_capacity(pins.len());
     for pin in pins {
         let item = |state: &str| PeerListItem {
@@ -1419,36 +1463,52 @@ fn lists(
             name: None,
             device_list: None,
             void: None,
+            reset_list: None,
         };
         if !may_read(hub, caller, &participants, &pin.account_id, now)? {
             items.push(item("refused"));
             continue;
         }
-        let read = hub.directory.store.with(|conn| {
-            Ok(match named_head(conn, &pin.account_id)? {
-                Some(head) => Some((head, void_shares(conn, &pin.account_id, None)?)),
-                None => None,
-            })
-        })?;
-        let Some(((name, version, hash), void)) = read else {
+        let head = hub
+            .directory
+            .store
+            .with(|conn| named_head(conn, &pin.account_id))?;
+        let Some((name, version, hash)) = head else {
             items.push(item("refused"));
             continue;
         };
-        if version == pin.version && hash == pin.head {
+        let same = version == pin.version && hash == pin.head;
+        if !same && full {
+            // The answer is full: decided from the head row, no list is read.
+            items.push(item("later"));
+            continue;
+        }
+        let void = hub
+            .directory
+            .store
+            .with(|conn| void_between(conn, &pin.account_id, &caller.account))?;
+        if same {
             items.push(PeerListItem {
                 void: Some(void),
                 ..item("same")
             });
             continue;
         }
-        let device_list = hub
-            .directory
-            .store
-            .with(|conn| list_entries(conn, &pin.account_id))?;
-        let bytes = serde_json::to_vec(&device_list)
-            .map_err(|_| RelayError::internal("A device list cannot be written."))?
-            .len();
+        let (device_list, reset_list) = hub.directory.store.with(|conn| {
+            Ok((
+                list_entries(conn, &pin.account_id)?,
+                reset_entries(conn, &pin.account_id)?,
+            ))
+        })?;
+        let written = |entries: &[ListEntry]| {
+            serde_json::to_vec(entries)
+                .map(|bytes| bytes.len())
+                .map_err(|_| RelayError::internal("A device list cannot be written."))
+        };
+        let bytes =
+            written(&device_list)?.saturating_add(reset_list.as_deref().map_or(Ok(0), written)?);
         if newer && carried.saturating_add(bytes) > LIST_READ_BYTES {
+            full = true;
             items.push(item("later"));
             continue;
         }
@@ -1458,6 +1518,7 @@ fn lists(
             name: Some(name),
             device_list: Some(device_list),
             void: Some(void),
+            reset_list,
             ..item("newer")
         });
     }
@@ -1613,5 +1674,11 @@ mod tests {
         state.check(ListOp::Leave, Some(p), Some(s), None).unwrap();
         state.take(ListOp::Leave, Some(p.into()), None, Some(s.into()));
         conflict(state.check(ListOp::Leave, Some(p), Some(s), None));
+        // The same share is not joined again after the leave; a newer one is.
+        conflict(state.check(ListOp::Join, Some(p), Some(s), Some(&[2; 32])));
+        conflict(state.check(ListOp::Join, Some(p), Some(s), Some(&[1; 32])));
+        state
+            .check(ListOp::Join, Some(p), Some(s), Some(&[3; 32]))
+            .unwrap();
     }
 }

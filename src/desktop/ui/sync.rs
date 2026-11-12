@@ -1828,7 +1828,12 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                     } else {
                         ui.add(Label::new(super::settings::rows::note(&line)).wrap());
                     }
-                    if on_relay && open_unlocked && app.relay_checks_list_long(&entry.id) {
+                    if on_relay
+                        && let Some(line) =
+                            status.and_then(|status| app.share_unverified_line(&entry.id, status))
+                    {
+                        kit::tone_note_icon(ui, line, Tone::Warning, Font::Callout);
+                    } else if on_relay && open_unlocked && app.relay_checks_list_long(&entry.id) {
                         kit::tone_note(ui, relay::CHECK_LIST_UNREACHABLE, Tone::Warning);
                         if kit::small_button(ui, "Try Again", Style::Prominent).clicked() {
                             check_list = Some(entry.id.clone());

@@ -1609,14 +1609,19 @@ pub struct VoidShare {
 }
 
 /// `GET /v1/account/peers/{account_id}`: another account whose list the caller may read
-/// (one group, or a vault store of both).
+/// (one group, or a vault store that both joined or that one made and the other joined).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerView {
     pub account_id: String,
     pub name: String,
     pub devices: Vec<PeerDevice>,
     pub device_list: Vec<ListEntry>,
+    /// The void shares of that list that name the caller.
     pub void: Vec<VoidShare>,
+    /// The last list of that account before its last recovery, while a vault store names
+    /// the account (connect-account-v1 section 16.4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_list: Option<Vec<ListEntry>>,
 }
 
 /// The pin that a client holds of one list: its version and its list hash (`0` and `""`
@@ -1637,7 +1642,8 @@ pub struct PeerListsRequest {
 }
 
 /// One account of `POST /v1/account/peers/lists`: `state` is `newer` (with `name`,
-/// `device_list`, `void`), `same` (with `void`), `refused`, or `later`.
+/// `device_list`, `void`, and `reset_list` when the account has one), `same` (with
+/// `void`), `refused`, or `later`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerListItem {
     pub account_id: String,
@@ -1648,6 +1654,8 @@ pub struct PeerListItem {
     pub device_list: Option<Vec<ListEntry>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub void: Option<Vec<VoidShare>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_list: Option<Vec<ListEntry>>,
 }
 
 /// `POST /v1/account/peers/lists` answer, in the asked order.
@@ -1888,6 +1896,8 @@ pub struct VaultStoreView {
     pub team_id: TeamId,
     pub vault_id: String,
     pub name: String,
+    /// The account that made the store.
+    pub account_id: String,
     pub created_at: u64,
     pub shared: bool,
     pub devices: Vec<StoreDevice>,

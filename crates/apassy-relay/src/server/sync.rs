@@ -34,8 +34,10 @@ use crate::sync_head::{HEAD_HEADER, MAX_SNAPSHOT_BYTES, SIGNATURE_HEADER, Signed
 
 /// The most chain entries in one answer.
 pub const MAX_CHAIN: u64 = 1000;
-/// The heads that maintenance keeps: the newest ones (`Limits::kept_heads`).
-pub const KEPT_HEADS: u64 = 10_000;
+/// The heads that maintenance keeps: the newest ones (`Limits::kept_heads`). The number is
+/// a fixed part of relay-sync-v1 (section 12), one constant with the client's check of a
+/// first download.
+pub const KEPT_HEADS: u64 = apassy::sync::KEPT_HEADS;
 /// A temporary file older than this is removed by maintenance.
 const TEMP_MAX_AGE_SECS: u64 = 3600;
 /// The piece of a snapshot that is read, hashed, and written at a time.

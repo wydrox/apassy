@@ -4388,6 +4388,7 @@ mod connect_v1 {
             team_id: String,
             vault_id: String,
             name: String,
+            account_id: String,
             created_at: u64,
             shared: bool,
             devices: Vec<StoreDevice>,
@@ -4575,6 +4576,7 @@ mod connect_v1 {
             is_id(&view.team_id, "t_")
                 && is_uuid(&view.vault_id)
                 && is_name(&view.name)
+                && is_id(&view.account_id, "acc_")
                 && !view.devices.is_empty()
                 && view.devices.iter().all(|d| {
                     d.store_device_id > 0
@@ -4680,6 +4682,9 @@ mod connect_v1 {
             devices: Vec<PeerDevice>,
             device_list: Vec<ListEntry>,
             void: Vec<VoidMark>,
+            /// The list before the last recovery, while a store names the account.
+            #[serde(default)]
+            reset_list: Option<Vec<ListEntry>>,
         }
 
         /// A share that Connect counts as void (section 16.4).
@@ -4716,6 +4721,8 @@ mod connect_v1 {
             device_list: Option<Vec<ListEntry>>,
             #[serde(default)]
             void: Option<Vec<VoidMark>>,
+            #[serde(default)]
+            reset_list: Option<Vec<ListEntry>>,
         }
 
         #[derive(Debug, Deserialize)]

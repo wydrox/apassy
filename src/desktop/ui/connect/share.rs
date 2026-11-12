@@ -91,6 +91,7 @@ pub(crate) const LEFT_HERE: &str =
 pub(crate) const UNPINNED: &str = "Some people who share a vault that you joined could not be verified on this device. Their devices sign nothing here.";
 pub(crate) const DOWNLOAD: &str = "Download the Shared Copy…";
 pub(crate) const VAULT_OFFERED: &str = "A vault";
+pub(crate) const CLAIM: &str = "Count Its Shares Again…";
 
 /// Every fixed text of the section, for the wording tests.
 #[cfg(test)]
@@ -126,7 +127,29 @@ pub(crate) const TEXTS: &[&str] = &[
     VAULT_OFFERED,
     CONFIRM_TAIL,
     MATCH_TAIL,
+    CLAIM,
 ];
+
+/// A store of this account made before Apassy recorded which account made a vault, with
+/// shares already: they count again after an owner check.
+pub(crate) fn claim_line(vault: &str) -> String {
+    format!(
+        "“{vault}” was shared before Apassy recorded which account made a vault. Its shares count again once you confirm that this account made it."
+    )
+}
+
+/// Two verified lists claim the store of an offer: it is not offered.
+pub(crate) fn contested(vault: &str) -> String {
+    format!("Two accounts claim the vault “{vault}”. Apassy does not offer it.")
+}
+
+/// The people of a shared store whose devices this device could not verify.
+pub(crate) fn unverified(people: &str) -> String {
+    format!(
+        "The devices of {people} could not be verified on this {}. Their changes are not taken.",
+        crate::computer!()
+    )
+}
 
 /// "Send this to <name>."
 pub(crate) fn send_to(name: &str) -> String {
@@ -275,6 +298,9 @@ pub(crate) struct ShareView {
     pub(crate) error: Option<String>,
     /// What this device did by itself, or learned: shown as notes.
     pub(crate) notes: Vec<String>,
+    /// Stores of this account whose earlier shares count again after an owner check:
+    /// (store, vault name).
+    pub(crate) claims: Vec<(String, String)>,
 }
 
 /// A press in the section.
@@ -309,6 +335,10 @@ pub(crate) enum ShareAction {
         team_id: String,
         owner: String,
         name: String,
+    },
+    /// The `store` entry of a store of this account whose earlier shares count again.
+    Claim {
+        team_id: String,
     },
 }
 
@@ -460,6 +490,16 @@ pub(crate) fn draw(ui: &mut Ui, view: &ShareView) -> Option<ShareAction> {
                         .filter(|line| !line.is_empty())
                     {
                         ui.add(egui::Label::new(rows::note(line)).wrap());
+                    }
+                });
+            }
+            for (team_id, vault) in &view.claims {
+                g.row(|ui| {
+                    let claim = rows::note(&claim_line(vault));
+                    if rows::text_buttons(ui, claim, &[(CLAIM, Style::Bordered)]).is_some() {
+                        action = Some(ShareAction::Claim {
+                            team_id: team_id.clone(),
+                        });
                     }
                 });
             }
@@ -873,6 +913,20 @@ pub(crate) fn view_of(
     if !status.unpinned.is_empty() {
         notes.push(UNPINNED.to_owned());
     }
+    for team in &status.contested {
+        let vault = local.get(team).cloned().unwrap_or_else(|| {
+            stores
+                .iter()
+                .find(|store| store.team_id == *team)
+                .map_or_else(|| VAULT_OFFERED.to_owned(), |store| store.name.clone())
+        });
+        notes.push(contested(&vault));
+    }
+    let claims = status
+        .claims
+        .iter()
+        .map(|team| (team.clone(), name_of(team)))
+        .collect();
     ShareView {
         own,
         others,
@@ -880,6 +934,7 @@ pub(crate) fn view_of(
         busy: false,
         error: None,
         notes,
+        claims,
     }
 }
 
@@ -1036,6 +1091,9 @@ pub(crate) enum Guard {
         account: String,
         leave: bool,
     },
+    Claim {
+        team_id: String,
+    },
 }
 
 /// What "Continue" of the picker found.
@@ -1067,6 +1125,8 @@ pub(crate) enum Outcome {
         result: Result<(), ConnectError>,
     },
     Differed,
+    /// The `store` entry of a store whose earlier shares count again.
+    Claimed(Result<(), ConnectError>),
 }
 
 /// What a join (or a download of a joined store) leads to.
@@ -1193,6 +1253,25 @@ fn local_stores(app: &DesktopApp) -> BTreeMap<String, String> {
         .collect()
 }
 
+/// The stores of [`local_stores`] that this computer syncs with this account's key at the
+/// account's origin: only those may get a `store` entry by themselves.
+fn account_stores(app: &DesktopApp) -> Vec<String> {
+    let Some(origin) = app.ui.connect.live.account_origin() else {
+        return Vec::new();
+    };
+    app.vault_list
+        .registry
+        .entries()
+        .iter()
+        .filter_map(|entry| {
+            let relay = app.relay_of(&entry.id)?;
+            let state = relay.state().ok()??;
+            (relay.uses_account_key() && state.relay_url.as_deref() == Some(origin.as_str()))
+                .then_some(state.team_id)?
+        })
+        .collect()
+}
+
 /// Run `work` with the account of the session on a worker.
 fn spawn(
     app: &mut DesktopApp,
@@ -1282,11 +1361,16 @@ pub(crate) fn step(app: &mut DesktopApp, ctx: &egui::Context) {
 fn refresh(app: &mut DesktopApp, ctx: &egui::Context) {
     app.ui.connect.share.refreshed_at = Some(Instant::now());
     let local: Vec<String> = local_stores(app).into_keys().collect();
+    let own = account_stores(app);
     spawn(app, ctx, move |account| {
-        Outcome::Refreshed(account.refresh_shares(&local).map(|status| Refreshed {
-            stores: status.vault_stores.clone(),
-            status,
-        }))
+        Outcome::Refreshed(
+            account
+                .refresh_shares_with(&local, &own)
+                .map(|status| Refreshed {
+                    stores: status.vault_stores.clone(),
+                    status,
+                }),
+        )
     });
 }
 
@@ -1296,8 +1380,9 @@ fn refresh(app: &mut DesktopApp, ctx: &egui::Context) {
 fn check(app: &mut DesktopApp, ctx: &egui::Context) {
     app.ui.connect.share.check_due = false;
     let local: Vec<String> = local_stores(app).into_keys().collect();
+    let own = account_stores(app);
     spawn(app, ctx, move |account| {
-        Outcome::Checked(account.refresh_shares(&local))
+        Outcome::Checked(account.refresh_shares_with(&local, &own))
     });
 }
 
@@ -1351,8 +1436,11 @@ fn take_status(app: &mut DesktopApp, status: ShareStatus) {
 /// from then on. A read that failed or did not verify, for any account of the store, notes
 /// nothing: the store keeps checking (and after 10 minutes says that Connect cannot be
 /// reached, with "Try Again"), and a read asked before the refusal never ends the check.
-/// (Settings › Connect notes the account's own list for the other stores.)
+/// (Settings › Connect notes the account's own list for the other stores.) The signers of
+/// the account file that this refresh wrote reach the sync first, so a time never reaches
+/// it with older signers.
 fn lists_read(app: &mut DesktopApp, now: Instant) {
+    super::live::hand_over_signers(app);
     let ids: Vec<String> = app
         .vault_list
         .registry
@@ -1547,6 +1635,12 @@ fn apply(app: &mut DesktopApp, ctx: &egui::Context, outcome: Outcome) {
             share.sheet = None;
             share.error = Some(DIFFERENT.to_owned());
         }
+        Outcome::Claimed(result) => {
+            share.refreshed_at = None;
+            if let Err(error) = result {
+                share.error = Some(error.to_string());
+            }
+        }
     }
 }
 
@@ -1653,6 +1747,12 @@ fn run_guarded(
                 result,
             }
         }),
+        Guard::Claim { team_id } => {
+            let own = account_stores(app);
+            spawn(app, ctx, move |account| {
+                Outcome::Claimed(account.claim_store(&team_id, &own, &names, proof, &epoch))
+            });
+        }
     }
 }
 
@@ -1787,6 +1887,13 @@ pub(crate) fn act(app: &mut DesktopApp, ctx: &egui::Context, action: ShareAction
                 account: owner,
                 name,
                 leave: true,
+            });
+        }
+        ShareAction::Claim { team_id } => {
+            let names = app.ui.connect.share.names(&local_stores(app));
+            spawn(app, ctx, move |account| {
+                let action = account.claim_store_action(&team_id, &names);
+                Outcome::Ask(Guard::Claim { team_id }, Ok(action))
             });
         }
     }
@@ -2087,6 +2194,29 @@ impl DesktopApp {
             }
             _ => None,
         }
+    }
+
+    /// The line of a vault whose store is shared between accounts while a head of it is
+    /// refused, or checked, and the lists of some people of the store cannot be verified on
+    /// this device (a suspended pin, a read that Connect refused): it names them. `None`
+    /// for every other vault and state.
+    pub(crate) fn share_unverified_line(
+        &self,
+        id: &str,
+        status: &crate::desktop::sync_worker::UiStatus,
+    ) -> Option<String> {
+        if !super::super::sync::relay::is_unlisted_signer(status) {
+            return None;
+        }
+        let team = self.store_team(id)?;
+        let people = self
+            .ui
+            .connect
+            .share
+            .status
+            .as_ref()?
+            .unverified_people(&team);
+        (!people.is_empty()).then(|| unverified(&people.join(", ")))
     }
 }
 

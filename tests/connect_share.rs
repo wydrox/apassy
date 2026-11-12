@@ -2125,3 +2125,337 @@ fn the_signers_and_the_time_of_their_list_are_one_value() {
             .any(|store| store.team_id == f.team)
     );
 }
+
+/// K3: one account of a shared store never verifies on A (Connect serves its list from
+/// another root, so its pin is suspended), while the others do: the check of a head does
+/// not wait for that account, and the status names its person.
+#[test]
+fn a_store_is_decided_while_one_account_never_verifies() {
+    let mut f = family();
+    f.share();
+    let team = f.team.clone();
+    let (_y, mut account_y, owner_y) = third(&f, "y", "Synthetic Ewa");
+    ceremony(
+        &mut f.account_a,
+        &f.owner_a,
+        &team,
+        &mut account_y,
+        &owner_y,
+    );
+    f.account_a.refresh_shares(&[]).expect("A");
+    let y_id = account_y.state().account_id.clone();
+    let other = new_account(&f.cloud, &mac(&f.cloud, "z"), "Synthetic Z");
+    let served = f.cloud.connect.device_list(&other.state().account_id);
+    f.cloud.connect.serve_peer_list(&y_id, Some(served));
+    hand_over(&f.a, &f.account_a);
+    // A second device of X that A has not read yet writes to the store.
+    let x2 = mac(&f.cloud, "x2");
+    let mut account_x2 = join_account(&f.cloud, &mut f.account_x, &x2, "Synthetic MacBook Air");
+    account_x2.refresh_shares(&[]).expect("X2");
+    let device = account_x2.state().device_id.clone();
+    f.cloud.connect.list_in_store(&team, &device);
+    let mut vault_x2 = member_copy(&x2, &mut account_x2, &team);
+    vault_x2.add(item("Beta")).expect("add");
+    assert!(x2.sync.sync(&mut vault_x2).expect("X2").pushed);
+    let before = std::time::Instant::now();
+    let checking = f.a.sync.sync(&mut f.vault_a);
+    assert_eq!(
+        checking.err(),
+        Some(apassy::sync::SyncError::ChecksDeviceList)
+    );
+    let status = f.account_a.refresh_shares(&[]).expect("A");
+    let store = status
+        .stores
+        .iter()
+        .find(|store| store.team_id == team)
+        .expect("the store");
+    assert_eq!(store.unverified, vec![y_id.clone()], "{store:?}");
+    assert_eq!(status.unverified_people(&team).len(), 1);
+    let asked = status
+        .asked_for(&team)
+        .expect("Y does not hold the check back");
+    assert!(asked > before);
+    hand_over(&f.a, &f.account_a);
+    f.a.sync.note_device_list(asked);
+    f.a.sync.sync(&mut f.vault_a).expect("A takes X2's head");
+    assert_eq!(titles(&f.vault_a), vec!["Alpha", "Beta"]);
+}
+
+/// K4: a `store` entry is signed by itself only for a store that this computer syncs
+/// with this account's key at its origin and that Connect lists as made by this account;
+/// a refusal of Connect is not asked again; a store that the list shared before the entry
+/// existed waits for an owner check, which signs exactly that entry.
+#[test]
+fn a_store_entry_is_signed_only_for_a_store_of_this_account() {
+    let mut f = family();
+    f.share();
+    let (a_id, x_id) = (f.a_id(), f.x_id());
+    let entries = |f: &Family| f.list_of(&a_id).len();
+    let holds_store = |f: &Family, team: &str| {
+        f.list_of(&a_id)
+            .iter()
+            .any(|entry| entry["op"] == "store" && entry["team_id"] == json!(team))
+    };
+    let a_device = f.account_a.state().device_id.clone();
+    let old = "t_oldaaaaaaa".to_owned();
+    f.cloud
+        .connect
+        .store_without_entry(&a_id, &a_device, &old, "Older");
+    assert!(!holds_store(&f, &old));
+    // A vault of another relay, or one that does not sync with this account's key: no
+    // entry, and no request for it.
+    let posts = f.cloud.connect.count("POST /v1/account/list");
+    f.account_a
+        .refresh_shares_with(std::slice::from_ref(&old), &[])
+        .expect("A");
+    assert_eq!(f.cloud.connect.count("POST /v1/account/list"), posts);
+    // X syncs A's store (or names one that it is not in): Connect does not list it as
+    // X's, so X asks for no entry at all.
+    let x_entries = f.list_of(&x_id).len();
+    f.account_x
+        .refresh_shares(std::slice::from_ref(&old))
+        .expect("X");
+    f.account_x.refresh_shares(&[f.team.clone()]).expect("X");
+    assert_eq!(f.list_of(&x_id).len(), x_entries);
+    assert_eq!(f.cloud.connect.count("POST /v1/account/list"), posts);
+    // A shares a second store with X and adds X's devices; X has not joined it, and a vault
+    // of X's computer syncs it (as after a "Forget" there): Connect lists it for X as A's,
+    // so X asks for no entry.
+    let second = f
+        .account_a
+        .create_vault_store("7e4a2d00-3c6f-4d43-9f54-9c3b8e0a5d43", "Second")
+        .expect("second store")
+        .team_id;
+    let names = ShareNames::default();
+    let (proof, epoch) = f.owner_a.proof(
+        f.account_a
+            .share_again_action(&second, &x_id, &names)
+            .expect("action"),
+    );
+    f.account_a
+        .share_again(&second, &x_id, &names, proof, &epoch)
+        .expect("A shares the second store");
+    assert!(
+        f.account_x
+            .vault_stores()
+            .expect("X's stores")
+            .iter()
+            .any(|store| store.team_id == second && store.account_id == a_id)
+    );
+    let posts = f.cloud.connect.count("POST /v1/account/list");
+    f.account_x
+        .refresh_shares(std::slice::from_ref(&second))
+        .expect("X");
+    assert_eq!(f.cloud.connect.count("POST /v1/account/list"), posts);
+    assert_eq!(f.list_of(&x_id).len(), x_entries);
+    // A's own store: the entry comes, once.
+    f.account_a
+        .refresh_shares(std::slice::from_ref(&old))
+        .expect("A");
+    assert!(holds_store(&f, &old));
+    let head = entries(&f);
+    f.account_a
+        .refresh_shares(std::slice::from_ref(&old))
+        .expect("A again");
+    assert_eq!(entries(&f), head);
+    // A refusal of Connect is not asked again in this session.
+    let refused = "t_refusedaaa".to_owned();
+    f.cloud
+        .connect
+        .store_without_entry(&a_id, &a_device, &refused, "Refused");
+    f.cloud
+        .connect
+        .answer_route_error("POST /v1/account/list", 403, "forbidden");
+    let posts = f.cloud.connect.count("POST /v1/account/list");
+    f.account_a
+        .refresh_shares(std::slice::from_ref(&refused))
+        .expect("refused");
+    let tried = f.cloud.connect.count("POST /v1/account/list");
+    assert!(tried > posts);
+    f.account_a
+        .refresh_shares(std::slice::from_ref(&refused))
+        .expect("refused again");
+    assert_eq!(f.cloud.connect.count("POST /v1/account/list"), tried);
+    f.cloud
+        .connect
+        .clear_route_errors_of("POST /v1/account/list");
+    // A store whose list holds a `share` of it already (a build before the entry): the
+    // entry makes that share count again, so it waits for an owner check.
+    let shared = "t_sharedaaaa".to_owned();
+    f.cloud
+        .connect
+        .store_without_entry(&a_id, &a_device, &shared, "Shared before");
+    let a_signer = f.account_a.signer().expect("signer");
+    push_entry(
+        &f.cloud,
+        &a_id,
+        &a_signer,
+        "share",
+        Some(&x_id),
+        None,
+        Some(&shared),
+    );
+    let head = entries(&f);
+    let status = f
+        .account_a
+        .refresh_shares(std::slice::from_ref(&shared))
+        .expect("A");
+    assert_eq!(status.claims, vec![shared.clone()], "{status:?}");
+    assert_eq!(entries(&f), head, "nothing signed without the owner check");
+    let names = ShareNames::default();
+    let action = f.account_a.claim_store_action(&shared, &names);
+    let OwnerAction::ClaimConnectStore {
+        team_id,
+        people,
+        entries: signed,
+        ..
+    } = &action
+    else {
+        panic!("{action:?}");
+    };
+    assert_eq!(team_id, &shared);
+    assert_eq!(people.len(), 1, "the person whose share counts again");
+    assert_eq!(signed.len(), 1);
+    assert_eq!(signed[0].op, "store");
+    // A check of another store does not sign this one.
+    let (proof, epoch) = f
+        .owner_a
+        .proof(f.account_a.claim_store_action(&old, &names));
+    let wrong = f.account_a.claim_store(
+        &shared,
+        std::slice::from_ref(&shared),
+        &names,
+        proof,
+        &epoch,
+    );
+    assert!(
+        matches!(wrong, Err(ConnectError::OwnerCheck(_))),
+        "{wrong:?}"
+    );
+    // Not a store that this computer syncs with the account key: refused, nothing signed.
+    let (proof, epoch) = f.owner_a.proof(action.clone());
+    let elsewhere = f.account_a.claim_store(&shared, &[], &names, proof, &epoch);
+    assert_eq!(elsewhere.unwrap_err(), ConnectError::Invalid);
+    assert_eq!(entries(&f), head);
+    let (proof, epoch) = f.owner_a.proof(action);
+    f.account_a
+        .claim_store(
+            &shared,
+            std::slice::from_ref(&shared),
+            &names,
+            proof,
+            &epoch,
+        )
+        .expect("the owner confirms");
+    assert!(holds_store(&f, &shared));
+    assert_eq!(entries(&f), head + 1);
+}
+
+/// K2: X writes to A's shared store, then resets its account; A pins X's new root with new
+/// words, writes over it, and shares the store with Z. Z's first download follows the
+/// chain with X's list before the reset (served while a store names X: X's old keys sign as
+/// keys that left). Without that list, a new device of Z ends its first download in a step
+/// of its own: the head of A is taken only with the owner's "Take This Copy Without Its
+/// Earlier History…".
+#[test]
+fn a_first_download_after_a_writer_reset_its_account() {
+    let mut f = family();
+    f.share();
+    let (team, x_id) = (f.team.clone(), f.x_id());
+    let mut vault_x = f.x_vault();
+    vault_x.add(item("Beta")).expect("add");
+    assert!(f.x.sync.sync(&mut vault_x).expect("X").pushed);
+    drop(vault_x);
+    hand_over(&f.a, &f.account_a);
+    f.a.sync.sync(&mut f.vault_a).expect("A takes X's head");
+    // X's only device leaves, and X recovers on a new Mac.
+    let device_id = f.account_x.state().device_id.clone();
+    let row = f
+        .account_x
+        .view()
+        .expect("view")
+        .devices
+        .into_iter()
+        .find(|device| device.device_id == device_id)
+        .expect("this device");
+    let (proof, epoch) = f.owner_x.proof(f.account_x.revoke_action(&row));
+    f.account_x.revoke(&row, proof, &epoch).expect("X leaves");
+    let fresh = mac(&f.cloud, "x-fresh");
+    let (mut new_x, _, _) = ConnectAccount::recover(
+        client(&f.cloud),
+        &fresh.keys,
+        &fresh.account_path,
+        &x_id,
+        &f.recovery_x.text(),
+        "Synthetic iMac",
+    )
+    .expect("recover X");
+    // A pins X's new root with new words, and writes over X's head.
+    f.account_a.refresh_shares(&[]).expect("A");
+    let names = ShareNames::default();
+    let link = f.account_a.start_share(&x_id, &team).expect("code");
+    let answer = new_x.accept_code(link.code()).expect("answer");
+    let requests = f.account_a.share_requests(&link).expect("requests");
+    assert_eq!(requests[0].words, answer.words);
+    let (proof, epoch) = f.owner_a.proof(
+        f.account_a
+            .share_action(&link, &requests[0], &names)
+            .expect("action"),
+    );
+    f.account_a
+        .confirm_share(&link, &requests[0], &names, proof, &epoch)
+        .expect("A re-pins X");
+    f.vault_a.add(item("Gamma")).expect("add");
+    hand_over(&f.a, &f.account_a);
+    assert!(f.a.sync.sync(&mut f.vault_a).expect("A").pushed);
+    // Z joins: its first download follows the chain with X's list before the reset.
+    let (z, mut account_z, owner_z) = third(&f, "z", "Synthetic Zofia");
+    ceremony(
+        &mut f.account_a,
+        &f.owner_a,
+        &team,
+        &mut account_z,
+        &owner_z,
+    );
+    f.account_a.refresh_shares(&[]).expect("A adds Z's devices");
+    let vault_z = member_copy(&z, &mut account_z, &team);
+    assert_eq!(titles(&vault_z), vec!["Alpha", "Beta", "Gamma"]);
+    // A Connect that keeps no list before the reset: a new device of Z.
+    f.cloud.connect.serve_reset_lists(false);
+    let z2 = mac(&f.cloud, "z2");
+    let mut account_z2 = join_account(&f.cloud, &mut account_z, &z2, "Synthetic MacBook Air");
+    account_z2.refresh_shares(&[]).expect("Z2");
+    let device = account_z2.state().device_id.clone();
+    f.cloud.connect.list_in_store(&team, &device);
+    let store = account_z2
+        .vault_stores()
+        .expect("stores")
+        .into_iter()
+        .find(|store| store.team_id == team)
+        .expect("in the store");
+    let joined = RelaySync::joined_from_store(&mut account_z2, &store).expect("joined");
+    let work = z2.data.join("sync");
+    assert_eq!(
+        joined.download(&work).err(),
+        Some(apassy::sync::SyncError::ChecksDeviceList)
+    );
+    // The lists, read again after the refusal, still do not hold X's old key.
+    let status = account_z2.refresh_shares(&[]).expect("Z2 again");
+    joined.set_signers(Some(signer_policy(account_z2.state())));
+    joined.note_device_list(status.asked_for(&team).expect("every list read"));
+    assert_eq!(
+        joined.download(&work).err(),
+        Some(apassy::sync::SyncError::HistoryUnverified)
+    );
+    let head = joined.unverified_history_head().expect("the head of A");
+    let a_key = key_of(&f.account_a);
+    assert_eq!(head.key, a_key, "a device of a verified list signed it");
+    let download = joined
+        .download_without_history(&work, &head)
+        .expect("the owner takes the copy");
+    let (vault, _) = z2.sync.adopt(&joined, &download, PASS).expect("adopt");
+    drop((vault, download, joined));
+    let mut vault = Vault::open(&z2.vault_path).expect("open");
+    vault.unlock(PASS).expect("unlock");
+    assert_eq!(titles(&vault), vec!["Alpha", "Beta", "Gamma"]);
+}

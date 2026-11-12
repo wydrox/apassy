@@ -137,6 +137,8 @@ struct Account {
     /// list hash of each.
     list: Vec<Value>,
     hashes: Vec<String>,
+    /// The last list before the last recovery (`reset_list` of the peer reads).
+    before_reset: Vec<Value>,
 }
 
 /// The message of the entry `version` of a device list.
@@ -644,6 +646,35 @@ impl FakeConnect {
             .devices
             .push((number, device.to_owned()));
         number
+    }
+
+    /// A vault store `team_id` of `account` with the device `device` in it, made without its
+    /// `store` entry, as a build before the entry made stores.
+    pub fn store_without_entry(&self, account: &str, device: &str, team_id: &str, name: &str) {
+        let mut state = lock(&self.shared);
+        state.next += 1;
+        let vault_id = format!("4b1d9a77-0f3c-4a10-8c21-{:012}", state.next);
+        let number = match state.relay.clone() {
+            Some(relay) => {
+                let me = state
+                    .devices
+                    .iter()
+                    .find(|entry| entry.id == device)
+                    .cloned()
+                    .expect("the device");
+                relay.add_store_team(team_id, name, &me.name, &me.public_key)
+            }
+            None => 1,
+        };
+        state.stores.push(Store {
+            team_id: team_id.to_owned(),
+            vault_id,
+            name: name.to_owned(),
+            account: account.to_owned(),
+            created_at: now(),
+            devices: vec![(number, device.to_owned())],
+            void: Vec::new(),
+        });
     }
 
     /// The signed device list of `account`, as Connect answers it.
@@ -1388,8 +1419,8 @@ fn store_view(store: &Store, state: &State) -> Value {
         .iter()
         .any(|device| device["account_id"] != json!(store.account));
     json!({"team_id": store.team_id, "vault_id": store.vault_id, "name": store.name,
-           "created_at": store.created_at, "shared": shared, "devices": devices,
-           "void": store.void})
+           "account_id": store.account, "created_at": store.created_at, "shared": shared,
+           "devices": devices, "void": store.void})
 }
 
 fn new_device(
@@ -1513,6 +1544,7 @@ fn route(shared: &Arc<Mutex<State>>, request: &Incoming) -> Outgoing {
                     customer: false,
                     list: Vec::new(),
                     hashes: Vec::new(),
+                    before_reset: Vec::new(),
                 },
             );
             if let Some(entry) = state.accounts.get_mut(&account_id) {
@@ -1863,6 +1895,7 @@ fn route(shared: &Arc<Mutex<State>>, request: &Incoming) -> Outgoing {
                 .count();
             state.stores.retain(|store| store.account != account);
             if let Some(entry) = state.accounts.get_mut(&account) {
+                entry.before_reset = std::mem::take(&mut entry.list);
                 entry.start_list(
                     &origin,
                     &account,

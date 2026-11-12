@@ -121,6 +121,11 @@ pub(crate) const REPLACE_DEPARTED: &str =
 /// The click of "Use the Copy That … Left…" on a screen of a device that joins: the next
 /// step of the join takes it ([`DesktopApp::relay_join_step`]).
 const TAKE_DEPARTED: &str = "sync-relay-take-departed";
+/// The click of "Take This Copy Without Its Earlier History…" on a screen of a device that
+/// joins ([`DesktopApp::relay_join_step`]).
+const TAKE_WITHOUT_HISTORY: &str = "sync-relay-take-without-history";
+/// The button of a first download whose earlier history does not verify.
+pub(crate) const WITHOUT_HISTORY: &str = "Take This Copy Without Its Earlier History…";
 /// A vault store that checks the device list this long says that Connect cannot be reached
 /// to check it, with "Try Again" (connect-account-v1 section 7.5).
 pub(crate) const CHECK_LIST_LONG: Duration = Duration::from_secs(10 * 60);
@@ -501,6 +506,7 @@ impl Join {
         match &self.phase {
             Phase::Downloading { joined, .. }
             | Phase::Departed { joined, .. }
+            | Phase::WithoutHistory { joined, .. }
             | Phase::Ready { joined, .. }
             | Phase::Passphrase { joined }
             | Phase::Merging { joined } => Some(joined),
@@ -542,6 +548,15 @@ enum Phase {
     Departed {
         joined: Arc<JoinedDevice>,
         head: DepartedHead,
+    },
+    /// A vault store whose head a device of a verified list signed, while an earlier entry
+    /// of its history is by a key that no list verifies ([`SyncError::HistoryUnverified`]):
+    /// the owner can take that head without its earlier history.
+    WithoutHistory {
+        joined: Arc<JoinedDevice>,
+        head: DepartedHead,
+        /// Its device as a sentence names it ([`DesktopApp::relay_signed_name`]).
+        device: String,
     },
     /// Downloaded: the owner types the passphrase.
     Ready {
@@ -599,6 +614,12 @@ pub(crate) enum JoinView {
     Departed {
         words: String,
         label: String,
+    },
+    /// The first download of a vault store: earlier versions of its copy were saved by
+    /// devices that no list verifies; the owner can take the copy without them
+    /// ([`WITHOUT_HISTORY`]).
+    WithoutHistory {
+        words: String,
     },
 }
 
@@ -789,6 +810,7 @@ impl RelayUi {
             Phase::Resolving(_) | Phase::FromStore(_) => true,
             Phase::Downloading { .. }
             | Phase::Departed { .. }
+            | Phase::WithoutHistory { .. }
             | Phase::Ready { .. }
             | Phase::Passphrase { .. }
             | Phase::Adopting(_)
@@ -846,6 +868,9 @@ impl RelayUi {
                     label: departed.use_label(),
                 }
             }
+            Phase::WithoutHistory { head, device, .. } => JoinView::WithoutHistory {
+                words: without_history_words(device, head),
+            },
             Phase::Ready { .. } => JoinView::Ready {
                 team: join.team.clone(),
             },
@@ -856,6 +881,49 @@ impl RelayUi {
                 team: join.team.clone(),
             },
         })
+    }
+}
+
+/// The line of a first download whose earlier history does not verify: the head that the
+/// owner can take, by its version, its device, and its time (by that device's clock).
+pub(crate) fn without_history_words(device: &str, head: &DepartedHead) -> String {
+    format!(
+        concat!(
+            "Version {version} of this copy was saved by {device} on {day}. Some earlier versions were saved by devices that this ",
+            crate::computer!(),
+            " cannot verify, for example of a person who reset their account. Apassy can take this copy without its earlier history; ask the person who shares the vault first if you are unsure."
+        ),
+        version = head.version,
+        device = device,
+        day = kit::day_month_year(head.time),
+    )
+}
+
+/// The download of a copy of a vault store at a join, from `slot` (the account of the
+/// session): a chain entry by a key that this device does not know yet makes it read the
+/// lists of the other accounts once more (the refresh of Shared Vaults), hand their
+/// signers to the device and note when they were asked, and download again. That second
+/// download is decided: the copy, [`SyncError::HistoryUnverified`] (the owner's choice),
+/// or a refusal. Without an answer of Connect it still checks the device list.
+fn download_store_copy(
+    device: &JoinedDevice,
+    work: &std::path::Path,
+    slot: &Mutex<Option<crate::connect::ConnectAccount>>,
+) -> Result<RelayDownload, SyncError> {
+    match device.download(work) {
+        Err(SyncError::ChecksDeviceList) => {
+            let listed = lock(slot).as_mut().and_then(|account| {
+                let status = account.refresh_shares(&[]).ok()?;
+                let asked = status.asked_for(device.team_id()).or(status.own_read)?;
+                Some((crate::connect::signer_policy(account.state()), asked))
+            });
+            if let Some((policy, asked)) = listed {
+                device.set_signers(Some(policy));
+                device.note_device_list(asked);
+            }
+            device.download(work)
+        }
+        other => other,
     }
 }
 
@@ -3546,23 +3614,38 @@ impl DesktopApp {
         });
     }
 
-    /// The signed name of the device of `key` in the account: a device that the verified
-    /// device list removed, or a device of that list.
+    /// The device of `key` as a sentence names it, by its signed name: “name” for a device of
+    /// the account (one that the verified device list removed, or a device of that list),
+    /// “name” of <person> for a device of another account of a shared vault, by that
+    /// account's verified list.
     fn relay_signed_name(&self, key: &[u8]) -> Option<String> {
         if let Some(name) = self.sync.relay.departed_names.get(key) {
-            return Some(name.clone());
+            return Some(format!("“{name}”"));
         }
-        let slot = self.ui.connect.live.session().slot();
-        let guard = slot.try_lock().ok()?;
-        guard
-            .as_ref()?
-            .verified_list()?
-            .name_of(key)
-            .map(str::to_owned)
+        let own = self
+            .ui
+            .connect
+            .live
+            .session()
+            .slot()
+            .try_lock()
+            .ok()
+            .and_then(|guard| {
+                guard
+                    .as_ref()?
+                    .verified_list()?
+                    .name_of(key)
+                    .map(|name| format!("“{name}”"))
+            });
+        own.or_else(|| {
+            let (device, person) = self.sync.relay.shared_devices.get(key)?;
+            Some(format!("“{device}” of {person}"))
+        })
     }
 
     /// The copy that "Use the relay copy…" of the vault store of `id` takes: the current
-    /// head that the relay served at the last check, and the signed name of its device.
+    /// head that the relay served at the last check, and its device as a sentence names it
+    /// ([`Self::relay_signed_name`]).
     pub(crate) fn relay_served_copy(&self, id: &str) -> Option<(DepartedHead, Option<String>)> {
         let head = self.relay_of(id)?.served_head()?;
         let name = self.relay_signed_name(&head.key);
@@ -3596,10 +3679,9 @@ impl DesktopApp {
             team_id,
             version: head.version,
             head: head.head_hash.clone(),
-            device_name: name.map_or_else(
-                || concat!("a device that this ", crate::computer!(), " does not know").to_owned(),
-                |name| format!("“{name}”"),
-            ),
+            device_name: name.unwrap_or_else(|| {
+                concat!("a device that this ", crate::computer!(), " does not know").to_owned()
+            }),
             time: head.time,
             vault_name,
         };
@@ -4415,6 +4497,7 @@ impl DesktopApp {
             Phase::Waiting { pending, .. } => self.relay_end_pending(pending),
             Phase::Downloading { joined, .. }
             | Phase::Departed { joined, .. }
+            | Phase::WithoutHistory { joined, .. }
             | Phase::Ready { joined, .. }
             | Phase::Passphrase { joined } => {
                 self.relay_end_joined(joined);
@@ -4491,7 +4574,10 @@ impl DesktopApp {
                         None => {
                             let work = self.vault_list.data_dir.join("sync");
                             let device = Arc::clone(&joined);
-                            let task = Task::spawn(ctx.cloned(), move || device.download(&work));
+                            let slot = self.ui.connect.live.session().slot();
+                            let task = Task::spawn(ctx.cloned(), move || {
+                                download_store_copy(&device, &work, &slot)
+                            });
                             Some(Phase::Downloading { joined, task })
                         }
                         Some(id) => {
@@ -4529,7 +4615,10 @@ impl DesktopApp {
                     let joined = Arc::new(joined);
                     let work = self.vault_list.data_dir.join("sync");
                     let device = Arc::clone(&joined);
-                    let task = Task::spawn(ctx.cloned(), move || device.download(&work));
+                    let slot = self.ui.connect.live.session().slot();
+                    let task = Task::spawn(ctx.cloned(), move || {
+                        download_store_copy(&device, &work, &slot)
+                    });
                     Some(Phase::Downloading { joined, task })
                 }
                 TaskPoll::Done(Err(text)) => {
@@ -4642,13 +4731,29 @@ impl DesktopApp {
                     self.ui.focus_start_field = true;
                     Some(Phase::Ready { joined, download })
                 }
-                TaskPoll::Done(Err(error)) => match joined
-                    .waiting_head()
-                    .filter(|_| error == SyncError::WaitsForAccountDevice)
-                {
+                TaskPoll::Done(Err(error)) => match (
+                    joined
+                        .waiting_head()
+                        .filter(|_| error == SyncError::WaitsForAccountDevice),
+                    joined
+                        .unverified_history_head()
+                        .filter(|_| error == SyncError::HistoryUnverified),
+                ) {
                     // The owner can take the copy that a device that left pushed.
-                    Some(head) => Some(Phase::Departed { joined, head }),
-                    None => {
+                    (Some(head), _) => Some(Phase::Departed { joined, head }),
+                    // The owner can take the head without its earlier history.
+                    (None, Some(head)) => {
+                        let device = self.relay_signed_name(&head.key).unwrap_or_else(|| {
+                            "a device of this account or of a person who shares this vault"
+                                .to_owned()
+                        });
+                        Some(Phase::WithoutHistory {
+                            joined,
+                            head,
+                            device,
+                        })
+                    }
+                    (None, None) => {
                         self.relay_end_joined(joined);
                         failure = Some(join_error(error));
                         None
@@ -4672,6 +4777,35 @@ impl DesktopApp {
                     Some(self.relay_join_departed(joined, head, ctx))
                 } else {
                     Some(Phase::Departed { joined, head })
+                }
+            }
+            Phase::WithoutHistory {
+                joined,
+                head,
+                device,
+            } => {
+                let take = ctx.is_some_and(|ctx| {
+                    ctx.data_mut(|data| {
+                        data.remove_temp::<bool>(egui::Id::new(TAKE_WITHOUT_HISTORY))
+                    })
+                    .is_some()
+                });
+                if take {
+                    self.relay_ask_without_history(&joined, &head, &device, ctx);
+                }
+                if self.relay_without_history_approved(&head) {
+                    let work = self.vault_list.data_dir.join("sync");
+                    let device = Arc::clone(&joined);
+                    let task = Task::spawn(ctx.cloned(), move || {
+                        device.download_without_history(&work, &head)
+                    });
+                    Some(Phase::Downloading { joined, task })
+                } else {
+                    Some(Phase::WithoutHistory {
+                        joined,
+                        head,
+                        device,
+                    })
                 }
             }
             ready @ (Phase::Ready { .. } | Phase::Passphrase { .. } | Phase::Merging { .. }) => {
@@ -5047,6 +5181,87 @@ impl DesktopApp {
         same
     }
 
+    /// "Take This Copy Without Its Earlier History…" of a device that joins: a fresh owner
+    /// check that names the store, the head, its device, and its time
+    /// ([`OwnerAction::TakeCopyWithoutHistory`]); with no vault unlocked it is bound to the
+    /// session of the start-screen step, as the step on the copy of a removed device.
+    fn relay_ask_without_history(
+        &mut self,
+        joined: &JoinedDevice,
+        head: &DepartedHead,
+        device: &str,
+        ctx: Option<&egui::Context>,
+    ) {
+        let request = OwnerRequest::TakeCopyWithoutHistory {
+            team_id: joined.team_id().to_owned(),
+            version: head.version,
+            head: head.head_hash.clone(),
+            device_name: device.to_owned(),
+            time: head.time,
+            vault_name: joined.team().to_owned(),
+            start: true,
+        };
+        self.sync.relay.join_departed_check = Some(request.action());
+        self.ask_owner(request, ctx);
+    }
+
+    /// Whether the owner check of [`Self::relay_ask_without_history`] passed for exactly
+    /// `head`, in the session that asked it.
+    fn relay_without_history_approved(&mut self, head: &DepartedHead) -> bool {
+        let named = matches!(
+            &self.sync.relay.join_departed_check,
+            Some(OwnerAction::TakeCopyWithoutHistory { .. })
+        );
+        if !named {
+            return false;
+        }
+        let Some(action) = self.relay_join_proof() else {
+            return false;
+        };
+        let same = matches!(
+            &action,
+            OwnerAction::TakeCopyWithoutHistory { version, head: hash, .. }
+                if *version == head.version && *hash == head.head_hash
+        );
+        if !same {
+            self.set_err("The copy on the relay changed. Nothing changed.");
+        }
+        same
+    }
+
+    /// The proof of the owner check of a step of a device that joins
+    /// (`join_departed_check`), checked against its action in the session that asked it
+    /// (the vault session, or else the start-screen step): the action, or `None` while no
+    /// proof came or it failed. A cancelled or refused check drops the step.
+    fn relay_join_proof(&mut self) -> Option<OwnerAction> {
+        let action = self.sync.relay.join_departed_check.clone()?;
+        if self.ui.connect.live.guarded.is_some() {
+            return None;
+        }
+        let Some(proof) = self.owner.take_connect_proof() else {
+            if self.owner.check.is_none() {
+                self.sync.relay.join_departed_check = None;
+            }
+            return None;
+        };
+        self.sync.relay.join_departed_check = None;
+        let Some(epoch) = self
+            .owner_ui
+            .session
+            .epoch()
+            .or_else(|| self.connect_session().start_epoch())
+        else {
+            self.set_err("The step ended. Nothing changed.");
+            return None;
+        };
+        if let Err(refusal) = proof.check(&action, &epoch) {
+            self.set_err(refusal.message());
+            return None;
+        }
+        drop(proof);
+        Some(action)
+    }
+
     /// "Use the Copy That … Left…" of a device that joins, after its owner check: the
     /// download takes the head that it waited on, once
     /// ([`JoinedDevice::download_departed`]); the adoption then makes it the anchor, and
@@ -5094,6 +5309,12 @@ impl DesktopApp {
     /// "Use the Copy That … Left…" of a device that joins, as a click, and one look.
     pub(crate) fn relay_take_departed_for_test(&mut self, ctx: &egui::Context) {
         ctx.data_mut(|data| data.insert_temp(egui::Id::new(TAKE_DEPARTED), true));
+        self.relay_join_step(Some(ctx));
+    }
+
+    /// "Take This Copy Without Its Earlier History…" on the screen of a device that joins.
+    pub(crate) fn relay_take_without_history_for_test(&mut self, ctx: &egui::Context) {
+        ctx.data_mut(|data| data.insert_temp(egui::Id::new(TAKE_WITHOUT_HISTORY), true));
         self.relay_join_step(Some(ctx));
     }
 
@@ -5192,19 +5413,30 @@ pub(super) fn safety_lines(ui: &mut egui::Ui, before: &str, words: &str, after: 
 /// What a Mac that joins shows while it waits: the words, the download.
 fn join_progress(ui: &mut egui::Ui, view: &JoinView) {
     match view {
+        // A copy that the device would take against a warning: the warning with its
+        // icon, and a bordered button, not the default one.
         JoinView::Departed { words, label } => {
-            kit::tone_note(
+            kit::tone_note_icon(
                 ui,
                 format!(
                     "{words} No device of the account has saved a copy over it yet. This copy comes from a device that was removed from the account. Do not use it if that device was lost or stolen. {DEPARTED_ADVICE} Apassy can take this copy once, and the vault of this {} starts from it.",
                     crate::computer!()
                 ),
                 Tone::Warning,
+                Font::Footnote,
             );
             ui.add_space(6.0);
-            if kit::small_button(ui, label, Style::Prominent).clicked() {
+            if kit::small_button(ui, label, Style::Bordered).clicked() {
                 ui.ctx()
                     .data_mut(|data| data.insert_temp(egui::Id::new(TAKE_DEPARTED), true));
+            }
+        }
+        JoinView::WithoutHistory { words } => {
+            kit::tone_note_icon(ui, words.as_str(), Tone::Warning, Font::Footnote);
+            ui.add_space(6.0);
+            if kit::small_button(ui, WITHOUT_HISTORY, Style::Bordered).clicked() {
+                ui.ctx()
+                    .data_mut(|data| data.insert_temp(egui::Id::new(TAKE_WITHOUT_HISTORY), true));
             }
         }
         JoinView::Sending => {
@@ -6831,7 +7063,7 @@ pub(crate) fn store_copy_text(
 ) -> String {
     let device = device.map_or_else(
         || concat!("a device that this ", crate::computer!(), " does not know").to_owned(),
-        |name| format!("“{name}”"),
+        str::to_owned,
     );
     format!(
         concat!(
@@ -7196,6 +7428,30 @@ mod access_repair_tests {
 #[cfg(test)]
 mod departed_tests {
     use super::*;
+
+    /// "Use the relay copy…" names a device of another account of a shared vault by its
+    /// verified name and person, and a key that no list holds as unknown.
+    #[test]
+    fn the_copy_of_a_co_member_names_its_verified_device() {
+        let mut app = DesktopApp::new();
+        let key = vec![4; 65];
+        app.sync.relay.shared_devices.insert(
+            key.clone(),
+            ("Synthetic MacBook".to_owned(), "“Ola”".to_owned()),
+        );
+        assert_eq!(
+            app.relay_signed_name(&key).as_deref(),
+            Some("“Synthetic MacBook” of “Ola”")
+        );
+        assert_eq!(app.relay_signed_name(&[5; 65]), None);
+        let text = store_copy_text("Family", 7, app.relay_signed_name(&key).as_deref(), 0);
+        assert!(
+            text.contains("which “Synthetic MacBook” of “Ola” saved"),
+            "{text}"
+        );
+        let text = store_copy_text("Family", 7, None, 0);
+        assert!(text.contains("does not know"), "{text}");
+    }
 
     fn head() -> DepartedHead {
         DepartedHead {

@@ -49,6 +49,8 @@ pub(super) struct ShareState {
     pending_key: Option<Vec<u8>>,
     /// owner → the shares of its list that the fake counts as void: (store, member).
     void: BTreeMap<String, Vec<(String, String)>>,
+    /// The reads give no `reset_list` (a Connect that keeps no list before a reset).
+    no_reset_lists: bool,
 }
 
 impl FakeConnect {
@@ -60,6 +62,12 @@ impl FakeConnect {
             Some(list) => state.share.served.insert(account.to_owned(), list),
             None => state.share.served.remove(account),
         };
+    }
+
+    /// The reads of other accounts' lists give the list of an account before its last
+    /// recovery (`reset_list`), or not (`false`: a Connect that keeps none).
+    pub fn serve_reset_lists(&self, serve: bool) {
+        lock(&self.shared).share.no_reset_lists = !serve;
     }
 
     /// The next join answers name `inviter` as the device of the code.
@@ -218,28 +226,29 @@ pub(super) fn append_store(
     Ok(())
 }
 
-/// The accounts of the store `team` as its owner's list names them: the owner, and each
-/// account of a `share` entry of it (also one that ended).
+/// The accounts of the store `team` that read each other's lists outside one group: its
+/// owner, and each account whose list has a `join` of it naming the owner (also one that a
+/// `leave` ended). A share that was never joined gives no read.
 fn participants(state: &State, team: &str) -> Vec<String> {
     let Some(store) = state.stores.iter().find(|store| store.team_id == team) else {
         return Vec::new();
     };
     let mut accounts = vec![store.account.clone()];
-    if let Some(entry) = state.accounts.get(&store.account) {
-        for held in &entry.list {
-            if held["op"] == "share"
+    for (account, entry) in &state.accounts {
+        let joined = entry.list.iter().any(|held| {
+            held["op"] == "join"
                 && held["team_id"] == team
-                && let Some(peer) = held["account_id"].as_str()
-            {
-                accounts.push(peer.to_owned());
-            }
+                && held["account_id"].as_str() == Some(store.account.as_str())
+        });
+        if joined {
+            accounts.push(account.clone());
         }
     }
     accounts
 }
 
-/// Whether `account` may read the list of `other`: one group, or a store that both are
-/// or were in (connect-account-v1 section 16.4).
+/// Whether `account` may read the list of `other`: one group, or a store that both joined
+/// or that one made and the other joined (connect-account-v1 section 16.4).
 fn may_read(state: &State, account: &str, other: &str) -> bool {
     account != other
         && (same_group(state, account, other)
@@ -249,8 +258,19 @@ fn may_read(state: &State, account: &str, other: &str) -> bool {
             }))
 }
 
-/// The void marks of the list of `owner` in a peer view.
-fn void_of(state: &State, owner: &str) -> Value {
+/// The list of `account` before its last recovery, for a read (none when the fake serves
+/// none, or the account has none).
+fn reset_of(state: &State, account: &str) -> Option<Vec<Value>> {
+    state
+        .accounts
+        .get(account)
+        .map(|entry| entry.before_reset.clone())
+        .filter(|list| !list.is_empty() && !state.share.no_reset_lists)
+}
+
+/// The void marks of the list of `owner` in a peer view of `caller`: the shares between
+/// the two.
+fn void_of(state: &State, owner: &str, caller: &str) -> Value {
     json!(
         state
             .share
@@ -258,6 +278,7 @@ fn void_of(state: &State, owner: &str) -> Value {
             .get(owner)
             .map(|marks| marks
                 .iter()
+                .filter(|(_, member)| member == caller)
                 .map(|(team, member)| json!({"team_id": team, "account_id": member}))
                 .collect::<Vec<_>>())
             .unwrap_or_default()
@@ -461,13 +482,15 @@ pub(super) fn route(
                     && version == entry.list.len() as u64
                     && entry.hashes.last().is_some_and(|last| *last == head);
                 if same {
-                    items.push(json!({"account_id": other, "state": "same", "void": void_of(state, &other)}));
+                    items.push(json!({"account_id": other, "state": "same", "void": void_of(state, &other, account)}));
                 } else {
                     let list = served.unwrap_or_else(|| entry.list.clone());
-                    items.push(
-                        json!({"account_id": other, "state": "newer", "name": entry.name,
-                                      "device_list": list, "void": void_of(state, &other)}),
-                    );
+                    let mut item = json!({"account_id": other, "state": "newer", "name": entry.name,
+                                      "device_list": list, "void": void_of(state, &other, account)});
+                    if let Some(reset) = reset_of(state, &other) {
+                        item["reset_list"] = json!(reset);
+                    }
+                    items.push(item);
                 }
             }
             ok(json!({"accounts": items}))
@@ -495,10 +518,12 @@ pub(super) fn route(
                                      "public_key": encode_b64u(&device.public_key)})
                 })
                 .collect();
-            ok(
-                json!({"account_id": other, "name": entry.name, "devices": devices, "device_list": list,
-                       "void": void_of(state, other)}),
-            )
+            let mut view = json!({"account_id": other, "name": entry.name, "devices": devices,
+                                  "device_list": list, "void": void_of(state, other, account)});
+            if let Some(reset) = reset_of(state, other) {
+                view["reset_list"] = json!(reset);
+            }
+            ok(view)
         }
         _ => return None,
     };
@@ -549,6 +574,18 @@ fn append(state: &mut State, body: &Value, account: &str, device: &str, origin: 
         || (matches!(op.as_str(), "peer" | "share" | "join" | "store") && version > 822)
     {
         return fail(403, "account_limit");
+    }
+    // A `store` names a store that this account made (connect-account-v1 section 16.3).
+    if op == "store" {
+        match state
+            .stores
+            .iter()
+            .find(|store| Some(&store.team_id) == team.as_ref())
+        {
+            None => return fail(404, "not_found"),
+            Some(store) if store.account != account => return fail(403, "forbidden"),
+            Some(_) => {}
+        }
     }
     let message = share_list_message(
         origin,

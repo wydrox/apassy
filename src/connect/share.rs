@@ -192,6 +192,10 @@ pub struct ListShares {
     /// Every store entry of the list, in its order: what ended, who signed it, and which
     /// share each one is about.
     pub ops: Vec<StoreOp>,
+    /// Every `peer` entry of the list, also one that an `unpeer` ended, in its order: the
+    /// account and the root that it pinned then. The list of an account before its reset
+    /// verifies from an earlier root of it ([`learn_lists_with`]).
+    pub peer_roots: Vec<(String, Vec<u8>)>,
 }
 
 impl ListShares {
@@ -295,6 +299,17 @@ impl ListShares {
         })
     }
 
+    /// Whether a `join` of this list (active or ended) answered the share `share` of `team`
+    /// from `owner`.
+    fn joined(&self, team: &str, owner: &str, share: &str) -> bool {
+        self.ops.iter().any(|held| {
+            held.op == JOIN
+                && held.team == team
+                && held.account == owner
+                && held.share.as_deref() == Some(share)
+        })
+    }
+
     /// Whether an active share or join names `account`.
     fn names(&self, account: &str) -> bool {
         self.shares
@@ -383,6 +398,10 @@ impl ListShares {
                         && !self.made(team)
                         && !self.shares.iter().any(|(store, _)| store == team),
                 )?;
+                // The same share is not joined twice, also after a `leave` of its join.
+                if share.is_some_and(|share| self.joined(team, peer, share)) {
+                    return Err(Refusal::Rule);
+                }
                 match self.owner_of(team) {
                     // A join of a newer share of the same owner replaces the one before.
                     Some(owner) => rule(
@@ -417,6 +436,7 @@ impl ListShares {
             (STORE, Some(team)) => self.stores.push(team),
             (PEER, None) => {
                 let root = entry.root.as_deref().and_then(point).ok_or(Refusal::Rule)?;
+                self.peer_roots.push((peer.clone(), root.clone()));
                 self.peers.push((peer, root));
             }
             (UNPEER, None) => self.peers.retain(|(held, _)| *held != peer),
@@ -568,6 +588,25 @@ impl PeerPin {
         self.list_head = list.head().to_owned();
         self.name.clone_from(&list.root_name);
         *self != before
+    }
+
+    /// Take `list`, the last list of this account before its reset, verified from an
+    /// earlier root that the naming list pinned for it: its devices and its keys that left
+    /// become keys that left here (never devices). Returns whether anything changed.
+    fn learn_reset(&mut self, list: &Verified) -> bool {
+        let before = self.left.len();
+        let keys = list
+            .live
+            .iter()
+            .chain(&list.removed)
+            .map(|key| encode_b64u(key));
+        for key in keys {
+            if !self.known.contains(&key) && !self.left.contains(&key) {
+                self.left.insert(0, key);
+            }
+        }
+        bound_oldest(&mut self.left, MAX_PEER_LEFT);
+        self.left.len() != before
     }
 
     /// The list that named this account names another root now (after a reset and new
@@ -926,6 +965,35 @@ fn ensure_via_pin(state: &mut AccountState, member: &str, owner: &str, root: &[u
     }
 }
 
+/// The accounts that the store `team` of `owner` names in the account file (its ended
+/// accounts, then its members), `me` left out, each without a root: a store whose share
+/// ended here keeps them as ended accounts with the pins that they have, and makes no pin
+/// anew.
+fn former_accounts(
+    state: &AccountState,
+    team: &str,
+    owner: &str,
+    me: &str,
+) -> Vec<(String, Option<Vec<u8>>)> {
+    let Some(store) = state
+        .stores
+        .iter()
+        .find(|store| store.team_id == team && store.owner == owner)
+    else {
+        return Vec::new();
+    };
+    let mut accounts: Vec<String> = Vec::new();
+    for account in store.ended.iter().chain(&store.members) {
+        if account != me && !accounts.contains(account) {
+            accounts.push(account.clone());
+        }
+    }
+    accounts
+        .into_iter()
+        .map(|account| (account, None))
+        .collect()
+}
+
 /// Whether the join of this account (`own`) of the store `team` of `owner` counts: it
 /// names the share of `team` with this account (`me`) that `owner`'s verified list
 /// (`list`) holds active now, `owner` made `team`, and Connect does not count that share
@@ -968,6 +1036,24 @@ pub(super) fn learn_lists(
     void: &VoidShares,
     cache: &ListCache,
 ) -> Learned {
+    learn_lists_with(state, own, origin, served, &BTreeMap::new(), void, cache)
+}
+
+/// [`learn_lists`] with `reset`: the last list of an account before its reset, as Connect
+/// served it (by account). A pin whose naming list (this account's own list for an own
+/// pin, the verified list of the owner of the store for a pin through it) pinned an earlier
+/// root of that account takes the list, when it verifies from that root, as keys that left
+/// ([`PeerPin::learn_reset`]): they sign only below a head of an accepted key and up to the
+/// anchor, never as devices.
+pub(super) fn learn_lists_with(
+    state: &mut AccountState,
+    own: &ListShares,
+    origin: &str,
+    served: &BTreeMap<String, Vec<ListEntry>>,
+    reset: &BTreeMap<String, Vec<ListEntry>>,
+    void: &VoidShares,
+    cache: &ListCache,
+) -> Learned {
     learn_own(state, own);
     let mut learned = Learned::default();
     for pin in state.peers.iter_mut().filter(|pin| pin.via.is_none()) {
@@ -989,7 +1075,16 @@ pub(super) fn learn_lists(
             continue;
         };
         if !join_counts(own, &list.shares, void, team, owner, &me) {
-            plans.push((team.clone(), owner.clone(), Vec::new(), Vec::new()));
+            // The share ended here (an `unshare`, a newer share that this account did not
+            // join yet, or a void mark): it only ends. The members of the store become
+            // ended accounts with the pins that they have, so their list pins stay, and a
+            // later share of the store goes on from them.
+            plans.push((
+                team.clone(),
+                owner.clone(),
+                Vec::new(),
+                former_accounts(state, team, owner, &me),
+            ));
             continue;
         }
         let named = |accounts: Vec<String>| -> Named {
@@ -1063,6 +1158,36 @@ pub(super) fn learn_lists(
     }
     for (account, list) in &learned.own {
         note_names(&mut learned.names, account, list);
+    }
+    // The lists before a reset: from an earlier root that the naming list pinned.
+    for pin in &mut state.peers {
+        let Some(entries) = reset.get(&pin.account_id) else {
+            continue;
+        };
+        let Some(earlier) = entries
+            .first()
+            .and_then(|entry| entry.key.as_deref())
+            .and_then(point)
+            .filter(|earlier| *earlier != pin.root_key())
+        else {
+            continue;
+        };
+        let naming = match pin.via.as_deref() {
+            None => Some(&own.peer_roots),
+            Some(owner) => learned.own.get(owner).map(|list| &list.shares.peer_roots),
+        };
+        let pinned = naming.is_some_and(|roots| {
+            roots
+                .iter()
+                .any(|(account, root)| *account == pin.account_id && *root == earlier)
+        });
+        if !pinned {
+            continue;
+        }
+        if let Some(list) = cache.verify(origin, &pin.account_id, &earlier, entries) {
+            pin.learn_reset(&list);
+            note_names(&mut learned.names, &pin.account_id, &list);
+        }
     }
     drop_unused_pins(state, own);
     learned
@@ -1288,6 +1413,9 @@ struct PeerView {
     device_list: Vec<ListEntry>,
     #[serde(default)]
     void: Vec<VoidMark>,
+    /// The last list of that account before its reset, while a store names the account.
+    #[serde(default)]
+    reset_list: Vec<ListEntry>,
 }
 
 /// One account of `POST /v1/account/peers/lists`, with the pin of its list that this
@@ -1316,6 +1444,10 @@ struct PeerListItem {
     device_list: Vec<ListEntry>,
     #[serde(default)]
     void: Vec<VoidMark>,
+    /// With `newer`: the last list of that account before its reset, while a store names
+    /// the account.
+    #[serde(default)]
+    reset_list: Vec<ListEntry>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1325,6 +1457,15 @@ struct PeerListsAnswer {
 
 /// The most accounts of one `POST /v1/account/peers/lists`.
 pub const LISTS_PER_READ: usize = 64;
+
+/// What the reads of a refresh gave ([`ConnectAccount::read_lists`]): the lists by account
+/// (the ones held in memory for an account that this refresh did not read anew), the lists
+/// of accounts before their reset, and the void marks.
+struct ReadLists {
+    served: BTreeMap<String, Vec<ListEntry>>,
+    reset: BTreeMap<String, Vec<ListEntry>>,
+    void: VoidShares,
+}
 /// The most entries of the lists that a device keeps in memory between two refreshes
 /// (to ask Connect only for lists that changed); over it, a list is asked again whole.
 const MAX_HELD_ENTRIES: usize = 100_000;
@@ -1345,6 +1486,10 @@ pub struct ShareMemory {
     wait_until: u64,
     /// The turn of the reads: each refresh starts its order at another account.
     turn: usize,
+    /// The stores whose `store` entry Connect refused in this session: not asked again.
+    refused_claims: BTreeSet<String>,
+    /// Account → the last list before its reset, as Connect served it last.
+    reset: HashMap<String, Vec<ListEntry>>,
 }
 
 impl ShareMemory {
@@ -1703,6 +1848,15 @@ pub struct StoreStatus {
     /// Every other account whose keys sign, or signed, in this store as the account file
     /// holds it: its owner, its members, and its ended accounts.
     pub accounts: Vec<String>,
+    /// The owner and the members (not this account) whose list this device cannot verify
+    /// now: the pin of that account here is suspended (it gave a list of another root), or
+    /// Connect refused the read in this refresh. Their devices sign nothing new here, and
+    /// the check of a head of this store does not wait for their lists.
+    pub unverified: Vec<String>,
+    /// The accounts whose lists the check of a head of this store waits for: its owner and
+    /// its members (not this account), less [`Self::unverified`]. An ended account does not
+    /// hold it back (its keys are not accepted, only kept as keys that left).
+    pub waits_for: Vec<String>,
     /// The share ended for this account (a store it joined): the owner's list ended it, or
     /// shares it anew and this account did not join that share yet.
     pub ended: bool,
@@ -1755,6 +1909,13 @@ pub struct ShareStatus {
     pub read: BTreeMap<String, Instant>,
     /// When this refresh asked for the own list (which verified).
     pub own_read: Option<Instant>,
+    /// Stores that the verified lists of two accounts claim (each holds a `store` entry of
+    /// it): neither offers it, and Shared Vaults says that two accounts claim this vault.
+    pub contested: Vec<String>,
+    /// Stores that this account syncs as its own, made before the `store` entry existed,
+    /// whose own list holds a `share` of them already: the `store` entry makes those shares
+    /// count again, so it waits for an owner check ([`ConnectAccount::claim_store_action`]).
+    pub claims: Vec<String>,
 }
 
 /// A store that this account's list left.
@@ -1769,16 +1930,35 @@ pub struct LeftStore {
 }
 
 impl ShareStatus {
-    /// When the lists of every account of the shared store `team` (its owner, members, and
-    /// ended accounts, and this account) were asked in this refresh, all of them verified:
-    /// the oldest of those times. `None` when one of them was not read or did not verify.
+    /// When the lists that a check of a head of the shared store `team` waits for (this
+    /// account's own list, and those of [`StoreStatus::waits_for`]) were asked in this
+    /// refresh, all of them verified: the oldest of those times. `None` when one of them was
+    /// not read or did not verify (Connect gave no answer for it). An account whose list
+    /// cannot be verified here ([`StoreStatus::unverified`]) or whose share ended does not
+    /// hold it back.
     pub fn asked_for(&self, team: &str) -> Option<Instant> {
         let store = self.stores.iter().find(|store| store.team_id == team)?;
         let mut oldest = self.own_read?;
-        for account in &store.accounts {
+        for account in &store.waits_for {
             oldest = oldest.min(*self.read.get(account)?);
         }
         Some(oldest)
+    }
+
+    /// The people of the shared store `team` whose devices this device could not verify
+    /// ([`StoreStatus::unverified`]), by the names that the rows show.
+    pub fn unverified_people(&self, team: &str) -> Vec<String> {
+        self.stores
+            .iter()
+            .find(|store| store.team_id == team)
+            .map(|store| {
+                store
+                    .unverified
+                    .iter()
+                    .map(|account| self.name_of(account))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// The name of `account` as a row shows it: the verified name with the name at Connect
@@ -2658,18 +2838,43 @@ impl ConnectAccount {
     /// not give, or that does not verify, changes nothing of it; a refusal, an error, or a
     /// `429` of a read ends nothing.
     pub fn refresh_shares(&mut self, local_teams: &[String]) -> Result<ShareStatus, ConnectError> {
+        self.refresh_shares_with(local_teams, local_teams)
+    }
+
+    /// [`Self::refresh_shares`], where `own_teams` are the stores of `local_teams` that
+    /// this computer syncs with this account's key at the account's origin: only those
+    /// may get a `store` entry by themselves ([`Self::claim_own_stores`]).
+    pub fn refresh_shares_with(
+        &mut self,
+        local_teams: &[String],
+        own_teams: &[String],
+    ) -> Result<ShareStatus, ConnectError> {
+        let mut status = ShareStatus::default();
         let mut own_read = Instant::now();
         let mut own = self.own_shares()?;
-        if self.claim_own_stores(&own, local_teams)? {
+        status.vault_stores = self.vault_stores().ok();
+        let stores = status.vault_stores.clone();
+        if self.claim_own_stores(&own, own_teams, stores.as_deref(), &mut status)? {
             own_read = Instant::now();
             own = self.own_shares()?;
         }
         let origin = self.client().origin().to_owned();
-        let mut status = ShareStatus::default();
         let cache = ListCache::default();
-        let (served, void) = self.read_lists(&own, &cache, &mut status)?;
+        let ReadLists {
+            served,
+            reset,
+            void,
+        } = self.read_lists(&own, &cache, &mut status)?;
         let before = self.state().clone();
-        let learned = learn_lists(self.state_mut(), &own, &origin, &served, &void, &cache);
+        let learned = learn_lists_with(
+            self.state_mut(),
+            &own,
+            &origin,
+            &served,
+            &reset,
+            &void,
+            &cache,
+        );
         if *self.state() != before {
             self.save_state()?;
         }
@@ -2687,47 +2892,158 @@ impl ConnectAccount {
                 .map(|g| g.members.clone())
                 .unwrap_or_default()
         });
-        status.vault_stores = self.vault_stores().ok();
         let own = self.end_by_itself(&own, &learned, &group, &mut status)?;
         self.add_member_devices(&own, &learned, &void, &mut status);
         self.fill_status(&own, &learned, &void, local_teams, &mut status);
         Ok(status)
     }
 
-    /// Append `store` for each store of `local_teams` that this computer syncs as its own
-    /// and whose `store` the own list `own` does not hold (stores made before the entry
-    /// existed): not a store that the list joins or ever joined, and not one that the
-    /// account file holds as another's. Connect checks that this account made it; a store
-    /// it refuses gets nothing. Returns whether one was appended.
+    /// The stores of `own_teams` (stores that this computer syncs with this account's key
+    /// at the account's origin) that may get a `store` entry: the own list `own` does not
+    /// hold it (a store made before the entry existed), the list never joined it, the
+    /// account file does not hold it as another account's, Connect lists it (`stores`, the
+    /// store view of this account) as made by this account, and Connect did not refuse its
+    /// entry before in this session. Each with whether the own list holds a `share` of it
+    /// already (the entry makes those shares count again).
+    fn claimable_stores(
+        &self,
+        own: &ListShares,
+        own_teams: &[String],
+        stores: &[super::VaultStoreView],
+        refused: &BTreeSet<String>,
+    ) -> Vec<(String, bool)> {
+        let me = &self.state().account_id;
+        own_teams
+            .iter()
+            .filter(|team| {
+                valid_team_id(team)
+                    && !own.made(team)
+                    && !own
+                        .ops
+                        .iter()
+                        .any(|op| op.team == **team && (op.op == JOIN || op.op == LEAVE))
+                    && !self.is_own_store_of_other(team)
+                    && !refused.contains(*team)
+                    && stores
+                        .iter()
+                        .any(|store| store.team_id == **team && store.account_id == *me)
+            })
+            .map(|team| {
+                let shared = own.ops.iter().any(|op| op.team == *team && op.op == SHARE);
+                (team.clone(), shared)
+            })
+            .collect()
+    }
+
+    /// Append `store` for each store that may get one ([`Self::claimable_stores`]) and
+    /// whose own list holds no `share` of it, without an owner check: it adds no signer.
+    /// A store with a `share` already waits for an owner check instead (the entry makes its
+    /// shares count again: `status.claims`, [`Self::claim_store`]). A store whose entry
+    /// Connect refuses is not asked again in this session. Without the store view of
+    /// Connect (`stores` `None`) nothing is appended. Returns whether one was appended.
     fn claim_own_stores(
         &mut self,
         own: &ListShares,
-        local_teams: &[String],
+        own_teams: &[String],
+        stores: Option<&[super::VaultStoreView]>,
+        status: &mut ShareStatus,
     ) -> Result<bool, ConnectError> {
+        let Some(stores) = stores else {
+            return Ok(false);
+        };
+        let refused = self.share_memory().refused_claims.clone();
         let mut claimed = false;
-        for team in local_teams {
-            let joined_ever = own
-                .ops
-                .iter()
-                .any(|op| op.team == *team && (op.op == JOIN || op.op == LEAVE));
-            if !valid_team_id(team)
-                || own.made(team)
-                || joined_ever
-                || self.is_own_store_of_other(team)
-            {
+        for (team, shared) in self.claimable_stores(own, own_teams, stores, &refused) {
+            if shared {
+                status.claims.push(team);
                 continue;
             }
-            match self.share_entry(STORE, None, None, Some(team)) {
+            match self.share_entry(STORE, None, None, Some(&team)) {
                 Ok(()) => claimed = true,
                 Err(error @ (ConnectError::Revoked | ConnectError::SignedOut)) => {
                     return Err(error);
                 }
-                // Not a store of this account, no such store, or the list moved: nothing
-                // is claimed now.
-                Err(_) => {}
+                // Connect cannot be reached now: the next refresh asks again.
+                Err(
+                    ConnectError::Offline
+                    | ConnectError::Broken
+                    | ConnectError::RateLimited(_)
+                    | ConnectError::Unauthenticated,
+                ) => {}
+                // A refusal (not a store of this account, no such store, the list does not
+                // allow it): not asked again in this session.
+                Err(_) => {
+                    self.share_memory().refused_claims.insert(team);
+                }
             }
         }
         Ok(claimed)
+    }
+
+    /// The owner check of the `store` entry of `team_id`, a store of this account made
+    /// before the entry existed whose own list holds shares of it already
+    /// ([`ShareStatus::claims`]): it names the vault and the people whose shares of it
+    /// count again.
+    pub fn claim_store_action(&self, team_id: &str, names: &ShareNames) -> OwnerAction {
+        let members: Vec<String> = self
+            .verified_list()
+            .map(|list| {
+                list.shares
+                    .shares
+                    .iter()
+                    .filter(|(store, _)| store == team_id)
+                    .map(|(_, account)| account.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let people = members
+            .iter()
+            .map(|account| {
+                let (name, _) = self.person(account, None);
+                label(&name, &names.hint(account))
+            })
+            .collect();
+        OwnerAction::ClaimConnectStore {
+            account_id: self.state().account_id.clone(),
+            team_id: team_id.to_owned(),
+            vault_name: names.vault(team_id),
+            people,
+            entries: vec![ShareEntry::new(STORE, None, Some(team_id))],
+        }
+    }
+
+    /// "Count Its Shares Again…" of a store of [`ShareStatus::claims`], after a fresh owner
+    /// check for [`Self::claim_store_action`]: this device reads Connect's store view and
+    /// its own list again, and signs the `store` entry of `team_id` only while the store
+    /// still may get one ([`Self::claimable_stores`]; `local_teams` the stores that this
+    /// computer syncs with this account's key at its origin). Else [`ConnectError::Invalid`]
+    /// and nothing is signed.
+    pub fn claim_store(
+        &mut self,
+        team_id: &str,
+        local_teams: &[String],
+        names: &ShareNames,
+        proof: OwnerProof,
+        epoch: &[u8; 32],
+    ) -> Result<(), ConnectError> {
+        proof
+            .check(&self.claim_store_action(team_id, names), epoch)
+            .map_err(ConnectError::OwnerCheck)?;
+        drop(proof);
+        let stores = self.vault_stores()?;
+        let own = self.own_shares()?;
+        let own_teams: Vec<String> = local_teams
+            .iter()
+            .filter(|team| *team == team_id)
+            .cloned()
+            .collect();
+        if self
+            .claimable_stores(&own, &own_teams, &stores, &BTreeSet::new())
+            .is_empty()
+        {
+            return Err(ConnectError::Invalid);
+        }
+        self.share_entry(STORE, None, None, Some(team_id))
     }
 
     /// Read the lists that a refresh needs ([`accounts_to_read`]): the own peers and the
@@ -2743,7 +3059,7 @@ impl ConnectAccount {
         own: &ListShares,
         cache: &ListCache,
         status: &mut ShareStatus,
-    ) -> Result<(BTreeMap<String, Vec<ListEntry>>, VoidShares), ConnectError> {
+    ) -> Result<ReadLists, ConnectError> {
         let origin = self.client().origin().to_owned();
         let now = self.now();
         status.read.clear();
@@ -2831,6 +3147,11 @@ impl ConnectAccount {
                                 item.device_list.clone(),
                                 head,
                             );
+                            if !item.reset_list.is_empty() {
+                                self.share_memory()
+                                    .reset
+                                    .insert(item.account_id.clone(), item.reset_list.clone());
+                            }
                             self.note_void(&item.account_id, &item.void);
                             status.read.insert(item.account_id.clone(), asked);
                             served.insert(item.account_id.clone(), item.device_list);
@@ -2868,7 +3189,16 @@ impl ConnectAccount {
                 .or_insert_with(|| entries.clone());
         }
         status.names.clone_from(&memory.names);
-        Ok((served, memory.void.clone()))
+        let reset = memory
+            .reset
+            .iter()
+            .map(|(account, entries)| (account.clone(), entries.clone()))
+            .collect();
+        Ok(ReadLists {
+            served,
+            reset,
+            void: memory.void.clone(),
+        })
     }
 
     /// The void marks that Connect gave with the list of `owner` (only ends are taken from
@@ -3069,6 +3399,16 @@ impl ConnectAccount {
                 here: op.by == my_key,
             });
         }
+        // A store that the verified lists of two accounts claim (each holds `store S`): no
+        // signed data says which made it, so neither offers it.
+        let claims = |team: &str| {
+            learned
+                .own
+                .values()
+                .filter(|list| list.shares.made(team))
+                .count()
+                + usize::from(own.made(team))
+        };
         for (account, list) in &learned.own {
             for (team, member) in &list.shares.shares {
                 if *member != me {
@@ -3077,6 +3417,12 @@ impl ConnectAccount {
                 let Some(share) = list.shares.share_hash(team, &me) else {
                     continue;
                 };
+                if claims(team) > 1 {
+                    if !status.contested.contains(team) {
+                        status.contested.push(team.clone());
+                    }
+                    continue;
+                }
                 let void_here = void.get(account).is_some_and(|marks| {
                     marks
                         .iter()
@@ -3158,7 +3504,31 @@ impl ConnectAccount {
                         .any(|(team, held)| *team == store.team_id && *held == me)
                 })
             });
+            // The owner and the members whose list cannot be verified here now: a suspended
+            // pin (the owner's own pin; a member's pin through the owner of the store), or
+            // a read that Connect refused in this refresh.
+            let mut unverified: Vec<String> = Vec::new();
+            let mut waits_for: Vec<String> = Vec::new();
+            for account in owner.iter().chain(&store.members) {
+                if *account == me || waits_for.contains(account) || unverified.contains(account) {
+                    continue;
+                }
+                let pin_via = if owner.as_ref() == Some(account) {
+                    None
+                } else {
+                    via
+                };
+                let suspended =
+                    pin_of(self.state(), account, pin_via).is_some_and(|pin| pin.suspended);
+                if suspended || status.outside_group.contains(account) {
+                    unverified.push(account.clone());
+                } else {
+                    waits_for.push(account.clone());
+                }
+            }
             status.stores.push(StoreStatus {
+                unverified,
+                waits_for,
                 team_id: store.team_id.clone(),
                 owner_name: owner.as_deref().map(|owner| status.name_of(owner)),
                 owner_suspended: owner
@@ -3282,10 +3652,25 @@ impl ConnectAccount {
         let own = self.own_shares()?;
         let cache = ListCache::default();
         let mut status = ShareStatus::default();
-        let (mut served, void) = self.read_lists(&own, &cache, &mut status)?;
+        let ReadLists {
+            mut served,
+            mut reset,
+            void,
+        } = self.read_lists(&own, &cache, &mut status)?;
         served.insert(owner.to_owned(), view.device_list);
+        if !view.reset_list.is_empty() {
+            reset.insert(owner.to_owned(), view.reset_list);
+        }
         let before = self.state().clone();
-        learn_lists(self.state_mut(), &own, &origin, &served, &void, &cache);
+        learn_lists_with(
+            self.state_mut(),
+            &own,
+            &origin,
+            &served,
+            &reset,
+            &void,
+            &cache,
+        );
         if *self.state() != before {
             self.save_state()?;
         }

@@ -999,6 +999,18 @@ fn a_member_that_left_signs_in_again_only_after_its_own_join() {
         200
     );
     assert_eq!(store_challenge(c, &f.team, member), 401);
+    // The same share is not joined again after its leave: the owner shares anew.
+    let left = c.share_hash(owner, member, &f.team);
+    assert_eq!(
+        code(&c.list_entry(member, "join", &owner.account, Some(&left), Some(&f.team))),
+        (409, Some("conflict"))
+    );
+    assert_eq!(
+        c.list_entry(owner, "unshare", &member.account, None, Some(&f.team))
+            .0,
+        200
+    );
+    c.share_store(owner, member, &f.team);
     assert_eq!(add_to_store(c, &anna, &f.team, member).0, 200);
     assert_eq!(store_challenge(c, &f.team, member), 401);
     c.join_store(member, owner, &f.team);
@@ -1892,6 +1904,8 @@ fn a_list_is_served_to_the_participants_of_a_store_that_exists() {
     c.add_member(owner, &bob);
     c.share_store(owner, member, &f.team);
     c.share_store(owner, &anna, &f.team);
+    c.join_store(member, owner, &f.team);
+    c.join_store(&anna, owner, &f.team);
     remove_member(c, owner, &anna);
     let stranger = c.account("Stranger");
     let view = |by: &Dev, of: &Dev| {
@@ -2196,6 +2210,18 @@ fn void_marks_show_in_the_store_view_and_the_list_reads() {
             answer.1
         );
     }
+    // Another member reads the owner's list: only the marks between the two show.
+    let anna = c.account("Anna");
+    c.add_member(owner, &anna);
+    let view = c.ok(
+        "GET",
+        &format!("/v1/account/peers/{}", owner.account),
+        Some(&anna.token),
+        None,
+    );
+    assert_eq!(view["void"], json!([]));
+    let answer = lists(c, &anna, json!([no_pin(&owner.account)]));
+    assert_eq!(answer.1["result"]["accounts"][0]["void"], json!([]));
     // A newer share has no mark.
     for op in ["unshare", "share"] {
         assert_eq!(
@@ -2415,4 +2441,267 @@ fn an_earlier_1006_file_gets_the_store_op_and_every_share_mark_at_open() {
     assert_eq!(rows, 1);
     drop(conn);
     drop(dir);
+}
+
+/// L1: outside one group a list is read only between the owner of a store and the accounts
+/// that joined it, and between those accounts: a share that was never joined gives no
+/// read, also after the owner left the group; two members shared at different times read
+/// each other once both joined.
+#[test]
+fn a_share_that_was_never_joined_gives_no_read() {
+    let f = family();
+    let (c, rafal, ola) = (&f.c, &f.owner, &f.member);
+    let (anna, bob, eve) = (c.account("Anna"), c.account("Bob"), c.account("Eve"));
+    for dev in [&anna, &bob, &eve] {
+        c.add_member(rafal, dev);
+    }
+    // Anna's store: Ola joins it, Bob never answers, Eve is shared later and joins.
+    let team = store(c, &anna, OTHER_VAULT);
+    c.share_store(&anna, ola, &team);
+    c.join_store(ola, &anna, &team);
+    c.share_store(&anna, &bob, &team);
+    c.share_store(&anna, &eve, &team);
+    c.join_store(&eve, &anna, &team);
+    for dev in [&anna, &bob, &eve] {
+        remove_member(c, rafal, dev);
+    }
+    let state = |by: &Dev, of: &Dev| {
+        let (status, answer) = lists(c, by, json!([no_pin(&of.account)]));
+        assert_eq!(status, 200, "{answer}");
+        answer["result"]["accounts"][0]["state"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let view = |by: &Dev, of: &Dev| {
+        c.call(
+            "GET",
+            &format!("/v1/account/peers/{}", of.account),
+            Some(&by.token),
+            None,
+        )
+    };
+    for (by, of) in [
+        (&anna, ola),
+        (ola, &anna),
+        (ola, &eve),
+        (&eve, ola),
+        (&anna, &eve),
+    ] {
+        assert_eq!(
+            state(by, of),
+            "newer",
+            "{} reads {}",
+            by.account,
+            of.account
+        );
+        assert_eq!(view(by, of).0, 200);
+    }
+    for (by, of) in [
+        (&anna, &bob),
+        (&bob, &anna),
+        (ola, &bob),
+        (&bob, &eve),
+        (rafal, &bob),
+    ] {
+        assert_eq!(
+            state(by, of),
+            "refused",
+            "{} reads {}",
+            by.account,
+            of.account
+        );
+        assert_eq!(code(&view(by, of)), (403, Some("not_in_group")));
+    }
+}
+
+/// L2: once the lists of an answer reach 1 MiB, every later account whose head differs
+/// from its pin is `later` from its head row alone: 61 accounts whose list rows cannot
+/// be read at all (a row that no list read takes) answer `later` after three large lists,
+/// and the read does not fail.
+#[test]
+fn a_full_list_read_reads_no_further_list() {
+    let f = family();
+    let (c, owner, member) = (&f.c, &f.owner, &f.member);
+    let anna = c.account("Anna");
+    c.add_member(owner, &anna);
+    let bob = c.account("Bob");
+    c.add_member(owner, &bob);
+    let hex = |byte: u8, count: usize| format!("{byte:02x}").repeat(count);
+    for dev in [member, &anna, &bob] {
+        let (head, hash) = c.list_head(&dev.account);
+        let mut sql = String::new();
+        for index in 0..1000u64 {
+            sql.push_str(&format!(
+                "INSERT INTO account_list (account_id, version, op, key, link_hash, name, by_key, signature, hash, created_at, peer_account, peer_root, team_id) \
+                 VALUES ('{}', {}, 'peer', NULL, NULL, NULL, x'{}', x'{}', '{hash}', 1, 'acc_aaaaaaaaaa', x'{}', NULL);",
+                dev.account,
+                head + 1 + index,
+                hex(4, 65),
+                hex(48, 72),
+                hex(4, 65)
+            ));
+        }
+        c.edit_directory(&sql);
+    }
+    // 61 accounts that joined the owner's store, each with a row that no read of a list
+    // takes (a device key of the wrong type).
+    let mut pins = vec![
+        no_pin(&member.account),
+        no_pin(&anna.account),
+        no_pin(&bob.account),
+    ];
+    let mut sql = String::new();
+    for index in 0..61 {
+        let dev = c.account(&format!("Synthetic {index}"));
+        let (head, hash) = c.list_head(&dev.account);
+        sql.push_str(&format!(
+            "INSERT INTO account_list (account_id, version, op, key, link_hash, name, by_key, signature, hash, created_at, peer_account, peer_root, team_id) \
+             VALUES ('{a}', {}, 'join', NULL, NULL, NULL, x'00', x'00', '{hash}', 1, '{o}', x'{}', '{t}'); \
+             INSERT INTO account_list (account_id, version, op, key, link_hash, name, by_key, signature, hash, created_at, peer_account, peer_root, team_id) \
+             VALUES ('{a}', {}, 'unpeer', NULL, NULL, NULL, 'not a key', x'00', '{hash}', 1, '{o}', NULL, NULL);",
+            head + 1,
+            hex(1, 32),
+            head + 2,
+            a = dev.account,
+            o = owner.account,
+            t = f.team,
+        ));
+        pins.push(no_pin(&dev.account));
+    }
+    c.edit_directory(&sql);
+    let answer = c.ok(
+        "POST",
+        "/v1/account/peers/lists",
+        Some(&owner.token),
+        Some(&json!({ "accounts": pins })),
+    );
+    let items = answer["accounts"].as_array().unwrap();
+    assert_eq!(items.len(), 64);
+    assert_eq!(items[0]["state"], "newer");
+    assert_eq!(items[2]["state"], "later", "three lists of about 400 KiB");
+    for item in &items[3..] {
+        assert_eq!(item["state"], "later", "{item}");
+        assert_eq!(item.as_object().unwrap().len(), 2, "{item}");
+    }
+}
+
+/// A `join` of an earlier build that names no share signs in nothing: after the member's
+/// joins, a `join` without the share hash (as an existing directory may hold one) ends the
+/// sign-in of its devices to the store.
+#[test]
+fn a_join_without_its_share_is_refused_at_sign_in() {
+    let f = shared_and_joined();
+    let (c, owner, member) = (&f.c, &f.owner, &f.member);
+    let store_device: i64 = c.rows(&format!(
+        "SELECT CAST(store_device AS TEXT) FROM account_store_device WHERE team_id = '{}' AND account_id = '{}'",
+        f.team, member.account
+    ))[0]
+        .parse()
+        .unwrap();
+    assert!(live(c, &f.team, store_device as u64));
+    let (head, hash) = c.list_head(&member.account);
+    c.edit_directory(&format!(
+        "INSERT INTO account_list (account_id, version, op, key, link_hash, name, by_key, signature, hash, created_at, peer_account, peer_root, team_id) \
+         VALUES ('{}', {}, 'join', NULL, NULL, NULL, x'00', x'00', '{hash}', 1, '{}', NULL, '{}');",
+        member.account,
+        head + 1,
+        owner.account,
+        f.team
+    ));
+    assert!(!live(c, &f.team, store_device as u64));
+    assert_eq!(store_challenge(c, &f.team, member), 401);
+}
+
+/// The `store` entries of a list are bounded over its life, also of stores deleted since:
+/// a store past the bound is 403 `account_limit`, and nothing is written.
+#[test]
+fn the_store_entries_of_a_list_are_bounded_over_its_life() {
+    use apassy_relay::server::account::MAX_STORE_ENTRIES;
+    let f = family();
+    let (c, owner) = (&f.c, &f.owner);
+    let (head, hash) = c.list_head(&owner.account);
+    let mut sql = String::new();
+    for index in 0..MAX_STORE_ENTRIES - 1 {
+        sql.push_str(&format!(
+            "INSERT INTO account_list (account_id, version, op, key, link_hash, name, by_key, signature, hash, created_at, peer_account, peer_root, team_id) \
+             VALUES ('{}', {}, 'store', NULL, NULL, NULL, x'00', x'00', '{hash}', 1, NULL, NULL, 't_deleted{:03}');",
+            owner.account,
+            head + 1 + index,
+            index
+        ));
+    }
+    c.edit_directory(&sql);
+    let entries = store_entries(c, &owner.account).len();
+    let (status, answer) = c.call(
+        "POST",
+        "/v1/account/vaults",
+        Some(&owner.token),
+        Some(&c.vault_body(owner, OTHER_VAULT, "Second", &connect::new_team_id())),
+    );
+    assert_eq!(
+        code(&(status, answer.clone())),
+        (403, Some("account_limit")),
+        "{answer}"
+    );
+    assert_eq!(store_entries(c, &owner.account).len(), entries);
+}
+
+/// K2: a recovery keeps the last list before it: a read of the account by another account
+/// of its stores carries it (`reset_list`), while a store names the account; the deletion
+/// of the last such store lets the maintenance pass drop it.
+#[test]
+fn the_list_before_a_recovery_is_served_while_a_store_names_the_account() {
+    let f = shared_and_joined();
+    let (c, owner, member) = (&f.c, &f.owner, &f.member);
+    let before: Vec<String> = c.rows(&format!(
+        "SELECT hash FROM account_list WHERE account_id = '{}' ORDER BY version",
+        member.account
+    ));
+    let renewed = c.recover(member);
+    let (status, view) = c.call(
+        "GET",
+        &format!("/v1/account/peers/{}", member.account),
+        Some(&owner.token),
+        None,
+    );
+    assert_eq!(status, 200, "{view}");
+    let reset = view["result"]["reset_list"]
+        .as_array()
+        .expect("the list before");
+    // The recovery revoked the last device first: its `remove` ends the list before.
+    assert_eq!(reset.len(), before.len() + 1);
+    assert_eq!(reset[0]["op"], "root");
+    assert_eq!(reset[before.len()]["op"], "remove");
+    assert_ne!(
+        reset[0]["key"], view["result"]["device_list"][0]["key"],
+        "another root"
+    );
+    let (_, answer) = lists(c, owner, json!([no_pin(&member.account)]));
+    assert_eq!(
+        answer["result"]["accounts"][0]["reset_list"]
+            .as_array()
+            .map(Vec::len),
+        Some(reset.len())
+    );
+    drop(renewed);
+    // The store goes: no store names the account any more.
+    assert_eq!(
+        c.call(
+            "DELETE",
+            &format!("/v1/account/vaults/{}", f.team),
+            Some(&owner.token),
+            None
+        )
+        .0,
+        200
+    );
+    apassy_relay::server::account::prune(&c.relay.hub(), apassy_relay::now_unix()).unwrap();
+    assert!(
+        c.rows(&format!(
+            "SELECT CAST(version AS TEXT) FROM account_list_reset WHERE account_id = '{}'",
+            member.account
+        ))
+        .is_empty()
+    );
 }
