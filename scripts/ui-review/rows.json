@@ -595,7 +595,7 @@
    "title": "2. Settings › Connect › Shared Vaults (frame 12; screens under rework in fix/connect-vault-sharing-3)",
    "rows": [
     {
-     "title": "The section: own vault, Share with…, Accept a Shared Vault…",
+     "title": "The section: own vault, Share with…, Accept Shared Vault…",
      "mockups": [
       "connect-12a.png"
      ],
@@ -645,7 +645,7 @@
      "note": ""
     },
     {
-     "title": "Joined: Leave This Shared Vault… (the member)",
+     "title": "Joined: Leave Vault… (the member)",
      "mockups": [
       "connect-12a.png"
      ],
@@ -693,7 +693,7 @@
      "note": ""
     },
     {
-     "title": "Accept a Shared Vault…",
+     "title": "Accept Shared Vault…",
      "mockups": [
       "connect-12e.png"
      ],
@@ -732,7 +732,7 @@
      "note": ""
     },
     {
-     "title": "Leave This Shared Vault…",
+     "title": "Leave Vault…",
      "mockups": [
       "connect-12g.png"
      ],
@@ -899,7 +899,7 @@
    "title": "5. Settings › Devices (demo frames)",
    "rows": [
     {
-     "title": "Both moves: Move Approvals to This Mac / to Connect",
+     "title": "Both moves: Move Here… / Move to Connect…",
      "mockups": [
       "devices-settings-9a.png"
      ],

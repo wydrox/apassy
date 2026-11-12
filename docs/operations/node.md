@@ -8,7 +8,7 @@ The Mac app has its own **node**: the relay of the questions, the feed, and the 
 
 | Group | What it shows |
 | --- | --- |
-| This Mac | "Reachable on Your Tailnet" (the route switch), Address (the Tailscale IPv4, with Copy for the whole origin), Port, Node Words, one line for each problem, "Move Approvals to This Mac…" when it applies, and Notifications |
+| This Mac | "Reachable on Your Tailnet" (the route switch), Address (the Tailscale IPv4, with Copy for the whole origin), Port, Node Words, one line for each problem, "Move Here…" when it applies, and Notifications |
 | Devices | One row for each device of each team: name, `<Kind> · <Role>`, the route word, the last contact, and Revoke… (Details… for a Linux node). The count and the ⓘ are by the title |
 | (button) | **Add an iPhone or a Mac…**: through the node when the route is on, else through Apassy relay (hosted Connect, ADR 0032) |
 | Wi-Fi Pairing | Only while a Wi-Fi iPhone is paired ([companion](companion.md)) |
@@ -17,7 +17,7 @@ The route words: **via your Mac** (straight to this Mac over your tailnet, green
 
 The last contact reads "Now" under a minute, then "4 min ago", "3 h ago", "Yesterday", "12 Sep".
 
-Only one button is blue at a time: "Add an iPhone or a Mac…", or "Move Approvals to This Mac…" while that row shows.
+Only one button is blue at a time: "Add an iPhone or a Mac…", or "Move Here…" while that row shows.
 
 ## Turn the route on
 
@@ -42,7 +42,7 @@ Select **Add an iPhone or a Mac…**.
 
 ## Move the approvals to this Mac
 
-A vault whose approvals still go through Apassy relay shows the row "Approvals go through Apassy relay" with **Move Approvals to This Mac…** while the route is on. The move makes an approvals team on this Mac (the owner check first), shows the pairing code for the iPhone (a new key and a new confirmation: identity is per team), and after the confirmed join takes the old devices off Apassy relay. The Apple Watch has its own key: pair it again from the iPhone. The move takes the iPhone and the watch; other Macs that read this Mac's feed stay where they are.
+A vault whose approvals still go through Apassy relay shows the row "Approvals go through Apassy relay" with **Move Here…** while the route is on. The move makes an approvals team on this Mac (the owner check first), shows the pairing code for the iPhone (a new key and a new confirmation: identity is per team), and after the confirmed join takes the old devices off Apassy relay. The Apple Watch has its own key: pair it again from the iPhone. The move takes the iPhone and the watch; other Macs that read this Mac's feed stay where they are.
 
 ## Revoke a device
 

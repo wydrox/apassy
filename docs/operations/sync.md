@@ -436,7 +436,7 @@ Apassy Connect (ADR 0037 stage 7; plan s7 unit M3) keeps the encrypted copy of a
 ### 18.1 Turn it on
 
 1. Settings › Connect: an account on this Mac with a plan that pushes (active, trialing, or past due in its grace). The account session opens with the unlock of the vault (one read of the key; with a Touch ID unlock, the key that it offered), and closes at the lock; "Sign In…" shows only when that read failed.
-2. Settings › Vault › Sync, the vault's row: the picker offers **Apassy Connect** after "Apassy relay" while the account can sync; it opens the sheet on its "Apassy Connect" choice (the sheet of "Apassy relay" offers the same choice first). Select "Turn on". The row, the Vault row of Settings, the sidebar, and the vault list then name the sync "Apassy Connect", and the row offers "Devices of the Account…" (Settings › Connect) instead of the device links of the relay.
+2. Settings › Vault › Sync, the vault's row: the picker offers **Apassy Connect** after "Apassy relay" while the account can sync; it opens the sheet on its "Apassy Connect" choice (the sheet of "Apassy relay" offers the same choice first). Select "Turn on". The row, the Vault row of Settings, the sidebar, and the vault list then name the sync "Apassy Connect", and the row offers "Account Devices…" (Settings › Connect) instead of the device links of the relay.
 3. Apassy makes the store (`POST /v1/account/vaults`; the same vault again answers the existing store), signs in to it with the account key, and pushes version 1. Then it adds the other live devices of the account to the store (`POST /v1/account/vaults/{team}/devices`). Those devices joined the account with the safety words and Touch ID on a live device; each still needs the vault passphrase.
 
 The account row, the sync state, and the link of the vault list are stored only after the first push worked. "This account is not on Apassy Connect, or its plan is read-only." means no plan that pushes: nothing turned on.
@@ -460,7 +460,7 @@ A person with whom you shared a vault before needs no code: "Share with…" and 
 
 **Accept and join (the other person):**
 
-1. Settings › Connect › Shared Vaults › "Accept a Shared Vault…": paste the code. "The code does not match the account that answered." means that Apassy Connect named another account than the code: nothing was signed; ask for a new code.
+1. Settings › Connect › Shared Vaults › "Accept Shared Vault…": paste the code. "The code does not match the account that answered." means that Apassy Connect named another account than the code: nothing was signed; ask for a new code.
 2. Compare the six words with the other screen. "The Words Match" runs the owner check. "The Words Differ" signs nothing.
 3. The vault then shows as "<vault>, shared by <name>". "Join" runs an owner check that names the vault and the person, signs the join, and opens the copy: type the passphrase of the vault. A wrong passphrase makes no vault. A vault that this Mac syncs as its own, or that your account shares, is never offered.
 
@@ -468,8 +468,8 @@ Your other Macs (and the other person's) take the share from the signed lists at
 
 **Stop sharing, or leave:**
 
-- The owner: "Stop Sharing with <name>…" (owner check). Connect removes their devices from the copy at once; their later changes are not merged. The vault stays on every device that has it.
-- The other person: "Leave This Shared Vault…" (owner check). This Mac turns off the sync of that vault; the vault stays on it. Their other Macs do the same when they read the leave: "You left this shared vault on <device>."
+- The owner: "Stop Sharing with <name>…" (owner check). Connect removes their devices from the copy at once; their later changes are not merged. Every device keeps the vault.
+- The other person: "Leave Vault…" (owner check). This Mac turns off the sync of that vault; the vault stays on it. Their other Macs do the same when they read the leave: "You left this shared vault on <device>."
 - Apassy ends a share by itself, without an owner check, in two cases: the person left the vault ("<name> left this vault."), or Apassy Connect shows the person outside your family or team ("Sharing with <name> ended: no longer in your family or team."). An end gives no one access. To share again with a person who left, "Share with…" again; they join again.
 - A person who recovered their account needs new words: the owner check of the new code says which shares with the old account end first.
 
@@ -481,7 +481,7 @@ Your other Macs (and the other person's) take the share from the signed lists at
 | "Waiting for a device that shares this vault" | The newest copy was signed by a device that left (or a person whose share ended) after this Mac's last sync. A device that shares the vault signs a copy of its own over it at its next sync. |
 | "<name> reset the account. Share again." | The other person recovered their account (a new account key). Their devices sign nothing new until you compare new words: stop sharing, then share again with a new code. |
 | "<name> must verify this account again." | The owner recovered their account; ask them to share again with a new code. |
-| "The share ended. The vault stays on this device." | The owner stopped sharing with you. |
+| "The share ended. The vault stays here." | The owner stopped sharing with you. |
 
 ### 18.4 Move the relay copy to Connect
 
@@ -496,8 +496,8 @@ Connect gets the copy **first**; the old copy goes **second**. A move record `<d
 
 | The row says | Both copies | The vault syncs with | What to do |
 | --- | --- | --- | --- |
-| "The copy is on Apassy Connect, and the old copy is still on apassy-relay.wyderka.cc. Both copies are kept, …" | yes | the hosted relay, as before | "Try Again" goes on from step 1 (Connect gets the changes made since), or "Undo the Move…" deletes the Connect copy after an owner check |
-| "The copy is on Apassy Connect, and the old copy is deleted, but the sync with Apassy Connect did not turn on yet. …" | Connect only | nothing yet; the vault is safe on this Mac | "Try Again" runs step 4 |
+| "Both copies are kept, and the vault still syncs with the relay. Try again, or undo the move." | yes | the hosted relay, as before | "Try Again" goes on from step 1 (Connect gets the changes made since), or "Undo the Move…" deletes the Connect copy after an owner check |
+| "The old copy is deleted, but sync with Apassy Connect is not on yet. Try again." | Connect only | nothing yet; the vault is safe on this Mac | "Try Again" runs step 4 |
 
 The other Macs of the old team: their next sync finds the hosted copy gone. Each turns on 18.2 (same account), or the owner shares the vault with that person (18.3).
 
@@ -516,12 +516,12 @@ The account key leaves the memory of the sync with the vault key at a lock.
 
 ### 18.6 Lost every device of the account
 
-When no device of the account is left (every Mac, Linux computer, and iPhone of it is lost, or each was removed), the account and its plan come back with its **account ID** and its **recovery code** (the sheet of the code showed both: "Save both."). Use this only then: while one device still works, add the new computer from it instead (Settings › Connect › Add a Device… there, "Add This Mac to an Account…" here).
+When no device of the account is left (every Mac, Linux computer, and iPhone of it is lost, or each was removed), the account and its plan come back with its **account ID** and its **recovery code** (the sheet of the code showed both: "Save it and the account ID in another password manager."). Use this only then: while one device still works, add the new computer from it instead (Settings › Connect › Add a Device… there, "Add This Mac…" here).
 
 1. Make or open a vault on the new computer (the start screen's Apassy Connect path needs another device of the account; it says so).
 2. Settings › Connect › "Recover an Account…": the account ID, the 16 words (pasted or typed; case, spaces, and line breaks do not matter), and the name of this computer. "Recover…" asks for the owner check.
 3. Save the **new** recovery code with the account ID ("I Saved It"). The old code stops working.
-4. Settings › Connect shows the account again, with its plan, and says how many vault copies Connect deleted. The vaults on your devices are not touched. Each vault syncs through Apassy Connect again with "Sync Through Apassy Connect Again…" in Settings › Vault › Sync (a new copy; the vault passphrase stays the same).
+4. Settings › Connect shows the account again, with its plan, and says how many vault copies Connect deleted. The vaults on your devices are not touched. Each vault syncs through Apassy Connect again with "Sync Again…" in Settings › Vault › Sync (a new copy; the vault passphrase stays the same).
 
 Connect gives one answer for a wrong code, a wrong account ID, and an account that still has a device; the sheet names the three. A recovery that Connect did not answer is finished the next time Apassy reaches Connect. The iPhone has no recovery screen in this release. The steps are in [connect-account-v1](../contracts/connect-account-v1.md) section 9.
 
