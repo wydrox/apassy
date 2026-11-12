@@ -124,6 +124,8 @@ pub(crate) const TEXTS: &[&str] = &[
     UNPINNED,
     DOWNLOAD,
     VAULT_OFFERED,
+    CONFIRM_TAIL,
+    MATCH_TAIL,
 ];
 
 /// "Send this to <name>."
@@ -131,20 +133,34 @@ pub(crate) fn send_to(name: &str) -> String {
     format!("Send this to {name}.")
 }
 
+/// The person of a words sheet: the label of its verified list ("“Ola's MacBook Air”
+/// (Ola)"), and the device that answered when it is not the one that the label names.
+fn person_device(name: &str, device: &str) -> String {
+    if device.trim().is_empty() || name.contains(&format!("\u{201c}{device}\u{201d}")) {
+        name.to_owned()
+    } else {
+        format!("{name} on \u{201c}{device}\u{201d}")
+    }
+}
+
 /// The words line on the device that made the code.
 pub(crate) fn asks(name: &str, device: &str) -> String {
-    format!("{name} ({device}) asks to share vaults with you.")
+    format!(
+        "{} asks to share vaults with you.",
+        person_device(name, device)
+    )
+}
+
+/// The words line on the device that answered the code.
+pub(crate) fn shares_with_you(name: &str, device: &str) -> String {
+    format!("{} shares vaults with you.", person_device(name, device))
 }
 
 /// The words tail on the device that made the code.
-pub(crate) fn confirm_tail(name: &str) -> String {
-    format!("Confirm only if {name}'s screen shows the same words.")
-}
+pub(crate) const CONFIRM_TAIL: &str = "Confirm only if the other device shows the same words.";
 
 /// The words tail on the device that answered the code.
-pub(crate) fn match_tail(name: &str) -> String {
-    format!("Go on only if {name}'s screen shows the same words.")
-}
+pub(crate) const MATCH_TAIL: &str = "Go on only if the other device shows the same words.";
 
 /// A member that has not joined yet.
 pub(crate) fn not_joined(name: &str) -> String {
@@ -361,81 +377,82 @@ pub(crate) fn draw(ui: &mut Ui, view: &ShareView) -> Option<ShareAction> {
     for note in &view.notes {
         rows::footnote(ui, note.as_str());
     }
+    // Every row keeps its text and its buttons inside the group at each width of the
+    // window: the text wraps, and the buttons go under it when the row is narrow
+    // ([`rows::text_buttons`]).
     ui.add_enabled_ui(!view.busy, |ui| {
         rows::group(ui, Some(SECTION), |g| {
             for store in &view.own {
                 g.row(|ui| {
-                    rows::one_line(ui, rows::label_text(&store.vault).into(), None, |ui| {
-                        if view.in_group
-                            && kit::small_button(ui, SHARE_WITH, Style::Bordered).clicked()
-                        {
-                            action = Some(ShareAction::ShareWith {
-                                team_id: store.team_id.clone(),
-                                vault: store.vault.clone(),
-                            });
-                        }
-                    });
-                    for (name, account, line) in &store.members {
-                        ui.horizontal(|ui| {
-                            ui.add(egui::Label::new(rows::note(line)).wrap());
-                            if kit::small_button(ui, &stop(name), Style::Bordered).clicked() {
-                                action = Some(ShareAction::Stop {
-                                    team_id: store.team_id.clone(),
-                                    account: account.clone(),
-                                    name: name.clone(),
-                                });
-                            }
+                    let share: &[(&str, Style)] = if view.in_group {
+                        &[(SHARE_WITH, Style::Bordered)]
+                    } else {
+                        &[]
+                    };
+                    if rows::text_buttons(ui, rows::label_text(&store.vault), share).is_some() {
+                        action = Some(ShareAction::ShareWith {
+                            team_id: store.team_id.clone(),
+                            vault: store.vault.clone(),
                         });
                     }
+                    for (name, account, line) in &store.members {
+                        let label = stop(name);
+                        if rows::text_buttons(ui, rows::note(line), &[(&label, Style::Bordered)])
+                            .is_some()
+                        {
+                            action = Some(ShareAction::Stop {
+                                team_id: store.team_id.clone(),
+                                account: account.clone(),
+                                name: name.clone(),
+                            });
+                        }
+                    }
                     for (name, account, line) in &store.ended {
-                        ui.horizontal(|ui| {
-                            ui.add(egui::Label::new(rows::note(line)).wrap());
-                            if view.in_group
-                                && kit::small_button(ui, &share_again(name), Style::Bordered)
-                                    .clicked()
-                            {
-                                action = Some(ShareAction::ShareAgain {
-                                    team_id: store.team_id.clone(),
-                                    account: account.clone(),
-                                    name: name.clone(),
-                                });
-                            }
-                        });
+                        let label = share_again(name);
+                        let again: &[(&str, Style)] = if view.in_group {
+                            &[(&label, Style::Bordered)]
+                        } else {
+                            &[]
+                        };
+                        if rows::text_buttons(ui, rows::note(line), again).is_some() {
+                            action = Some(ShareAction::ShareAgain {
+                                team_id: store.team_id.clone(),
+                                account: account.clone(),
+                                name: name.clone(),
+                            });
+                        }
                     }
                 });
             }
             for store in &view.others {
                 g.row(|ui| {
-                    rows::one_line(ui, rows::label_text(&store.title).into(), None, |ui| {
-                        match &store.joined {
-                            _ if store.left => {}
-                            None => {
-                                if kit::small_button(ui, JOIN, Style::Bordered).clicked() {
-                                    action = Some(ShareAction::Join {
-                                        team_id: store.team_id.clone(),
-                                        owner: store.owner.clone(),
-                                    });
-                                }
-                            }
-                            Some(_) => {
-                                if kit::small_button(ui, LEAVE, Style::Bordered).clicked() {
-                                    action = Some(ShareAction::Leave {
-                                        team_id: store.team_id.clone(),
-                                        owner: store.owner.clone(),
-                                        name: store.title.clone(),
-                                    });
-                                }
-                                if store.download
-                                    && kit::small_button(ui, DOWNLOAD, Style::Bordered).clicked()
-                                {
-                                    action = Some(ShareAction::Download {
-                                        team_id: store.team_id.clone(),
-                                        owner: store.owner.clone(),
-                                    });
-                                }
-                            }
+                    // The rightmost button first.
+                    let buttons: Vec<(&str, Style)> = match &store.joined {
+                        _ if store.left => Vec::new(),
+                        None => vec![(JOIN, Style::Bordered)],
+                        Some(_) if store.download => {
+                            vec![(LEAVE, Style::Bordered), (DOWNLOAD, Style::Bordered)]
                         }
-                    });
+                        Some(_) => vec![(LEAVE, Style::Bordered)],
+                    };
+                    let pressed = rows::text_buttons(ui, rows::label_text(&store.title), &buttons);
+                    if let Some(index) = pressed {
+                        action = Some(match buttons[index].0 {
+                            JOIN => ShareAction::Join {
+                                team_id: store.team_id.clone(),
+                                owner: store.owner.clone(),
+                            },
+                            LEAVE => ShareAction::Leave {
+                                team_id: store.team_id.clone(),
+                                owner: store.owner.clone(),
+                                name: store.title.clone(),
+                            },
+                            _ => ShareAction::Download {
+                                team_id: store.team_id.clone(),
+                                owner: store.owner.clone(),
+                            },
+                        });
+                    }
                     for line in store
                         .joined
                         .iter()
@@ -447,11 +464,14 @@ pub(crate) fn draw(ui: &mut Ui, view: &ShareView) -> Option<ShareAction> {
                 });
             }
             g.row(|ui| {
-                rows::one_line(ui, rows::label_text(SECTION_NOTE).into(), None, |ui| {
-                    if view.in_group && kit::small_button(ui, ACCEPT, Style::Bordered).clicked() {
-                        action = Some(ShareAction::Accept);
-                    }
-                });
+                let accept: &[(&str, Style)] = if view.in_group {
+                    &[(ACCEPT, Style::Bordered)]
+                } else {
+                    &[]
+                };
+                if rows::text_buttons(ui, rows::label_text(SECTION_NOTE), accept).is_some() {
+                    action = Some(ShareAction::Accept);
+                }
             });
         });
     });
@@ -460,17 +480,7 @@ pub(crate) fn draw(ui: &mut Ui, view: &ShareView) -> Option<ShareAction> {
 
 fn big_words(ui: &mut Ui, words: &str) {
     ui.add_space(6.0);
-    let list: Vec<&str> = words.split_whitespace().collect();
-    for line in list.chunks(3) {
-        ui.vertical_centered(|ui| {
-            ui.label(
-                kit::text(line.join("  "), Font::Title)
-                    .variation(b"wght", 600.0)
-                    .color(kit::palette().label),
-            );
-        });
-        ui.add_space(4.0);
-    }
+    kit::word_chips(ui, words);
     ui.add_space(6.0);
 }
 
@@ -486,7 +496,7 @@ fn buttons(
         ui,
         |ui| {
             if busy {
-                ui.add(egui::Spinner::new().size(14.0));
+                kit::spinner(ui, 14.0);
             }
             if let Some((label, pick, style)) = &leading
                 && ui
@@ -543,7 +553,7 @@ fn continue_buttons(ui: &mut Ui, ready: bool, busy: bool) -> Option<ShareChoice>
         ui,
         |ui| {
             if busy {
-                ui.add(egui::Spinner::new().size(14.0));
+                kit::spinner(ui, 14.0);
             }
         },
         |ui| {
@@ -623,7 +633,7 @@ fn sheet_body(
             ui.add_space(8.0);
             ui.vertical_centered(|ui| {
                 ui.horizontal(|ui| {
-                    ui.add(egui::Spinner::new().size(12.0));
+                    kit::spinner(ui, 12.0);
                     ui.label(rows::value(CODE_WAITING));
                 });
             });
@@ -640,15 +650,14 @@ fn sheet_body(
                 ui,
                 CONFIRM_TITLE,
                 Some(&format!(
-                    "{} Both devices show these words. {}",
+                    "{} Both devices show these words. {CONFIRM_TAIL}",
                     asks(name, device),
-                    confirm_tail(name)
                 )),
             );
             big_words(ui, words);
             buttons(
                 ui,
-                Some(("Refuse", ShareChoice::Differ, Style::Destructive)),
+                Some(("Refuse", ShareChoice::Differ, Style::DestructiveBordered)),
                 Some(("Confirm…", ShareChoice::Go)),
                 busy,
             )
@@ -668,14 +677,18 @@ fn sheet_body(
                 ui,
                 CONFIRM_TITLE,
                 Some(&format!(
-                    "{name} ({device}) shares vaults with you. Both devices show these words. {}",
-                    match_tail(name)
+                    "{} Both devices show these words. {MATCH_TAIL}",
+                    shares_with_you(name, device),
                 )),
             );
             big_words(ui, words);
             buttons(
                 ui,
-                Some((WORDS_DIFFER, ShareChoice::Differ, Style::Destructive)),
+                Some((
+                    WORDS_DIFFER,
+                    ShareChoice::Differ,
+                    Style::DestructiveBordered,
+                )),
                 Some((&format!("{WORDS_MATCH}…"), ShareChoice::Go)),
                 busy,
             )
@@ -691,17 +704,19 @@ fn sheet_body(
                 )
             };
             let mut choice = None;
-            kit::sheet_title(ui, &title, Some(lead));
+            kit::alert_head(ui, Tone::Critical, &title, Some(lead));
             kit::sheet_buttons(
                 ui,
                 |ui| {
                     if busy {
-                        ui.add(egui::Spinner::new().size(14.0));
+                        kit::spinner(ui, 14.0);
                     }
                 },
                 |ui| {
                     if ui
-                        .add_enabled_ui(!busy, |ui| kit::button(ui, button, Style::Destructive))
+                        .add_enabled_ui(!busy, |ui| {
+                            kit::button(ui, button, Style::DestructiveBordered)
+                        })
                         .inner
                         .clicked()
                     {
@@ -1137,6 +1152,12 @@ impl ShareUi {
     }
 
     /// Whether `team_id` is a store shared between accounts, as the last status says.
+    /// Whether the last read of Shared Vaults lists `team_id` among the vault stores of
+    /// the account, own or shared: a vault that syncs it syncs through Apassy Connect.
+    pub(crate) fn lists_store(&self, team_id: &str) -> bool {
+        self.stores.iter().any(|store| store.team_id == team_id)
+    }
+
     pub(crate) fn is_shared(&self, team_id: &str) -> bool {
         self.status
             .as_ref()
@@ -1696,7 +1717,7 @@ pub(crate) fn act(app: &mut DesktopApp, ctx: &egui::Context, action: ShareAction
         ShareAction::ShareWith { team_id, vault } => {
             let me = app.ui.connect.share_account_id().unwrap_or_default();
             let status = app.ui.connect.share.status.clone().unwrap_or_default();
-            let members = app
+            let members: Vec<(String, String)> = app
                 .ui
                 .connect
                 .share
@@ -1712,11 +1733,13 @@ pub(crate) fn act(app: &mut DesktopApp, ctx: &egui::Context, action: ShareAction
                     (member.account_id.clone(), name)
                 })
                 .collect();
+            // The only person is chosen already (frame 12b); Continue still asks.
+            let chosen = (members.len() == 1).then_some(0);
             app.ui.connect.share.sheet = Some(ShareSheet::Pick {
                 team_id,
                 vault,
                 members,
-                chosen: None,
+                chosen,
             });
         }
         ShareAction::Accept => {
