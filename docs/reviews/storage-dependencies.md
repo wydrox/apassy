@@ -151,6 +151,12 @@ Build note: on this host, `clang` with the default Command Line Tools SDK (`MacO
 
 No advisory applies to rusqlite, libsqlite3-sys, openssl-sys, openssl-src, ring, rustls-webpki, zeroize, or eframe/egui at these versions.
 
+Later advisories:
+
+| Advisory | Crate | Title | Fix | Status |
+| --- | --- | --- | --- | --- |
+| RUSTSEC-2026-0502 (CVE-2026-119375), 2026-10-30 | sqlcipher-src 419.0.6 (SQLCipher 4.19.0 on SQLite 3.53.4), through libsqlite3-sys 0.39.1 and rusqlite 0.41.1 | `sqlcipher-src` via C SQLite CVE-2026-119375 | sqlcipher-src `>= 420.0.0` (SQLCipher 4.20.0 on SQLite 3.54.1). libsqlite3-sys 0.39.x requires `=419.0.6`, so the step is libsqlite3-sys 0.40.0 and rusqlite `=0.42.0`. | Updated on 2026-11-12. The build script of libsqlite3-sys and the SQLCipher defaults are unchanged: SQLCipher 4, page size 4096, PBKDF2-HMAC-SHA512 with 256,000 iterations, HMAC-SHA512. Vault and relay files of the previous build open with the new build, and the reverse. |
+
 Coverage gap: the RustSec database has no `openssl-src` advisory after February 2023. It has no `libsqlite3-sys` advisory after 2022. A clean `cargo audit` result does not cover the bundled OpenSSL or SQLCipher. The update policy (§8) adds the upstream sources.
 
 ### 6.2 OpenSSL upstream
