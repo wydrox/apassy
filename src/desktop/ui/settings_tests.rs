@@ -546,7 +546,6 @@ fn devices_frame_one_draws_the_mockup() {
         "harbor lemon quartz otter cedar mango",
         "Notifications",
         "Devices",
-        "6",
         "Mac mini (office)",
         concat!("via your ", crate::computer!()),
         "via Apassy relay",
@@ -1189,11 +1188,13 @@ fn devices_route_chip_sits_under_the_qr_code() {
     );
 }
 
-/// "Devices ⓘ 6" has the space of a group label above it, and its rows follow at the
-/// same distance as under "This Mac": no second space between the label and the rows.
+/// "Devices ⓘ" has the space of a group label above it, and its group starts at the same
+/// distance under it as the group under "This Mac": no second space between the label
+/// and the rows. The top of the group is measured, not the text: a one-line device row
+/// centers its name on the taller glyph.
 #[test]
 fn devices_rows_follow_their_label_as_under_this_mac() {
-    let texts = view_rects(&frame_one());
+    let (texts, boxes) = view_boxes(&frame_one());
     let this_mac = rect_of(&texts, concat!("This ", crate::computer!()));
     let reachable = rect_of(&texts, devices::ROUTE_SWITCH);
     let first = rect_of(&texts, "Mac mini (office)");
@@ -1204,12 +1205,61 @@ fn devices_rows_follow_their_label_as_under_this_mac() {
         .find(|(text, rect)| text == "Devices" && rect.bottom() < first.top())
         .map(|(_, rect)| *rect)
         .expect("the Devices label");
-    let under_this_mac = reachable.top() - this_mac.bottom();
-    let under_devices = first.top() - label.bottom();
+    // The top of the group under a label: the highest painted rectangle between the
+    // label and the first text of the group.
+    let group_top = |label: Rect, first: Rect| {
+        boxes
+            .iter()
+            .map(|rect| rect.top())
+            .filter(|top| *top >= label.bottom() && *top <= first.top())
+            .fold(f32::INFINITY, f32::min)
+    };
+    let under_this_mac = group_top(this_mac, reachable) - this_mac.bottom();
+    let under_devices = group_top(label, first) - label.bottom();
+    assert!(
+        under_this_mac.is_finite() && under_devices.is_finite(),
+        "a group under each label: {under_this_mac} {under_devices}"
+    );
     assert!(
         (under_devices - under_this_mac).abs() < 6.0,
-        "the rows follow the label: {under_devices} vs {under_this_mac}"
+        "the groups follow their labels: {under_devices} vs {under_this_mac}"
     );
+}
+
+/// The painted texts of the Devices section with their rectangles, and the rectangles of
+/// its filled shapes (the group boxes, the glyph tiles).
+fn view_boxes(view: &DevicesView) -> (Vec<(String, Rect)>, Vec<Rect>) {
+    fn rects(shape: &egui::Shape, out: &mut Vec<Rect>) {
+        match shape {
+            egui::Shape::Rect(rect) => out.push(rect.rect),
+            egui::Shape::Vec(nested) => nested.iter().for_each(|inner| rects(inner, out)),
+            _ => {}
+        }
+    }
+    let ctx = egui::Context::default();
+    let mut texts = Vec::new();
+    let mut boxes = Vec::new();
+    for _ in 0..3 {
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(720.0, 2400.0))),
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                devices::draw(ui, view, |g| {
+                    g.labeled("Notifications", super::rows::value("On"));
+                });
+            });
+        });
+        texts.clear();
+        boxes.clear();
+        for clipped in &output.shapes {
+            texts_of(&clipped.shape, clipped.clip_rect, &mut texts);
+            rects(&clipped.shape, &mut boxes);
+        }
+        output.drop_without_applying_deltas();
+    }
+    (texts, boxes)
 }
 
 /// Frames 2a–2c and 4b–4d use the exact texts of the mockup table.
@@ -1795,7 +1845,8 @@ fn devices_list_the_team_and_revoke_needs_the_owner_check() {
         texts = frame(&ctx, &mut app, TALL, Vec::new());
     }
     let text = joined(&texts);
-    for expected in ["Synthetic iPhone", "via Apassy relay", "Revoke…"] {
+    // One device on one route: no chip (the chips show only where routes differ).
+    for expected in ["Synthetic iPhone", "Revoke…"] {
         assert!(text.contains(expected), "shows {expected}: {text}");
     }
     let at = center_of(&texts, "Revoke…", TALL.x).expect("Revoke… is painted");
@@ -2750,4 +2801,22 @@ fn device_rows_describe_their_facts() {
             "{label}: {description} in {found:?}"
         );
     }
+}
+
+/// A route chip only where the route differs from the common one: with every device on
+/// one route, no row draws a chip; a device on another route keeps its chip.
+#[test]
+fn route_chips_show_only_where_routes_differ() {
+    let mut view = frame_one();
+    for device in &mut view.devices {
+        if device.route.is_some() {
+            device.route = Some(Route::Relay);
+        }
+    }
+    let text = view_texts(&view);
+    assert!(!text.contains("via Apassy relay"), "{text}");
+    view.devices[1].route = Some(Route::Connect);
+    let text = view_texts(&view);
+    assert!(text.contains("via Apassy Connect"), "{text}");
+    assert!(!text.contains("via Apassy relay"), "{text}");
 }

@@ -3424,7 +3424,6 @@ fn add_an_iphone_to_the_questions_shows_a_qr_code_and_needs_the_owner_check() {
     for expected in [
         concat!("This ", crate::computer!()),
         "Test iPhone",
-        "via Apassy relay",
         "Revoke…",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");

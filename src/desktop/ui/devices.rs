@@ -1046,6 +1046,7 @@ fn buttons_row(g: &mut rows::Group<'_>, add: impl FnOnce(&mut Ui)) {
 }
 
 /// A group label with an ⓘ and a count on the right: "Devices ⓘ 6".
+/// "Devices ⓘ": the title of the list, without a count (the header says how many).
 fn devices_label(ui: &mut Ui, count: usize) {
     ui.add_space(LABEL_TOP);
     ui.horizontal(|ui| {
@@ -1062,19 +1063,18 @@ fn devices_label(ui: &mut Ui, count: usize) {
         if count > 1 {
             kit::help_button(ui, "Devices", &DEVICES_HELP);
         }
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.add_space(2.0);
-            ui.label(kit::text(count.to_string(), Font::Callout).color(kit::palette().secondary));
-        });
     });
     ui.add_space(6.0);
 }
 
 fn devices_group(ui: &mut Ui, view: &DevicesView, action: &mut Option<Action>) {
     devices_label(ui, view.devices.len());
+    let common = common_route(&view.devices);
     rows::group_box(ui, |g| {
         for (index, device) in view.devices.iter().enumerate() {
-            if let Some(clicked) = device_row(g, device, view.now)
+            // A route chip only where the route differs from the common one.
+            let chip = device.route.filter(|route| Some(*route) != common);
+            if let Some(clicked) = device_row(g, device, chip, view.now)
                 && clicked
             {
                 *action = Some(match device.target {
@@ -1152,7 +1152,26 @@ fn route_chip(ui: &mut Ui, route: Route) -> egui::Response {
 }
 
 /// One device row. `Some(true)` when its button was pressed; `None` without a button.
-fn device_row(g: &mut rows::Group<'_>, device: &DeviceEntry, now: u64) -> Option<bool> {
+/// The route of most devices, when one is the most common; the rows on it draw no chip.
+/// With every device on one route, no row draws one.
+fn common_route(devices: &[DeviceEntry]) -> Option<Route> {
+    let routes: Vec<Route> = devices.iter().filter_map(|device| device.route).collect();
+    let count = |route: Route| routes.iter().filter(|other| **other == route).count();
+    let best = routes.iter().copied().max_by_key(|route| count(*route))?;
+    let ties = routes
+        .iter()
+        .copied()
+        .filter(|route| *route != best && count(*route) == count(best))
+        .count();
+    (ties == 0).then_some(best)
+}
+
+fn device_row(
+    g: &mut rows::Group<'_>,
+    device: &DeviceEntry,
+    chip: Option<Route>,
+    now: u64,
+) -> Option<bool> {
     let mut clicked = None;
     let detail = device.subline();
     g.row(|ui| {
@@ -1185,19 +1204,19 @@ fn device_row(g: &mut rows::Group<'_>, device: &DeviceEntry, now: u64) -> Option
                             }
                         });
                     };
-                    // The name starts at the top inset of the row, as the rows under "This
-                    // Mac": not centered on the taller glyph. A problem keeps its second
-                    // line.
-                    ui.with_layout(Layout::top_down(Align::Min), |ui| {
-                        ui.spacing_mut().item_spacing.y = 1.0;
-                        head(ui);
-                        if device.failed {
+                    // One line, centered on the glyph; a problem keeps its second line.
+                    if device.failed {
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 1.0;
+                            head(ui);
                             ui.label(
                                 kit::text("Not revoked. Try Again", Font::Callout)
                                     .color(Tone::Critical.text()),
                             );
-                        }
-                    });
+                        });
+                    } else {
+                        head(ui);
+                    }
                 },
                 |ui| {
                     ui.spacing_mut().item_spacing.x = 10.0;
@@ -1212,7 +1231,7 @@ fn device_row(g: &mut rows::Group<'_>, device: &DeviceEntry, now: u64) -> Option
                     if let Some(at) = device.last_contact {
                         ui.label(rows::value(last_contact(at, now)).size(12.0));
                     }
-                    if let Some(route) = device.route {
+                    if let Some(route) = chip {
                         route_chip(ui, route);
                     }
                 },
@@ -1405,15 +1424,11 @@ pub(crate) fn wifi_group(ui: &mut Ui, wifi: &WifiView, now: u64) -> Option<Actio
                             ui.spacing_mut().item_spacing.x = 10.0;
                             device_glyph(ui, Kind::Iphone);
                             let paired = format!("Paired {}", day_month(device.paired_at));
-                            // The name at the top inset of the row, as in the Devices list.
-                            ui.with_layout(Layout::top_down(Align::Min), |ui| {
-                                let name =
-                                    ui.add(Label::new(rows::label_text(&entry.name)).truncate());
-                                ui.ctx().accesskit_node_builder(name.id, |node| {
-                                    node.set_description(paired.as_str());
-                                });
-                                name.on_hover_text(paired);
+                            let name = ui.add(Label::new(rows::label_text(&entry.name)).truncate());
+                            ui.ctx().accesskit_node_builder(name.id, |node| {
+                                node.set_description(paired.as_str());
                             });
+                            name.on_hover_text(paired);
                         },
                         |ui| {
                             ui.spacing_mut().item_spacing.x = 10.0;
