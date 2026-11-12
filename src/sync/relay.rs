@@ -4081,6 +4081,12 @@ impl JoinedDevice {
         &self.session.team_id
     }
 
+    /// Whether its session follows the signers of the account file: a vault store shared
+    /// between accounts ([`Self::set_signers`]).
+    pub fn follows_shared_signers(&self) -> bool {
+        self.signers.is_some()
+    }
+
     /// The device number of this Mac on the relay.
     pub fn device_id(&self) -> u64 {
         self.session.device_id().unwrap_or_default()

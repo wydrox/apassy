@@ -930,7 +930,8 @@ fn download_store_copy(
         Err(SyncError::ChecksDeviceList) => {
             let listed = lock(slot).as_mut().and_then(|account| {
                 let status = account.refresh_shares(&[]).ok()?;
-                let asked = status.asked_for(device.team_id()).or(status.own_read)?;
+                let shared = device.follows_shared_signers();
+                let asked = join_lists_asked(&status, device.team_id(), shared)?;
                 Some((crate::connect::signer_policy(account.state()), asked))
             });
             if let Some((policy, asked)) = listed {
@@ -940,6 +941,24 @@ fn download_store_copy(
             device.download(work)
         }
         other => other,
+    }
+}
+
+/// When the lists that decide the download of a join from the store `team` were asked in
+/// the refresh `status`: for a store shared between accounts (`shared`, or a store that
+/// the refresh lists) the lists of every account of the store and the own list
+/// ([`crate::connect::ShareStatus::asked_for`]), `None` when one of them was not read or
+/// did not verify, so the download keeps checking the device list; for a store of this
+/// account alone the own list.
+pub(crate) fn join_lists_asked(
+    status: &crate::connect::ShareStatus,
+    team: &str,
+    shared: bool,
+) -> Option<Instant> {
+    if shared || status.stores.iter().any(|store| store.team_id == team) {
+        status.asked_for(team)
+    } else {
+        status.own_read
     }
 }
 

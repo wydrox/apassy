@@ -537,6 +537,33 @@ fn the_reads_of_a_head_not_verified_yet_back_off() {
     assert!(reads.windows(2).all(|pair| pair[1] - pair[0] <= 600));
 }
 
+/// The download of a join from a shared store is decided only by the lists of every
+/// account of the store: when a refresh read the own list and not the list of a member,
+/// no time is noted (the download keeps checking the device list), and the own list's time
+/// is used only for a store of this account alone.
+#[test]
+fn a_join_from_a_shared_store_waits_for_the_lists_of_its_accounts() {
+    use crate::desktop::ui::sync::relay::join_lists_asked;
+    let later = Instant::now() + Duration::from_secs(5);
+    let mut status = status();
+    status.own_read = Some(later);
+    assert_eq!(
+        join_lists_asked(&status, "t_familyaaaa", true),
+        None,
+        "Ola's list was not read"
+    );
+    assert_eq!(join_lists_asked(&status, "t_familyaaaa", false), None);
+    status.read.insert("acc_olaaaaaaaa".to_owned(), later);
+    assert_eq!(join_lists_asked(&status, "t_familyaaaa", true), Some(later));
+    // A store of this account alone: the own list decides.
+    assert_eq!(
+        join_lists_asked(&status, "t_aloneaaaaa", false),
+        Some(later)
+    );
+    // A shared store that this refresh does not list: nothing is noted.
+    assert_eq!(join_lists_asked(&status, "t_aloneaaaaa", true), None);
+}
+
 /// F11: a shared store is decided only by lists asked after its refusal: the time of a
 /// refresh counts for a store only when the lists that it waits for (its owner and members
 /// whose list can be verified here), and the own list, were asked and verified; a read
