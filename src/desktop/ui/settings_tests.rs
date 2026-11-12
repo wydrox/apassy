@@ -540,21 +540,14 @@ fn devices_frame_one_draws_the_mockup() {
         concat!("This ", crate::computer!()),
         ROUTE_SWITCH,
         "Address",
-        "100.101.7.12",
+        "100.101.7.12:8444",
         "Copy",
-        "Port",
-        "8444",
         "Node Words",
         "harbor lemon quartz otter cedar mango",
         "Notifications",
         "Devices",
         "6",
         "Mac mini (office)",
-        concat!(crate::computer_cap!(), " · Hosts approvals"),
-        "iPhone · Approves runs",
-        "Apple Watch · Sees requests",
-        concat!(crate::computer_cap!(), " · Syncs Personal"),
-        "Linux node · Syncs Acme team",
         concat!("via your ", crate::computer!()),
         "via Apassy relay",
         "Tailnet",
@@ -569,14 +562,14 @@ fn devices_frame_one_draws_the_mockup() {
         WIFI_GROUP,
         "Wi-Fi pairing ends in two versions.",
         WIFI_LISTEN,
-        "Paired 12 Sep",
-        "Wi-Fi",
         "3 h ago",
         "Remove…",
         "Reset Pairing…",
     ] {
         assert!(text.contains(expected), "frame 1 shows {expected}: {text}");
     }
+    // One line for each device: the kind and the roles, and the day of a Wi-Fi pairing,
+    // are hover texts; the Port has its place in the Address.
     for gone in [
         "Pair an iPhone",
         "Pair…",
@@ -584,6 +577,10 @@ fn devices_frame_one_draws_the_mockup() {
         MOVE,
         ONLY_THIS_MAC,
         "Get approvals on your iPhone",
+        "Port",
+        "iPhone · Approves runs",
+        "Linux node · Syncs Acme team",
+        "Paired 12 Sep",
     ] {
         assert!(!text.contains(gone), "frame 1 has no {gone}: {text}");
     }
@@ -644,8 +641,8 @@ fn devices_node_states_draw_the_mockup() {
                 locked: true,
                 ..with(NodeState::Locked, None)
             },
-            vec![ROUTE_LOCKED, "Address", "Off"],
-            vec!["Node Words", "Copy"],
+            vec![ROUTE_LOCKED],
+            vec!["Node Words", "Copy", "Address"],
         ),
         (
             "3g",
@@ -962,14 +959,21 @@ fn devices_relay_group_restores_the_relay_and_the_other_macs() {
     ] {
         let text = view_texts(&with(questions, None, false));
         let (subline, _) = questions.subline();
-        for expected in [RELAY_GROUP, RELAY_QUESTIONS, subline] {
+        for expected in [RELAY_GROUP, RELAY_QUESTIONS] {
             assert!(text.contains(expected), "{questions:?}: {expected}: {text}");
         }
+        // A switch that is on says nothing more; its words are the first line of ⓘ.
         assert_eq!(
-            text.contains(SHOW_AGENTS) && text.contains(SHOW_AGENTS_NOTE),
+            text.contains(subline),
+            questions != Questions::On,
+            "{questions:?}: {subline}: {text}"
+        );
+        assert_eq!(
+            text.contains(SHOW_AGENTS),
             questions == Questions::On,
             "the feed switch only while the questions are on: {questions:?}: {text}"
         );
+        assert!(!text.contains(SHOW_AGENTS_NOTE), "{text}");
         assert_eq!(
             text.contains(RELAY_QUESTIONS_REMOVED_SYNC_FIX),
             questions == Questions::RemovedSync,
@@ -1008,31 +1012,24 @@ fn devices_relay_group_restores_the_relay_and_the_other_macs() {
     // The other Macs of a vault that syncs through the relay, and the D14 notice.
     let text = view_texts(&with(
         Questions::On,
-        Some(OtherMacsRow {
-            words: "Through the Apassy relay".to_owned(),
-            relay: true,
-        }),
+        Some(OtherMacsRow { relay: true }),
         true,
     ));
     for expected in [
         OTHER_MACS,
-        "Through the Apassy relay",
         OTHER_MACS_DEVICES,
         ADD_MAC,
         devices::free_end_line("0.5.20").as_str(),
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
-    // A folder sync names the folder and has no relay buttons.
+    // A folder sync has no row here: Vault › Sync names the folder.
     let text = view_texts(&with(
         Questions::CanTurnOn,
-        Some(OtherMacsRow {
-            words: "Through iCloud Drive".to_owned(),
-            relay: false,
-        }),
+        Some(OtherMacsRow { relay: false }),
         false,
     ));
-    assert!(text.contains("Through iCloud Drive"), "{text}");
+    assert!(!text.contains(OTHER_MACS), "{text}");
     assert!(!text.contains(ADD_MAC), "{text}");
     assert!(!text.contains("Free approvals"), "{text}");
 
@@ -1798,12 +1795,7 @@ fn devices_list_the_team_and_revoke_needs_the_owner_check() {
         texts = frame(&ctx, &mut app, TALL, Vec::new());
     }
     let text = joined(&texts);
-    for expected in [
-        "Synthetic iPhone",
-        "iPhone · Approves runs",
-        "via Apassy relay",
-        "Revoke…",
-    ] {
+    for expected in ["Synthetic iPhone", "via Apassy relay", "Revoke…"] {
         assert!(text.contains(expected), "shows {expected}: {text}");
     }
     let at = center_of(&texts, "Revoke…", TALL.x).expect("Revoke… is painted");
@@ -2538,6 +2530,8 @@ fn devices_connect_frames_draw_the_mockup() {
     assert!(text.contains(MOVE_TO_CONNECT), "{text}");
     assert!(!text.contains(MOVE_APPROVALS), "{text}");
     assert!(text.contains("Approvals go through Apassy relay"), "{text}");
+    // The move row says it; the switch above does not say it again.
+    assert!(!text.contains(ROUTE_OFF), "{text}");
     // Neither: no move row.
     let text = view_texts(&frame_one());
     assert!(!text.contains(MOVE_TO_CONNECT), "{text}");

@@ -3417,16 +3417,15 @@ fn add_an_iphone_to_the_questions_shows_a_qr_code_and_needs_the_owner_check() {
     );
     a.ui.sheet = None;
     // Settings > Devices of N7 (Devices mockup, frame 1): the row of the iPhone with its
-    // kind and role, its route, and "Revoke…" for a device on the relay.
+    // route and "Revoke…" for a device on the relay; its kind and role are the hover
+    // text of the row.
     super::open_settings(&mut a, super::SettingsSection::Devices);
     let text = frames(&mut a);
     a.questions_settle_for_test();
     // This Mac's row has the name of the machine, not its device name on the relay.
     for expected in [
         concat!("This ", crate::computer!()),
-        concat!(crate::computer_cap!(), " · Asks for approvals"),
         "Test iPhone",
-        "iPhone · Approves runs",
         "via Apassy relay",
         "Revoke…",
     ] {

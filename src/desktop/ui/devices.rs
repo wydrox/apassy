@@ -162,7 +162,8 @@ pub(crate) const ADD_MAC: &str = concat!("Add a ", crate::computer!(), "…");
 pub(crate) const OLD_RELAY_ENTRY: &str = "Old entry still on Apassy relay";
 
 /// The help of the relay switch.
-const RELAY_HELP: [&str; 2] = [
+const RELAY_HELP: [&str; 3] = [
+    RELAY_QUESTIONS_ON,
     "Questions also reach your other devices of this vault.",
     concat!(
         "Turning it on needs ",
@@ -171,7 +172,7 @@ const RELAY_HELP: [&str; 2] = [
     ),
 ];
 /// The help of the feed switch.
-const SHOW_AGENTS_HELP: [&str; 2] = [
+const SHOW_AGENTS_HELP: [&str; 3] = [
     concat!(
         "Your iPhone and your other ",
         crate::computers!(),
@@ -179,18 +180,13 @@ const SHOW_AGENTS_HELP: [&str; 2] = [
         crate::computer!(),
         "'s agents."
     ),
+    SHOW_AGENTS_NOTE,
     concat!(
         "Off: Apassy deletes this ",
         crate::computer!(),
         "'s feed from the relay."
     ),
 ];
-/// The help of the other Macs row.
-const OTHER_MACS_HELP: [&str; 1] = [concat!(
-    "The ",
-    crate::computers!(),
-    " that sync this vault."
-)];
 /// The help of the old entry row (frame 4d).
 const OLD_RELAY_ENTRY_HELP: [&str; 2] = [
     concat!(
@@ -480,10 +476,9 @@ impl Questions {
 /// The other Macs of a synced vault.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OtherMacsRow {
-    /// "Through the Apassy relay", "Through iCloud Drive", "Removed from the relay".
-    pub(crate) words: String,
     /// The vault syncs through the relay and this Mac is in its team: Devices… and Add a
-    /// Mac… work.
+    /// Mac… work, and only then is the row drawn (Vault › Sync names the way of a
+    /// folder).
     pub(crate) relay: bool,
 }
 
@@ -787,10 +782,12 @@ fn this_mac_group(
     action: &mut Option<Action>,
 ) {
     rows::group(ui, Some(concat!("This ", crate::computer!())), |g| {
-        let off = route_off_line(view);
+        // The move row below says that the approvals go through the relay (frame 9b).
+        let off = Some(route_off_line(view))
+            .filter(|line| *line != ROUTE_OFF || move_choices(view).is_none());
         let (subline, enabled) = match &view.node {
-            NodeState::Missing | NodeState::NotConnected => (Some(off), false),
-            NodeState::Off => (Some(off), !view.locked),
+            NodeState::Missing | NodeState::NotConnected => (off, false),
+            NodeState::Off => (off, !view.locked),
             NodeState::Locked => (Some(ROUTE_LOCKED), false),
             NodeState::On { .. } => (None, !view.locked),
         };
@@ -830,10 +827,8 @@ fn this_mac_group(
                     *action = Some(Action::CheckAgain);
                 }
             }
-            NodeState::Off => {}
-            NodeState::Locked => {
-                value_row(g, "Address", rows::value("Off"), None);
-            }
+            // 3f: the subline of the switch says that it stopped.
+            NodeState::Off | NodeState::Locked => {}
             NodeState::On { address } => on_rows(g, view, address.as_ref(), action),
         }
         if let Some((to_mac, to_connect)) = move_choices(view) {
@@ -906,7 +901,8 @@ fn on_rows(
         });
         return;
     };
-    let mono = kit::text(&address.ipv4, Font::Mono).color(kit::palette().label);
+    let shown = format!("{}:{}", address.ipv4, address.port);
+    let mono = kit::text(shown, Font::Mono).color(kit::palette().label);
     if value_row(g, "Address", mono, Some("Copy")) {
         *action = Some(Action::Copy(address.origin.clone()));
     }
@@ -922,7 +918,6 @@ fn on_rows(
         }
         return;
     }
-    value_row(g, "Port", rows::value(address.port.to_string()), None);
     if let Some(words) = &address.words {
         g.line(
             "Node Words",
@@ -1133,6 +1128,7 @@ fn route_chip(ui: &mut Ui, route: Route) -> egui::Response {
 /// One device row. `Some(true)` when its button was pressed; `None` without a button.
 fn device_row(g: &mut rows::Group<'_>, device: &DeviceEntry, now: u64) -> Option<bool> {
     let mut clicked = None;
+    let detail = device.subline();
     g.row(|ui| {
         egui::Sides::new()
             .shrink_left()
@@ -1143,11 +1139,17 @@ fn device_row(g: &mut rows::Group<'_>, device: &DeviceEntry, now: u64) -> Option
                 |ui| {
                     ui.spacing_mut().item_spacing.x = 10.0;
                     device_glyph(ui, device.kind);
-                    ui.vertical(|ui| {
-                        ui.spacing_mut().item_spacing.y = 1.0;
+                    // One line: the kind and the roles ("iPhone · Approves runs") are the
+                    // hover text of the name and its VoiceOver description.
+                    let head = |ui: &mut Ui| {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 6.0;
-                            ui.add(Label::new(rows::label_text(&device.name)).truncate());
+                            let name =
+                                ui.add(Label::new(rows::label_text(&device.name)).truncate());
+                            ui.ctx().accesskit_node_builder(name.id, |node| {
+                                node.set_description(detail.as_str());
+                            });
+                            name.on_hover_text(detail.as_str());
                             if device.target == Target::ThisMac {
                                 kit::cap_toned(
                                     ui,
@@ -1156,21 +1158,27 @@ fn device_row(g: &mut rows::Group<'_>, device: &DeviceEntry, now: u64) -> Option
                                 );
                             }
                         });
-                        if device.failed {
+                    };
+                    if device.failed {
+                        // A problem keeps its second line.
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 1.0;
+                            head(ui);
                             ui.label(
                                 kit::text("Not revoked. Try Again", Font::Callout)
                                     .color(Tone::Critical.text()),
                             );
-                        } else {
-                            ui.add(Label::new(rows::note(&device.subline())).truncate());
-                        }
-                    });
+                        });
+                    } else {
+                        head(ui);
+                    }
                 },
                 |ui| {
                     ui.spacing_mut().item_spacing.x = 10.0;
                     if let Some(label) = device.button() {
                         let button = kit::small_button(ui, label, Style::Bordered);
-                        let spoken = format!("{label} {}", device.name);
+                        // "Revoke MacBook Pro", "Details build-box".
+                        let spoken = format!("{} {}", label.trim_end_matches('…'), device.name);
                         ui.ctx()
                             .accesskit_node_builder(button.id, |node| node.set_label(spoken));
                         clicked = Some(button.clicked());
@@ -1194,11 +1202,13 @@ fn relay_group(ui: &mut Ui, relay: &RelayView, action: &mut Option<Action>) {
     rows::group(ui, Some(RELAY_GROUP), |g| {
         let was = matches!(relay.questions, Questions::On | Questions::Ended);
         let (subline, enabled) = relay.questions.subline();
+        // On says nothing more; its words are the first line of the ⓘ.
+        let subline = (relay.questions != Questions::On).then_some(subline);
         let mut on = was;
         switch_row(
             g,
             RELAY_QUESTIONS,
-            Some(subline),
+            subline,
             &mut on,
             enabled,
             Some(&RELAY_HELP),
@@ -1214,7 +1224,7 @@ fn relay_group(ui: &mut Ui, relay: &RelayView, action: &mut Option<Action>) {
             switch_row(
                 g,
                 SHOW_AGENTS,
-                Some(SHOW_AGENTS_NOTE),
+                None,
                 &mut shown,
                 true,
                 Some(&SHOW_AGENTS_HELP),
@@ -1223,17 +1233,14 @@ fn relay_group(ui: &mut Ui, relay: &RelayView, action: &mut Option<Action>) {
                 *action = Some(Action::ShowAgents(shown));
             }
         }
-        if let Some(others) = &relay.other_macs {
-            g.line(OTHER_MACS, Some(rows::value(&others.words)), |ui| {
-                if others.relay {
-                    if kit::small_button(ui, ADD_MAC, Style::Bordered).clicked() {
-                        *action = Some(Action::AddMac);
-                    }
-                    if kit::small_button(ui, OTHER_MACS_DEVICES, Style::Bordered).clicked() {
-                        *action = Some(Action::OtherMacs);
-                    }
+        if relay.other_macs.as_ref().is_some_and(|others| others.relay) {
+            g.line(OTHER_MACS, None, |ui| {
+                if kit::small_button(ui, ADD_MAC, Style::Bordered).clicked() {
+                    *action = Some(Action::AddMac);
                 }
-                kit::help_button(ui, OTHER_MACS, &OTHER_MACS_HELP);
+                if kit::small_button(ui, OTHER_MACS_DEVICES, Style::Bordered).clicked() {
+                    *action = Some(Action::OtherMacs);
+                }
             });
         }
         if let Some((ended, version)) = &relay.ended {
@@ -1372,14 +1379,12 @@ pub(crate) fn wifi_group(ui: &mut Ui, wifi: &WifiView, now: u64) -> Option<Actio
                         |ui| {
                             ui.spacing_mut().item_spacing.x = 10.0;
                             device_glyph(ui, Kind::Iphone);
-                            ui.vertical(|ui| {
-                                ui.spacing_mut().item_spacing.y = 1.0;
-                                ui.add(Label::new(rows::label_text(&entry.name)).truncate());
-                                ui.label(rows::note(&format!(
-                                    "Paired {}",
-                                    day_month(device.paired_at)
-                                )));
+                            let paired = format!("Paired {}", day_month(device.paired_at));
+                            let name = ui.add(Label::new(rows::label_text(&entry.name)).truncate());
+                            ui.ctx().accesskit_node_builder(name.id, |node| {
+                                node.set_description(paired.as_str());
                             });
+                            name.on_hover_text(paired);
                         },
                         |ui| {
                             ui.spacing_mut().item_spacing.x = 10.0;
@@ -1396,7 +1401,6 @@ pub(crate) fn wifi_group(ui: &mut Ui, wifi: &WifiView, now: u64) -> Option<Actio
                             if let Some(at) = entry.last_contact {
                                 ui.label(rows::value(last_contact(at, now)).size(12.0));
                             }
-                            route_chip(ui, Route::Wifi);
                         },
                     );
             });
@@ -2614,7 +2618,6 @@ mod live {
         let other_macs = synced.then(|| {
             let others = super::super::sync::other_macs(app);
             super::OtherMacsRow {
-                words: others.words,
                 relay: others.relay.is_some(),
             }
         });
