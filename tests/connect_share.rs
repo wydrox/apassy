@@ -2502,7 +2502,7 @@ fn recover_on(
     let account_id = account.state().account_id.clone();
     cloud.connect.revoke(&account.state().device_id);
     apassy::connect::forget_this_device(&device.keys, &device.account_path).expect("forget");
-    let (recovered, _, deleted) = ConnectAccount::recover(
+    let (recovered, _, deleted) = recover_with(
         client(cloud),
         &device.keys,
         &device.account_path,
@@ -2511,7 +2511,7 @@ fn recover_on(
         "Synthetic MacBook",
     )
     .expect("recover");
-    (recovered, deleted)
+    (recovered, deleted.expect("Connect names the deleted stores"))
 }
 
 /// Section 9 on the device that recovered the account: the sync of a vault through a store

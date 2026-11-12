@@ -1344,6 +1344,10 @@ fn apply(app: &mut DesktopApp, ctx: &egui::Context, outcome: Outcome) {
         Outcome::Recovered(Ok((note, account_id, words, deleted))) => {
             live.refreshed_at = Some(Instant::now());
             live.recovered = Some(deleted);
+            live.file = OnceCell::new();
+            // The vaults whose stores the recovery deleted say so now, and ask Connect
+            // nothing more.
+            app.relay_note_deleted_stores();
             if !locked {
                 app.ui.connect.sheet = Some(Sheet::Recovery {
                     account_id,
@@ -1371,6 +1375,8 @@ fn apply(app: &mut DesktopApp, ctx: &egui::Context, outcome: Outcome) {
         }
         Outcome::RecoveryResumed(Ok(Some((account_id, words, deleted)))) => {
             live.recovered = Some(deleted);
+            app.relay_note_deleted_stores();
+            let live = &mut app.ui.connect.live;
             match words {
                 Some(words) if !locked => {
                     live.refreshed_at = Some(Instant::now());
