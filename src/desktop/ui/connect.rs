@@ -1215,12 +1215,7 @@ fn entity_row(
 
 fn devices_group(ui: &mut Ui, view: &ConnectView, account: &Account, action: &mut Option<Action>) {
     counted_label(ui, "Devices", &account.devices.len().to_string());
-    if !account.list_verified {
-        // An error of the device list: one red line with its icon (the rule of every
-        // view of the mockup).
-        ui.add_space(6.0);
-        kit::tone_note_icon(ui, LIST_NOT_VERIFIED, Tone::Critical, Font::Callout);
-    } else if account.list_nearly_full {
+    if account.list_nearly_full && account.list_verified {
         rows::footnote(ui, LIST_NEARLY_FULL);
     }
     rows::group_box(ui, |g| {
@@ -1283,6 +1278,12 @@ fn devices_group(ui: &mut Ui, view: &ConnectView, account: &Account, action: &mu
             );
         }
     });
+    if !account.list_verified {
+        // An error of the device list: one red line with its icon under the group that
+        // failed (the rule of every view of the mockup).
+        ui.add_space(6.0);
+        kit::tone_note_icon(ui, LIST_NOT_VERIFIED, Tone::Critical, Font::Callout);
+    }
     ui.add_space(12.0);
     ui.horizontal(|ui| {
         ui.add_enabled_ui(!view.locked, |ui| {
@@ -2099,7 +2100,9 @@ fn sheet_body(
             kit::sheet_buttons(
                 ui,
                 |ui| {
+                    // Frame 8b: the spinner and what it waits for.
                     kit::spinner(ui, 14.0);
+                    ui.label(rows::value("Waiting…"));
                 },
                 |ui| {
                     if kit::alert_cancel(ui).clicked() {
