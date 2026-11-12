@@ -2208,14 +2208,11 @@ impl DesktopApp {
             }),
             "share-accept" => in_group.then_some(ShareAction::Accept),
             "share-stop" => view.own.iter().find_map(|store| {
-                store
-                    .members
-                    .first()
-                    .map(|(name, account, _)| ShareAction::Stop {
-                        team_id: store.team_id.clone(),
-                        account: account.clone(),
-                        name: name.clone(),
-                    })
+                store.members.first().map(|person| ShareAction::Stop {
+                    team_id: store.team_id.clone(),
+                    account: person.account.clone(),
+                    name: person.name.clone(),
+                })
             }),
             "share-join" => view
                 .others
