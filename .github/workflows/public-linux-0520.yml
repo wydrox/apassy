@@ -1,0 +1,65 @@
+name: Verify public Linux 0.5.20
+on:
+  push:
+    branches: [verify/linux-public-0.5.20]
+permissions:
+  contents: read
+jobs:
+  readback:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {arch: x86_64, deb: amd64, runner: ubuntu-24.04}
+          - {arch: aarch64, deb: arm64, runner: ubuntu-24.04-arm}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    env:
+      V: "0.5.20"
+      ARCH: ${{ matrix.arch }}
+      DEB: ${{ matrix.deb }}
+    steps:
+      - name: Verify public downloads and versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=https://apassy-relay.wyderka.cc
+          mkdir downloads && cd downloads
+          curl --retry 3 -fsS "$base/dl/SHA256SUMS" -o SHA256SUMS
+          printf '%s  SHA256SUMS\n' 35e89776d0755d9d8066b34ac658fed1862185cc6c1481145892c9d3e8a8c823 | sha256sum -c -
+          test "$(wc -l < SHA256SUMS)" -eq 10
+          curl --retry 3 -fsS "$base/dl/release.json" -o release.json
+          python3 - <<'PY'
+          import json
+          r=json.load(open('release.json'))
+          assert r['version']=='0.5.20'
+          assert r['commit']=='54e004dde086181a0620151ad4bc3455a37d0d09'
+          assert sorted(r)==['artifacts','commit','node','vault','version'], sorted(r)
+          PY
+          while read -r hash name; do curl --retry 3 -fsS "$base/dl/$name" -o "$name"; done < SHA256SUMS
+          sha256sum -c SHA256SUMS
+          if [ "$ARCH" = x86_64 ]; then
+            chmod +x apassy-team-linux-x86_64
+            test "$(./apassy-team-linux-x86_64 --version)" = "apassy-team $V"
+          fi
+          # Node: tarball, .deb, install.sh.
+          mkdir node && tar -xzf "apassy-$V-linux-$ARCH.tar.gz" -C node
+          test "$(node/apassy-$V-linux-$ARCH/apassy --version)" = "apassy $V"
+          sudo dpkg -i "apassy_${V}_${DEB}.deb"
+          test "$(apassy --version)" = "apassy $V"
+          test "$(apassy-team --version)" = "apassy-team $V"
+          sudo dpkg -r apassy
+          curl --retry 3 -fsS "$base/install.sh" -o install.sh
+          APASSY_INSTALL_DIR="$PWD/installed" sh install.sh
+          test "$(installed/apassy --version)" = "apassy $V"
+          curl --retry 3 -fsS "$base/guide" -o guide.html
+          # Vault: tarball and .deb on the runner, then in minimal containers (release.md, "Linux vault packages").
+          mkdir vault && tar -xzf "apassy-vault-$V-linux-$ARCH.tar.gz" -C vault
+          test "$(vault/apassy-vault-$V-linux-$ARCH/usr/bin/apassy --version)" = "apassy $V"
+          dpkg-deb --field "apassy-vault_${V}_${DEB}.deb" Package Version Architecture
+          for image in debian:12-slim ubuntu:22.04; do
+            docker run --rm -v "$PWD:/v:ro" "$image" sh -c \
+              "apt-get update -q >/dev/null && DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends /v/apassy-vault_${V}_${DEB}.deb >/dev/null && test \"\$(apassy --version)\" = 'apassy $V' && apassy --version"
+          done
+          docker run --rm -e APASSY_COMPONENT=vault -e APASSY_INSTALL_AS_ROOT=1 ubuntu:22.04 sh -c \
+            "apt-get update -q >/dev/null && apt-get install -y -q --no-install-recommends curl ca-certificates sudo >/dev/null && curl -fsSL $base/install.sh -o i.sh && sh i.sh && test \"\$(apassy --version)\" = 'apassy $V' && apassy --version"
