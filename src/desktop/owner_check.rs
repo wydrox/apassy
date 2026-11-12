@@ -207,7 +207,9 @@ fn share_request_action(request: OwnerRequest) -> OwnerAction {
 /// device list signed, the short fingerprint of its pinned root, and its name at Connect
 /// beside them as a hint only.
 fn person_text(name: &str, hint: &str, fingerprint: &str) -> String {
-    let (name, hint, fingerprint) = (page_text(name), page_text(hint), page_text(fingerprint));
+    let (name, hint) = (page_text(name), page_text(hint));
+    // The key that the owner compares stays on one line.
+    let fingerprint = page_text(fingerprint).replace(' ', "\u{a0}");
     // One form, as the rows of Shared Vaults: the verified name, then the name at
     // Connect and the key in brackets, so no clause ends the question.
     match (name.is_empty(), hint.is_empty() || hint == name) {
@@ -2020,7 +2022,7 @@ impl OwnerRequest {
             } => format!(
                 concat!("Forget this ", crate::computer!(), " (\u{201c}{}\u{201d}, key {}) in your Apassy Connect account? It leaves every vault copy at Connect and signs out. Your vaults stay on this ", crate::computer!(), "."),
                 page_text(device_name),
-                page_text(fingerprint)
+                page_text(fingerprint).replace(' ', "\u{a0}")
             ),
             Self::RevokeConnectDevice {
                 device_name,
@@ -2029,7 +2031,7 @@ impl OwnerRequest {
             } => format!(
                 "Revoke \u{201c}{}\u{201d} (key {})? It leaves your Apassy Connect account and every vault copy at Connect, and signs out at once. Its key fingerprint is shown in Settings › Connect on that device.",
                 page_text(device_name),
-                page_text(fingerprint)
+                page_text(fingerprint).replace(' ', "\u{a0}")
             ),
             Self::DeleteConnectAccount { .. } => "Delete your Apassy Connect account? The subscription ends now, and every vault store, device, and link of the account is deleted at Connect. Your vaults stay on your devices.".to_owned(),
             Self::NewRecoveryCode { .. } => "Make a new recovery code for your Apassy Connect account? Apassy shows the new code once. The old recovery code stops working.".to_owned(),

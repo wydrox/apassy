@@ -1170,10 +1170,7 @@ fn a_vault_on_connect_is_named_apassy_connect() {
     ] {
         assert!(!text.contains(refused), "{refused}: {text}");
     }
-    assert_eq!(
-        super::sync::sidebar_status(&a).0,
-        "Apassy Connect · synced just now"
-    );
+    assert_eq!(super::sync::sidebar_status(&a).0, "Apassy Connect");
     let entry = a.vault_list.registry.get(&id).expect("entry").clone();
     assert_eq!(super::sync::method_words(&a, &entry), "Apassy Connect");
     // A vault of the relay keeps its name.
@@ -1360,10 +1357,7 @@ fn add_a_mac_shows_a_link_then_the_safety_words_and_confirm_needs_the_owner_chec
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
-    assert_eq!(
-        super::sync::sidebar_status(&a).0,
-        "Apassy relay · synced just now"
-    );
+    assert_eq!(super::sync::sidebar_status(&a).0, "Apassy relay");
 
     // Mac A: the link, and nobody asks yet.
     a.sync_open_sheet(SyncSheet::AddMac { id: id.clone() }, None);

@@ -326,10 +326,9 @@ pub(crate) fn sidebar_status(app: &DesktopApp) -> (String, Tone) {
     // The place first, then the state: the narrow sidebar keeps the place, and a state
     // that needs the owner shows alone.
     match app.sync.statuses.get(&entry.id) {
-        Some(UiStatus::UpToDate(Some(at))) => {
-            (format!("{folder} · synced {}", ago(*at)), Tone::Neutral)
-        }
-        Some(UiStatus::UpToDate(None)) | None => (format!("{folder} · synced"), Tone::Neutral),
+        // In sync: the place alone, so the narrow sidebar shows it whole; the time of
+        // the last sync is in Settings › Vault › Sync.
+        Some(UiStatus::UpToDate(_)) | None => (folder, Tone::Neutral),
         Some(UiStatus::Syncing) => (format!("{folder} · sync pending"), Tone::Neutral),
         Some(UiStatus::Waiting) => (format!("{folder} · waiting for the file"), Tone::Neutral),
         Some(status) => (
@@ -1823,7 +1822,12 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                             "Sync is off. Open and unlock this vault to turn it on.".to_owned()
                         }
                     };
-                    ui.add(Label::new(super::settings::rows::note(&line)).wrap());
+                    // A plan state of Apassy Connect is a warning, with its icon.
+                    if matches!(status, Some(UiStatus::Connect(_))) && !syncing {
+                        kit::tone_note_icon(ui, line, Tone::Warning, Font::Callout);
+                    } else {
+                        ui.add(Label::new(super::settings::rows::note(&line)).wrap());
+                    }
                     if on_relay && open_unlocked && app.relay_checks_list_long(&entry.id) {
                         kit::tone_note(ui, relay::CHECK_LIST_UNREACHABLE, Tone::Warning);
                         if kit::small_button(ui, "Try Again", Style::Prominent).clicked() {

@@ -1135,13 +1135,14 @@ fn button_named(
             },
         ),
     };
-    // A button that is off keeps a label that can be read: a gray label on the gray
-    // fill for a button with a fill (white on a pale blue could not be read), a faded
-    // label for a borderless one.
+    // A button that is off keeps a label that can be read: the label color on the gray
+    // fill for a button with a fill (white on a pale blue could not be read; egui fades
+    // a disabled area by half again, so the label stays dark), a faded label for a
+    // borderless one.
     let (fill, fg) = match (enabled, style) {
         (true, _) => (fill, fg),
         (false, Style::Link | Style::Destructive) => (fill, fg.gamma_multiply(0.45)),
-        (false, _) => (palette().fill, palette().secondary),
+        (false, _) => (palette().fill, palette().label),
     };
     let radius = if size == Size::Large { 8 } else { 6 };
     let painter = ui.painter();

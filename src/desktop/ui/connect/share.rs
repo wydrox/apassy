@@ -431,7 +431,7 @@ pub(crate) fn draw(ui: &mut Ui, view: &ShareView) -> Option<ShareAction> {
                         _ if store.left => Vec::new(),
                         None => vec![(JOIN, Style::Bordered)],
                         Some(_) if store.download => {
-                            vec![(LEAVE, Style::Bordered), (DOWNLOAD, Style::Bordered)]
+                            vec![(DOWNLOAD, Style::Bordered), (LEAVE, Style::Bordered)]
                         }
                         Some(_) => vec![(LEAVE, Style::Bordered)],
                     };

@@ -998,10 +998,10 @@ pub(crate) fn connect_words(state: ConnectState) -> String {
     match state {
         ConnectState::PastDue { grace_until, .. } => match grace_until {
             Some(until) => format!(
-                "Connect: past due. Sync works until {}. Update the payment method in Settings › Connect › Manage billing….",
+                "Connect: past due. Sync works until {}. Update the payment method with Manage Billing… in Settings › Connect.",
                 day(until)
             ),
-            None => "Connect: past due. Sync works for now. Update the payment method in Settings › Connect › Manage billing….".to_owned(),
+            None => "Connect: past due. Sync works for now. Update the payment method with Manage Billing… in Settings › Connect.".to_owned(),
         },
         ConnectState::ReadOnly { until } => format!(
             concat!(
