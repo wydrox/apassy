@@ -8,8 +8,8 @@ The Mac app has its own **node**: the relay of the questions, the feed, and the 
 
 | Group | What it shows |
 | --- | --- |
-| This Mac | "Reachable on Your Tailnet" (the route switch), Address (the Tailscale IPv4, with Copy for the whole origin), Port, Node Words, one line for each problem, "Move Here…" when it applies, and Notifications |
-| Devices | One row for each device of each team: name, `<Kind> · <Role>`, the route word, the last contact, and Revoke… (Details… for a Linux node). The count and the ⓘ are by the title |
+| This Mac | "Reachable on Your Tailnet" (the route switch), Address (the Tailscale IPv4 and the port, with Copy for the whole origin), Node Words, one line for each problem, "Move Here…" when it applies, and Notifications |
+| Devices | One line for each device of each team: name, the route word, the last contact, and Revoke… (Details… for a Linux node); `<Kind> · <Role>` is the hover text and the VoiceOver description of the name. The count and the ⓘ are by the title |
 | (button) | **Add an iPhone or a Mac…**: through the node when the route is on, else through Apassy relay (hosted Connect, ADR 0032) |
 | Wi-Fi Pairing | Only while a Wi-Fi iPhone is paired ([companion](companion.md)) |
 
@@ -23,7 +23,7 @@ Only one button is blue at a time: "Add an iPhone or a Mac…", or "Move Here…
 
 1. Install Tailscale on the Mac and sign in. Settings shows "Tailscale is not installed." with **Get Tailscale…** (tailscale.com/download), or "Tailscale is not connected." with **Check Again**. The app also looks again every 10 s while Devices shows.
 2. Turn on **Reachable on Your Tailnet**. The owner check (Touch ID or the passphrase) comes first; the switch moves only after it. Off asks too.
-3. "Starting…" shows until the node listens on the tailnet address. Then Address, Port, and Node Words show.
+3. "Starting…" shows until the node listens on the tailnet address. Then Address (with the port) and Node Words show.
 4. Install Tailscale on the iPhone too, and turn it on there.
 
 The route runs while the vault is unlocked. A lock, a quit, and the end of the waiting runs stop it: Settings says "Stopped while the vault is locked." The setting stays, and the route starts again at the next unlock.

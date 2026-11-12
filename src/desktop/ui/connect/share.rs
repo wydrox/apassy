@@ -2053,6 +2053,67 @@ pub(crate) fn choose(app: &mut DesktopApp, ctx: &egui::Context, choice: ShareCho
 }
 
 /// The section in Settings › Connect, under the account.
+impl DesktopApp {
+    /// A step of the screenshot tour in Shared Vaults ([`DesktopApp::tour_connect`]):
+    /// `share-with` presses Share with… of the first vault of this account,
+    /// `share-accept` Accept Shared Vault…, `share-stop` Stop Sharing… of its first person,
+    /// `share-join` Join of the first offer, and `share-leave` Leave… of the first joined
+    /// vault. Returns false when the section has no such button.
+    pub(crate) fn tour_share(&mut self, ctx: &egui::Context, step: &str) -> bool {
+        let local = local_stores(self);
+        let me = self.ui.connect.share_account_id().unwrap_or_default();
+        let share = &self.ui.connect.share;
+        let Some(status) = share.status.as_ref() else {
+            return false;
+        };
+        let in_group = share
+            .members
+            .iter()
+            .any(|member| member.account_id == me && member.state == "active");
+        let view = view_of(status, &share.stores, &local, in_group, &[]);
+        let action = match step {
+            "share-with" => view.own.first().map(|store| ShareAction::ShareWith {
+                team_id: store.team_id.clone(),
+                vault: store.vault.clone(),
+            }),
+            "share-accept" => in_group.then_some(ShareAction::Accept),
+            "share-stop" => view.own.iter().find_map(|store| {
+                store
+                    .members
+                    .first()
+                    .map(|(name, account, _)| ShareAction::Stop {
+                        team_id: store.team_id.clone(),
+                        account: account.clone(),
+                        name: name.clone(),
+                    })
+            }),
+            "share-join" => view
+                .others
+                .iter()
+                .find(|store| store.joined.is_none() && !store.left)
+                .map(|store| ShareAction::Join {
+                    team_id: store.team_id.clone(),
+                    owner: store.owner.clone(),
+                }),
+            "share-leave" => view
+                .others
+                .iter()
+                .find(|store| store.joined.is_some() && !store.left)
+                .map(|store| ShareAction::Leave {
+                    team_id: store.team_id.clone(),
+                    owner: store.owner.clone(),
+                    name: store.title.clone(),
+                }),
+            _ => None,
+        };
+        let Some(action) = action else {
+            return false;
+        };
+        act(self, ctx, action);
+        true
+    }
+}
+
 pub(crate) fn section(app: &mut DesktopApp, ui: &mut Ui) {
     let ctx = ui.ctx().clone();
     app.ui.connect.share.shown_at = Some(Instant::now());

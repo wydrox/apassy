@@ -517,7 +517,11 @@ impl DesktopApp {
     /// `connect STEP`), on the fake Connect of the tour: `recover` opens the recovery sheet,
     /// `recover-fill` puts `text` (the account id and the code, as the Copy button of a code
     /// copies them) in it, `recover-go` presses "Recover…" (the owner check opens), and
-    /// `saved` presses "I Saved It". Returns false when the step does not fit the sheet.
+    /// `saved` presses "I Saved It". `revoke` presses Revoke… of the first other device,
+    /// `go` the button of the open alert or sheet (an owner check opens), `new-recovery`
+    /// the item of the ⋯ menu, and `share-…` a button of Shared Vaults
+    /// ([`DesktopApp::tour_share`]): the rows of the section have no fixed place. Returns
+    /// false when the step does not fit the window.
     #[doc(hidden)]
     pub fn tour_connect(&mut self, ctx: &egui::Context, step: &str, text: Option<&str>) -> bool {
         match step {
@@ -555,6 +559,32 @@ impl DesktopApp {
                 choose(self, ctx, SheetChoice::Done);
                 true
             }
+            "revoke" => {
+                let Shown::Account(account) = view(self).shown else {
+                    return false;
+                };
+                let Some(index) = account
+                    .devices
+                    .iter()
+                    .position(|device| !device.this && device.verified)
+                else {
+                    return false;
+                };
+                act(self, ctx, Action::Revoke(index));
+                matches!(self.ui.connect.sheet, Some(Sheet::Revoke { .. }))
+            }
+            "go" => {
+                if self.ui.connect.sheet.is_none() {
+                    return false;
+                }
+                choose(self, ctx, SheetChoice::Go);
+                self.owner.check.is_some()
+            }
+            "new-recovery" => {
+                act(self, ctx, Action::NewRecoveryCode);
+                self.owner.check.is_some()
+            }
+            step if step.starts_with("share-") => self.tour_share(ctx, step),
             _ => false,
         }
     }
