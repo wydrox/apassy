@@ -1467,3 +1467,115 @@ fn the_list_before_a_reset_gives_keys_that_left_only() {
     let state = learn(&forged);
     assert!(!left(&state, STORE, &stranger) && !accepted(&state, STORE, &stranger));
 }
+
+/// Y resets its account, and A's list still pins Y's earlier root (no new words yet). A new
+/// device of A, which never read Y's list of that root, takes Y's last list before the
+/// reset from it: the pin of Y is suspended, and Y's old keys are keys that left (16.8), not
+/// devices.
+#[test]
+fn a_new_device_takes_the_list_before_a_reset_from_the_root_that_it_pins() {
+    let (a, x, mut y_old) = family();
+    let old_device = key();
+    y_old.add(&old_device, 3);
+    let mut y_new = List::new(&y_old.id);
+    y_new.peer(&a);
+    let served: BTreeMap<String, Vec<ListEntry>> = [
+        (x.id.clone(), x.entries.clone()),
+        (y_new.id.clone(), y_new.entries.clone()),
+    ]
+    .into_iter()
+    .collect();
+    let reset: BTreeMap<String, Vec<ListEntry>> = [(y_old.id.clone(), y_old.entries.clone())]
+        .into_iter()
+        .collect();
+    let mut state = state_of(&a);
+    assert_eq!(
+        pin_of(&state, &y_old.id, None).map(|pin| pin.root.clone()),
+        Some(b64(&y_old.root)),
+        "A's list pins Y's earlier root"
+    );
+    learn_lists_with(
+        &mut state,
+        &a.verified().unwrap().shares,
+        ORIGIN,
+        &served,
+        &reset,
+        &VoidShares::default(),
+        &ListCache::default(),
+    );
+    assert!(state.is_valid_for_test(), "{state:?}");
+    let pin = pin_of(&state, &y_old.id, None).unwrap();
+    assert!(pin.suspended, "{pin:?}");
+    assert!(
+        left(&state, STORE, &old_device) && left(&state, STORE, &y_old.root),
+        "{pin:?}"
+    );
+    assert!(!accepted(&state, STORE, &old_device) && !accepted(&state, STORE, &y_old.root));
+    assert!(!accepted(&state, STORE, &y_new.root) && !left(&state, STORE, &y_new.root));
+}
+
+/// The keys of a list before a reset join a pin whose keys that left are full (32): they
+/// are the newest there, and the oldest keys that left go for them.
+#[test]
+fn the_keys_before_a_reset_join_a_full_pin_as_its_newest() {
+    let (mut a, x, mut y_old) = family();
+    let old_device = key();
+    y_old.add(&old_device, 3);
+    let mut y_new = List::new(&y_old.id);
+    let passing: Vec<DeviceKey> = (0..MAX_PEER_LEFT).map(|_| key()).collect();
+    let root = y_new.root_signer();
+    for (index, device) in passing.iter().enumerate() {
+        y_new.add(device, index as u8 + 10);
+        y_new.device(&root, "remove", device, None, None);
+    }
+    y_new.peer(&a);
+    a.share(UNSHARE, &y_old.id.clone(), None, Some(STORE));
+    a.share(UNPEER, &y_old.id.clone(), None, None);
+    a.peer(&y_new);
+    a.share(SHARE, &y_new.id.clone(), None, Some(STORE));
+    y_new.join(&a, STORE);
+    let served: BTreeMap<String, Vec<ListEntry>> = [
+        (a.id.clone(), a.entries.clone()),
+        (y_new.id.clone(), y_new.entries.clone()),
+    ]
+    .into_iter()
+    .collect();
+    let mut state = state_of(&x);
+    learn_lists_with(
+        &mut state,
+        &x.verified().unwrap().shares,
+        ORIGIN,
+        &served,
+        &BTreeMap::new(),
+        &VoidShares::default(),
+        &ListCache::default(),
+    );
+    let pin = pin_of(&state, &y_old.id, Some(&a.id)).unwrap();
+    assert_eq!(
+        pin.left.len(),
+        MAX_PEER_LEFT,
+        "full before the list of the reset"
+    );
+    let reset: BTreeMap<String, Vec<ListEntry>> = [(y_old.id.clone(), y_old.entries.clone())]
+        .into_iter()
+        .collect();
+    learn_lists_with(
+        &mut state,
+        &x.verified().unwrap().shares,
+        ORIGIN,
+        &served,
+        &reset,
+        &VoidShares::default(),
+        &ListCache::default(),
+    );
+    assert!(state.is_valid_for_test(), "{state:?}");
+    let pin = pin_of(&state, &y_old.id, Some(&a.id)).unwrap();
+    assert_eq!(pin.left.len(), MAX_PEER_LEFT);
+    assert!(
+        pin.left.contains(&b64(&old_device)) && pin.left.contains(&b64(&y_old.root)),
+        "{pin:?}"
+    );
+    assert!(left(&state, STORE, &old_device) && !accepted(&state, STORE, &old_device));
+    assert!(pin.left.contains(&b64(&passing[MAX_PEER_LEFT - 1])));
+    assert!(!pin.left.contains(&b64(&passing[0])));
+}

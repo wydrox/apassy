@@ -592,21 +592,22 @@ impl PeerPin {
 
     /// Take `list`, the last list of this account before its reset, verified from an
     /// earlier root that the naming list pinned for it: its devices and its keys that left
-    /// become keys that left here (never devices). Returns whether anything changed.
+    /// become keys that left here (never devices), as the newest ones, so a full
+    /// [`Self::left`] drops its oldest keys for them. Returns whether anything changed.
     fn learn_reset(&mut self, list: &Verified) -> bool {
-        let before = self.left.len();
+        let before = self.left.clone();
         let keys = list
-            .live
+            .removed
             .iter()
-            .chain(&list.removed)
+            .chain(&list.live)
             .map(|key| encode_b64u(key));
         for key in keys {
             if !self.known.contains(&key) && !self.left.contains(&key) {
-                self.left.insert(0, key);
+                self.left.push(key);
             }
         }
         bound_oldest(&mut self.left, MAX_PEER_LEFT);
-        self.left.len() != before
+        self.left != before
     }
 
     /// The list that named this account names another root now (after a reset and new
@@ -1174,7 +1175,10 @@ pub(super) fn learn_lists_with(
     for (account, list) in &learned.own {
         note_names(&mut learned.names, account, list);
     }
-    // The lists before a reset: from an earlier root that the naming list pinned.
+    // The lists before a reset: from an earlier root that the naming list pinned. That
+    // can be the root of the pin itself, while the naming list still pins it and Connect
+    // serves a list of another root (the pin is suspended): a device that never read the
+    // list of that root takes its keys as keys that left too.
     for pin in &mut state.peers {
         let Some(entries) = reset.get(&pin.account_id) else {
             continue;
@@ -1183,7 +1187,7 @@ pub(super) fn learn_lists_with(
             .first()
             .and_then(|entry| entry.key.as_deref())
             .and_then(point)
-            .filter(|earlier| *earlier != pin.root_key())
+            .filter(|earlier| *earlier != pin.root_key() || pin.suspended)
         else {
             continue;
         };
