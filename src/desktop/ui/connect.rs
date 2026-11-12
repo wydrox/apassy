@@ -164,6 +164,9 @@ pub(crate) const START_NO_DEVICE: &str = concat!(
     ", then recover the account in Settings › Connect."
 );
 pub(crate) const RECOVER_LEAD: &str = "Use this only if no device of the account is left.";
+/// What a recovery deletes, under the lead of its sheet.
+pub(crate) const RECOVER_WHAT: &str =
+    "The vault copies at Connect are deleted; the vaults on your devices stay.";
 pub(crate) const RECOVER_CODE: &str = "Recovery Code";
 pub(crate) const RECOVER_CODE_HINT: &str = "The 16 words";
 pub(crate) const RECOVER_ID_WRONG: &str = "An account ID is acc_ and 10 letters and digits.";
@@ -235,7 +238,8 @@ pub(crate) const ADD_LEAD: &str = concat!(
 );
 pub(crate) const ADD_WAITING: &str = "Waiting for the other device…";
 pub(crate) const WORDS_TAIL: &str = "Confirm only if the other device shows the same words.";
-pub(crate) const REVOKE_LEAD: &str = "It leaves your Connect account. Its vaults stay on it.";
+pub(crate) const REVOKE_LEAD: &str =
+    "It leaves your Connect account and every vault copy at Connect. Its vaults stay on it.";
 pub(crate) const FORGET_TITLE: &str = concat!("Forget This ", crate::computer_cap!(), "?");
 pub(crate) const NOT_VERIFIED: &str = "Not verified";
 /// The device list that Connect sent did not verify on this device: every device shows
@@ -263,14 +267,16 @@ pub(crate) const OLD_FILE: &str = concat!(
     ", then add it again from another device."
 );
 pub(crate) const FORGET_REMOVED_LEAD: &str = concat!(
-    "The Connect key of this ",
+    "The Connect key and the account file of this ",
     crate::computer!(),
-    " is deleted. To come back, add it from another device."
+    " are deleted, and the vault copies of the account stop syncing on this ",
+    crate::computer!(),
+    ". To come back, add it from another device."
 );
 pub(crate) const FORGET_LEAD: &str = concat!(
     "This ",
     crate::computer!(),
-    " leaves your Connect account. To come back, add it from another device."
+    " leaves your Connect account, and its Connect key is deleted. To come back, add it from another device."
 );
 pub(crate) const JOIN_ACCOUNT_TITLE: &str =
     concat!("Add This ", crate::computer_cap!(), " to an Account");
@@ -285,8 +291,7 @@ pub(crate) const SEATS_NOTE: &str = "Stripe charges or credits the difference fo
 pub(crate) const JOIN_GROUP_REFUSED: &str =
     "This account has a plan or another family or team. Cancel or leave it first.";
 pub(crate) const DELETE_TITLE: &str = "Delete Your Connect Account?";
-pub(crate) const DELETE_LEAD: &str =
-    "The plan ends and Connect deletes the account for good. Your vaults stay on your devices.";
+pub(crate) const DELETE_LEAD: &str = "The plan ends now, and every vault copy, device, and link of the account is deleted at Connect. Your vaults stay on your devices.";
 pub(crate) const ACTIVE_FAMILY: &str = "Invite your family in Settings › Connect.";
 pub(crate) const ACTIVE_TEAM: &str = "Invite your team in Settings › Connect.";
 pub(crate) const MEMBERS_FIRST_TITLE: &str = "Remove the Members First";
@@ -336,6 +341,7 @@ pub(crate) const TEXTS: &[&str] = &[
     RECOVER_TITLE,
     START_NO_DEVICE,
     RECOVER_LEAD,
+    RECOVER_WHAT,
     RECOVER_CODE,
     RECOVER_CODE_HINT,
     RECOVER_ID_WRONG,
@@ -2005,6 +2011,8 @@ fn recover_sheet(
     busy: bool,
 ) -> Option<SheetChoice> {
     kit::sheet_title(ui, RECOVER_TITLE, Some(RECOVER_LEAD));
+    kit::note(ui, RECOVER_WHAT);
+    ui.add_space(8.0);
     let (id_note, code_note, ready) = recover_check(account_id, code, device_name);
     rows::group_box(ui, |g| {
         g.row(|ui| {
@@ -2437,7 +2445,9 @@ fn sheet_body(
                 destructive(
                     ui,
                     &format!("Leave the {word}?"),
-                    &format!("You leave the {word} and its shared vaults."),
+                    &format!(
+                        "You leave the {word} and its shared vaults. Your Connect account stays, without a plan."
+                    ),
                     None,
                     "Leave…",
                 )
@@ -2445,7 +2455,9 @@ fn sheet_body(
                 destructive(
                     ui,
                     &format!("Remove {name}?"),
-                    &format!("{name} leaves your {word} and its shared vaults."),
+                    &format!(
+                        "{name} leaves your {word} and its shared vaults. {name} keeps an Apassy Connect account without a plan."
+                    ),
                     None,
                     "Remove…",
                 )

@@ -2086,7 +2086,7 @@ impl OwnerRequest {
                 this_device: true,
                 ..
             } => format!(
-                concat!("Forget this ", crate::computer!(), " (\u{201c}{}\u{201d}, key {}) in your Apassy Connect account? It leaves every vault copy at Connect and signs out. Your vaults stay on this ", crate::computer!(), "."),
+                concat!("Forget this ", crate::computer!(), " (\u{201c}{}\u{201d}, key {}) in your Apassy Connect account? It leaves every vault copy at Connect, signs out, and its Connect key is deleted. Your vaults stay on this ", crate::computer!(), "."),
                 page_text(device_name),
                 page_text(fingerprint).replace(' ', "\u{a0}")
             ),
@@ -2099,7 +2099,7 @@ impl OwnerRequest {
                 page_text(device_name),
                 page_text(fingerprint).replace(' ', "\u{a0}")
             ),
-            Self::DeleteConnectAccount { .. } => "Delete your Apassy Connect account? The plan ends and Connect deletes the account for good. Your vaults stay on your devices.".to_owned(),
+            Self::DeleteConnectAccount { .. } => "Delete your Apassy Connect account? The plan ends now, and every vault copy, device, and link of the account is deleted at Connect. Your vaults stay on your devices.".to_owned(),
             Self::NewRecoveryCode { .. } => "Make a new recovery code? The old code stops working.".to_owned(),
             Self::RecoverConnectAccount { account_id } => format!(
                 concat!(
@@ -2341,7 +2341,17 @@ impl OwnerRequest {
                     "Apassy takes this copy as it is now."
                 },
             ),
-            Self::ChangeConnectGroup { change, .. } => match change {
+            Self::ChangeConnectGroup {
+                account_id: own,
+                change,
+                ..
+            } => match change {
+                // A member's own leave: the change removes the account of this device.
+                crate::broker::approvals::ConnectGroupChange::RemoveMember { account_id, .. }
+                    if account_id == own =>
+                {
+                    "Leave your Apassy Connect family or team? Your account stays, without a plan, and leaves the vaults that are shared with you.".to_owned()
+                }
                 crate::broker::approvals::ConnectGroupChange::ConfirmMember { name, .. } => format!(
                     "Add \"{}\" to your Apassy Connect family or team? They get the plan and can join the vaults that you share.",
                     page_text(name)
@@ -4468,6 +4478,40 @@ mod connect_proof_tests {
 #[cfg(test)]
 mod connect_prompt_tests {
     use super::OwnerRequest;
+
+    /// A member's own leave says Leave, not "Remove <own name>", and what stays; the
+    /// organizer's removal names the person. The deletion says what goes at Connect, now.
+    #[test]
+    fn the_group_and_deletion_prompts_say_what_is_lost() {
+        use crate::broker::approvals::ConnectGroupChange;
+        let change = |member: &str| OwnerRequest::ChangeConnectGroup {
+            account_id: "acc_ownaaaaaa".to_owned(),
+            group_id: "grp_aaaaaaaaaa".to_owned(),
+            change: ConnectGroupChange::RemoveMember {
+                account_id: member.to_owned(),
+                name: "Ola".to_owned(),
+            },
+        };
+        let leave = change("acc_ownaaaaaa").describe();
+        assert!(
+            leave.starts_with("Leave your Apassy Connect family or team?"),
+            "{leave}"
+        );
+        assert!(
+            leave.contains("without a plan") && !leave.contains("Remove"),
+            "{leave}"
+        );
+        let remove = change("acc_olaaaaaaaa").describe();
+        assert!(remove.starts_with("Remove \"Ola\""), "{remove}");
+        let delete = OwnerRequest::DeleteConnectAccount {
+            account_id: "acc_ownaaaaaa".to_owned(),
+        }
+        .describe();
+        assert!(
+            delete.contains("The plan ends now, and every vault copy, device, and link of the account is deleted at Connect."),
+            "{delete}"
+        );
+    }
 
     /// The owner compares the code of the browser page with this one: the prompt names
     /// the page in the browser, not "the agent", and says that the connect makes a new

@@ -1734,11 +1734,11 @@ fn mac_connect_texts_are_unchanged() {
         (FORGET_THIS_MAC, "Forget This Mac…"),
         (
             FORGET_REMOVED_LEAD,
-            "The Connect key of this Mac is deleted. To come back, add it from another device.",
+            "The Connect key and the account file of this Mac are deleted, and the vault copies of the account stop syncing on this Mac. To come back, add it from another device.",
         ),
         (
             FORGET_LEAD,
-            "This Mac leaves your Connect account. To come back, add it from another device.",
+            "This Mac leaves your Connect account, and its Connect key is deleted. To come back, add it from another device.",
         ),
         (JOIN_ACCOUNT_TITLE, "Add This Mac to an Account"),
         (JOINED_TITLE, "This Mac Is Added"),

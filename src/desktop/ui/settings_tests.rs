@@ -2686,3 +2686,19 @@ fn connect_move_texts_follow_the_rules_of_plans_section_5() {
         assert!(text.contains("Apassy Connect"), "{text}");
     }
 }
+
+/// N8-7 (node-pairing-v1 section 4a): the help of Node Words calls them safety words to
+/// compare and says that the same words are not proof of this computer.
+#[test]
+fn node_words_help_says_the_words_are_no_proof() {
+    let help = devices::WORDS_HELP.join(" ");
+    assert!(help.contains("Safety words to compare"), "{help}");
+    assert!(
+        help.contains(concat!(
+            "The same words are not proof of this ",
+            crate::computer!(),
+            ". The iPhone checks the whole certificate."
+        )),
+        "{help}"
+    );
+}

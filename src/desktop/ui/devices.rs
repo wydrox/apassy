@@ -88,9 +88,19 @@ const ROUTE_HELP: [&str; 2] = [
     ),
 ];
 /// The help of Node Words: safety words to compare, never proof of the node (N8-7).
-const WORDS_HELP: [&str; 2] = [
+pub(crate) const WORDS_HELP: [&str; 4] = [
+    concat!(
+        "Safety words to compare: six words from this ",
+        crate::computer!(),
+        "'s certificate."
+    ),
     "Your iPhone shows them in Settings → Devices.",
     "Other words there: revoke that iPhone and pair again.",
+    concat!(
+        "The same words are not proof of this ",
+        crate::computer!(),
+        ". The iPhone checks the whole certificate."
+    ),
 ];
 /// The help of the Devices list.
 const DEVICES_HELP: [&str; 5] = [
