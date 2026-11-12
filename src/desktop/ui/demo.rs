@@ -1731,8 +1731,15 @@ pub(crate) fn devices_view(frame: DevicesFrame) -> super::devices::DevicesView {
     } else {
         ("Hosts approvals", Route::Mac)
     };
+    // This computer: a Mac mini on macOS, a Linux desktop on Linux (its kind reads
+    // "Computer" there). The other Macs of the fixture are Macs on both.
+    let this_name = if cfg!(target_os = "linux") {
+        "Linux desktop"
+    } else {
+        "Mac mini (office)"
+    };
     let this_mac = demo_device(
-        "Mac mini (office)",
+        this_name,
         Kind::Mac,
         if first_run {
             "Asks for approvals"

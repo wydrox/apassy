@@ -1051,6 +1051,60 @@ fn devices_relay_group_restores_the_relay_and_the_other_macs() {
     assert!(text.contains(OLD_RELAY_ENTRY), "{text}");
 }
 
+/// A route that is off says "Approvals go through Apassy relay." only while the
+/// questions of the vault go through it (or the vault is locked); otherwise they stay on
+/// this Mac. The own row of the list carries the title-case badge "This Mac", and the
+/// move button reads "Move Approvals to This Mac…" in title case.
+#[test]
+fn devices_route_off_line_follows_the_questions() {
+    let with = |questions: Option<Questions>| DevicesView {
+        node: NodeState::Off,
+        relay: questions.map(|questions| RelayView {
+            questions,
+            feed_shown: true,
+            other_macs: None,
+            free_end: None,
+            ended: None,
+            can_move: false,
+            can_move_connect: false,
+        }),
+        ..frame_one()
+    };
+    for (questions, line) in [
+        (None, ROUTE_OFF),
+        (Some(Questions::On), ROUTE_OFF),
+        (Some(Questions::Locked), ROUTE_OFF),
+        (Some(Questions::NeedsTeam), devices::ROUTE_OFF_HERE),
+        (Some(Questions::CanTurnOn), devices::ROUTE_OFF_HERE),
+        (Some(Questions::JoinTeam), devices::ROUTE_OFF_HERE),
+        (Some(Questions::Removed), devices::ROUTE_OFF_HERE),
+        (Some(Questions::RemovedSync), devices::ROUTE_OFF_HERE),
+        (Some(Questions::Ended), devices::ROUTE_OFF_HERE),
+    ] {
+        let text = view_texts(&with(questions));
+        assert!(text.contains(line), "{questions:?}: {line}: {text}");
+        let other = if line == ROUTE_OFF {
+            devices::ROUTE_OFF_HERE
+        } else {
+            ROUTE_OFF
+        };
+        assert!(!text.contains(other), "{questions:?}: {other}: {text}");
+    }
+    let text = view_texts(&frame_one());
+    assert!(
+        text.contains(concat!("This ", crate::computer_cap!())),
+        "the badge in title case: {text}"
+    );
+    assert_eq!(
+        devices::MOVE_APPROVALS,
+        concat!("Move Approvals to This ", crate::computer_cap!(), "…")
+    );
+    assert_eq!(
+        devices::MOVE_TITLE,
+        concat!("Move Approvals to This ", crate::computer_cap!())
+    );
+}
+
 /// The texts of the steps of the add and move sheets, inside a sheet.
 fn step_texts(draw: impl Fn(&mut egui::Ui)) -> String {
     joined(&step_rects(draw))
@@ -1299,7 +1353,7 @@ fn devices_add_and_move_sheets_use_the_mockup_texts() {
         );
     });
     for expected in [
-        concat!("Move Approvals to This ", crate::computer!()),
+        concat!("Move Approvals to This ", crate::computer_cap!()),
         concat!(
             "Your iPhone pairs again, with this ",
             crate::computer!(),
@@ -1601,9 +1655,11 @@ fn devices_of_a_vault_without_a_team_show_this_mac_and_the_add_button() {
     let (mut app, _) = unlocked_app_with_item(&dir);
     super::super::open_settings(&mut app, SettingsSection::Devices);
     let (text, _) = frames(&mut app, TALL);
+    // The questions do not go through the relay: the switch says where they stay.
+    assert!(!text.contains(ROUTE_OFF), "{text}");
     for expected in [
         ROUTE_SWITCH,
-        ROUTE_OFF,
+        devices::ROUTE_OFF_HERE,
         "Tailscale is not installed.",
         ONLY_THIS_MAC,
         ADD_DEVICE,
@@ -2462,6 +2518,25 @@ fn devices_connect_frames_draw_the_mockup() {
     ] {
         assert!(text.contains(wanted), "9a has {wanted}: {text}");
     }
+    // The text spans the row; the two buttons sit on their own row below it, the move to
+    // Connect on the right.
+    let rects = view_rects(&both);
+    let note = rect_of(
+        &rects,
+        "Move them here: over your tailnet, or through Apassy Connect.",
+    );
+    let to_mac = rect_of(&rects, MOVE_APPROVALS);
+    let to_connect = rect_of(&rects, MOVE_TO_CONNECT);
+    assert!(
+        note.width() > 250.0,
+        "9a: the note is not a column: {note:?}"
+    );
+    assert!(to_mac.top() > note.bottom(), "{to_mac:?} under {note:?}");
+    assert!((to_mac.center().y - to_connect.center().y).abs() < 2.0);
+    assert!(
+        to_connect.left() > to_mac.right(),
+        "{to_connect:?} {to_mac:?}"
+    );
     // 9b: without Tailscale, the move to Connect alone.
     let connect_only = DevicesView {
         node: NodeState::Off,
@@ -2500,6 +2575,33 @@ fn devices_connect_frames_draw_the_mockup() {
     };
     let text = view_texts(&ended(true, true));
     assert!(text.contains(&ended_line(Ended::Free, "0.5.20")), "{text}");
+    // The line spans the row, and the moves sit on a row below it, once: the This Mac
+    // group has no move row of its own while they are ended.
+    for ended_why in [Ended::Free, Ended::Retired] {
+        let mut view = DevicesView {
+            can_move: true,
+            can_move_connect: true,
+            ..ended(true, true)
+        };
+        if let Some(relay) = view.relay.as_mut() {
+            relay.ended = Some((ended_why, "0.5.20".to_owned()));
+        }
+        let rects = view_rects(&view);
+        let text = joined(&rects);
+        assert_eq!(text.matches(MOVE_APPROVALS).count(), 1, "{text}");
+        assert_eq!(text.matches(MOVE_TO_CONNECT).count(), 1, "{text}");
+        assert!(
+            !text.contains("Approvals go through Apassy relay"),
+            "{text}"
+        );
+        let line = rect_of(&rects, &ended_line(ended_why, "0.5.20"));
+        let to_mac = rect_of(&rects, MOVE_APPROVALS);
+        assert!(
+            line.width() > 250.0,
+            "9d: the line is not a column: {line:?}"
+        );
+        assert!(to_mac.top() > line.bottom(), "{to_mac:?} under {line:?}");
+    }
     assert!(text.contains(RELAY_QUESTIONS_ENDED), "{text}");
     assert!(text.contains(MOVE_TO_CONNECT), "{text}");
     assert!(text.contains(MOVE_APPROVALS), "{text}");
