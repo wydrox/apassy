@@ -75,7 +75,7 @@ pub(crate) const LABEL: &str = "Apassy relay";
 pub(crate) const CONNECT_LABEL: &str = "Apassy Connect";
 /// What a vault store of Apassy Connect offers instead of "Add a device…" and
 /// "Devices…": a store has no device links; the devices of the account sync it.
-pub(crate) const CONNECT_DEVICES: &str = "Account Devices…";
+pub(crate) const CONNECT_DEVICES: &str = "Devices…";
 /// Its hint.
 pub(crate) const CONNECT_DEVICES_NOTE: &str =
     "Every device of your Apassy Connect account syncs this vault.";
@@ -135,7 +135,9 @@ pub(crate) const SYNC_AGAIN: &str = "Sync Again…";
 pub(crate) const STORE_REFUSED_WORDS: &str = concat!(
     "Apassy Connect no longer lets this ",
     crate::computer!(),
-    " into this vault's copy. Check Settings › Connect."
+    " into this vault's copy. The vault stays on this ",
+    crate::computer!(),
+    ". Check Settings › Connect."
 );
 /// A vault store that checks the device list this long says that Connect cannot be reached
 /// to check it, with "Try Again" (connect-account-v1 section 7.5).
@@ -1105,10 +1107,19 @@ pub(crate) fn connect_words(state: ConnectState) -> String {
         ),
         ConnectState::Suspended { delete_at } => match delete_at {
             Some(at) => format!(
-                "Connect: suspended. The copy at Connect is kept until {}.",
+                concat!(
+                    "Connect: suspended. The copy at Connect is kept until {}. The vault stays on this ",
+                    crate::computer!(),
+                    "."
+                ),
                 day(at)
             ),
-            None => "Connect: suspended. See Settings › Connect.".to_owned(),
+            None => concat!(
+                "Connect: suspended. The vault stays on this ",
+                crate::computer!(),
+                ". See Settings › Connect."
+            )
+            .to_owned(),
         },
         ConnectState::SignedOut => {
             "Connect: signed out. Choose Sign In… in Settings › Connect.".to_owned()
@@ -1305,8 +1316,11 @@ pub(crate) const MOVE_BOTH_COPIES: &str =
     "Both copies are kept, and the vault still syncs with the relay. Try again, or undo the move.";
 
 /// The relay row of a move whose old copy is deleted, while Connect did not turn on.
-pub(crate) const MOVE_OLD_DELETED: &str =
-    "The old copy is deleted, but sync with Apassy Connect is not on yet. Try again.";
+pub(crate) const MOVE_OLD_DELETED: &str = concat!(
+    "The old copy is deleted, but sync with Apassy Connect is not on yet. The vault stays on this ",
+    crate::computer!(),
+    ". Try again."
+);
 
 /// The words of "Move the relay copy to Connect" before it runs.
 pub(crate) const MOVE_WORDS: &str = "Apassy uploads this vault to Apassy Connect, then deletes the relay copy. If a step fails, both copies stay.";
@@ -7506,6 +7520,17 @@ mod access_repair_tests {
             connect_words(ConnectState::SignedOut).contains("Settings › Connect"),
             "the way on"
         );
+        // A suspended plan says that the vault stays, with or without the day.
+        for delete_at in [Some(1_805_000_000), None] {
+            assert!(
+                connect_words(ConnectState::Suspended { delete_at }).contains(concat!(
+                    "The vault stays on this ",
+                    crate::computer!(),
+                    "."
+                )),
+                "{delete_at:?}"
+            );
+        }
         for state in [
             read_only,
             past_due,

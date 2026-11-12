@@ -1157,20 +1157,14 @@ fn a_vault_on_connect_is_named_apassy_connect() {
     for expected in [
         "Apassy Connect",
         "Saved to Apassy Connect",
-        "Account Devices…",
+        super::sync::relay::CONNECT_DEVICES,
         "Sync now",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
-    // "Account Devices…" ends with the word of the relay's button; the relay's own
-    // "Devices…" is the one that must not show.
-    let text = text.replace("Account Devices…", "");
-    for refused in [
-        "Apassy relay",
-        "Saved to the relay",
-        "Add a device…",
-        "Devices…",
-    ] {
+    // One "Devices…": the one that opens Settings › Connect, not the relay's links.
+    assert_eq!(text.matches("Devices…").count(), 1, "{text}");
+    for refused in ["Apassy relay", "Saved to the relay", "Add a device…"] {
         assert!(!text.contains(refused), "{refused}: {text}");
     }
     assert_eq!(super::sync::sidebar_status(&a).0, "Apassy Connect");
@@ -4870,5 +4864,36 @@ fn a_store_deleted_at_a_recovery_is_named_once_and_a_new_store_syncs() {
         "{:?} {}",
         app.sync.statuses.get(&id),
         app.status_text
+    );
+}
+
+/// The line of a Sync row does not repeat the tag beside it; any other line stays whole.
+#[test]
+fn the_sync_line_does_not_repeat_its_tag() {
+    use super::sync::without_tag;
+    assert_eq!(
+        without_tag(
+            "Connect: past due. Sync works until 10 Dec 2026.",
+            "Connect: past due"
+        ),
+        "Sync works until 10 Dec 2026."
+    );
+    assert_eq!(
+        without_tag(
+            "Connect: read-only until 4 Jan 2027. Changes made here upload later.",
+            "Connect: read-only"
+        ),
+        "Until 4 Jan 2027. Changes made here upload later."
+    );
+    assert_eq!(
+        without_tag(
+            "Saved to Apassy Connect. Last sync just now.",
+            "Saved to Apassy Connect"
+        ),
+        "Last sync just now."
+    );
+    assert_eq!(
+        without_tag("Up to date as a.apassy in iCloud Drive.", "Up to date"),
+        "Up to date as a.apassy in iCloud Drive."
     );
 }

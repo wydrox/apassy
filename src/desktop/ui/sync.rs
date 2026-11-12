@@ -347,6 +347,23 @@ fn status_tag(link: &SyncLink, status: &UiStatus, connect: bool) -> (&'static st
     }
 }
 
+/// The line of a Sync row without the tag that the row draws beside it: "Connect: past
+/// due. Sync works until 10 Dec 2026. …" under the tag "Connect: past due" reads "Sync
+/// works until 10 Dec 2026. …", and "Connect: read-only until 4 Jan 2027. …" reads
+/// "Until 4 Jan 2027. …". Any other line stays whole.
+pub(super) fn without_tag(line: &str, tag: &str) -> String {
+    let Some(rest) = line.strip_prefix(tag) else {
+        return line.to_owned();
+    };
+    if let Some(rest) = rest.strip_prefix(". ") {
+        return rest.to_owned();
+    }
+    if let Some(rest) = rest.strip_prefix(" until ") {
+        return format!("Until {rest}");
+    }
+    line.to_owned()
+}
+
 /// A short folder name for the sidebar: the label of a detected folder, else the last
 /// part of the path.
 fn sidebar_folder_label(folders: &[SyncFolder], path: &Path) -> String {
@@ -1831,6 +1848,13 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                         (None, _) => {
                             "Sync is off. Open and unlock this vault to turn it on.".to_owned()
                         }
+                    };
+                    // The tag beside the picker says the state: the line does not say it again.
+                    let line = match (link, status) {
+                        (Some(link), Some(status)) => {
+                            without_tag(&line, status_tag(link, status, on_connect).0)
+                        }
+                        _ => line,
                     };
                     // A plan state of Apassy Connect is a warning, with its icon.
                     if let Some(why) = deleted {
