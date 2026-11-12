@@ -436,7 +436,7 @@ Apassy Connect (ADR 0037 stage 7; plan s7 unit M3) keeps the encrypted copy of a
 ### 18.1 Turn it on
 
 1. Settings › Connect: an account on this Mac with a plan that pushes (active, trialing, or past due in its grace). The account session opens with the unlock of the vault (one read of the key; with a Touch ID unlock, the key that it offered), and closes at the lock; "Sign In…" shows only when that read failed.
-2. Settings › Vault › Sync, the vault's row: the picker offers **Apassy Connect** after "Apassy relay" while the account can sync; it opens the sheet on its "Apassy Connect" choice (the sheet of "Apassy relay" offers the same choice first). Select "Turn on". The row, the Vault row of Settings, the sidebar, and the vault list then name the sync "Apassy Connect", and the row offers "Devices…" (Settings › Connect) instead of the device links of the relay.
+2. Settings › Vault › Sync, the vault's row: the picker offers **Apassy Connect** after "Apassy relay" while the account can sync; it opens the sheet on its "Apassy Connect" choice (the sheet of "Apassy relay" offers the same choice first). Select "Turn on". The row, the Vault row of Settings, the sidebar, and the vault list then name the sync "Apassy Connect", and the row offers "Open Connect…" (Settings › Connect) instead of the device links of the relay.
 3. Apassy makes the store (`POST /v1/account/vaults`; the same vault again answers the existing store), signs in to it with the account key, and pushes version 1. Then it adds the other live devices of the account to the store (`POST /v1/account/vaults/{team}/devices`). Those devices joined the account with the safety words and Touch ID on a live device; each still needs the vault passphrase.
 
 The account row, the sync state, and the link of the vault list are stored only after the first push worked. "This account is not on Apassy Connect, or its plan is read-only." means no plan that pushes: nothing turned on.
@@ -469,8 +469,8 @@ Your other Macs (and the other person's) take the share from the signed lists at
 **Stop sharing, or leave:**
 
 - The owner: "Stop Sharing…" on the person's line (owner check). Connect removes their devices from the copy at once; their later changes are not merged. Every device keeps the vault.
-- The other person: "Leave…" on the vault's line (owner check). This Mac turns off the sync of that vault; the vault stays on it. Their other Macs do the same when they read the leave: the vault's line ends "· left on <device>".
-- Apassy ends a share by itself, without an owner check, in two cases: the person left the vault ("<name> left this vault."), or Apassy Connect shows the person outside your family or team ("Sharing with <name> ended: no longer in your family or team."). An end gives no one access. To share again with a person who left, "Share with…" again; they join again.
+- The other person: "Leave…" on the vault's line (owner check). This Mac turns off the sync of that vault; the vault stays on it. Their other Macs do the same when they read the leave: the vault's line ends "· you left it on <device>".
+- Apassy ends a share by itself, without an owner check, in two cases: the person left the vault (the person's row says "Left"), or Apassy Connect shows the person outside your family or team ("Sharing with <name> ended: no longer in your family or team."). An end gives no one access. To share again with a person who left, "Share with…" again; they join again.
 - A person who recovered their account needs new words: the owner check of the new code says which shares with the old account end first.
 
 **The lines of the row:**
@@ -479,7 +479,7 @@ Your other Macs (and the other person's) take the share from the signed lists at
 | --- | --- |
 | "Checking who shares this vault…" | The newest copy (or one before it in the chain) was signed by a device that this Mac has not verified yet (for example a new Mac of the other person). Apassy reads the signed lists again after 30 s, then after twice the last wait, up to every 10 minutes, and shows no error for 10 minutes for that copy (a lock does not start the 10 minutes again). Only a read after those 10 minutes that still does not know the device refuses the copy, and the sync line shows the error. |
 | "Waiting for a device that shares this vault" | The newest copy was signed by a device that left (or a person whose share ended) after this Mac's last sync. A device that shares the vault signs a copy of its own over it at its next sync. |
-| "<name> reset the account. Share again." | The other person recovered their account (a new account key). Their devices sign nothing new until you compare new words: stop sharing, then share again with a new code. |
+| "<name> reset the account. Share again." | The other person recovered their account (a new account key). Their devices sign nothing new until you compare new words: "Share Again…" on their row makes a new code. |
 | "<name> must verify this account again." | The owner recovered their account; ask them to share again with a new code. |
 | "The share ended. The vault stays here." | The owner stopped sharing with you. |
 
