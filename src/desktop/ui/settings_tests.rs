@@ -1243,7 +1243,7 @@ fn devices_rows_follow_their_label_as_under_this_mac() {
         "a group under each label: {under_this_mac} {under_devices}"
     );
     assert!(
-        (under_devices - under_this_mac).abs() < 6.0,
+        (under_devices - under_this_mac).abs() <= 1.0,
         "the groups follow their labels: {under_devices} vs {under_this_mac}"
     );
 }
@@ -2760,16 +2760,88 @@ fn connect_move_texts_follow_the_rules_of_plans_section_5() {
 /// compare and says that the same words are not proof of this computer.
 #[test]
 fn node_words_help_says_the_words_are_no_proof() {
-    let help = devices::WORDS_HELP.join(" ");
-    assert!(help.contains("Safety words to compare"), "{help}");
-    assert!(
-        help.contains(concat!(
+    let view = frame_one();
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut nodes = Vec::new();
+    for _ in 0..3 {
+        nodes = devices_frame(&ctx, &view, Vec::new()).1;
+    }
+    let at = nodes
+        .iter()
+        .find(|(name, _)| name == "About Node Words")
+        .map(|(_, rect)| rect.center())
+        .unwrap_or_else(|| panic!("no ⓘ of Node Words in {nodes:?}"));
+    let button = |pressed| Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Modifiers::NONE,
+    };
+    devices_frame(&ctx, &view, vec![Event::PointerMoved(at)]);
+    devices_frame(&ctx, &view, vec![button(true)]);
+    devices_frame(&ctx, &view, vec![button(false)]);
+    let mut text = String::new();
+    for _ in 0..2 {
+        text = devices_frame(&ctx, &view, Vec::new()).0;
+    }
+    for line in [
+        concat!(
+            "Safety words to compare: six words from this ",
+            crate::computer!(),
+            "'s certificate."
+        ),
+        "Your iPhone shows them in Settings → Devices.",
+        "Other words there: revoke that iPhone and pair again.",
+        concat!(
             "The same words are not proof of this ",
             crate::computer!(),
             ". The iPhone checks the whole certificate."
-        )),
-        "{help}"
-    );
+        ),
+    ] {
+        assert!(text.contains(line), "the open ⓘ shows {line:?}: {text}");
+    }
+}
+
+/// One frame of the Devices section for `view` with `events`: the painted text, and the
+/// AccessKit nodes that have a label and bounds.
+fn devices_frame(
+    ctx: &egui::Context,
+    view: &DevicesView,
+    events: Vec<Event>,
+) -> (String, Vec<(String, Rect)>) {
+    let input = RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(720.0, 2400.0))),
+        events,
+        ..Default::default()
+    };
+    let output = ctx.run_ui(input, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
+            devices::draw(ui, view, |g| {
+                g.labeled("Notifications", super::rows::value("On"));
+            });
+        });
+    });
+    let mut texts = Vec::new();
+    for clipped in &output.shapes {
+        texts_of(&clipped.shape, clipped.clip_rect, &mut texts);
+    }
+    let mut nodes = Vec::new();
+    for update in &output.platform_output.accesskit_update {
+        for (_, node) in &update.nodes {
+            if let (Some(name), Some(at)) = (node.label(), node.bounds()) {
+                nodes.push((
+                    name.to_owned(),
+                    Rect::from_min_max(
+                        egui::pos2(at.x0 as f32, at.y0 as f32),
+                        egui::pos2(at.x1 as f32, at.y1 as f32),
+                    ),
+                ));
+            }
+        }
+    }
+    output.drop_without_applying_deltas();
+    (joined(&texts), nodes)
 }
 
 /// The labeled AccessKit nodes of the Devices section for `view` that carry a

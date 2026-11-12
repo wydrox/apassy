@@ -30,25 +30,50 @@ fn painted(mut add: impl FnMut(&egui::Context, &mut Ui)) -> String {
     text
 }
 
-/// The spoken names (AccessKit labels) of the section for `view`.
-fn spoken(view: &ShareView) -> Vec<String> {
+/// The painted galleys (each text with its rectangle) and the AccessKit buttons (each
+/// spoken name with its rectangle) of the section for `view`.
+fn layout(view: &ShareView) -> (Vec<(String, egui::Rect)>, Vec<(String, egui::Rect)>) {
+    fn walk(shape: &egui::Shape, out: &mut Vec<(String, egui::Rect)>) {
+        match shape {
+            egui::Shape::Text(text) => out.push((
+                text.galley.text().to_owned(),
+                egui::Rect::from_min_size(text.pos, text.galley.size()),
+            )),
+            egui::Shape::Vec(nested) => nested.iter().for_each(|inner| walk(inner, out)),
+            _ => {}
+        }
+    }
     let ctx = egui::Context::default();
     ctx.enable_accesskit();
-    let mut names = Vec::new();
+    let mut texts = Vec::new();
+    let mut buttons = Vec::new();
     for _ in 0..3 {
         let output = ctx.run_ui(input(0.0, Vec::new()), |ui| {
-            draw(ui, view);
+            let _ = draw(ui, view);
         });
-        names = output
-            .platform_output
-            .accesskit_update
-            .iter()
-            .flat_map(|update| update.nodes.iter())
-            .filter_map(|(_, node)| node.label().map(str::to_owned))
-            .collect();
+        texts.clear();
+        buttons.clear();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut texts);
+        }
+        for update in &output.platform_output.accesskit_update {
+            for (_, node) in &update.nodes {
+                if node.role() == egui::accesskit::Role::Button
+                    && let (Some(name), Some(at)) = (node.label(), node.bounds())
+                {
+                    buttons.push((
+                        name.to_owned(),
+                        egui::Rect::from_min_max(
+                            egui::pos2(at.x0 as f32, at.y0 as f32),
+                            egui::pos2(at.x1 as f32, at.y1 as f32),
+                        ),
+                    ));
+                }
+            }
+        }
         output.drop_without_applying_deltas();
     }
-    names
+    (texts, buttons)
 }
 
 fn store(team: &str, name: &str) -> VaultStoreView {
@@ -176,52 +201,71 @@ fn stores() -> Vec<VaultStoreView> {
 #[test]
 fn the_section_shows_each_state_of_a_shared_vault() {
     let view = view_of(&status(), &stores(), &local(), true, &[]);
-    let text = painted(|_, ui| {
-        draw(ui, &view);
-    });
-    for expected in [
-        SECTION,
-        "Family",
-        SHARE_WITH,
-        // One line per person: the name, and a word only for a state that is not the
-        // normal one; a problem line says the way on.
-        "Ola",
-        NOT_JOINED_STATE,
-        "Anna",
-        RESET_STATE,
-        &reset_owner("Anna"),
-        STOP_SHARING,
-        &shared_by("Garden", "Piotr"),
-        &reset_member("Piotr"),
-        &shared_by("Car", "Ewa"),
-        &stopped("Ewa"),
-        &offered_at("Travel", "Ola"),
-        "Piotr",
-        LEFT_STATE,
-        "Ewa",
-        ENDED_STATE,
-        SHARE_AGAIN,
-        JOIN,
-        LEAVE,
-        ACCEPT,
-    ] {
+    let (texts, buttons) = layout(&view);
+    let text: String = texts.iter().map(|(text, _)| format!("{text}\n")).collect();
+    for expected in ["Shared Vaults", "Accept Shared Vault…"] {
         assert!(text.contains(expected), "{expected} in:\n{text}");
     }
-    // Each person's button is spoken with the person and the vault.
-    let names = spoken(&view);
-    for expected in [
-        share_with("Family"),
-        stop("Family", "Ola"),
-        stop("Family", "Anna"),
-        // A person who reset the account is shared with again from the same row.
-        share_again("Family", "Anna"),
-        share_again("Family", "Piotr"),
-        share_again("Family", "Ewa"),
-    ] {
-        assert!(
-            names.contains(&expected),
-            "spoken {expected:?} in {names:?}"
-        );
+    // Each row: its painted text (the person or the vault, and a state word only off the
+    // normal state, on the same line), the problem line under it, and exactly its buttons
+    // by their spoken names, on the line of the text.
+    let rows: [(&str, Option<&str>, &[&str]); 9] = [
+        ("Family", None, &["Share Family with…"]),
+        ("Ola   Not joined", None, &["Stop Sharing Family with Ola…"]),
+        (
+            "Anna   Account reset",
+            Some("Anna reset the account. Share again."),
+            &[
+                "Share Family with Anna Again…",
+                "Stop Sharing Family with Anna…",
+            ],
+        ),
+        ("Piotr   Left", None, &["Share Family with Piotr Again…"]),
+        ("Ewa   Ended", None, &["Share Family with Ewa Again…"]),
+        (
+            "Garden · Piotr",
+            Some("Piotr must verify this account again."),
+            &["Leave Garden · Piotr"],
+        ),
+        (
+            "Car · Ewa",
+            Some("Ewa stopped sharing this vault."),
+            &["Leave Car · Ewa"],
+        ),
+        (
+            "\u{201c}Travel\u{201d} at Connect · Ola",
+            None,
+            &["Join \u{201c}Travel\u{201d} at Connect · Ola"],
+        ),
+        ("Accept Shared Vault…", None, &["Accept Shared Vault…"]),
+    ];
+    for (row, problem, expected) in rows {
+        let rect = texts
+            .iter()
+            .find(|(text, _)| text == row)
+            .map(|(_, rect)| *rect)
+            .unwrap_or_else(|| panic!("no row {row:?} in:\n{text}"));
+        let on_line: Vec<&str> = buttons
+            .iter()
+            .filter(|(_, at)| (at.center().y - rect.center().y).abs() < 8.0)
+            .map(|(name, _)| name.as_str())
+            .collect();
+        let mut on_line_sorted = on_line.clone();
+        on_line_sorted.sort_unstable();
+        let mut expected_sorted = expected.to_vec();
+        expected_sorted.sort_unstable();
+        assert_eq!(on_line_sorted, expected_sorted, "the buttons of {row:?}");
+        if let Some(problem) = problem {
+            let under = texts
+                .iter()
+                .find(|(text, _)| text == problem)
+                .map(|(_, at)| *at)
+                .unwrap_or_else(|| panic!("no {problem:?} in:\n{text}"));
+            assert!(
+                under.top() >= rect.bottom() - 1.0 && under.top() < rect.bottom() + 30.0,
+                "{problem:?} is under {row:?}: {under:?} {rect:?}"
+            );
+        }
     }
     // An offer whose store Connect does not name here: "A vault · Ola".
     let unnamed: Vec<VaultStoreView> = stores()
@@ -232,7 +276,7 @@ fn the_section_shows_each_state_of_a_shared_vault() {
     let text = painted(|_, ui| {
         draw(ui, &view);
     });
-    assert!(text.contains(&shared_by(VAULT_OFFERED, "Ola")), "{text}");
+    assert!(text.contains("A vault · Ola"), "{text}");
     // A head of a key not verified yet: the joined store says so.
     let checking = view_of(
         &status(),
@@ -248,7 +292,7 @@ fn the_section_shows_each_state_of_a_shared_vault() {
         .unwrap();
     assert_eq!(
         joined.joined.as_deref(),
-        Some(stopped("Ewa").as_str()),
+        Some("Ewa stopped sharing this vault."),
         "the end comes first"
     );
     let mut alive = status();

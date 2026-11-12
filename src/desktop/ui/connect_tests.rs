@@ -3462,30 +3462,93 @@ fn the_recovery_rows_fit_their_column_at_each_width() {
     }
 }
 
-/// A pending member keeps its role: the cap beside "Pending", and the hover text and
-/// VoiceOver description of its row ("Admin · Pending"); an active one says since when.
+/// A pending member keeps its role beside "Pending" on its painted row (an organizer
+/// confirms an admin knowingly); an active member's row has no "Pending". The role and
+/// the day it joined are its hover text.
 #[test]
 fn a_pending_member_keeps_its_role() {
     use super::connect::{Member, member_detail};
-    let member = |role: &str, state: &str| Member {
-        account_id: "acc_janaaaaaaa".to_owned(),
-        name: "Jan".to_owned(),
+    let member = |id: &str, name: &str, role: &str, state: &str| Member {
+        account_id: id.to_owned(),
+        name: name.to_owned(),
         role: role.to_owned(),
         state: state.to_owned(),
         joined_at: Some(1_790_000_000),
     };
+    let mut account = menu_account(false, true);
+    if let Some(group) = account.group.as_mut() {
+        group.kind = "team".to_owned();
+        group.members = vec![
+            member("acc_olaaaaaaaa", "Ola", "member", "active"),
+            member("acc_janaaaaaaa", "Jan", "admin", "pending"),
+        ];
+    }
+    let view = menu_view(account, false, false);
+    let ctx = egui::Context::default();
+    let mut texts = Vec::new();
+    for _ in 0..3 {
+        texts = galleys(&ctx, &view);
+    }
+    let row = |name: &str| {
+        texts
+            .iter()
+            .find(|(text, _)| text == name)
+            .map(|(_, rect)| *rect)
+            .unwrap_or_else(|| panic!("no row {name}: {texts:?}"))
+    };
+    let on_row = |row: egui::Rect, cap: &str| {
+        texts.iter().any(|(text, rect)| {
+            text == cap
+                && (rect.center().y - row.center().y).abs() < 6.0
+                && rect.left() > row.right()
+        })
+    };
+    let jan = row("Jan");
+    assert!(on_row(jan, "Admin"), "Jan's row has Admin: {texts:?}");
+    assert!(on_row(jan, "Pending"), "Jan's row has Pending: {texts:?}");
+    let ola = row("Ola");
+    assert!(
+        !on_row(ola, "Pending"),
+        "Ola's row has no Pending: {texts:?}"
+    );
     assert_eq!(
-        member_detail("team", &member("admin", "pending")),
+        member_detail("team", &member("acc_janaaaaaaa", "Jan", "admin", "pending")),
         "Admin · Pending"
     );
     assert_eq!(
-        member_detail("family", &member("member", "pending")),
+        member_detail(
+            "family",
+            &member("acc_janaaaaaaa", "Jan", "member", "pending")
+        ),
         "Member · Pending"
     );
     assert_eq!(
-        member_detail("team", &member("admin", "active")),
-        format!("Admin · Since {}", super::connect::day(1_790_000_000))
+        member_detail("team", &member("acc_janaaaaaaa", "Jan", "admin", "active")),
+        "Admin · Since 21 Sep 2026"
     );
+}
+
+/// The painted galleys of one frame of the section: each text with its rectangle.
+fn galleys(ctx: &egui::Context, view: &ConnectView) -> Vec<(String, egui::Rect)> {
+    fn walk(shape: &egui::Shape, out: &mut Vec<(String, egui::Rect)>) {
+        match shape {
+            egui::Shape::Text(text) => out.push((
+                text.galley.text().to_owned(),
+                egui::Rect::from_min_size(text.pos, text.galley.size()),
+            )),
+            egui::Shape::Vec(nested) => nested.iter().for_each(|inner| walk(inner, out)),
+            _ => {}
+        }
+    }
+    let output = ctx.run_ui(input(0.0, Vec::new()), |ui| {
+        let _ = super::connect::draw(ui, view);
+    });
+    let mut out = Vec::new();
+    for clipped in &output.shapes {
+        walk(&clipped.shape, &mut out);
+    }
+    output.drop_without_applying_deltas();
+    out
 }
 
 /// An account of the menu tests: this device and another one, the list verified, a family
@@ -3669,34 +3732,66 @@ fn click_node(
     section_frame(ctx, view, vec![button(false)]).2
 }
 
-/// The ⋯ of the Account row opens a menu with the account id and its items; an item that
-/// is on acts, and Delete Account… does nothing while the vault is locked.
+/// The ⋯ of the Account row opens a menu with the account id and its items, and each
+/// item that is on acts: Copy Account ID copies, Forget This Mac… and Delete Account… open
+/// their alerts, and the two that need an owner check do nothing while the vault is
+/// locked. New Code… of the Recovery Code row is off while the vault is locked and while
+/// the device list did not verify.
 #[test]
 fn the_account_menu_opens_and_its_items_act() {
-    use super::connect::{COPY_ACCOUNT_ID, DELETE, MORE_ACCOUNT};
-    for locked in [false, true] {
-        let view = menu_view(menu_account(false, true), locked, false);
+    use super::connect::{MORE_ACCOUNT, NEW_RECOVERY};
+    const COPY: &str = "Copy Account ID acc_k7m2q4x3ca";
+    const FORGET: &str = concat!("Forget This ", crate::computer_cap!(), "…");
+    const DELETE: &str = "Delete Account…";
+    let press = |view: &ConnectView, item: &str| {
         let ctx = egui::Context::default();
         ctx.enable_accesskit();
         let mut nodes = Vec::new();
         for _ in 0..3 {
-            nodes = section_frame(&ctx, &view, Vec::new()).1;
+            nodes = section_frame(&ctx, view, Vec::new()).1;
         }
-        assert_eq!(click_node(&ctx, &view, &nodes, MORE_ACCOUNT), None);
-        let (text, nodes, _) = section_frame(&ctx, &view, Vec::new());
-        for item in ["acc_k7m2q4x3ca", COPY_ACCOUNT_ID, FORGET_THIS_MAC, DELETE] {
-            assert!(
-                text.contains(item),
-                "{locked}: the menu shows {item}: {text}"
-            );
+        assert_eq!(click_node(&ctx, view, &nodes, MORE_ACCOUNT), None);
+        let (text, nodes, _) = section_frame(&ctx, view, Vec::new());
+        for shown in ["Copy Account ID", "acc_k7m2q4x3ca", FORGET, DELETE] {
+            assert!(text.contains(shown), "the menu shows {shown}: {text}");
         }
-        let pressed = click_node(&ctx, &view, &nodes, DELETE);
-        if locked {
-            assert_eq!(pressed, None, "Delete Account… is off while locked");
-        } else {
-            assert_eq!(pressed, Some(Action::Delete));
+        click_node(&ctx, view, &nodes, item)
+    };
+    let open = menu_view(menu_account(false, true), false, false);
+    assert_eq!(press(&open, COPY), Some(Action::CopyAccountId));
+    assert_eq!(press(&open, FORGET), Some(Action::Revoke(0)));
+    assert_eq!(press(&open, DELETE), Some(Action::Delete));
+    let locked = menu_view(menu_account(false, true), true, false);
+    assert_eq!(press(&locked, COPY), Some(Action::CopyAccountId));
+    assert_eq!(
+        press(&locked, FORGET),
+        None,
+        "Forget This Mac… is off while locked"
+    );
+    assert_eq!(
+        press(&locked, DELETE),
+        None,
+        "Delete Account… is off while locked"
+    );
+    // New Code… (spoken "New Recovery Code…") of the Recovery Code row.
+    let new_code = |view: &ConnectView| {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut nodes = Vec::new();
+        for _ in 0..3 {
+            nodes = section_frame(&ctx, view, Vec::new()).1;
         }
-    }
+        click_node(&ctx, view, &nodes, NEW_RECOVERY)
+    };
+    assert_eq!(new_code(&open), Some(Action::NewRecoveryCode));
+    assert_eq!(new_code(&locked), None, "New Code… is off while locked");
+    let mut unverified = menu_account(false, true);
+    unverified.list_verified = false;
+    assert_eq!(
+        new_code(&menu_view(unverified, false, false)),
+        None,
+        "New Code… is off while the device list did not verify"
+    );
 }
 
 /// The labeled AccessKit nodes of the section that carry a description.
@@ -3746,16 +3841,14 @@ fn account_rows_describe_their_facts() {
             },
         ];
     }
-    let device = account.devices[1].clone();
     let view = menu_view(account, false, false);
     let ctx = egui::Context::default();
     ctx.enable_accesskit();
     let found = section_descriptions(&ctx, &view);
-    let day = super::connect::day(1_790_000_000);
     for (label, description) in [
-        (device.name.clone(), super::connect::device_detail(&device)),
-        ("Ola".to_owned(), format!("Member · Since {day}")),
-        ("Jan".to_owned(), "Admin · Pending".to_owned()),
+        ("Laptop", "Mac · Added 21 Sep 2026 · Key 3f0a 91c2 7be4"),
+        ("Ola", "Member · Since 21 Sep 2026"),
+        ("Jan", "Admin · Pending"),
     ] {
         assert!(
             found
@@ -3764,18 +3857,13 @@ fn account_rows_describe_their_facts() {
             "{label}: {description} in {found:?}"
         );
     }
-    assert!(
-        super::connect::device_detail(&device).contains("Key 3f0a 91c2 7be4"),
-        "the key is in the facts"
-    );
 }
 
 /// A recovery code made on another device: the line with OK, and the ⓘ beside it says that
 /// the old code no longer works and what to do when it was not you.
 #[test]
 fn a_replaced_recovery_code_says_more_behind_its_info_button() {
-    use super::connect::{RECOVERY_CHANGED_HELP, RecoveryLine};
-    assert_eq!(RECOVERY_CHANGED_HELP[0], "The old code no longer works.");
+    use super::connect::RecoveryLine;
     let mut account = menu_account(false, true);
     account.recovery_changed = Some(RecoveryLine {
         text: super::connect::recovery_changed(Some("MacBook Air"), Some(1_790_000_000)),
@@ -3790,7 +3878,10 @@ fn a_replaced_recovery_code_says_more_behind_its_info_button() {
     }
     let _ = click_node(&ctx, &view, &nodes, "About Recovery Code");
     let (text, _, _) = section_frame(&ctx, &view, Vec::new());
-    for line in RECOVERY_CHANGED_HELP {
+    for line in [
+        "The old code no longer works.",
+        "Not you? Revoke that device, then make a new code.",
+    ] {
         assert!(text.contains(line), "{line} in {text}");
     }
 }

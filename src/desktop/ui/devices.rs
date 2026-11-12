@@ -1057,14 +1057,15 @@ fn buttons_row(g: &mut rows::Group<'_>, add: impl FnOnce(&mut Ui)) {
     });
 }
 
-/// A group label with an ⓘ and a count on the right: "Devices ⓘ 6".
-/// "Devices ⓘ": the title of the list, without a count (the header says how many).
+/// "Devices ⓘ": the title of the list, without a count (the header says how many), and
+/// the ⓘ of the routes while the list has more than this Mac.
 fn devices_label(ui: &mut Ui, count: usize) {
     ui.add_space(LABEL_TOP);
-    ui.horizontal(|ui| {
+    let mut text_bottom = f32::NEG_INFINITY;
+    let row = ui.horizontal(|ui| {
         ui.add_space(2.0);
         ui.spacing_mut().item_spacing.x = 4.0;
-        ui.add(
+        let title = ui.add(
             Label::new(
                 kit::text("Devices", Font::Callout)
                     .variation(b"wght", 600.0)
@@ -1072,11 +1073,15 @@ fn devices_label(ui: &mut Ui, count: usize) {
             )
             .selectable(false),
         );
+        text_bottom = title.rect.bottom();
         if count > 1 {
             kit::help_button(ui, "Devices", &DEVICES_HELP);
         }
     });
-    ui.add_space(6.0);
+    // The ⓘ makes the row taller than its text: the group starts as far under the text as
+    // under the title of every other group ([`rows::group_label`]).
+    let below_text = (row.response.rect.bottom() - text_bottom).max(0.0);
+    ui.add_space((6.0 - below_text).max(0.0));
 }
 
 fn devices_group(ui: &mut Ui, view: &DevicesView, action: &mut Option<Action>) {
