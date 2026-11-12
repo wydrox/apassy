@@ -15,7 +15,7 @@
 //!   [`ConnectAccount::view`] verifies it from the pinned root and from the pinned version
 //!   on, and only a device of the verified list counts as a device of the account. A
 //!   confirmation and a revoke are entries of that list that this Mac signs.
-//! - "Add a device…" on this Mac: [`ConnectAccount::start_link`],
+//! - "Add a Device…" on this Mac: [`ConnectAccount::start_link`],
 //!   [`ConnectAccount::pending_joins`] with the six safety words, and
 //!   [`ConnectAccount::confirm_join`] with a fresh owner check
 //!   (`OwnerAction::ConfirmConnectDevice`). **No account sign-in adds a device**: an
@@ -837,7 +837,7 @@ fn finish_sign_in(
     ))
 }
 
-/// The link of "Add a device…": the code in memory, shown with a Copy button and as a QR
+/// The link of "Add a Device…": the code in memory, shown with a Copy button and as a QR
 /// code of the same text, and its number at Connect. Debug is redacted.
 pub struct DeviceLink {
     code: LinkCode,
@@ -2259,7 +2259,7 @@ impl ConnectAccount {
 
     // ---- Devices (section 7). ----
 
-    /// "Add a device…": a new link code in memory and its hash at Connect. The code names
+    /// "Add a Device…": a new link code in memory and its hash at Connect. The code names
     /// the account root that this Mac pinned and this Mac's key, so the new device checks
     /// the keys that Connect gives it. The link works once and for 10 minutes.
     pub fn start_link(&mut self) -> Result<DeviceLink, ConnectError> {

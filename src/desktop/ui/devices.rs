@@ -3,7 +3,7 @@
 //!
 //! The section has, in this order: the This Mac group with the node of this Mac on the
 //! tailnet ("Reachable on Your Tailnet", its address, port, and Node Words, one line for
-//! each problem, "Move Here…" when the approvals still go through
+//! each problem, "Move to This Mac…" when the approvals still go through
 //! Apassy relay, and the notifications), the Devices list with one row for each device of
 //! each team (kind, roles, the route word, the last contact, and Revoke… or Details…),
 //! the one add button, and the Wi-Fi Pairing group while a Wi-Fi iPhone is paired
@@ -53,7 +53,7 @@ pub(crate) const ROUTE_LOCKED: &str = "Stopped while the vault is locked.";
 /// The one add button of the section.
 pub(crate) const ADD_DEVICE: &str = concat!("Add an iPhone or a ", crate::computer!(), "…");
 /// The button of the move row (frame 4).
-pub(crate) const MOVE_APPROVALS: &str = "Move Here…";
+pub(crate) const MOVE_APPROVALS: &str = concat!("Move to This ", crate::computer_cap!(), "…");
 /// The button of the move to Apassy Connect (frame 9a; plan s7 unit M5).
 pub(crate) const MOVE_TO_CONNECT: &str = "Move to Connect…";
 /// Its spoken name: what moves, and where.
@@ -973,7 +973,7 @@ fn connect_pending_row(g: &mut rows::Group<'_>, action: &mut Option<Action>) {
 }
 
 /// Frame 4: the approvals still go through Apassy relay. `to_mac`: the tailnet route
-/// runs ("Move Here…"); `to_connect`: the node runs on Apassy Connect
+/// runs ("Move to This Mac…"); `to_connect`: the node runs on Apassy Connect
 /// ("Move to Connect…", frame 9a). The first one is the blue button.
 fn move_row(g: &mut rows::Group<'_>, to_mac: bool, to_connect: bool, action: &mut Option<Action>) {
     let text = |ui: &mut Ui| {
@@ -1653,8 +1653,8 @@ pub(crate) fn wifi_notice(ctx: &egui::Context, tailnet: bool) -> (Option<Choice>
 
 // ---- Frames 2 and 4b–4d: the add and move sheets. ----
 //
-// The sheet of "Add an iPhone or a Mac…" and of "Move Here…" is the
-// questions mode of "Add a device…" of relay sync (`sync/relay.rs`); these functions draw
+// The sheet of "Add an iPhone or a Mac…" and of "Move to This Mac…" is the
+// questions mode of "Add a Device…" of relay sync (`sync/relay.rs`); these functions draw
 // its steps inside it, with the exact texts of the mockup, and the demo build draws them
 // from fixtures.
 

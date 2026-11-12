@@ -1043,7 +1043,7 @@ fn devices_relay_group_restores_the_relay_and_the_other_macs() {
 /// A route that is off says "Approvals go through Apassy relay." only while the
 /// questions of the vault go through it (or the vault is locked); otherwise they stay on
 /// this Mac. The own row of the list carries the title-case badge "This Mac", and the
-/// move button reads "Move Here…" in title case.
+/// move button reads "Move to This Mac…" in title case.
 #[test]
 fn devices_route_off_line_follows_the_questions() {
     let with = |questions: Option<Questions>| DevicesView {
@@ -1084,7 +1084,10 @@ fn devices_route_off_line_follows_the_questions() {
         text.contains(concat!("This ", crate::computer_cap!())),
         "the badge in title case: {text}"
     );
-    assert_eq!(devices::MOVE_APPROVALS, "Move Here…");
+    assert_eq!(
+        devices::MOVE_APPROVALS,
+        concat!("Move to This ", crate::computer_cap!(), "…")
+    );
     assert_eq!(
         devices::MOVE_TITLE,
         concat!("Move Approvals to This ", crate::computer_cap!())

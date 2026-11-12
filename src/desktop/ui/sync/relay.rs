@@ -1,12 +1,12 @@
 //! Sync through the Apassy relay in the app (ADR 0022 section 5, contract relay-sync-v1
-//! sections 6 and 7): the "Apassy relay" sheet that turns it on, "Add a device…" with the
+//! sections 6 and 7): the "Apassy relay" sheet that turns it on, "Add a Device…" with the
 //! safety words and the owner check, "Devices…", the relay source of "Use a vault from
 //! another Mac", "Turn off" with "Delete the copy on the relay", "Replace with this Mac's
 //! vault…", and the status words.
 //!
 //! The engine is [`crate::sync::RelaySync`]. Every relay call that the owner starts runs
-//! on its own thread ([`Task`]): turning sync on with the first upload, "Add a device…" and
-//! its question every 5 seconds, "Devices…", "Sync now", the receipts of the other Macs,
+//! on its own thread ([`Task`]): turning sync on with the first upload, "Add a Device…" and
+//! its question every 5 seconds, "Devices…", "Sync Now", the receipts of the other Macs,
 //! "Turn off", the replace of a damaged copy, a new passphrase, and the link, the wait,
 //! the download, and the adoption of a Mac that joins. The window shows what runs
 //! ([`Job::progress`]) and stays responsive; each frame takes the answers
@@ -24,7 +24,7 @@
 //! answered: a folder sync of the vault goes on until then, and stays when the relay
 //! refuses.
 //!
-//! The link of "Add a device…", a typed team code, and a pasted link for a vault of this
+//! The link of "Add a Device…", a typed team code, and a pasted link for a vault of this
 //! Mac stay in memory only while their sheet is open. A lock drops them. The team code
 //! field is masked, and its text goes after each try, as a passphrase does.
 //!
@@ -73,9 +73,9 @@ pub(crate) const LABEL: &str = "Apassy relay";
 /// The name of the sync of a vault through a vault store of the Apassy Connect account
 /// (plan s7 unit M3), in the same places.
 pub(crate) const CONNECT_LABEL: &str = "Apassy Connect";
-/// What a vault store of Apassy Connect offers instead of "Add a device…" and
+/// What a vault store of Apassy Connect offers instead of "Add a Device…" and
 /// "Devices…": a store has no device links; the devices of the account sync it.
-pub(crate) const CONNECT_DEVICES: &str = "Devices…";
+pub(crate) const CONNECT_DEVICES: &str = "Open Connect…";
 /// Its hint.
 pub(crate) const CONNECT_DEVICES_NOTE: &str =
     "Every device of your Apassy Connect account syncs this vault.";
@@ -144,7 +144,7 @@ pub(crate) const STORE_REFUSED_WORDS: &str = concat!(
 pub(crate) const CHECK_LIST_LONG: Duration = Duration::from_secs(10 * 60);
 /// The line of such a store.
 pub(crate) const CHECK_LIST_UNREACHABLE: &str = concat!(
-    "Apassy Connect cannot be reached to check the devices. Changes stay on this ",
+    "Apassy Connect cannot be reached to check the devices. Apassy keeps checking. Changes stay on this ",
     crate::computer!(),
     " until then."
 );
@@ -207,9 +207,9 @@ pub(crate) enum Job {
     /// "Turn on" with a team code and the first upload, or "Join from another Mac" for a
     /// vault of the list.
     TurnOn,
-    /// The link of "Add a device…".
+    /// The link of "Add a Device…".
     NewLink,
-    /// The devices that wait in "Add a device…".
+    /// The devices that wait in "Add a Device…".
     Links,
     /// "Confirm…" after the owner check.
     Confirm,
@@ -221,7 +221,7 @@ pub(crate) enum Job {
     Remove,
     /// Whether this Mac is the last of its team, for "Turn off…".
     LastMac,
-    /// "Sync now".
+    /// "Sync Now".
     SyncNow,
     /// The receipts of the other Macs.
     Receipts,
@@ -408,7 +408,7 @@ struct Running {
     relay: Option<RelaySync>,
 }
 
-/// "Add a device…" while its sheet is open.
+/// "Add a Device…" while its sheet is open.
 struct AddMac {
     older: Vec<(crate::vault::TrustedDevice, String)>,
     /// The vault (list ID).
@@ -459,7 +459,7 @@ impl AddMac {
     }
 }
 
-/// A device of the questions team as the sheet of "Add a device…" shows it.
+/// A device of the questions team as the sheet of "Add a Device…" shows it.
 fn team_device_view(device: TeamDevice) -> DeviceView {
     DeviceView {
         id: device.id,
@@ -827,7 +827,7 @@ impl RelayUi {
         holds.then_some(self.join_source)
     }
 
-    /// Whether the sheet of "Add a device…" (any mode) is open for the vault `id`.
+    /// Whether the sheet of "Add a Device…" (any mode) is open for the vault `id`.
     pub(crate) fn add_open_for(&self, id: &str) -> bool {
         self.add.as_ref().is_some_and(|add| add.id == id)
     }
@@ -1096,7 +1096,10 @@ pub(crate) fn connect_words(state: ConnectState) -> String {
                 "Connect: past due. Sync works until {}. Update the payment in Settings › Connect.",
                 day(until)
             ),
-            None => "Connect: past due. Update the payment in Settings › Connect.".to_owned(),
+            None => {
+                "Connect: past due. Sync still works. Update the payment in Settings › Connect."
+                    .to_owned()
+            }
         },
         ConnectState::ReadOnly { until } => format!(
             "{}. Changes made here upload when the plan is active again.",
@@ -1312,8 +1315,7 @@ pub(crate) const CONNECT_SETUP_WORDS: &str =
     "Your other devices of the account turn it on the same way, without a link code.";
 
 /// The relay row of a move that kept both copies.
-pub(crate) const MOVE_BOTH_COPIES: &str =
-    "Both copies are kept, and the vault still syncs with the relay. Try again, or undo the move.";
+pub(crate) const MOVE_BOTH_COPIES: &str = "Both copies are kept, at Apassy Connect and on the relay, and the vault still syncs with the relay. Try again, or undo the move.";
 
 /// The relay row of a move whose old copy is deleted, while Connect did not turn on.
 pub(crate) const MOVE_OLD_DELETED: &str = concat!(
@@ -1461,7 +1463,7 @@ impl DesktopApp {
     /// Whether another Mac removed this one from the relay team of the vault `id`
     /// ([`RelaySync::is_removed`]). Until the worker asks the relay again, every relay
     /// call of the vault fails at once, so the window offers only turning relay sync
-    /// off: no "Sync now", "Add a device…", "Devices…", "Check again", or "Refresh".
+    /// off: no "Sync Now", "Add a Device…", "Devices…", "Check again", or "Refresh".
     pub(crate) fn relay_removed(&self, id: &str) -> bool {
         lock(&self.sync.relay.cache)
             .get(id)
@@ -2302,7 +2304,7 @@ impl DesktopApp {
                         concat!(
                             "“{name}” syncs through your own node. To add another ",
                             crate::computer!(),
-                            " or an iPhone, select “Add a device…”."
+                            " or an iPhone, select “Add a Device…”."
                         ),
                         name = name
                     )
@@ -2311,7 +2313,7 @@ impl DesktopApp {
                         concat!(
                             "“{name}” syncs through the Apassy relay. To add another ",
                             crate::computer!(),
-                            " or an iPhone, select “Add a device…”."
+                            " or an iPhone, select “Add a Device…”."
                         ),
                         name = name
                     )
@@ -2393,7 +2395,7 @@ impl DesktopApp {
         }
     }
 
-    /// Erase the team code and a pasted link, and drop the link of "Add a device…". A Mac
+    /// Erase the team code and a pasted link, and drop the link of "Add a Device…". A Mac
     /// that joins for a vault of this list stops.
     pub(crate) fn relay_forget_codes(&mut self) {
         let relay = &mut self.sync.relay;
@@ -2415,7 +2417,7 @@ impl DesktopApp {
         }
     }
 
-    /// A relay sheet closed: "Add a device…" refuses the Macs that wait for its link
+    /// A relay sheet closed: "Add a Device…" refuses the Macs that wait for its link
     /// (contract section 7.1 step 4), and a join for a vault of this list stops.
     pub(crate) fn relay_sheet_closed(&mut self) {
         // A move before its join stops; an ended move's sheet is seen.
@@ -3395,7 +3397,7 @@ impl DesktopApp {
         self.sync.relay.switch_to = Some(folder);
     }
 
-    /// "Sync now" for the open vault `id` on the relay, then the receipts of the other
+    /// "Sync Now" for the open vault `id` on the relay, then the receipts of the other
     /// Macs, on its own thread.
     pub(crate) fn relay_sync_now(&mut self, id: &str) {
         // A vault store that Connect deleted at a recovery is asked nothing.
@@ -3887,7 +3889,7 @@ impl DesktopApp {
             .is_some_and(|relay| relay.keeps_passphrase())
     }
 
-    // ---- "Add a device…". ----
+    // ---- "Add a Device…". ----
 
     /// A new link for another Mac or an iPhone.
     fn relay_add_mac_start(&mut self, id: &str) {
@@ -5458,7 +5460,7 @@ impl DesktopApp {
         self.relay_settle_for_test();
     }
 
-    /// "Add a device…" asks the relay now, and takes the answer.
+    /// "Add a Device…" asks the relay now, and takes the answer.
     pub(crate) fn relay_add_mac_poll_for_test(&mut self) {
         self.relay_add_mac_poll();
         self.relay_settle_for_test();
@@ -5469,7 +5471,7 @@ impl DesktopApp {
         Some(std::mem::replace(&mut code.expires_at, expires_at))
     }
 
-    /// The link of the open "Add a device…" sheet.
+    /// The link of the open "Add a Device…" sheet.
     pub(crate) fn relay_add_mac_link_for_test(&self) -> Option<String> {
         let add = self.sync.relay.add.as_ref()?;
         add.code.as_ref().map(|code| match &add.channel {
@@ -5478,12 +5480,12 @@ impl DesktopApp {
         })
     }
 
-    /// The QR code of the open "Add a device…" sheet.
+    /// The QR code of the open "Add a Device…" sheet.
     pub(crate) fn relay_add_mac_qr_for_test(&self) -> Option<&QrModules> {
         self.sync.relay.add.as_ref()?.qr.as_ref()
     }
 
-    /// The devices that wait in the open "Add a device…" sheet.
+    /// The devices that wait in the open "Add a Device…" sheet.
     pub(crate) fn relay_add_mac_links_for_test(&self) -> Vec<PendingLink> {
         self.sync
             .relay
@@ -5493,7 +5495,7 @@ impl DesktopApp {
             .unwrap_or_default()
     }
 
-    /// "Confirm…" in the open "Add a device…" sheet.
+    /// "Confirm…" in the open "Add a Device…" sheet.
     pub(crate) fn relay_ask_confirm_for_test(&mut self, link_id: u64) {
         self.relay_ask_confirm(link_id, None);
     }
@@ -5829,7 +5831,7 @@ pub(super) fn setup_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &Vau
                         concat!(
                             "For a vault that is on the relay or on Apassy Connect already. On the ",
                             crate::computer!(),
-                            " that syncs it, select “Add a device…” and copy the link. Apassy merges the copy with this vault. A family or team vault that someone shares with you joins the same way: their ",
+                            " that syncs it, select “Add a Device…” and copy the link. Apassy merges the copy with this vault. A family or team vault that someone shares with you joins the same way: their ",
                             crate::computer!(),
                             " shows the same words as this one, and you type the passphrase of the vault."
                         )
@@ -5837,7 +5839,7 @@ pub(super) fn setup_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &Vau
                         concat!(
                             "For a vault that is on the relay already. On the ",
                             crate::computer!(),
-                            " that syncs it, select “Add a device…” and copy the link. Apassy merges the relay copy with this vault."
+                            " that syncs it, select “Add a Device…” and copy the link. Apassy merges the relay copy with this vault."
                         )
                     }),
                     |s| {
@@ -5936,16 +5938,16 @@ pub(super) fn setup_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &Vau
     response.escape
 }
 
-/// The width of the QR code of "Add a device…" in points, about.
+/// The width of the QR code of "Add a Device…" in points, about.
 const LINK_QR_POINTS: f32 = 180.0;
 
-/// The QR code of a link of "Add a device…" for the iPhone app: exactly the text of the
+/// The QR code of a link of "Add a Device…" for the iPhone app: exactly the text of the
 /// link, `<relay URL>/link#apassy_lnk_…`, as "Copy link" copies it.
 fn link_qr(code: &LinkCode) -> Option<QrModules> {
     QrModules::new(&code.link)
 }
 
-/// "Add a device…": the link for another Mac, as text and as a QR code for an iPhone, then
+/// "Add a Device…": the link for another Mac, as text and as a QR code for an iPhone, then
 /// each device that asks, with the safety words, "Confirm…", and "Refuse" (contract
 /// section 7.1). With `iphone`, "Add an iPhone…" of a notifications-only team (plan §A7):
 /// the same steps through the questions team, for an iPhone that joins with
@@ -6211,8 +6213,8 @@ pub(super) fn add_mac_sheet(
 /// The width of the QR code of the move sheet (frame 4b) in points, about.
 const MOVE_QR_POINTS: f32 = 140.0;
 
-/// The questions mode of "Add a device…": the sheet of "Add an iPhone or a Mac…" and of
-/// "Move Here…" in Settings > Devices, with the frames and the exact
+/// The questions mode of "Add a Device…": the sheet of "Add an iPhone or a Mac…" and of
+/// "Move to This Mac…" in Settings > Devices, with the frames and the exact
 /// texts of `docs/design/devices-settings-mockup.html`: 2a the link, 2b the safety
 /// words, 2c done; 4b the move, 4c moved, 4d the old entry still on Apassy relay.
 #[allow(clippy::too_many_arguments)]
@@ -6783,7 +6785,7 @@ pub(super) fn open_screen(app: &mut DesktopApp, ui: &mut egui::Ui) {
         concat!(
             "On the ",
             crate::computer!(),
-            " that has the vault, open Settings > Vault > Sync, select “Add a device…”, and copy the link. Paste it here. Both ",
+            " that has the vault, open Settings > Vault > Sync, select “Add a Device…”, and copy the link. Paste it here. Both ",
             crate::computers!(),
             " then show the same two words."
         ),

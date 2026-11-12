@@ -1,7 +1,7 @@
 //! Sync of the vaults through a folder (ADR 0014) or through the Apassy relay (ADR 0022)
 //! in the app (docs/operations/sync.md): the Sync setting of each vault, the status in
-//! plain words, "Sync now", the prompt for a passphrase that changed on another Mac, and
-//! "Use a vault from another Mac". The relay sheets ("Apassy relay", "Add a device…",
+//! plain words, "Sync Now", the prompt for a passphrase that changed on another Mac, and
+//! "Use a vault from another Mac". The relay sheets ("Apassy relay", "Add a Device…",
 //! "Devices…") and the relay source of "Use a vault from another Mac" are in [`relay`].
 //!
 //! The engine is [`crate::sync`]. The vault list keeps the setting of each vault
@@ -109,7 +109,7 @@ pub(crate) struct SyncUiState {
     open_error_from_adopt: bool,
     open_waiting: bool,
     open_next_download: Option<Instant>,
-    /// Sync through the Apassy relay: the sheets, "Add a device…", and a Mac that joins.
+    /// Sync through the Apassy relay: the sheets, "Add a Device…", and a Mac that joins.
     pub(crate) relay: RelayUi,
 }
 
@@ -218,7 +218,7 @@ pub(crate) enum SyncSheet {
     /// "Apassy relay": the relay address, the team code, and the name of this Mac; or a
     /// link from another Mac for a vault that is on the relay already.
     RelaySetup { id: String },
-    /// "Add a device…": the link for another Mac or an iPhone, and its safety words to
+    /// "Add a Device…": the link for another Mac or an iPhone, and its safety words to
     /// confirm.
     AddMac { id: String },
     /// "Devices…": the Macs of the relay team.
@@ -227,7 +227,7 @@ pub(crate) enum SyncSheet {
     /// relay: a notifications-only team with the relay address and a team code.
     QuestionsTeam { id: String },
     /// "Add an iPhone…" of a notifications-only team: the link as a QR code, then the
-    /// safety words and the owner check, as "Add a device…".
+    /// safety words and the owner check, as "Add a Device…".
     AddIphone { id: String },
     /// "Remove…" of a device of the questions in Devices: its confirmation.
     // Unused since Settings > Devices lists every device itself (plan S2–S3, unit N7).
@@ -349,19 +349,18 @@ fn status_tag(link: &SyncLink, status: &UiStatus, connect: bool) -> (&'static st
 
 /// The line of a Sync row without the tag that the row draws beside it: "Connect: past
 /// due. Sync works until 10 Dec 2026. …" under the tag "Connect: past due" reads "Sync
-/// works until 10 Dec 2026. …", and "Connect: read-only until 4 Jan 2027. …" reads
-/// "Until 4 Jan 2027. …". Any other line stays whole.
+/// works until 10 Dec 2026. …". Any other line stays whole, also "Connect: read-only until
+/// 4 Jan 2027. …".
 pub(super) fn without_tag(line: &str, tag: &str) -> String {
     let Some(rest) = line.strip_prefix(tag) else {
         return line.to_owned();
     };
-    if let Some(rest) = rest.strip_prefix(". ") {
-        return rest.to_owned();
+    // Only a whole sentence of the tag goes: "Connect: read-only until 4 Jan 2027." keeps
+    // its subject.
+    match rest.strip_prefix(". ") {
+        Some(rest) => rest.to_owned(),
+        None => line.to_owned(),
     }
-    if let Some(rest) = rest.strip_prefix(" until ") {
-        return format!("Until {rest}");
-    }
-    line.to_owned()
 }
 
 /// A short folder name for the sidebar: the label of a detected folder, else the last
@@ -405,7 +404,7 @@ pub(super) struct OtherMacs {
     /// The way in a few words.
     pub(super) words: String,
     /// The list ID of the open vault while it syncs through the relay and this Mac is in
-    /// its relay team: "Add a device…" and "Devices…" work.
+    /// its relay team: "Add a Device…" and "Devices…" work.
     pub(super) relay: Option<String>,
 }
 
@@ -756,7 +755,7 @@ impl DesktopApp {
 
     /// Erase the passphrase field of the sync sheets and its undo history, and the codes
     /// of the relay sheets: the team code, a pasted link of a vault on this Mac, and the
-    /// link of "Add a device…". The relay keys in memory go, except the one of the open,
+    /// link of "Add a Device…". The relay keys in memory go, except the one of the open,
     /// unlocked vault.
     pub(crate) fn sync_forget_secrets(&mut self, ctx: Option<&egui::Context>) {
         self.sync.passphrase.zeroize();
@@ -910,7 +909,7 @@ impl DesktopApp {
     }
 
     /// Sync the open vault now, without a message unless something needs the owner.
-    /// The window calls it for an unlock and "Sync now"; the worker has its own.
+    /// The window calls it for an unlock and "Sync Now"; the worker has its own.
     pub(crate) fn sync_quietly(&mut self) -> Option<Result<SyncOutcome, SyncError>> {
         let (id, sync) = self.sync_current()?;
         if self.owner_ui.session.is_locked() {
@@ -1031,7 +1030,7 @@ impl DesktopApp {
         }
     }
 
-    /// "Sync now" in Settings > Vault > Sync.
+    /// "Sync Now" in Settings > Vault > Sync.
     pub(crate) fn sync_now(&mut self) {
         let Some((id, sync)) = self.sync_current() else {
             return;
@@ -1683,7 +1682,7 @@ fn sync_picker(
     .show_ui(ui, |ui| {
         // A vault on Connect shows its choice, also while no plan offers it to others.
         // Relay sync and Connect do not switch here: a vault on the relay moves with
-        // "Move the Relay Copy to Connect", so each shows only its own.
+        // "Move to Connect…", so each shows only its own.
         let connect = (connect && current != Current::Relay) || current == Current::Connect;
         for (choice, text) in picker_choices(folders, relay, connect)
             .into_iter()
@@ -1962,7 +1961,7 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                                 && !removed
                                 && ui
                                     .add_enabled_ui(!syncing, |ui| {
-                                        kit::small_button(ui, "Sync now", Style::Bordered)
+                                        kit::small_button(ui, "Sync Now", Style::Bordered)
                                     })
                                     .inner
                                     .clicked()
@@ -1979,7 +1978,7 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                                     open_connect = true;
                                 }
                             } else if on_relay && !removed {
-                                if kit::small_button(ui, "Add a device…", Style::Bordered).clicked()
+                                if kit::small_button(ui, "Add a Device…", Style::Bordered).clicked()
                                 {
                                     sheet = Some(SyncSheet::AddMac {
                                         id: entry.id.clone(),
@@ -1997,13 +1996,9 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                                 && !moving
                                 && app.relay_move_state(&entry.id).is_none()
                                 && app.relay_can_move(&entry.id)
-                                && kit::small_button(
-                                    ui,
-                                    "Move the Relay Copy to Connect",
-                                    Style::Bordered,
-                                )
-                                .on_hover_text(relay::MOVE_WORDS)
-                                .clicked()
+                                && kit::small_button(ui, "Move to Connect…", Style::Bordered)
+                                    .on_hover_text(relay::MOVE_WORDS)
+                                    .clicked()
                             {
                                 move_to = Some(entry.id.clone());
                             }
@@ -2011,7 +2006,7 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                     }
                 });
             }
-            if g.link("Open a synced vault…").clicked() {
+            if g.link("Open a Synced Vault…").clicked() {
                 open_synced = true;
             }
         },

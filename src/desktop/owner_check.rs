@@ -760,7 +760,7 @@ pub enum OwnerRequest {
         approval_key: Vec<u8>,
     },
     /// Add a device to the relay sync of the vault `vault` (a list ID; ADR 0022). The
-    /// values are the link exactly as the "Add a device…" sheet showed it with its safety
+    /// values are the link exactly as the "Add a Device…" sheet showed it with its safety
     /// words.
     ConfirmSyncDevice {
         vault: String,
@@ -798,7 +798,7 @@ pub enum OwnerRequest {
         action: OwnerAction,
     },
     /// Add a device to the Apassy Connect account (connect-account-v1 section 7.1): the
-    /// join exactly as "Add a device…" showed it, with the six safety words. The proof
+    /// join exactly as "Add a Device…" showed it, with the six safety words. The proof
     /// goes to [`OwnerFlows::take_connect_proof`] for the Connect view (unit M2), which passes it
     /// to `ConnectAccount::confirm_join`.
     ConfirmConnectDevice {

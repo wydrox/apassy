@@ -1729,7 +1729,7 @@ fn mac_connect_texts_are_unchanged() {
         (FORGET_TITLE, "Forget This Mac?"),
         (
             REMOVED_NOTE,
-            "Apassy Connect removed this Mac from its account. Forget the account here.",
+            "Apassy Connect removed this Mac from its account. Forget this Mac here.",
         ),
         (FORGET_THIS_MAC, "Forget This Mac…"),
         (

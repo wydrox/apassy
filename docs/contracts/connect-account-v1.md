@@ -177,7 +177,7 @@ From a live device after an owner check on it (`OwnerAction::DeleteConnectAccoun
 
 ## 7. Account devices
 
-### 7.1 The existing device: "Add a device…"
+### 7.1 The existing device: "Add a Device…"
 
 1. The device makes a link code (32 random bytes and the link fingerprint of its pinned root key and its own key, section 2) and keeps it in memory. `POST /v1/account/devices/link` with `{"link_hash":"<b64u>"}` answers `{"link_id":7,"expires_at":1790000600}`. The link works once and for 10 minutes. The device shows the code as text with a Copy button and as a QR code of the same text (error correction M). Connect never sees the code.
 2. While the sheet is open the device asks `GET /v1/account/devices/pending` every 5 s: `[{"join_id":4,"link_id":7,"device_name":"iPhone","platform":"iphone","public_key":"<b64u>","signature":"<b64u>","created_at":1790000100,"expires_at":1790000600}]`, the joins of links that this device made; `signature` is the joining key's signature of the join (7.2). For each it checks that `signature` verifies with `public_key` over the `apassy-connect join v1` message of its own link with `device_name` (a join that does not verify is not shown: Connect cannot name a device otherwise than the device named itself), computes the safety words (7.3) with the code it holds, and shows the sheet `"iPhone" Asks to Join` with the words (audio coyote forest mint magnet apple) and "Confirm only if the other device shows the same words."

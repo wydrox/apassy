@@ -156,7 +156,7 @@ Each step: the command, what it changes, and how to undo it. Keep the outputs; t
 - `docker compose exec -T relay apassy-relay admin teams`: only `"kind": "account"`, the same ids as `kept` of `cutover-result.json`.
 - `docker compose exec -T relay ls -la /data`: `relay.db`, `cutover.json`, `teams/`, `relay.lock`, `admin.sock`; no `relay.db.keyed`, `relay.db.work`, or `*.plain`. The container has no `APASSY_RELAY_KEY_FILE` (`docker compose exec -T relay env | grep -c APASSY_RELAY_KEY` answers 0) and no `master_key` under `/run/secrets`.
 - `docker compose exec -T relay apassy-relay admin backup`: a backup with `"mode": "connect"`.
-- On the owner's Mac (an account on a plan): Settings › Connect shows the plan; a vault synced through Connect pushes and pulls (Sync now); an iPhone without Tailscale, on cellular, approves a question through the tunnel; a cloud agent reaches `https://<node>.node.apassy.wyderka.cc/mcp`.
+- On the owner's Mac (an account on a plan): Settings › Connect shows the plan; a vault synced through Connect pushes and pulls (Sync Now); an iPhone without Tailscale, on cellular, approves a question through the tunnel; a cloud agent reaches `https://<node>.node.apassy.wyderka.cc/mcp`.
 - The downloads: the public delivery gate of the release runbook (`check-public-assets.py`) passes as before.
 - The Stripe dashboard: the webhook endpoint shows the deliveries after the start as answered 200.
 

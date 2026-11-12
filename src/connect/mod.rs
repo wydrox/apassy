@@ -13,7 +13,7 @@
 //!   the app (`https://` anywhere, `http://` on loopback only).
 //! - [`account`]: the account of this Mac. Creation with the device key and a recovery
 //!   code; sign-in by challenge and token (the account token lives 15 minutes in memory
-//!   and goes only to the Connect origin); "Add a device…" with the safety words and a
+//!   and goes only to the Connect origin); "Add a Device…" with the safety words and a
 //!   fresh owner check on this Mac; the join of this Mac to an account; revoke, recovery,
 //!   deletion; the entitlement token kept in memory. The account file
 //!   (`connect/account.json` in the data directory) holds ids, names, the origin, the

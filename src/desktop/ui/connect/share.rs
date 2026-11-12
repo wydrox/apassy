@@ -85,7 +85,7 @@ pub(crate) const ACCEPTED_LEAD: &str = "Their shared vaults show in Settings ›
 /// The end of the line of a shared vault that this device left.
 pub(crate) const LEFT_HERE: &str = "you left; the vault stays here";
 pub(crate) const UNPINNED: &str = "Some people who share your vaults could not be verified here.";
-pub(crate) const DOWNLOAD: &str = "Download…";
+pub(crate) const DOWNLOAD: &str = "Download Copy…";
 pub(crate) const VAULT_OFFERED: &str = "A vault";
 pub(crate) const CLAIM: &str = "Confirm…";
 /// The buttons of a person's row; their spoken names carry the person ([`stop`],

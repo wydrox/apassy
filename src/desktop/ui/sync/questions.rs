@@ -20,7 +20,7 @@
 //! it takes authority away. It removes the purpose `questions` and never touches relay
 //! sync.
 //!
-//! "Add an iPhone or a Mac…" links a device to the questions team: the "Add a device…"
+//! "Add an iPhone or a Mac…" links a device to the questions team: the "Add a Device…"
 //! sheet in questions mode ([`SyncSheet::AddIphone`]), also for a team that syncs the vault,
 //! so its code carries the handoff a watch needs. The confirmation writes the row of an
 //! iPhone or an Apple Watch (ADR 0039) from its link (`register_linked_device`); a Mac writes its
@@ -1783,7 +1783,7 @@ impl DesktopApp {
     }
 
     /// "Add an iPhone…": the link of the questions team as a QR code. A notifications-only
-    /// team links through its own sheet; a sync team through "Add a device…".
+    /// team links through its own sheet; a sync team through "Add a Device…".
     pub(crate) fn questions_add_iphone(&mut self, ctx: Option<&egui::Context>) {
         let Some(id) = self.vault_list.current.clone() else {
             return self.set_err("Open a vault of the list first.");

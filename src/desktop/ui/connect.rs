@@ -260,7 +260,9 @@ pub(crate) const REMOVED: &str = "Removed from the account";
 pub(crate) const REMOVED_NOTE: &str = concat!(
     "Apassy Connect removed this ",
     crate::computer!(),
-    " from its account. Forget the account here."
+    " from its account. Forget this ",
+    crate::computer!(),
+    " here."
 );
 pub(crate) const FORGET_THIS_MAC: &str = concat!("Forget This ", crate::computer_cap!(), "…");
 /// The title of an account file of an earlier version of Apassy.
@@ -613,7 +615,10 @@ pub(crate) fn device_detail(device: &Device) -> String {
 /// that the owner did not confirm this account yet.
 pub(crate) fn managed_by(group_state: &str, owner_name: &str) -> (String, Tone) {
     if group_state == "pending" {
-        (format!("Waiting for {owner_name}"), Tone::Warning)
+        (
+            format!("Waiting for {owner_name} to confirm you"),
+            Tone::Warning,
+        )
     } else {
         (format!("Managed by {owner_name}"), Tone::Neutral)
     }
