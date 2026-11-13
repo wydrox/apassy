@@ -90,7 +90,7 @@ fn still_current(vault: &Vault, entry: &DecisionEntry, item_id: u64) -> bool {
 /// (condition 3): `Ok(None)` without codes, `Ok(Some(with_value))` with them.
 fn codes_of(entry: &DecisionEntry, item_id: u64) -> Result<Option<bool>, NotOffered> {
     let code_name = crate::vault::mfa::code_env_name(item_id);
-    let had_code = entry.env_names.iter().any(|name| *name == code_name);
+    let had_code = entry.env_names.contains(&code_name);
     match entry.why().codes.as_str() {
         "with_value" => Ok(Some(true)),
         // A code-only run had no other variable of the credential.
