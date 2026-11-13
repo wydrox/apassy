@@ -629,7 +629,6 @@ fn the_detail_shows_the_facts_the_command_and_why() {
         "api.stripe.com",
         "Command",
         "curl https://api.stripe.com/v1/payouts",
-        "Why you are asked",
         "This is a production key, and there is no production rule for reading in acme-billing yet.",
         "Dismiss",
         "Allow",
@@ -643,6 +642,10 @@ fn the_detail_shows_the_facts_the_command_and_why() {
         !text.contains("Dismiss with comment"),
         "one Dismiss: {text}"
     );
+    // The reason is the title here (ADR 0046): it shows once, without a "Why" group.
+    let reason = "This is a production key, and there is no production rule for reading in acme-billing yet.";
+    assert_eq!(text.matches(reason).count(), 1, "{text}");
+    assert!(!text.contains("Why you are asked"), "{text}");
     assert!(
         text.find(decisions::question_headline(&pending.question)) < text.find("Credential"),
         "the reason headline precedes the credential facts: {text}"
@@ -2690,18 +2693,16 @@ fn unconfirmed_question_headlines_show_blocking_reason_before_classification() {
         let mut info = question(vec![credential], &[AnswerKind::CorrectEnvironment]);
         info.reason = reason;
         assert_eq!(decisions::question_headline(&info), headline);
-        assert_eq!(
-            decisions::classification_line(&info).as_deref(),
-            Some("Synthetic sandbox: environment unknown")
-        );
         let (waiter, pending) = ask(&app, &queue, 1, run("Synthetic agent", info));
         app.place = Place::Decisions;
         let (text, _) = frames(&mut app, WIDE, 3);
+        // The cap of the credential row says that the environment is unknown; no
+        // paragraph says it again.
         assert!(
-            text.find(headline).unwrap()
-                < text.find("Synthetic sandbox: environment unknown").unwrap(),
+            text.find(headline).unwrap() < text.find("Environment unknown").unwrap(),
             "{text}"
         );
+        assert!(!text.contains("environment unknown"), "{text}");
         for label in ["Dismiss", "Allow as prod", "Allow as dev"] {
             assert!(text.contains(label), "{text}");
         }
@@ -2856,7 +2857,7 @@ fn a_past_decision_opens_its_why_while_a_question_waits() {
     for hidden in facts {
         assert!(!text.contains(hidden), "{hidden}: {text}");
     }
-    assert!(!text.contains("Why you are asked"), "{text}");
+    assert!(!text.contains("left to answer"), "{text}");
     let text = screen.click(&mut app, "Details");
     for expected in facts {
         assert!(text.contains(expected), "{expected}: {text}");
@@ -2882,7 +2883,7 @@ fn a_past_decision_opens_its_why_while_a_question_waits() {
     let text = screen.click(&mut app, &decisions::waiting_label(2));
     assert_eq!(decisions::selected_past(&app), None, "{text}");
     assert_eq!(decisions::selected(&app), Some(first.id), "{text}");
-    assert!(text.contains("Why you are asked"), "{text}");
+    assert!(text.contains("left to answer"), "{text}");
 
     for (id, waiter) in [(first.id, first_waiter), (second.id, second_waiter)] {
         assert!(queue.deny(id));
@@ -2949,4 +2950,39 @@ fn dismiss_sends_a_typed_comment() {
     assert!(!text.contains("Dismiss with comment"), "{text}");
     assert!(queue.deny(pending.id));
     waiter.join().unwrap().unwrap();
+}
+
+/// C3: "Why you are asked" says only what the title does not. With a real reason, the
+/// title is its sentence and the why text shows under the group; with the reason
+/// `Other`, the why text is the title and the group is not drawn.
+#[test]
+fn the_why_group_shows_only_what_the_title_does_not_say() {
+    use crate::broker::route_diagnostics::ReasonKind;
+    let why = "\"Live key\" is a production credential with write or admin scope: you approve each run in \"acme-billing\": reading.";
+    for (reason, group) in [(ReasonKind::Production, true), (ReasonKind::Other, false)] {
+        let dir = TempDir::new().unwrap();
+        let (mut app, item_id) = unlocked_app_with_item(&dir);
+        let queue = queue_of(&mut app, &dir);
+        let mut info = question(vec![item(item_id, "Live key")], &[]);
+        info.reason = reason;
+        info.why = why.to_owned();
+        let (waiter, pending) = ask(&app, &queue, 1, run("Codex", info));
+        app.place = Place::Decisions;
+        let (text, _) = frames(&mut app, WIDE, 3);
+        assert_eq!(
+            text.contains("Why you are asked"),
+            group,
+            "{reason:?}: {text}"
+        );
+        assert_eq!(text.matches(why).count(), 1, "{reason:?}: {text}");
+        if group {
+            assert!(text.contains("Production credential."), "{text}");
+            assert!(
+                text.contains("This production credential asks every time."),
+                "{text}"
+            );
+        }
+        assert!(queue.deny(pending.id));
+        waiter.join().unwrap().unwrap();
+    }
 }

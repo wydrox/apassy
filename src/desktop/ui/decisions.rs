@@ -2177,13 +2177,6 @@ pub(super) fn why_beyond_title(run: &PendingRun) -> Option<&str> {
     };
     (!why.is_empty() && why != question_headline(&run.question)).then_some(why)
 }
-pub(super) fn classification_line(question: &QuestionInfo) -> Option<String> {
-    question
-        .items
-        .iter()
-        .find(|item| item.unconfirmed)
-        .map(|item| format!("{}: environment unknown", item.name))
-}
 
 fn draw_question(
     app: &mut DesktopApp,
@@ -2212,9 +2205,6 @@ fn draw_question(
         Font::Body,
         kit::palette().secondary,
     );
-    if let Some(classification) = classification_line(question) {
-        kit::paragraph(ui, classification, Font::Body, kit::palette().secondary);
-    }
     let mut notes = false;
     match remote {
         Some(remote) => {
@@ -2318,20 +2308,21 @@ fn draw_question(
                 });
         });
     });
-    let why = if !question.why.is_empty() {
-        question.why.clone()
-    } else if !run.risk.is_empty() {
-        run.risk.clone()
-    } else {
-        "The bouncer gate needs your answer for this run.".to_owned()
-    };
-    group_label(ui, "Why you are asked");
-    kit::section(ui, None, None, |s| {
-        s.row(|ui| kit::paragraph(ui, why, Font::Body, kit::palette().label));
-        if let Some(every) = asks_every_time(question) {
-            s.row(|ui| kit::paragraph(ui, every, Font::Body, kit::palette().secondary));
-        }
-    });
+    // "Why you are asked" says only what the title does not: the why text when it
+    // differs from the title, and how long a question like this keeps asking.
+    let why = why_beyond_title(run);
+    let every = asks_every_time(question);
+    if why.is_some() || every.is_some() {
+        group_label(ui, "Why you are asked");
+        kit::section(ui, None, None, |s| {
+            if let Some(why) = why {
+                s.row(|ui| kit::paragraph(ui, why, Font::Body, kit::palette().label));
+            }
+            if let Some(every) = every {
+                s.row(|ui| kit::paragraph(ui, every, Font::Body, kit::palette().secondary));
+            }
+        });
+    }
     // The quiet line at the foot of a detail of the mockup (`.meta-foot`).
     ui.add_space(2.0);
     ui.vertical_centered(|ui| {
