@@ -1269,6 +1269,18 @@ mod tests {
             text.contains("Apassy cannot recover a lost passphrase"),
             "{text}"
         );
+
+        // Restore keeps its lead; the placeholders say the rest, so no footer explains
+        // the empty file field.
+        app.ui.start = start::Step::Restore;
+        let (text, _) = draw_frames(&mut app, DEFAULT_SIZE, 3);
+        assert!(
+            text.contains("each credential waits for your review"),
+            "{text}"
+        );
+        assert!(text.contains("Passphrase of the backup"), "{text}");
+        assert!(!text.contains("Leave the file empty"), "{text}");
+        assert!(!text.contains("The passphrase is the one of"), "{text}");
     }
 
     /// The two create fields must match. Both fields are empty after the try.
