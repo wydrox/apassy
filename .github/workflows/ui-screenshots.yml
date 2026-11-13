@@ -139,6 +139,9 @@ jobs:
           set -o pipefail
           env -u XDG_RUNTIME_DIR -u WAYLAND_DISPLAY -u DBUS_SESSION_BUS_ADDRESS \
             bash scripts/screenshots-linux.sh "$RUNNER_TEMP/shots" 2>&1 | tee "$RUNNER_TEMP/logs/demo.log"
+      # One run of the script per vault scene: the script stops at the first scene that
+      # fails, so each scene runs on its own and a failed scene does not hide the later
+      # ones. The step fails at the end when a scene failed (logs/failed-scenes.txt).
       - name: Screenshots, vault part
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         env:
@@ -147,8 +150,21 @@ jobs:
           APASSY_TOUR_LOG: ${{ runner.temp }}/logs/app
         run: |
           set -o pipefail
-          env -u XDG_RUNTIME_DIR -u WAYLAND_DISPLAY -u DBUS_SESSION_BUS_ADDRESS \
-            bash scripts/screenshots-linux.sh "$RUNNER_TEMP/shots" 2>&1 | tee "$RUNNER_TEMP/logs/vault.log"
+          failed=""
+          for scene in $("$APASSY_TOUR_BIN" scenes); do
+            echo "::group::vault scene $scene"
+            if ! APASSY_TOUR_SCENES="$scene" env -u XDG_RUNTIME_DIR -u WAYLAND_DISPLAY -u DBUS_SESSION_BUS_ADDRESS \
+              bash scripts/screenshots-linux.sh "$RUNNER_TEMP/shots" 2>&1 | tee "$RUNNER_TEMP/logs/vault-$scene.log"; then
+              failed="$failed $scene"
+              echo "::error::vault scene $scene failed"
+            fi
+            echo "::endgroup::"
+          done
+          if [ -n "$failed" ]; then
+            echo "$failed" | tr ' ' '\n' | sed '/^$/d' >"$RUNNER_TEMP/logs/failed-scenes.txt"
+            printf 'failed vault scenes:%s\n\n' "$failed" >>"$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
       - name: Count the screenshots
         if: always()
         run: |
