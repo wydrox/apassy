@@ -407,6 +407,11 @@ impl Vault {
         self.query_uses("agent_id", to_sql_id(agent_id)?, limit)
     }
 
+    /// The uses that one decision wrote, newest first (schema 27 index).
+    pub fn uses_of_decision(&self, decision_log_id: u64) -> VaultResult<Vec<ItemUse>> {
+        self.query_uses("decision_log_id", to_sql_id(decision_log_id)?, 64)
+    }
+
     fn query_uses(&self, column: &str, id: i64, limit: usize) -> VaultResult<Vec<ItemUse>> {
         let limit = i64::try_from(limit).map_err(|_| err(VaultErrorKind::InvalidInput))?;
         let conn = self.conn_ref()?;
@@ -744,6 +749,61 @@ mod tests {
                 .item_used_in_project(item, "/tmp/p/.git", ActionKind::Read, agent.id)
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn the_uses_of_a_decision_are_read_by_its_id() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut vault = Vault::create(&dir.path().join("usage.db"), PASS).unwrap();
+        vault.unlock(PASS).unwrap();
+        let mut ids = Vec::new();
+        for title in ["First", "Second"] {
+            ids.push(
+                vault
+                    .add(ItemDraft {
+                        title: title.to_owned(),
+                        kind: CredentialKind::ApiKey,
+                        notes: String::new(),
+                        tags: Vec::new(),
+                        fields: vec![Field {
+                            name: "token".to_owned(),
+                            value: SecretValue::new(format!("SYNTH-{title}")),
+                            secret: true,
+                        }],
+                    })
+                    .unwrap()
+                    .id,
+            );
+        }
+        let new = |item_id: u64, decision_log_id: Option<u64>| NewItemUse {
+            item_id,
+            agent_id: None,
+            agent_name: "Synthetic".to_owned(),
+            project_key: "/tmp/p/.git".to_owned(),
+            project_label: "p".to_owned(),
+            action: ActionKind::Change,
+            command_summary: "run make deploy".to_owned(),
+            hosts: vec!["api.example.com".to_owned()],
+            outcome: UseOutcome::TimedOut,
+            decided_by: UseDecidedBy::Owner,
+            answered_on: String::new(),
+            decision_log_id,
+        };
+        vault.record_item_use(&new(ids[0], Some(7))).unwrap();
+        vault.record_item_use(&new(ids[1], Some(7))).unwrap();
+        vault.record_item_use(&new(ids[0], Some(8))).unwrap();
+        vault.record_item_use(&new(ids[0], None)).unwrap();
+        let uses = vault.uses_of_decision(7).unwrap();
+        assert_eq!(
+            uses.iter().map(|used| used.item_id).collect::<Vec<_>>(),
+            vec![ids[1], ids[0]],
+            "both uses of the decision, newest first"
+        );
+        assert!(uses.iter().all(|used| used.decision_log_id == Some(7)));
+        assert_eq!(uses[0].action, ActionKind::Change);
+        assert_eq!(uses[0].hosts, vec!["api.example.com".to_owned()]);
+        assert_eq!(vault.uses_of_decision(8).unwrap().len(), 1);
+        assert!(vault.uses_of_decision(9).unwrap().is_empty());
     }
 
     /// Gate 1 (B-4): the use log and the interaction count mask the secret values of the

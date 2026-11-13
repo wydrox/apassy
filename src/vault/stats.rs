@@ -30,7 +30,7 @@ use serde_json::Value;
 
 use super::agents::{from_sql_time, to_sql_time};
 use super::types::{VaultErrorKind, VaultResult, err};
-use super::{Vault, to_public_id, to_sql_id};
+use super::{DecisionWhy, Vault, to_public_id, to_sql_id};
 
 /// The bars of the Overview: one per local calendar day, today first.
 pub const STATS_DAYS: usize = 7;
@@ -173,6 +173,10 @@ pub struct LogRow {
     pub relay_run: Option<u64>,
     /// A credential of the request was declared for production.
     pub production: bool,
+    /// The rule flags of the decision.
+    pub flags: Vec<String>,
+    /// The closed words of the decision (ADR 0046). Empty for an older row.
+    pub why: DecisionWhy,
 }
 
 /// The offset of the local time from UTC at `at`, in seconds, as macOS says it; 0 when
@@ -454,7 +458,7 @@ impl Vault {
                         d.decision = 'allow', d.decided_by, d.wait_ms, d.declarations,
                         (SELECT r.relay_run_id FROM cloud_run r WHERE r.decision_log_id = d.id
                          ORDER BY r.at DESC LIMIT 1),
-                        u.project_label, u.answered_on
+                        u.project_label, u.answered_on, d.rule_flags, d.policy
                  FROM page JOIN decision_log d ON d.id = page.id
                  LEFT JOIN item_use u ON u.decision_log_id = d.id
                  ORDER BY d.id DESC, u.id ASC",
@@ -475,6 +479,8 @@ impl Vault {
             Option<i64>,
             Option<String>,
             Option<String>,
+            String,
+            String,
         );
         let rows = stmt
             .query_map(
@@ -495,6 +501,8 @@ impl Vault {
                         row.get(11)?,
                         row.get(12)?,
                         row.get(13)?,
+                        row.get(14)?,
+                        row.get(15)?,
                     ))
                 },
             )
@@ -516,6 +524,8 @@ impl Vault {
                 relay_run,
                 project_label,
                 answered_on,
+                rule_flags,
+                policy,
             ): Row = row.map_err(storage)?;
             let id = to_public_id(id)?;
             if let Some(last) = out.last_mut().filter(|last| last.decision_log_id == id) {
@@ -550,6 +560,8 @@ impl Vault {
                 wait_ms: wait.map(u64::try_from).transpose().map_err(storage)?,
                 relay_run: relay_run.map(to_public_id).transpose()?,
                 production: declares_production(&declarations),
+                flags: serde_json::from_str(&rule_flags).map_err(storage)?,
+                why: DecisionWhy::of_policy(&policy),
             });
         }
         drop(stmt);
@@ -1077,6 +1089,45 @@ mod tests {
             fx.vault.bouncer_log(None, 10_000, None).unwrap().len(),
             11.min(BOUNCER_LOG_PAGE)
         );
+    }
+
+    #[test]
+    fn the_bouncer_log_has_the_flags_and_the_why_words() {
+        let mut fx = fixture();
+        let mut flagged = entry(fx.a, "Claude Code", NOON + HOUR, fx.item, How::NoAnswer);
+        flagged.rule_flags = vec!["injection_phrase".to_owned(), "secret_output".to_owned()];
+        flagged.policy = "apassy-bouncer-v9".to_owned();
+        let flagged = flagged.with_why(&DecisionWhy {
+            reason: "HookFlags".to_owned(),
+            ..DecisionWhy::default()
+        });
+        let mut offered = entry(fx.a, "Claude Code", NOON + 2 * HOUR, fx.item, How::NoAnswer);
+        offered.policy = "apassy-bouncer-v9".to_owned();
+        let offered = offered.with_why(&DecisionWhy {
+            reason: "ForeignProject".to_owned(),
+            offered: "in_project:change".to_owned(),
+            ..DecisionWhy::default()
+        });
+        let flagged = fx.vault.record_decision(&flagged).unwrap();
+        let offered = fx.vault.record_decision(&offered).unwrap();
+        let rows = fx.vault.bouncer_log(None, 5, None).unwrap();
+        let row = |id: u64| rows.iter().find(|row| row.decision_log_id == id).unwrap();
+        assert_eq!(
+            row(flagged).flags,
+            vec!["injection_phrase".to_owned(), "secret_output".to_owned()]
+        );
+        assert_eq!(row(flagged).why.reason, "HookFlags");
+        assert!(row(flagged).why.offered.is_empty());
+        assert!(row(offered).flags.is_empty());
+        assert_eq!(row(offered).why.reason, "ForeignProject");
+        assert_eq!(row(offered).why.offered, "in_project:change");
+        // A row of the fixture has neither.
+        let older = rows
+            .iter()
+            .find(|row| row.decision_log_id != flagged && row.decision_log_id != offered)
+            .unwrap();
+        assert!(older.flags.is_empty());
+        assert_eq!(older.why, DecisionWhy::default());
     }
 
     #[test]

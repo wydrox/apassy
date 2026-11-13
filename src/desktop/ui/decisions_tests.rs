@@ -2661,10 +2661,7 @@ fn unconfirmed_question_headlines_show_blocking_reason_before_classification() {
             ReasonKind::ModelUnsure,
             "The bouncer brain wasn't sure this run is safe.",
         ),
-        (
-            ReasonKind::HookFlags,
-            "The command or task context needs your review.",
-        ),
+        (ReasonKind::HookFlags, "A safety rule flagged this run."),
         (ReasonKind::NotProject, "This folder isn't a project."),
         (
             ReasonKind::BrowserFill,

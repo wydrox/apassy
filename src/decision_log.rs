@@ -137,6 +137,9 @@ pub struct Line {
     pub answered_on: String,
     /// The error code of a refusal.
     pub code: String,
+    /// The remembered answer that the question offered, for example
+    /// `in_project:change`. Empty: none.
+    pub offered: String,
     /// Milliseconds from the request to the decision, with the wait for the owner.
     pub millis: u64,
 }
@@ -172,6 +175,7 @@ impl Line {
             &mut line.outcome,
             &mut line.answered_on,
             &mut line.code,
+            &mut line.offered,
         ] {
             *text = cut(text, MAX_NAME);
         }

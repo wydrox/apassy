@@ -29,6 +29,7 @@ pub mod profile;
 pub mod project;
 pub mod prompts;
 pub mod proxy;
+pub mod reasons;
 pub mod replay;
 pub mod route_diagnostics;
 mod run;
