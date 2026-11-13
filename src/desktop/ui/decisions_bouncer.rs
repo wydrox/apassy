@@ -107,6 +107,9 @@ pub(crate) struct HistoryRow {
     pub(crate) denied: bool,
     /// "14:14" today and yesterday, the weekday this week, else the day.
     pub(crate) meta: String,
+    /// The short reason of a decision of this Mac (ADR 0046). Empty for a run of
+    /// another Mac, which shows its environment instead.
+    pub(crate) reason: String,
 }
 
 /// What History shows for one scope at one time.
@@ -192,7 +195,12 @@ impl HistoryView {
                 1 => "Yesterday",
                 _ => "Earlier",
             };
-            let row = HistoryRow::of(event, now, offset);
+            let mut row = HistoryRow::of(event, now, offset);
+            if let LogSource::Decision(id) = &event.source
+                && let Some(reason) = data.reasons.get(id)
+            {
+                row.reason.clone_from(reason);
+            }
             match groups.last_mut() {
                 Some((group, rows)) if group == title => rows.push(row),
                 _ => groups.push((title.to_owned(), vec![row])),
@@ -227,6 +235,7 @@ impl HistoryRow {
             outcome: event.outcome.text(),
             denied: event.outcome.denied(),
             meta,
+            reason: String::new(),
         }
     }
 }
@@ -404,10 +413,14 @@ fn history_row(ui: &mut Ui, row: &HistoryRow, selected: bool) -> egui::Response 
     };
     let width = ui.available_width();
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, ROW_HEIGHT), Sense::click());
-    let name = format!(
+    let mut name = format!(
         "{}, {}, {}, {}",
         row.title, row.env_name, row.outcome, row.meta
     );
+    if !row.reason.is_empty() {
+        name.push_str(", ");
+        name.push_str(&row.reason);
+    }
     response
         .widget_info(|| WidgetInfo::selected(WidgetType::SelectableLabel, true, selected, &name));
     if response.gained_focus() {
@@ -470,17 +483,26 @@ fn history_row(ui: &mut Ui, row: &HistoryRow, selected: bool) -> egui::Response 
         ),
         (
             galley(
-                kit::text(&row.env_name, Font::Callout).color(sub_color),
-                text_width,
-            ),
-            sub_color,
-        ),
-        (
-            galley(
-                kit::text(&row.outcome, Font::Footnote).color(outcome_color),
+                kit::text(&row.outcome, Font::Callout).color(outcome_color),
                 text_width,
             ),
             outcome_color,
+        ),
+        // The reason of a decision of this Mac; the environment of another Mac's run.
+        (
+            galley(
+                kit::text(
+                    if row.reason.is_empty() {
+                        &row.env_name
+                    } else {
+                        &row.reason
+                    },
+                    Font::Footnote,
+                )
+                .color(sub_color),
+                text_width,
+            ),
+            sub_color,
         ),
     ];
     let mut y = top;

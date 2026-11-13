@@ -972,6 +972,8 @@ pub(crate) struct BouncerData {
     pub(crate) remote_access_of: BTreeMap<DeviceScope, RemoteAccessWord>,
     /// The median answer of each agent of this Mac in the window, in seconds.
     pub(crate) agent_answer_p50: BTreeMap<AgentRef, u64>,
+    /// The short reason of each decision of this Mac, by `decision_log_id` (ADR 0046).
+    pub(crate) reasons: BTreeMap<u64, String>,
 }
 
 impl BouncerData {
