@@ -22,6 +22,7 @@ pub mod heads_place;
 pub mod http;
 pub mod learning;
 pub mod model_server;
+pub mod next_time;
 mod operations;
 pub mod packs;
 pub mod patterns;

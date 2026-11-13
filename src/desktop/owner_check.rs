@@ -722,6 +722,17 @@ pub enum OwnerRequest {
         item_id: u64,
         name: String,
     },
+    /// Save the project answer that a past question offered (ADR 0046): "Allow ACTION
+    /// in PROJECT" for the credential, for every agent. It gives authority, so it needs
+    /// the check for the credential, and the session checks the offer again under it.
+    RememberAnswer {
+        decision_id: u64,
+        item_id: u64,
+        name: String,
+        project: String,
+        action: ActionKind,
+        codes: bool,
+    },
     /// Remove an exception of an agent for an item (ADR 0025 §3f). It gives authority
     /// back.
     RemoveAgentException {
@@ -1470,7 +1481,8 @@ impl OwnerRequest {
             | Self::Unarchive { item_id, .. }
             | Self::SetEnvironment { item_id, .. }
             | Self::AnswerSuggestion { item_id, .. }
-            | Self::AlwaysAskOff { item_id, .. } => {
+            | Self::AlwaysAskOff { item_id, .. }
+            | Self::RememberAnswer { item_id, .. } => {
                 OwnerAction::ChangeItemRules { item_id: *item_id }
             }
             Self::RemoveAgentException {
@@ -1970,6 +1982,17 @@ impl OwnerRequest {
             ),
             Self::AlwaysAskOff { name, .. } => format!(
                 "Turn off \"Always ask me\" for \"{name}\". The bouncer then decides each use."
+            ),
+            Self::RememberAnswer {
+                name,
+                project,
+                action,
+                codes,
+                ..
+            } => format!(
+                "Allow {} in \"{project}\" with \"{name}\"{} for every agent, without asking, from the next matching use. Hard checks still apply.",
+                action_words(*action),
+                if *codes { " and its one-time codes" } else { "" }
             ),
             Self::RemoveAgentException {
                 agent_name, kind, ..
@@ -3406,6 +3429,20 @@ impl DesktopApp {
                     None => self.set_err("The vault is locked."),
                 }
             }
+            OwnerRequest::RememberAnswer {
+                decision_id,
+                item_id,
+                name,
+                project,
+                action,
+                ..
+            } => match session.remember_from_decision(decision_id, item_id, proof) {
+                Ok(_) => self.set_ok(format!(
+                    "Allowed. Apassy no longer asks about {} in {project} with {name}. Hard checks still apply.",
+                    action_words(action)
+                )),
+                Err(err) => self.set_err(err.message),
+            },
             OwnerRequest::RemoveAgentException {
                 agent_id,
                 agent_name,

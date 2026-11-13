@@ -501,6 +501,33 @@ impl OwnerSession {
     }
 }
 
+impl OwnerSession {
+    /// Save the project answer that the question of decision `decision_id` offered
+    /// (ADR 0046). It gives authority: it needs the proof for "change the rules of
+    /// `item_id`", and the offer is checked again under it. Returns the answer's ID.
+    pub fn remember_from_decision(
+        &mut self,
+        decision_id: u64,
+        item_id: u64,
+        proof: OwnerProof,
+    ) -> ModelResult<u64> {
+        let mut vault = self.unlocked_for(proof, &OwnerAction::ChangeItemRules { item_id })?;
+        let refused = || {
+            fail(
+                "conflict",
+                "This answer is no longer offered. Answer the next question.",
+            )
+        };
+        let answer =
+            crate::broker::next_time::later_answer(&vault, decision_id).map_err(|_| refused())?;
+        if answer.item_id != item_id {
+            return Err(refused());
+        }
+        crate::broker::next_time::save(&mut vault, &answer, concat!("this ", crate::computer!()))
+            .map_err(map_err)
+    }
+}
+
 /// The owner-check rule of [`OwnerSession::answer_needs_check`] for a vault in hand.
 fn answer_needs_check(
     vault: &Vault,
