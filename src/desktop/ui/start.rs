@@ -204,7 +204,7 @@ fn create(app: &mut DesktopApp, ui: &mut egui::Ui) {
     ui.label(kit::text(heading, Font::Title).color(kit::palette().label));
     kit::paragraph(
         ui,
-        "Each vault has its own passphrase, agents, and rules. Choose a passphrase that you can remember. Apassy cannot recover a lost passphrase, and the data is then gone.",
+        "Apassy cannot recover a lost passphrase. The data is then gone.",
         Font::Callout,
         kit::palette().secondary,
     );
@@ -455,49 +455,43 @@ pub(super) fn restore_form(app: &mut DesktopApp, ui: &mut egui::Ui) -> bool {
         Err(_) => (restore_fallback_name(app), String::new()),
     };
     let mut submit = false;
-    kit::section(
-        ui,
-        None,
-        Some(if cfg!(target_os = "linux") {
-            "The passphrase is the one of the backup. The restored vault is a new vault in your list. Leave the file empty for the default folder."
-        } else {
-            "The passphrase is the one of the backup. The restored vault is a new vault in your list. Leave the file empty for the default folder. Touch ID unlock stays off for the restored file."
-        }),
-        |s| {
-            let source = s.field("Backup file", |ui| {
-                files::path_input(
-                    ui,
-                    &mut app.files,
-                    &mut app.owner_ui.restore_source,
-                    "vault-restore-source",
-                    "/Volumes/Backup/apassy.backup",
-                    files::DialogKind::OpenBackup,
-                )
-            });
-            first_field(app, &source);
-            vaults::name_field(app, s, "vault-restore-name", &name_hint);
-            s.field("New vault file", |ui| {
-                files::path_input(
-                    ui,
-                    &mut app.files,
-                    &mut app.owner_ui.restore_dest,
-                    "vault-restore-dest",
-                    &dest_hint,
-                    files::DialogKind::SaveVault,
-                )
-            });
-            let field = s.field("Passphrase", |ui| {
-                secure_input(
-                    ui,
-                    VAULT_PASSPHRASE_FIELD,
-                    &mut app.owner_ui.passphrase,
-                    PASSPHRASE_CAPACITY,
-                    "Passphrase of the backup",
-                )
-            });
-            submit = enter_pressed(&field);
-        },
-    );
+    // The placeholders show the default file and say whose passphrase it is.
+    let footer =
+        (!cfg!(target_os = "linux")).then_some("Touch ID unlock stays off for the restored file.");
+    kit::section(ui, None, footer, |s| {
+        let source = s.field("Backup file", |ui| {
+            files::path_input(
+                ui,
+                &mut app.files,
+                &mut app.owner_ui.restore_source,
+                "vault-restore-source",
+                "/Volumes/Backup/apassy.backup",
+                files::DialogKind::OpenBackup,
+            )
+        });
+        first_field(app, &source);
+        vaults::name_field(app, s, "vault-restore-name", &name_hint);
+        s.field("New vault file", |ui| {
+            files::path_input(
+                ui,
+                &mut app.files,
+                &mut app.owner_ui.restore_dest,
+                "vault-restore-dest",
+                &dest_hint,
+                files::DialogKind::SaveVault,
+            )
+        });
+        let field = s.field("Passphrase", |ui| {
+            secure_input(
+                ui,
+                VAULT_PASSPHRASE_FIELD,
+                &mut app.owner_ui.passphrase,
+                PASSPHRASE_CAPACITY,
+                "Passphrase of the backup",
+            )
+        });
+        submit = enter_pressed(&field);
+    });
     submit
 }
 

@@ -161,6 +161,87 @@ fn last_seen_text(seen: Option<Instant>) -> String {
     }
 }
 
+/// Settings > Tools > Browser Debugging (macOS): the browser instances that agents may
+/// fill in with remote debugging. Drawn only with a row: an instance to trust, a trusted
+/// instance, or the protected device setting that cannot be read.
+fn debugging_group(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    use super::settings::rows;
+
+    let untrusted = app.browser.unsafe_instance.clone();
+    let profiles = app
+        .browser
+        .trusted_instances
+        .get_or_insert_with(crate::browser::trust::profiles)
+        .clone();
+    if untrusted.is_none() && profiles.as_ref().is_ok_and(Vec::is_empty) {
+        return;
+    }
+    rows::group_label_with_help(
+        ui,
+        "Browser Debugging",
+        &[
+            "Browser instances that agents may fill in with remote debugging.",
+            "Trust covers all profiles of the instance.",
+        ],
+    );
+    let mut trust = None;
+    let mut remove = None;
+    rows::group_box(ui, |g| {
+        if let Some(identity) = &untrusted {
+            let pressed = g.row(|ui| {
+                rows::text_buttons_named(
+                    ui,
+                    rows::label_text(&identity.description()),
+                    &[("Trust…", "Trust this browser instance", Style::Bordered)],
+                )
+            });
+            if pressed.is_some() {
+                trust = Some(identity.clone());
+            }
+        }
+        match &profiles {
+            Ok(profiles) => {
+                for identity in profiles {
+                    let description = identity.description();
+                    let spoken = format!("Remove trust of {description}");
+                    let pressed = g.row(|ui| {
+                        rows::text_buttons_named(
+                            ui,
+                            rows::label_text(&description),
+                            &[("Remove", spoken.as_str(), Style::Bordered)],
+                        )
+                    });
+                    if pressed.is_some() {
+                        remove = Some(identity.clone());
+                    }
+                }
+            }
+            Err(_) => g.tone_icon_row(
+                "Protected device setting unavailable. Agent fills are refused.",
+                Tone::Warning,
+            ),
+        }
+    });
+    if let Some(identity) = trust {
+        app.prepare_owner(
+            crate::desktop::owner_check::OwnerRequest::BrowserDebugging {
+                request_label: "Agent fills in all profiles of this instance".into(),
+                identity,
+                scope: None,
+                binding: None,
+            },
+            Some(ui.ctx()),
+            false,
+        );
+    }
+    if let Some(identity) = remove {
+        if let Err(e) = crate::browser::trust::remove(&identity) {
+            app.set_err(e);
+        }
+        app.browser.trusted_instances = None;
+    }
+}
+
 /// Settings > Tools > Browser extension: a row for each Chromium browser on this computer
 /// with its state and "Connect", and when the extension last asked.
 pub(super) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
@@ -170,126 +251,89 @@ pub(super) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     // Linux refuses a browser that was started for remote debugging outright
     // (src/browser/caller_linux.rs), so it has no such instances to trust.
     if !cfg!(target_os = "linux") {
-        ui.label("Browser instances agents may fill in with remote debugging (all profiles)");
-        if let Some(identity) = app.browser.unsafe_instance.clone() {
-            ui.horizontal(|ui| {
-                ui.label(identity.description());
-                if ui.button("Trust this instance…").clicked() {
-                    app.prepare_owner(
-                        crate::desktop::owner_check::OwnerRequest::BrowserDebugging {
-                            request_label: "Agent fills in all profiles of this instance".into(),
-                            identity,
-                            scope: None,
-                            binding: None,
-                        },
-                        Some(ui.ctx()),
-                        false,
-                    );
-                }
-            });
-        }
-        let profiles = app
-            .browser
-            .trusted_instances
-            .get_or_insert_with(crate::browser::trust::profiles)
-            .clone();
-        match profiles {
-            Ok(profiles) => {
-                for identity in profiles {
-                    ui.horizontal(|ui| {
-                        ui.label(identity.description());
-                        if ui.button("Remove").clicked() {
-                            if let Err(e) = crate::browser::trust::remove(&identity) {
-                                app.set_err(e);
-                            }
-                            app.browser.trusted_instances = None;
-                        }
-                    });
-                }
-            }
-            Err(_) => {
-                ui.label("Protected device setting unavailable. Agent fills are refused.");
-            }
-        }
+        debugging_group(app, ui);
     }
     let home = install::home();
     let mut action: Option<(Action, &'static Browser)> = None;
-    rows::section(
+    rows::group_label_with_help(
         ui,
-        Some("Browser extension"),
-        Some(concat!(
-            "Fills ask for ",
-            crate::touch_id!(),
-            " as set in Security › How often to ask. Agents never get the password."
-        )),
-        |g| {
-            let (Some(bundle), Some(home)) = (&bundle, &home) else {
-                g.line_note(
-                    "Chrome extension",
-                    Some(kit::text(crate::needs_app!(), Font::Body).color(Tone::Warning.text())),
-                    Some(rows::note(SOURCE_BUILD_NOTE)),
-                    |_| {},
-                );
-                return;
-            };
-            let host = bundle.host();
-            let mut found = 0;
-            for browser in BROWSERS {
-                let state = install::state(home, browser, &host);
-                let stale = install::manifest_path(home, browser).is_file();
-                let Some(row) = row_view(browser, &state, stale) else {
-                    continue;
-                };
-                found += 1;
-                let tone = match row.tone {
-                    RowTone::Accent => kit::palette().accent_text,
-                    RowTone::Warning => Tone::Warning.text(),
-                    RowTone::Secondary => kit::palette().secondary,
-                };
-                g.line_note(
-                    browser.name,
-                    Some(kit::text(row.status, Font::Body).color(tone)),
-                    row.note.as_deref().map(rows::note),
-                    |ui| {
-                        for button in &row.buttons {
-                            let (label, style, hover) = button_view(*button, row.status);
-                            let mut response = kit::small_button(ui, label, style);
-                            if let Some(hover) = hover {
-                                response = response.on_hover_text(hover);
-                            }
-                            if response.clicked() {
-                                action = Some((*button, browser));
-                            }
-                        }
-                    },
-                );
-            }
-            if found == 0 {
-                g.note_row(concat!(
-                    "No Chromium browser is on this ",
-                    crate::computer!(),
-                    "."
-                ));
-            }
-            g.line(
-                "Extension",
-                Some(rows::value(last_seen_text(app.browser.last_seen))),
+        "Browser extension",
+        &[
+            concat!(
+                "Fills ask for ",
+                crate::touch_id!(),
+                " as set in Security › How often to ask."
+            ),
+            "Agents never get the password.",
+        ],
+    );
+    rows::group_box(ui, |g| {
+        let (Some(bundle), Some(home)) = (&bundle, &home) else {
+            g.line_note(
+                "Chrome extension",
+                Some(kit::text(crate::needs_app!(), Font::Body).color(Tone::Warning.text())),
+                Some(rows::note(SOURCE_BUILD_NOTE)),
                 |_| {},
             );
-            // macOS only: the Linux package is always installed at /usr/lib/apassy, and
-            // Linux has no agent sandbox profile.
-            #[cfg(not(target_os = "linux"))]
-            if !bundle.is_installed_app() {
-                g.tone_row(
+            return;
+        };
+        let host = bundle.host();
+        let mut found = 0;
+        for browser in BROWSERS {
+            let state = install::state(home, browser, &host);
+            let stale = install::manifest_path(home, browser).is_file();
+            let Some(row) = row_view(browser, &state, stale) else {
+                continue;
+            };
+            found += 1;
+            let tone = match row.tone {
+                RowTone::Accent => kit::palette().accent_text,
+                RowTone::Warning => Tone::Warning.text(),
+                RowTone::Secondary => kit::palette().secondary,
+            };
+            g.line_note(
+                browser.name,
+                Some(kit::text(row.status, Font::Body).color(tone)),
+                row.note.as_deref().map(rows::note),
+                |ui| {
+                    for button in &row.buttons {
+                        let (label, style, hover) = button_view(*button, row.status);
+                        let mut response = kit::small_button(ui, label, style);
+                        if let Some(hover) = hover {
+                            response = response.on_hover_text(hover);
+                        }
+                        if response.clicked() {
+                            action = Some((*button, browser));
+                        }
+                    }
+                },
+            );
+        }
+        if found == 0 {
+            g.note_row(concat!(
+                "No Chromium browser is on this ",
+                crate::computer!(),
+                "."
+            ));
+        }
+        g.line(
+            "Extension",
+            Some(rows::value(last_seen_text(app.browser.last_seen))),
+            |_| {},
+        );
+        // macOS only: the Linux package is always installed at /usr/lib/apassy, and
+        // Linux has no agent sandbox profile.
+        #[cfg(not(target_os = "linux"))]
+        if !bundle.is_installed_app() {
+            g.tone_row(
                     "This Apassy.app is not /Applications/Apassy.app. The agent profile protects it only when agents start with the apassy-sandbox of this app.",
                     Tone::Warning.text(),
                 );
-            }
-            if let Some(problem) = &app.browser.problem {
-                g.tone_row(problem, Tone::Critical.text());
-            }
-        },
-    );
+        }
+        if let Some(problem) = &app.browser.problem {
+            g.tone_row(problem, Tone::Critical.text());
+        }
+    });
     let (Some(bundle), Some(home)) = (bundle, home) else {
         return;
     };

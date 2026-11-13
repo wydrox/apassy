@@ -341,7 +341,8 @@ fn launch_command_at(host: Host, launcher: &std::path::Path) -> String {
     }
 }
 
-/// What the owner does after the settings are saved.
+/// What the owner does after the settings are saved: start the host, then check the
+/// connection in it. The PATH help for the owner commands is in Settings › Tools.
 pub(super) fn after_setup_notes(ui: &mut egui::Ui, host: ConnectHost) {
     let Some(setup) = host.setup() else {
         return;
@@ -355,37 +356,28 @@ pub(super) fn after_setup_notes(ui: &mut egui::Ui, host: ConnectHost) {
     kit::note(
         ui,
         format!(
-            concat!(
-                "Configuration saved. Start {} ",
-                crate::agent_sandbox!(),
-                " Keep Apassy open and the vault unlocked. Connection and first use still need verification."
-            ),
+            concat!("1. Start {} ", crate::agent_sandbox!()),
             setup.name()
         ),
     );
-    kit::note(
-        ui,
-        if setup == Host::Codex {
-            "Use /hooks to trust the Apassy hook, and /mcp to check the connection. A question waits up to 5 minutes for you; the setup gives Codex a tool time-out of 660 seconds."
-        } else {
-            "Use /mcp to check the connection. A question waits up to 5 minutes for you, so start Claude Code with a tool time-out of at least 660 seconds:"
-        },
-    );
-    kit::code_block(ui, &launch_command(setup), 2);
-    kit::note(
-        ui,
-        "For owner CLI commands, install the links in Settings > Tools. In this terminal, add them to PATH:",
-    );
-    kit::code_block(ui, "export PATH=\"$HOME/.local/bin:$PATH\"", 1);
-    kit::note(
-        ui,
-        "For future zsh terminals, run the following once (use ~/.bashrc for Bash):",
-    );
-    kit::code_block(
-        ui,
-        "printf '%s\\n' 'export PATH=\"$HOME/.local/bin:$PATH\"' >> \"$HOME/.zshrc\"",
-        2,
-    );
+    let (timeout, check) = if setup == Host::Codex {
+        (
+            "The setup gave Codex a tool time-out of 660 seconds.",
+            "2. In Codex, run /hooks and trust the Apassy hook. Then run /mcp and check that Apassy is connected.",
+        )
+    } else {
+        (
+            "The time-out of 660 seconds covers the 5 minutes that a question waits for you.",
+            "2. In Claude Code, run /mcp and check that Apassy is connected.",
+        )
+    };
+    // The time-out fact is the hover text and the description of the command.
+    let command = kit::code_block(ui, &launch_command(setup), 2);
+    ui.ctx()
+        .accesskit_node_builder(command.id, |node| node.set_description(timeout));
+    command.on_hover_text(timeout);
+    kit::note(ui, check);
+    kit::note(ui, "Keep Apassy open and the vault unlocked.");
 }
 
 #[cfg(test)]
@@ -501,6 +493,144 @@ mod tests {
         assert!(app.owner_ui.session.agent_sees_all(ci.id).unwrap());
         assert_eq!(token_shown(&mut app).0, ConnectHost::Other);
     }
+
+    /// The painted texts of a frame of the window with their positions, and the
+    /// descriptions of its AccessKit nodes.
+    fn sheet_frame(
+        ctx: &egui::Context,
+        app: &mut DesktopApp,
+        events: Vec<egui::Event>,
+    ) -> (Vec<(String, egui::Pos2)>, Vec<String>) {
+        fn texts(shape: &egui::Shape, out: &mut Vec<(String, egui::Pos2)>) {
+            match shape {
+                egui::Shape::Text(text) => out.push((
+                    text.galley.text().to_owned(),
+                    text.pos + text.galley.size() / 2.0,
+                )),
+                egui::Shape::Vec(nested) => nested.iter().for_each(|inner| texts(inner, out)),
+                _ => {}
+            }
+        }
+        let output = ctx.run_ui(super::super::owner_tests::input(0.0, events), |ui| {
+            super::super::draw(app, ui)
+        });
+        let mut painted = Vec::new();
+        for clipped in &output.shapes {
+            texts(&clipped.shape, &mut painted);
+        }
+        let described = output
+            .platform_output
+            .accesskit_update
+            .iter()
+            .flat_map(|update| update.nodes.iter())
+            .filter_map(|(_, node)| node.description().map(str::to_owned))
+            .collect();
+        output.drop_without_applying_deltas();
+        (painted, described)
+    }
+
+    /// Three frames: the last one's texts and descriptions.
+    fn settled(ctx: &egui::Context, app: &mut DesktopApp) -> (String, Vec<String>) {
+        let mut last = (Vec::new(), Vec::new());
+        for _ in 0..3 {
+            last = sheet_frame(ctx, app, Vec::new());
+        }
+        let text = last
+            .0
+            .iter()
+            .map(|(text, _)| text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        (text, last.1)
+    }
+
+    /// Once the settings are saved, the sheet says what is left in two steps: start the
+    /// host (in the Apassy sandbox on macOS; on Linux with the sentence that agents are
+    /// not confined), then check the connection in it. The time-out fact is the hover
+    /// text and the description of the command. The PATH lines are not in the sheet.
+    /// Done says that the bouncer decides each use.
+    #[test]
+    fn the_saved_sheet_has_two_steps() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut app, _) = unlocked_app_with_item(&dir);
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        for (host, setup, check, timeout) in [
+            (
+                ConnectHost::Claude,
+                Host::Claude,
+                "2. In Claude Code, run /mcp and check that Apassy is connected.",
+                "The time-out of 660 seconds covers the 5 minutes that a question waits for you.",
+            ),
+            (
+                ConnectHost::Codex,
+                Host::Codex,
+                "2. In Codex, run /hooks and trust the Apassy hook. Then run /mcp and check that Apassy is connected.",
+                "The setup gave Codex a tool time-out of 660 seconds.",
+            ),
+        ] {
+            app.owner_ui.fresh_token = None;
+            connect(&mut app, None, host, "");
+            app.confirm_owner_now(OwnerCheck::passphrase(PASS)).unwrap();
+            assert!(app.owner_ui.fresh_token.is_some());
+            let (before, _) = settled(&ctx, &mut app);
+            assert!(
+                before.contains("There is nothing else to set"),
+                "the lead before the save: {before}"
+            );
+            // The settings are saved: a test never writes host settings.
+            app.ui.agent_setup.result = Some(Ok(setup));
+            let (text, described) = settled(&ctx, &mut app);
+            let start = format!(
+                concat!("1. Start {} ", crate::agent_sandbox!()),
+                setup.name()
+            );
+            for expected in [
+                "Connection settings saved.",
+                start.as_str(),
+                check,
+                "Keep Apassy open and the vault unlocked.",
+                "Done",
+            ] {
+                assert!(text.contains(expected), "missing {expected}: {text}");
+            }
+            assert!(
+                described.iter().any(|said| said == timeout),
+                "{timeout}: {described:?}"
+            );
+            for gone in [
+                "PATH",
+                "do not prove",
+                "Configuration saved",
+                "There is nothing else to set",
+            ] {
+                assert!(!text.contains(gone), "{gone} is painted: {text}");
+            }
+        }
+
+        // Done closes the sheet with the new toast.
+        let (painted, _) = sheet_frame(&ctx, &mut app, Vec::new());
+        let at = painted
+            .iter()
+            .rev()
+            .find(|(text, _)| text == "Done")
+            .map(|(_, at)| *at)
+            .expect("Done");
+        let button = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        sheet_frame(&ctx, &mut app, vec![egui::Event::PointerMoved(at)]);
+        sheet_frame(&ctx, &mut app, vec![button(true)]);
+        sheet_frame(&ctx, &mut app, vec![button(false)]);
+        assert!(app.owner_ui.fresh_token.is_none(), "{}", app.status_text);
+        assert_eq!(
+            app.status_text,
+            "Done. The bouncer decides each use; a question shows in Decisions."
+        );
+    }
 }
 
 /// Repair must target the recorded identity, never an unrelated agent with the
@@ -540,15 +670,39 @@ pub(super) struct HostHealth {
     pub action: Option<&'static str>,
 }
 
-pub(super) fn host_health(home: &std::path::Path, host: Host) -> HostHealth {
+/// Where the host health looks: the home folder and the config folders of the hosts
+/// (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`). Settings › Tools reads them from the
+/// environment; a test gives its own folders.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct HostDirs {
+    pub(crate) home: std::path::PathBuf,
+    pub(crate) claude_config: Option<std::path::PathBuf>,
+    pub(crate) codex_home: Option<std::path::PathBuf>,
+}
+
+impl HostDirs {
+    /// The folders of this process: `HOME`, `CLAUDE_CONFIG_DIR`, and `CODEX_HOME`.
+    pub(crate) fn from_env() -> Self {
+        Self {
+            home: std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_default(),
+            claude_config: std::env::var_os("CLAUDE_CONFIG_DIR").map(std::path::PathBuf::from),
+            codex_home: std::env::var_os("CODEX_HOME").map(std::path::PathBuf::from),
+        }
+    }
+}
+
+pub(super) fn host_health(dirs: &HostDirs, host: Host) -> HostHealth {
     use std::os::unix::fs::PermissionsExt;
+    let home = dirs.home.as_path();
     let dir = home.join(".config/apassy");
     let executable = |name: &str| {
         std::fs::metadata(dir.join(format!("apassy-{name}-{}.sh", host.id())))
             .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
     };
     let (config, hooks) = if host == Host::Claude {
-        let custom = std::env::var_os("CLAUDE_CONFIG_DIR").map(std::path::PathBuf::from);
+        let custom = dirs.claude_config.clone();
         (
             custom
                 .as_ref()
@@ -558,8 +712,9 @@ pub(super) fn host_health(home: &std::path::Path, host: Host) -> HostHealth {
                 .join("settings.json"),
         )
     } else {
-        let base = std::env::var_os("CODEX_HOME")
-            .map(std::path::PathBuf::from)
+        let base = dirs
+            .codex_home
+            .clone()
             .unwrap_or_else(|| home.join(".codex"));
         (base.join("config.toml"), base.join("hooks.json"))
     };
@@ -688,7 +843,11 @@ mod health_tests {
     #[test]
     fn missing_host_is_visible_and_never_claims_a_request() {
         let dir = tempfile::tempdir().unwrap();
-        let health = host_health(dir.path(), Host::Claude);
+        let dirs = HostDirs {
+            home: dir.path().to_path_buf(),
+            ..HostDirs::default()
+        };
+        let health = host_health(&dirs, Host::Claude);
         assert_eq!(health.status, "Not connected");
         assert_eq!(health.action, Some("Connect…"));
         assert!(health.details.contains("missing"));

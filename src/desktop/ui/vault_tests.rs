@@ -671,6 +671,8 @@ fn settings_show_start_now_and_the_first_start_download() {
     let text = frames(&mut app);
     assert!(text.contains("Cannot start"), "{text}");
     assert!(!text.contains("Start now"), "{text}");
+    // With a model server, the "Bouncer brain" row alone says the state.
+    assert!(!text.contains("Brain not ready"), "{text}");
 
     // The environment is complete: "Start now".
     executable(&laya_dir.join(".venv/bin/laya-serve"), "#!/bin/sh\n");

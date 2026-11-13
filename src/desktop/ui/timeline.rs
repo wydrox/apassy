@@ -192,20 +192,14 @@ pub(super) fn change_timeline(app: &mut DesktopApp, ui: &mut egui::Ui, item_id: 
         FOLDED_ROWS
     };
     let now = now();
-    kit::section(
-        ui,
-        Some("History"),
-        Some(
-            "Changes to this credential, newest first. The history names what changed and never keeps a value.",
-        ),
-        |s| {
-            for event in events.iter().take(shown) {
-                let (text, detail, tone) = event_text(event);
-                s.row(|ui| row(ui, tone, &text, detail.as_deref(), event.at, now));
-            }
-            fold_toggle(app, s, &key, events.len());
-        },
-    );
+    // The group label "History" above names it; the rows are newest first.
+    kit::section(ui, None, None, |s| {
+        for event in events.iter().take(shown) {
+            let (text, detail, tone) = event_text(event);
+            s.row(|ui| row(ui, tone, &text, detail.as_deref(), event.at, now));
+        }
+        fold_toggle(app, s, &key, events.len());
+    });
 }
 
 fn decision(row: &AgentActivityRow) -> (&'static str, Tone) {
@@ -233,63 +227,56 @@ pub(super) fn access_timeline(
     } else {
         FOLDED_ROWS
     };
-    kit::section(
-        ui,
-        Some(title),
-        Some(
-            "Requests that Apassy allowed, denied, or ended, newest first. The log keeps the last 500 requests of all agents.",
-        ),
-        |s| {
-            if rows.is_empty() {
-                s.row(|ui| kit::note(ui, empty));
-                return;
-            }
-            for entry in rows.iter().take(shown) {
-                s.row(|ui| {
-                    let (label, tone) = decision(entry);
-                    egui::Sides::new()
-                        .height(LINE_HEIGHT)
-                        .shrink_left()
-                        .truncate()
-                        .show(
-                            ui,
-                            |ui| {
-                                kit::dot(ui, tone);
-                                let who = if by_agent { &entry.item } else { &entry.agent };
-                                ui.label(kit::medium(who, Font::Body).color(kit::palette().label));
-                                ui.add(
-                                    Label::new(
-                                        kit::text(&entry.operation, Font::MonoSmall)
-                                            .color(kit::palette().secondary),
-                                    )
-                                    .truncate(),
-                                )
-                                .on_hover_text(&entry.operation);
-                            },
-                            |ui| {
-                                ui.label(
-                                    kit::text(relative_time(entry.at, now), Font::Footnote)
-                                        .color(kit::palette().secondary),
-                                )
-                                .on_hover_text(&entry.when);
-                                kit::tag(ui, label, tone);
-                            },
-                        );
-                    if !entry.reason.is_empty() {
-                        kit::indented(ui, kit::DOT_INDENT, |ui| {
+    kit::section(ui, Some(title), None, |s| {
+        if rows.is_empty() {
+            s.row(|ui| kit::note(ui, empty));
+            return;
+        }
+        for entry in rows.iter().take(shown) {
+            s.row(|ui| {
+                let (label, tone) = decision(entry);
+                egui::Sides::new()
+                    .height(LINE_HEIGHT)
+                    .shrink_left()
+                    .truncate()
+                    .show(
+                        ui,
+                        |ui| {
+                            kit::dot(ui, tone);
+                            let who = if by_agent { &entry.item } else { &entry.agent };
+                            ui.label(kit::medium(who, Font::Body).color(kit::palette().label));
                             ui.add(
                                 Label::new(
-                                    kit::text(&entry.reason, Font::Footnote)
+                                    kit::text(&entry.operation, Font::MonoSmall)
                                         .color(kit::palette().secondary),
                                 )
                                 .truncate(),
                             )
-                            .on_hover_text(&entry.reason);
-                        });
-                    }
-                });
-            }
-            fold_toggle(app, s, key, rows.len());
-        },
-    );
+                            .on_hover_text(&entry.operation);
+                        },
+                        |ui| {
+                            ui.label(
+                                kit::text(relative_time(entry.at, now), Font::Footnote)
+                                    .color(kit::palette().secondary),
+                            )
+                            .on_hover_text(&entry.when);
+                            kit::tag(ui, label, tone);
+                        },
+                    );
+                if !entry.reason.is_empty() {
+                    kit::indented(ui, kit::DOT_INDENT, |ui| {
+                        ui.add(
+                            Label::new(
+                                kit::text(&entry.reason, Font::Footnote)
+                                    .color(kit::palette().secondary),
+                            )
+                            .truncate(),
+                        )
+                        .on_hover_text(&entry.reason);
+                    });
+                }
+            });
+        }
+        fold_toggle(app, s, key, rows.len());
+    });
 }
