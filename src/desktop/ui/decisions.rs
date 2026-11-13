@@ -193,6 +193,8 @@ pub(crate) struct State {
     evaluation: Option<EvaluationDraft>,
     /// The past decision whose "Details" are open, by its key (ADR 0046).
     past_details: Option<u64>,
+    /// The screenshot tour draws the floating question window inside the main window.
+    tour_window: bool,
     /// The detail of the past decision that shows, read once per key (ADR 0046).
     past_detail: Option<(
         super::decisions_past::CacheKey,
@@ -946,6 +948,49 @@ pub(super) fn select(app: &mut DesktopApp, run_id: u64) {
     app.ui.decisions.past = None;
     app.ui.decisions.selected = Some(Key::Run(run_id));
     app.ui.decisions.disconnect = None;
+}
+
+impl DesktopApp {
+    /// The screenshot tour: show the newest past decision of this computer about
+    /// `credential` in Decisions, with its "Details" open when `details`. False when
+    /// History has none.
+    pub fn tour_past(&mut self, credential: &str, details: bool) -> bool {
+        let Some(key) = self
+            .ui
+            .bouncer
+            .data
+            .events
+            .iter()
+            .filter(|event| matches!(event.source, super::bouncer::LogSource::Decision(_)))
+            .find(|event| event.credential.as_deref() == Some(credential))
+            .map(super::bouncer::LogEvent::key)
+        else {
+            return false;
+        };
+        self.place = crate::desktop::Place::Decisions;
+        choose_past(&mut self.ui.decisions, key);
+        self.ui.decisions.past_details = details.then_some(key);
+        true
+    }
+
+    /// The screenshot tour: select the question of `agent` that waits. False when none
+    /// waits.
+    pub fn tour_question(&mut self, agent: &str) -> bool {
+        let Some(run) = queue(self)
+            .and_then(|(queue, _)| queue.pending().into_iter().find(|run| run.agent == agent))
+        else {
+            return false;
+        };
+        self.place = crate::desktop::Place::Decisions;
+        select(self, run.id);
+        true
+    }
+
+    /// The screenshot tour: draw the floating question window inside the main window
+    /// (with embedded viewports), so the tour can capture it.
+    pub fn tour_question_window(&mut self, on: bool) {
+        self.ui.decisions.tour_window = on;
+    }
 }
 
 /// A notification is a hint to one exact request, never an approval or a next-item action.
@@ -3553,7 +3598,8 @@ pub(super) fn floating_prompt(app: &mut DesktopApp, ctx: &egui::Context, pending
             .with_always_on_top()
             .with_active(false),
         |ui, class| {
-            if class == egui::ViewportClass::EmbeddedWindow {
+            // The screenshot tour draws the window inside the main one.
+            if class == egui::ViewportClass::EmbeddedWindow && !app.ui.decisions.tour_window {
                 if app.ui.decisions.floating_fallback != Some(run.id) {
                     app.ui.decisions.floating_fallback = Some(run.id);
                     select(app, run.id);
