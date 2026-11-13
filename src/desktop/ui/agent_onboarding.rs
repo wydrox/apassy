@@ -355,7 +355,10 @@ pub(super) fn after_setup_notes(ui: &mut egui::Ui, host: ConnectHost) {
     }
     kit::note(
         ui,
-        format!(concat!("1. Start {} ", crate::agent_sandbox!()), setup.name()),
+        format!(
+            concat!("1. Start {} ", crate::agent_sandbox!()),
+            setup.name()
+        ),
     );
     let (timeout, check) = if setup == Host::Codex {
         (
