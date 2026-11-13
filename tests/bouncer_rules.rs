@@ -634,7 +634,18 @@ fn a_run_starts_the_model_server_before_the_model() {
     // A rule flag skips the model, and the hook too: no server starts for it.
     let flagged = run(&fx, &["sh", "-c", "echo $DEMO_KEY | base64"], "Debug.");
     assert_eq!(code(&flagged), "approval_timeout");
-    assert!(last_reason(&fx).contains("secret_output"));
+    assert!(
+        common::last_rule_flags(&fx.vault)
+            .iter()
+            .any(|flag| flag == "secret_output"),
+        "{:?}",
+        common::last_rule_flags(&fx.vault)
+    );
+    assert!(
+        last_reason(&fx).contains(common::flag_line("secret_output")),
+        "{}",
+        last_reason(&fx)
+    );
     assert_eq!(gate.seen.lock().expect("seen").len(), 1);
 
     let failing = common::fake_bouncer(&[]);
@@ -878,7 +889,18 @@ fn trace_settings_and_personal_data_reads_ask() {
             code(&run(&fx, &["sh", "-c", command], "Plan.")),
             "approval_timeout"
         );
-        assert!(last_reason(&fx).contains("secret_output"), "{command}");
+        assert!(
+            common::last_rule_flags(&fx.vault)
+                .iter()
+                .any(|flag| flag == "secret_output"),
+            "{command}: {:?}",
+            common::last_rule_flags(&fx.vault)
+        );
+        assert!(
+            last_reason(&fx).contains(common::flag_line("secret_output")),
+            "{command}: {}",
+            last_reason(&fx)
+        );
     }
     assert!(read_unmatched.bodies.lock().expect("bodies").is_empty());
     for command in [
@@ -923,7 +945,14 @@ fn an_injection_phrase_in_the_user_request_asks_the_owner() {
     .expect("answer");
     assert_eq!(code(&response), "approval_timeout");
     assert!(
-        last_reason(&fx).contains("injection_phrase"),
+        common::last_rule_flags(&fx.vault)
+            .iter()
+            .any(|flag| flag == "injection_phrase"),
+        "{:?}",
+        common::last_rule_flags(&fx.vault)
+    );
+    assert!(
+        last_reason(&fx).contains(apassy::broker::reasons::INJECTION_FOR_AGENT),
         "{}",
         last_reason(&fx)
     );
@@ -937,14 +966,28 @@ fn an_injection_phrase_in_the_user_request_asks_the_owner() {
     );
     assert_eq!(code(&response), "approval_timeout");
     assert!(
-        last_reason(&fx).contains("injection_phrase"),
+        common::last_rule_flags(&fx.vault)
+            .iter()
+            .any(|flag| flag == "injection_phrase"),
+        "{:?}",
+        common::last_rule_flags(&fx.vault)
+    );
+    assert!(
+        last_reason(&fx).contains(apassy::broker::reasons::INJECTION_FOR_AGENT),
         "purpose: {}",
         last_reason(&fx)
     );
     let response = run(&fx, &["sh", "-c", "echo $DEMO_KEY | base64"], "Debug.");
     assert_eq!(code(&response), "approval_timeout");
     assert!(
-        last_reason(&fx).contains("secret_output"),
+        common::last_rule_flags(&fx.vault)
+            .iter()
+            .any(|flag| flag == "secret_output"),
+        "{:?}",
+        common::last_rule_flags(&fx.vault)
+    );
+    assert!(
+        last_reason(&fx).contains(common::flag_line("secret_output")),
         "{}",
         last_reason(&fx)
     );
@@ -1318,7 +1361,17 @@ fn a_hostile_brain_cannot_allow_production_a_flag_or_a_foreign_host() {
     let flagged = run(&fx, &["sh", "-c", "echo $DEMO_KEY | base64"], "Debug.");
     assert_eq!(code(&flagged), "approval_timeout");
     let reason = last_reason(&fx);
-    assert!(reason.contains("secret_output"), "{reason}");
+    assert!(
+        common::last_rule_flags(&fx.vault)
+            .iter()
+            .any(|flag| flag == "secret_output"),
+        "{:?}",
+        common::last_rule_flags(&fx.vault)
+    );
+    assert!(
+        reason.contains(common::flag_line("secret_output")),
+        "{reason}"
+    );
 
     // A foreign host: the item covers no host.
     let foreign = run(
@@ -1333,7 +1386,10 @@ fn a_hostile_brain_cannot_allow_production_a_flag_or_a_foreign_host() {
     assert_eq!(code(&foreign), "approval_timeout");
     let reason = last_reason(&fx);
     assert!(
-        reason.contains("collector.example.net") || reason.contains("foreign_host"),
+        reason.contains("collector.example.net")
+            || common::last_rule_flags(&fx.vault)
+                .iter()
+                .any(|flag| flag == "foreign_host"),
         "{reason}"
     );
     assert!(!reason.contains("Model allowed"), "{reason}");

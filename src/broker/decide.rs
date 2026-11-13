@@ -1016,6 +1016,7 @@ fn ask_owner(
         remember: None,
         question: QuestionInfo {
             reason,
+            flags: Vec::new(),
             id: 0,
             item_ids: vec![item_id],
             project: None,

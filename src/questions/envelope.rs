@@ -544,6 +544,7 @@ impl Card {
             }),
             question: QuestionInfo {
                 reason: Default::default(),
+                flags: Vec::new(),
                 id: question_id,
                 item_ids,
                 project: self.question.project.as_ref().map(|project| Project {

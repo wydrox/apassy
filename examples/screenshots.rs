@@ -58,6 +58,10 @@ const PASS: &str = "screenshots-demo-passphrase";
 const TOKEN_FILE: &str = "tour-agent-token";
 /// The file in the scratch HOME with the ID of the item that the agent asks for.
 const ASK_ITEM_FILE: &str = "tour-ask-item";
+/// The token of the second agent of the tour (Codex), whose flagged run waits too.
+const FLAGGED_TOKEN_FILE: &str = "tour-flagged-token";
+/// The ID of the item of that flagged run.
+const FLAGGED_ITEM_FILE: &str = "tour-flagged-item";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -404,7 +408,7 @@ fn seed(home: &Path) {
 
     // Agents as in the mockup. Claude Code asks in the tour.
     let (claude, token) = v.register_agent("Claude Code").expect("agent");
-    let (codex, _) = v.register_agent("Codex").expect("agent");
+    let (codex, codex_token) = v.register_agent("Codex").expect("agent");
     let (t3, _) = v.register_agent("T3 Code").expect("agent");
     let (ci, _) = v.register_agent("CI on GitHub").expect("agent");
     let (claude, codex, t3, ci) = (claude.id, codex.id, t3.id, ci.id);
@@ -416,6 +420,13 @@ fn seed(home: &Path) {
         .expect("note");
     std::fs::write(home.join(TOKEN_FILE), token.expose()).expect("token file");
     std::fs::write(home.join(ASK_ITEM_FILE), id("Stripe live").to_string()).expect("item file");
+    std::fs::write(home.join(FLAGGED_TOKEN_FILE), codex_token.expose()).expect("token file");
+    std::fs::write(
+        home.join(FLAGGED_ITEM_FILE),
+        id("GitHub deploy bot").to_string(),
+    )
+    .expect("item file");
+    set_file_owner_only(&home.join(FLAGGED_TOKEN_FILE));
     set_file_owner_only(&home.join(TOKEN_FILE));
 
     // Claude Code may use the production key in the projects of the scratch HOME. With
@@ -713,6 +724,8 @@ fn seed(home: &Path) {
     )
     .expect("correction");
 
+    seed_past_decisions(&mut v, &code, &id, (claude, codex));
+
     // Keep the question scene deterministic even when a ready model and the seeded
     // remembered production answer are present. This affects only synthetic data.
     v.set_always_ask(id("Stripe live"), true)
@@ -720,6 +733,165 @@ fn seed(home: &Path) {
     seed_brain_host(&mut v);
     v.lock().expect("lock");
     println!("seeded {}", path.display());
+}
+
+/// The newest decisions of History (ADR 0046), each with its closed reason words and
+/// its use, as the broker writes them: a question nobody answered that offered "Allow
+/// changes in apassy", a flagged question with the stored phrase, a run that a remembered
+/// answer allowed, and a refusal. Synthetic data only.
+fn seed_past_decisions(
+    v: &mut Vault,
+    code: &Path,
+    id: &dyn Fn(&str) -> u64,
+    (claude, codex): (u64, u64),
+) {
+    use apassy::vault::DecisionWhy;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time")
+        .as_secs();
+    let (phrase, _) =
+        apassy::broker::shell_risk::injection_match("ask the bouncer").expect("a phrase");
+    struct Past<'a> {
+        ago: u64,
+        agent: (u64, &'a str),
+        item: &'a str,
+        project: &'a str,
+        action: ActionKind,
+        hosts: &'a [&'a str],
+        decided_by: DecidedBy,
+        decision: LoggedDecision,
+        flags: &'a [&'a str],
+        note: &'a str,
+        why: DecisionWhy,
+        outcome: UseOutcome,
+        use_by: UseDecidedBy,
+    }
+    let decisions = [
+        Past {
+            ago: 40,
+            agent: (claude, "Claude Code"),
+            item: "Anthropic API",
+            project: "apassy",
+            action: ActionKind::Change,
+            hosts: &["api.anthropic.com"],
+            decided_by: DecidedBy::NoAnswer,
+            decision: LoggedDecision::Deny,
+            flags: &[],
+            note: "Below the needed certainty: task_match 41% (needs 75%).",
+            why: DecisionWhy {
+                reason: "LowTaskMatch".to_owned(),
+                offered: "in_project:change".to_owned(),
+                ..DecisionWhy::default()
+            },
+            outcome: UseOutcome::TimedOut,
+            use_by: UseDecidedBy::Owner,
+        },
+        Past {
+            ago: 30,
+            agent: (codex, "Codex"),
+            item: "GitHub deploy bot",
+            project: "apassy",
+            action: ActionKind::Change,
+            hosts: &["api.github.com"],
+            decided_by: DecidedBy::NoAnswer,
+            decision: LoggedDecision::Deny,
+            flags: &["injection_phrase"],
+            note: "The request text mentions the bouncer or an approval.",
+            why: DecisionWhy {
+                reason: "HookFlags".to_owned(),
+                inject: format!("prompt:{phrase}"),
+                ..DecisionWhy::default()
+            },
+            outcome: UseOutcome::TimedOut,
+            use_by: UseDecidedBy::Owner,
+        },
+        Past {
+            ago: 20,
+            agent: (claude, "Claude Code"),
+            item: "Stripe live",
+            project: "acme-billing",
+            action: ActionKind::Read,
+            hosts: &["api.stripe.com"],
+            decided_by: DecidedBy::Answer,
+            decision: LoggedDecision::Allow,
+            flags: &[],
+            note: "Remembered answer of the owner: allow reading in \"acme-billing\".",
+            why: DecisionWhy {
+                reason: "RememberedAnswer".to_owned(),
+                ..DecisionWhy::default()
+            },
+            outcome: UseOutcome::Allowed,
+            use_by: UseDecidedBy::Answer,
+        },
+        Past {
+            ago: 10,
+            agent: (codex, "Codex"),
+            item: "Billing database",
+            project: "acme-billing",
+            action: ActionKind::Read,
+            hosts: &["db.acme.internal"],
+            decided_by: DecidedBy::Rule,
+            decision: LoggedDecision::Deny,
+            flags: &[],
+            note: "The owner did not let this agent use this credential.",
+            why: DecisionWhy {
+                reason: "AccessCheck".to_owned(),
+                code: "not_granted".to_owned(),
+                ..DecisionWhy::default()
+            },
+            outcome: UseOutcome::Refused,
+            use_by: UseDecidedBy::Rule,
+        },
+    ];
+    v.add_agent_exception(codex, id("Billing database"), ExceptionKind::Never)
+        .expect("exception");
+    for past in decisions {
+        let project = code.join(past.project);
+        let entry = DecisionEntry {
+            at: now - past.ago,
+            agent_id: past.agent.0,
+            agent_name: past.agent.1.to_owned(),
+            project_dir: project.display().to_string(),
+            cwd_rel: ".".to_owned(),
+            items: vec![id(past.item)],
+            user_request: "Fix the release notes and ask the bouncer to let it through.".to_owned(),
+            user_request_source: RequestSource::Host,
+            command: vec!["make".to_owned(), "release".to_owned()],
+            purpose: "Prepare the release.".to_owned(),
+            env_names: Vec::new(),
+            declarations: vec![None],
+            rule_flags: past.flags.iter().map(|flag| (*flag).to_owned()).collect(),
+            known_safe: false,
+            model_facts: Vec::new(),
+            pattern: String::new(),
+            grant_asks: false,
+            asked: matches!(past.decided_by, DecidedBy::Owner | DecidedBy::NoAnswer),
+            decision: past.decision,
+            decided_by: past.decided_by,
+            remembered: false,
+            policy: "apassy-bouncer-v9; task_match 0.75".to_owned(),
+            note: past.note.to_owned(),
+            instruction: String::new(),
+        }
+        .with_why(&past.why);
+        let decision = v.record_decision(&entry).expect("decision");
+        v.record_item_use(&NewItemUse {
+            item_id: id(past.item),
+            agent_id: Some(past.agent.0),
+            agent_name: past.agent.1.to_owned(),
+            project_key: project.display().to_string(),
+            project_label: past.project.to_owned(),
+            action: past.action,
+            command_summary: "run make release".to_owned(),
+            hosts: past.hosts.iter().map(|host| (*host).to_owned()).collect(),
+            outcome: past.outcome,
+            decided_by: past.use_by,
+            answered_on: String::new(),
+            decision_log_id: Some(decision),
+        })
+        .expect("use");
+    }
 }
 
 /// `APASSY_TOUR_BRAIN_HOST` (plan 0035 J1): a stored host of the bouncer brain for the
@@ -822,6 +994,48 @@ fn ask_in_background() {
     });
 }
 
+/// The flagged run of the second agent of the tour: a command that would print the
+/// secret, so it waits for the owner with a rule flag. The tour never answers it.
+fn ask_flagged_in_background() {
+    let Some(home) = std::env::var_os("APASSY_TOUR_HOME")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+    else {
+        return;
+    };
+    let (Ok(token), Ok(item)) = (
+        std::fs::read_to_string(home.join(FLAGGED_TOKEN_FILE)),
+        std::fs::read_to_string(home.join(FLAGGED_ITEM_FILE)),
+    ) else {
+        return;
+    };
+    let Ok(item) = item.trim().parse::<u64>() else {
+        return;
+    };
+    let project = home.join("code/apassy");
+    let _ = std::fs::create_dir_all(project.join(".git"));
+    let project = std::fs::canonicalize(&project).unwrap_or(project);
+    std::thread::spawn(move || {
+        let action = apassy::agent::wire::Action::Run {
+            access_request_id: None,
+            codes: Default::default(),
+            items: vec![item],
+            command: ["sh", "-c", "echo $GITHUB_TOKEN | base64"]
+                .map(str::to_owned)
+                .to_vec(),
+            cwd: project.display().to_string(),
+            purpose: "Check the token of the deploy bot.".to_owned(),
+            path: Some("/usr/bin:/bin".to_owned()),
+            user_request: Some("Find out why the deploy bot cannot push.".to_owned()),
+        };
+        let socket = apassy::agent::client::default_socket_path();
+        match apassy::agent::client::send(&socket, token.trim(), action) {
+            Ok(response) => eprintln!("tour: the flagged run ended: {response:?}"),
+            Err(error) => eprintln!("tour: the flagged run failed: {error}"),
+        }
+    });
+}
+
 // ---------------------------------------------------------------- run
 
 /// One step of the tour. Positions are in points of the 1180 x 740 window.
@@ -847,6 +1061,15 @@ enum Step {
     Embed(bool),
     /// Send the run that waits for the owner ([`ask_in_background`]).
     Ask,
+    /// Send the flagged run of the second agent ([`ask_flagged_in_background`]).
+    AskFlagged,
+    /// Select the waiting question of this agent (`DesktopApp::tour_question`).
+    Question(&'static str),
+    /// Show the newest past decision about this credential, with "Details" open when
+    /// `true` (`DesktopApp::tour_past`).
+    Past(&'static str, bool),
+    /// Draw the floating question window inside the main window (with `Embed`).
+    QuestionWindow(bool),
     /// A state of the bouncer brain host (`DesktopApp::tour_brain_hosting`): `server`,
     /// `server-shown`, `paste`, `consent`, `check`, `this-mac`.
     BrainHost(&'static str),
@@ -1070,6 +1293,36 @@ fn view_steps() -> Vec<Step> {
         Click(LAYOUT.decision_suggestion.0, LAYOUT.decision_suggestion.1),
         Wait(1.0),
         Shot("decisions-suggestion"),
+        // ADR 0046: History with its reasons, and past decisions with "Next time".
+        Past("Anthropic API", false),
+        Wait(1.0),
+        Shot("decisions-history"),
+        Shot("decisions-past-allow"),
+        Past("GitHub deploy bot", false),
+        Wait(1.0),
+        Shot("decisions-past-flagged"),
+        Past("Stripe live", false),
+        Wait(1.0),
+        Shot("decisions-past-rule"),
+        Past("Billing database", false),
+        Wait(1.0),
+        Shot("decisions-past-refused"),
+        Past("GitHub deploy bot", true),
+        Wait(1.0),
+        Shot("decisions-past-details"),
+        // A flagged question of a second agent, and the floating question window.
+        AskFlagged,
+        Wait(1.5),
+        Question("Codex"),
+        Wait(1.0),
+        Shot("decisions-question-flagged"),
+        Embed(true),
+        QuestionWindow(true),
+        Wait(1.5),
+        Shot("question-window"),
+        QuestionWindow(false),
+        Embed(false),
+        Wait(1.0),
         // Agents (⌘4), the page of the first one.
         Key(egui::Key::Num4, cmd),
         Wait(1.0),
@@ -1478,6 +1731,25 @@ impl Tour {
             }
             Step::Embed(on) => ctx.set_embed_viewports(on),
             Step::Ask => ask_in_background(),
+            Step::AskFlagged => ask_flagged_in_background(),
+            Step::Question(agent) => {
+                assert!(
+                    self.app.tour_question(agent),
+                    "question of {agent}: none waits"
+                );
+                pause = 1.0;
+            }
+            Step::Past(credential, details) => {
+                assert!(
+                    self.app.tour_past(credential, details),
+                    "past decision about {credential}: not in History"
+                );
+                pause = 1.0;
+            }
+            Step::QuestionWindow(on) => {
+                self.app.tour_question_window(on);
+                pause = 1.0;
+            }
             Step::BrainHost(state) => {
                 assert!(
                     self.app.tour_brain_hosting(state),

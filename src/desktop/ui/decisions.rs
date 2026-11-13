@@ -191,6 +191,15 @@ pub(crate) struct State {
     sending: Sending,
     /// An immutable offer snapshot with only the owner's classification edits.
     evaluation: Option<EvaluationDraft>,
+    /// The past decision whose "Details" are open, by its key (ADR 0046).
+    past_details: Option<u64>,
+    /// The screenshot tour draws the floating question window inside the main window.
+    tour_window: bool,
+    /// The detail of the past decision that shows, read once per key (ADR 0046).
+    past_detail: Option<(
+        super::decisions_past::CacheKey,
+        Option<super::decisions_past::Past>,
+    )>,
 }
 
 impl State {
@@ -307,6 +316,15 @@ pub(super) enum Primary {
     /// "Development" (and "Production") for a credential that is production only by
     /// default.
     Correct,
+}
+
+/// The answer of Dismiss: with the comment of the field when it holds one.
+pub(super) fn dismiss_answer(comment: &str) -> Answer {
+    if comment.trim().is_empty() {
+        Answer::Deny
+    } else {
+        Answer::DenyWithComment(comment.to_owned())
+    }
 }
 
 /// An answer of the owner on the card.
@@ -890,6 +908,8 @@ fn choose_past(state: &mut State, id: u64) {
     state.selected = None;
     state.disconnect = None;
     state.past = Some(id);
+    // "Details" of a past decision opens per selection, closed by default.
+    state.past_details = None;
 }
 
 /// Type into the paste field of the selected request.
@@ -928,6 +948,52 @@ pub(super) fn select(app: &mut DesktopApp, run_id: u64) {
     app.ui.decisions.past = None;
     app.ui.decisions.selected = Some(Key::Run(run_id));
     app.ui.decisions.disconnect = None;
+}
+
+impl DesktopApp {
+    /// The screenshot tour: show the newest past decision of this computer about
+    /// `credential` in Decisions, with its "Details" open when `details`. False when
+    /// History has none.
+    #[doc(hidden)]
+    pub fn tour_past(&mut self, credential: &str, details: bool) -> bool {
+        let Some(key) = self
+            .ui
+            .bouncer
+            .data
+            .events
+            .iter()
+            .filter(|event| matches!(event.source, super::bouncer::LogSource::Decision(_)))
+            .find(|event| event.credential.as_deref() == Some(credential))
+            .map(super::bouncer::LogEvent::key)
+        else {
+            return false;
+        };
+        self.place = crate::desktop::Place::Decisions;
+        choose_past(&mut self.ui.decisions, key);
+        self.ui.decisions.past_details = details.then_some(key);
+        true
+    }
+
+    /// The screenshot tour: select the question of `agent` that waits. False when none
+    /// waits.
+    #[doc(hidden)]
+    pub fn tour_question(&mut self, agent: &str) -> bool {
+        let Some(run) = queue(self)
+            .and_then(|(queue, _)| queue.pending().into_iter().find(|run| run.agent == agent))
+        else {
+            return false;
+        };
+        self.place = crate::desktop::Place::Decisions;
+        select(self, run.id);
+        true
+    }
+
+    /// The screenshot tour: draw the floating question window inside the main window
+    /// (with embedded viewports), so the tour can capture it.
+    #[doc(hidden)]
+    pub fn tour_question_window(&mut self, on: bool) {
+        self.ui.decisions.tour_window = on;
+    }
 }
 
 /// A notification is a hint to one exact request, never an approval or a next-item action.
@@ -1424,17 +1490,31 @@ pub(super) fn detail_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[
         .filter(|_| !app.ui.decisions.routed)
         .and_then(|key| cards::find(&app.ui.bouncer.data, &app.ui.activity_scope, key).cloned());
     if let Some(event) = past {
-        // The decision log entry of a decision of this Mac says why it went as it did.
-        let why = match event.source {
-            super::bouncer::LogSource::Decision(id) => app
-                .owner_ui
-                .session
-                .decision_record(id)
-                .ok()
-                .flatten()
-                .map(|record| why_rows(&super::decisions_activity::PastWhy::of(&record.entry))),
+        // A decision of this Mac says why it went as it did, and what can change next
+        // time. The vault is read once per key, not each frame.
+        let detail = match &event.source {
+            super::bouncer::LogSource::Decision(id) => {
+                let key = super::decisions_past::cache_key(app, event.key(), unix_now());
+                let fresh = app
+                    .ui
+                    .decisions
+                    .past_detail
+                    .as_ref()
+                    .is_some_and(|(cached, _)| *cached == key);
+                if !fresh {
+                    let read = super::decisions_past::read(app, *id);
+                    app.ui.decisions.past_detail = Some((key, read));
+                }
+                app.ui
+                    .decisions
+                    .past_detail
+                    .as_ref()
+                    .and_then(|(_, detail)| detail.clone())
+            }
             _ => None,
         };
+        let mut details_open = app.ui.decisions.past_details == Some(event.key());
+        let mut pressed = None;
         let mut week = false;
         columns::detail_toolbar(ui, |ui| {
             // With something waiting, the way back goes to it; else to the week.
@@ -1447,8 +1527,32 @@ pub(super) fn detail_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[
         });
         columns::detail_body(ui, ("past-decision", event.key()), |ui| {
             super::shell::banners(app, ui, pending);
-            cards::history_detail(ui, &event, why.as_deref(), unix_now());
+            // A decision of this Mac keeps its "Decision" table inside "Details".
+            let now = unix_now();
+            cards::history_detail(
+                ui,
+                &event,
+                now,
+                detail.is_some(),
+                |ui| {
+                    if let Some(detail) = &detail {
+                        pressed = super::decisions_past::draw_top(ui, detail);
+                    }
+                },
+                |ui| {
+                    if let Some(detail) = &detail {
+                        super::decisions_past::draw_details(ui, detail, &mut details_open, |ui| {
+                            cards::decision_facts(ui, &event, now);
+                        });
+                    }
+                },
+            );
         });
+        app.ui.decisions.past_details = details_open.then_some(event.key());
+        if let Some(act) = pressed {
+            let ctx = ui.ctx().clone();
+            super::decisions_past::act(app, &ctx, act);
+        }
         if week {
             app.ui.decisions.past = None;
         }
@@ -1549,27 +1653,6 @@ fn question_detail(
         apply(app, ui.ctx(), &current.run, answer);
     }
     disconnect_sheet(app, ui.ctx());
-}
-
-/// The lines of "Why" of a past decision of this Mac.
-fn why_rows(why: &super::decisions_activity::PastWhy) -> Vec<(String, String)> {
-    let mut rows = Vec::new();
-    if !why.note.is_empty() {
-        rows.push((String::new(), why.note.clone()));
-    }
-    rows.push((
-        "Asked you".to_owned(),
-        if why.asked { "Yes" } else { "No" }.to_owned(),
-    ));
-    rows.push(("Task".to_owned(), why.task.clone()));
-    if !why.flags.is_empty() {
-        rows.push(("Rule flags".to_owned(), why.flags.join(", ")));
-    }
-    let brain = why.brain_line();
-    if !brain.is_empty() {
-        rows.push(("Bouncer brain".to_owned(), brain));
-    }
-    rows
 }
 
 /// The card of a connect request (frame 5): Deny needs nothing; Allow opens the owner
@@ -2030,22 +2113,25 @@ fn action_bar(ui: &mut egui::Ui, run: &PendingRun, answer: &mut Option<Answer>) 
                 });
             }
         }
-        if bar_button(ui, "Dismiss", Bar::Deny).clicked() {
-            *answer = Some(Answer::Deny);
-        }
+        // One Dismiss: it sends the comment of the field when the field holds one.
         let key = egui::Id::new(("refusal-comment", run.id));
         let mut comment = ui
             .ctx()
             .data_mut(|d| d.get_temp::<String>(key).unwrap_or_default());
-        ui.add(
-            TextEdit::singleline(&mut comment)
-                .char_limit(500)
-                .desired_width(170.0)
-                .hint_text("Comment"),
-        );
-        if bar_button(ui, "Dismiss with comment", Bar::Plain).clicked() {
-            *answer = Some(Answer::DenyWithComment(comment.clone()));
+        if bar_button(ui, "Dismiss", Bar::Deny).clicked() {
+            *answer = Some(dismiss_answer(&comment));
         }
+        let field = ui
+            .add(
+                TextEdit::singleline(&mut comment)
+                    .char_limit(500)
+                    .desired_width(170.0)
+                    .hint_text("Comment"),
+            )
+            .on_hover_text("Sent to the agent with Dismiss. Optional.");
+        ui.ctx().accesskit_node_builder(field.id, |node| {
+            node.set_label("Comment for the agent, sent with Dismiss");
+        });
         ui.ctx().data_mut(|d| d.insert_temp(key, comment));
     });
     if let Some(item) = unknown.filter(|_| others > 0) {
@@ -2116,22 +2202,47 @@ fn item_tile(app: &DesktopApp, item_id: u64, name: &str) -> kit::Tile {
     super::credential_tile(kind, provider.as_deref().unwrap_or(&service), name)
 }
 
-/// Broker-owned enum takes precedence over credential classification and agent prose.
+/// Broker-owned enum takes precedence over credential classification and agent prose:
+/// the one sentence of the reason, and of the first rule flag of a flagged run (ADR 0046).
 pub(super) fn question_headline(question: &QuestionInfo) -> &str {
     if question.reason == crate::broker::route_diagnostics::ReasonKind::Other
         && !question.why.is_empty()
     {
         &question.why
     } else {
-        question.reason.headline()
+        crate::broker::reasons::words(question.reason, &question.flags, "").line
     }
 }
-pub(super) fn classification_line(question: &QuestionInfo) -> Option<String> {
-    question
-        .items
-        .iter()
-        .find(|item| item.unconfirmed)
-        .map(|item| format!("{}: environment unknown", item.name))
+
+/// How long a question like this keeps asking, when no answer can change it (ADR 0046).
+/// Only the owner's window says it: it is not part of the why text. A production
+/// credential, a folder outside a project, and a run without a task already say it in
+/// their why text, so the question does not repeat it (History does).
+pub(super) fn asks_every_time(question: &QuestionInfo) -> Option<&'static str> {
+    use crate::broker::route_diagnostics::ReasonKind;
+    if question.flags.is_empty()
+        && matches!(
+            question.reason,
+            ReasonKind::Production | ReasonKind::NotProject | ReasonKind::MissingTask
+        )
+    {
+        return None;
+    }
+    crate::broker::reasons::every_time(question.reason, &question.flags)
+}
+
+/// The why text of a question without what the title says: the card's why, else the
+/// risk note, without the title sentence at its start (the first flag of a flagged run).
+/// `None` when nothing is left.
+pub(super) fn why_beyond_title(run: &PendingRun) -> Option<&str> {
+    let why = if run.question.why.is_empty() {
+        run.risk.as_str()
+    } else {
+        run.question.why.as_str()
+    };
+    let title = question_headline(&run.question);
+    let rest = why.strip_prefix(title).unwrap_or(why).trim();
+    (!rest.is_empty()).then_some(rest)
 }
 
 fn draw_question(
@@ -2161,9 +2272,6 @@ fn draw_question(
         Font::Body,
         kit::palette().secondary,
     );
-    if let Some(classification) = classification_line(question) {
-        kit::paragraph(ui, classification, Font::Body, kit::palette().secondary);
-    }
     let mut notes = false;
     match remote {
         Some(remote) => {
@@ -2267,17 +2375,21 @@ fn draw_question(
                 });
         });
     });
-    let why = if !question.why.is_empty() {
-        question.why.clone()
-    } else if !run.risk.is_empty() {
-        run.risk.clone()
-    } else {
-        "The bouncer gate needs your answer for this run.".to_owned()
-    };
-    group_label(ui, "Why you are asked");
-    kit::section(ui, None, None, |s| {
-        s.row(|ui| kit::paragraph(ui, why, Font::Body, kit::palette().label));
-    });
+    // "Why you are asked" says only what the title does not: the why text when it
+    // differs from the title, and how long a question like this keeps asking.
+    let why = why_beyond_title(run);
+    let every = asks_every_time(question);
+    if why.is_some() || every.is_some() {
+        group_label(ui, "Why you are asked");
+        kit::section(ui, None, None, |s| {
+            if let Some(why) = why {
+                s.row(|ui| kit::paragraph(ui, why, Font::Body, kit::palette().label));
+            }
+            if let Some(every) = every {
+                s.row(|ui| kit::paragraph(ui, every, Font::Body, kit::palette().secondary));
+            }
+        });
+    }
     // The quiet line at the foot of a detail of the mockup (`.meta-foot`).
     ui.add_space(2.0);
     ui.vertical_centered(|ui| {
@@ -3494,7 +3606,8 @@ pub(super) fn floating_prompt(app: &mut DesktopApp, ctx: &egui::Context, pending
             .with_always_on_top()
             .with_active(false),
         |ui, class| {
-            if class == egui::ViewportClass::EmbeddedWindow {
+            // The screenshot tour draws the window inside the main one.
+            if class == egui::ViewportClass::EmbeddedWindow && !app.ui.decisions.tour_window {
                 if app.ui.decisions.floating_fallback != Some(run.id) {
                     app.ui.decisions.floating_fallback = Some(run.id);
                     select(app, run.id);
@@ -3505,57 +3618,136 @@ pub(super) fn floating_prompt(app: &mut DesktopApp, ctx: &egui::Context, pending
                 return;
             }
             ui.ctx().request_repaint_after(Duration::from_secs(1));
-            ui.label(kit::medium(
-                format!(
-                    concat!("{} · on this ", crate::computer!(), " · 1 of {count}"),
-                    run.agent,
-                    count = count
-                ),
-                Font::Body,
-            ));
-            ui.strong(question_headline(&run.question));
-            egui::ScrollArea::vertical()
-                .max_height(145.0)
-                .show(ui, |ui| {
-                    for item in &run.question.items {
-                        let environment = if item.unconfirmed {
-                            "Unknown".to_owned()
-                        } else {
-                            app.owner_ui
-                                .session
-                                .declaration(item.item_id)
-                                .ok()
-                                .flatten()
-                                .map(|d| environment_label(d.environment).to_owned())
-                                .unwrap_or_else(|| {
-                                    if item.production {
-                                        "Production".to_owned()
-                                    } else {
-                                        "Unknown".to_owned()
-                                    }
-                                })
-                        };
-                        ui.horizontal(|ui| {
-                            ui.label(&item.name);
-                            kit::cap(ui, &environment, item.production);
-                        });
-                    }
-                    ui.label("What the agent says you asked");
-                    ui.label(&run.user_request);
-                    ui.small(&run.request_source);
-                    ui.label(&run.purpose);
-                    let command = shell_words(&run.command);
-                    ui.add(Label::new(kit::text(&command, Font::Mono)).truncate())
-                        .on_hover_text(command);
-                });
-            ui.label(timer_text(clock(first.left), Font::Body).color(kit::palette().countdown));
-            action_bar(ui, run, &mut answer);
+            prompt_body(app, ui, first, count, &mut answer);
         },
     );
     if let Some(answer) = answer {
         apply(app, ctx, run, answer);
     }
 }
+
+/// The floating question window's content: the agent and the project with the time
+/// left, the title and why it asks, the credentials, the request lines that have text,
+/// the command, and the answer bar. `count`: how many questions wait.
+fn prompt_body(
+    app: &DesktopApp,
+    ui: &mut egui::Ui,
+    first: &Waiting,
+    count: usize,
+    answer: &mut Option<Answer>,
+) {
+    let run = &first.run;
+    egui::Sides::new().shrink_left().show(
+        ui,
+        |ui| {
+            ui.add(
+                Label::new(kit::medium(
+                    format!("{} · {}", run.agent, project_text(run)),
+                    Font::Body,
+                ))
+                .truncate(),
+            );
+        },
+        |ui| {
+            ui.label(
+                timer_text(format!("{} left", clock(first.left)), Font::Body)
+                    .color(kit::palette().countdown),
+            );
+            if count > 1 {
+                ui.label(
+                    kit::text(format!("1 of {count} \u{b7}"), Font::Callout)
+                        .color(kit::palette().secondary),
+                );
+            }
+        },
+    );
+    kit::paragraph(
+        ui,
+        question_headline(&run.question),
+        Font::Headline,
+        kit::palette().label,
+    );
+    // The window is 440 by 320 points and does not grow: the scroll area takes what the
+    // answer bar leaves, with the bar's height of the last frame.
+    let bar_id = egui::Id::new(("prompt-bar-height", run.id));
+    let bar = ui
+        .ctx()
+        .data(|d| d.get_temp::<f32>(bar_id))
+        .unwrap_or(PROMPT_BAR_HEIGHT);
+    let room = (ui.available_height() - bar - ui.spacing().item_spacing.y).max(40.0);
+    egui::ScrollArea::vertical()
+        .max_height(room)
+        .show(ui, |ui| {
+            if let Some(why) = why_beyond_title(run) {
+                kit::paragraph(ui, why, Font::Callout, kit::palette().secondary);
+            }
+            if let Some(every) = asks_every_time(&run.question) {
+                kit::paragraph(ui, every, Font::Callout, kit::palette().secondary);
+            }
+            for item in &run.question.items {
+                let environment = if item.unconfirmed {
+                    "Unknown".to_owned()
+                } else {
+                    app.owner_ui
+                        .session
+                        .declaration(item.item_id)
+                        .ok()
+                        .flatten()
+                        .map(|d| environment_label(d.environment).to_owned())
+                        .unwrap_or_else(|| {
+                            if item.production {
+                                "Production".to_owned()
+                            } else {
+                                "Unknown".to_owned()
+                            }
+                        })
+                };
+                ui.horizontal(|ui| {
+                    ui.label(&item.name);
+                    kit::cap(ui, &environment, item.production);
+                });
+            }
+            // The request lines of the Decisions detail; the source in brackets says
+            // where the request came from.
+            if !run.user_request.is_empty() {
+                let source = if run.request_source.is_empty() {
+                    "from the agent"
+                } else {
+                    run.request_source.as_str()
+                };
+                kit::paragraph(
+                    ui,
+                    format!("\"{}\" ({source})", run.user_request),
+                    Font::Body,
+                    kit::palette().label,
+                );
+                if !run.agent_request.is_empty() {
+                    kit::tone_note(
+                        ui,
+                        format!(
+                            "The agent sent a different request: \"{}\"",
+                            run.agent_request
+                        ),
+                        Tone::Warning,
+                    );
+                }
+            }
+            if !run.purpose.is_empty() {
+                kit::paragraph(ui, &run.purpose, Font::Callout, kit::palette().secondary);
+            }
+            let command = shell_words(&run.command);
+            ui.add(Label::new(kit::text(&command, Font::Mono)).truncate())
+                .on_hover_text(command);
+        });
+    let top = ui.cursor().top();
+    action_bar(ui, run, answer);
+    let height = ui.cursor().top() - top;
+    ui.ctx().data_mut(|d| d.insert_temp(bar_id, height));
+}
+
+/// The height that the answer bar of the floating window takes before it was drawn
+/// once: two rows of buttons and a note.
+const PROMPT_BAR_HEIGHT: f32 = 110.0;
 
 #[cfg(test)]
 mod prompt_tests {
@@ -3585,5 +3777,174 @@ mod prompt_tests {
         assert_eq!((first.run.id, count), (2, 2));
         queue.retain(|w| w.run.id != 2);
         assert_eq!(prompt_queue(&queue).unwrap().0.run.id, 3);
+    }
+
+    /// The words of one frame of the window's content.
+    fn window_text(waiting: &Waiting, count: usize) -> String {
+        fn collect(shape: &egui::Shape, out: &mut String) {
+            match shape {
+                egui::Shape::Text(text) => {
+                    out.push_str(text.galley.text());
+                    out.push('\n');
+                }
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| collect(shape, out)),
+                _ => {}
+            }
+        }
+        let app = DesktopApp::new();
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(440.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        let mut answer = None;
+        let mut output = ctx.run_ui(input, |ui| {
+            prompt_body(&app, ui, waiting, count, &mut answer);
+        });
+        output.textures_delta.clear();
+        let mut text = String::new();
+        for clipped in &output.shapes {
+            collect(&clipped.shape, &mut text);
+        }
+        output.drop_without_applying_deltas();
+        text
+    }
+
+    /// The painted texts with their rectangles, after three frames of the window's
+    /// content at 440 by 320 points (the bar's height settles after the first).
+    fn window_at_size(waiting: &Waiting, count: usize) -> Vec<(String, egui::Rect)> {
+        fn collect(shape: &egui::Shape, out: &mut Vec<(String, egui::Rect)>) {
+            match shape {
+                egui::Shape::Text(text) => out.push((
+                    text.galley.text().to_owned(),
+                    egui::Rect::from_min_size(text.pos, text.galley.size()),
+                )),
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| collect(shape, out)),
+                _ => {}
+            }
+        }
+        let app = DesktopApp::new();
+        let ctx = egui::Context::default();
+        let mut placed = Vec::new();
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(440.0, 320.0),
+                )),
+                ..Default::default()
+            };
+            let mut answer = None;
+            let mut output = ctx.run_ui(input, |ui| {
+                prompt_body(&app, ui, waiting, count, &mut answer);
+            });
+            output.textures_delta.clear();
+            placed.clear();
+            for clipped in &output.shapes {
+                collect(&clipped.shape, &mut placed);
+            }
+            output.drop_without_applying_deltas();
+        }
+        placed
+    }
+
+    /// The window is 440 by 320 points and does not grow: with a long request, a
+    /// two-line why and the note of two unknown credentials, every answer button is
+    /// still inside it.
+    #[test]
+    fn the_question_window_keeps_its_answers_inside_its_size() {
+        let unknown = |item_id, name: &str| crate::broker::approvals::QuestionItem {
+            item_id,
+            name: name.to_owned(),
+            unconfirmed: true,
+            ..Default::default()
+        };
+        let waiting = Waiting {
+            run: PendingRun {
+                id: 7,
+                agent: "Codex".into(),
+                command: vec!["sh".into(), "-c".into(), "make deploy ".repeat(12)],
+                cwd: "/synthetic/acme-billing".into(),
+                env_names: vec![],
+                purpose: "Deploy the billing service to the staging cluster.".into(),
+                risk: String::new(),
+                user_request: "Deploy the billing service to staging and check that the payout jobs still run after the migration of last week. ".repeat(3),
+                request_source: "from the agent".into(),
+                agent_request: String::new(),
+                remember: None,
+                question: QuestionInfo {
+                    project: Some(crate::broker::project::Project {
+                        key: "/synthetic/acme-billing/.git".into(),
+                        label: "acme-billing".into(),
+                        root: "/synthetic/acme-billing".into(),
+                    }),
+                    why: "Synthetic billing key is declared for the project platform, not for acme-billing, and Synthetic queue key has no environment set yet.".into(),
+                    items: vec![unknown(1, "Synthetic billing key"), unknown(2, "Synthetic queue key")],
+                    valid_answers: vec![AnswerKind::Once, AnswerKind::CorrectEnvironment],
+                    ..QuestionInfo::default()
+                },
+            },
+            left: Duration::from_secs(200),
+        };
+        let placed = window_at_size(&waiting, 3);
+        let window = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(440.0, 320.0));
+        for label in ["Allow as dev", "Allow as prod", "Allow once", "Dismiss"] {
+            let (_, rect) = placed
+                .iter()
+                .find(|(text, _)| text == label)
+                .unwrap_or_else(|| panic!("{label} is not painted: {placed:?}"));
+            assert!(window.contains_rect(*rect), "{label} at {rect:?}");
+        }
+    }
+
+    #[test]
+    fn the_question_window_draws_no_empty_request_lines() {
+        let mut waiting = Waiting {
+            run: PendingRun {
+                id: 1,
+                agent: "Codex".into(),
+                command: vec!["true".into()],
+                cwd: "/synthetic/acme-billing".into(),
+                env_names: vec![],
+                purpose: String::new(),
+                risk: String::new(),
+                user_request: String::new(),
+                request_source: String::new(),
+                agent_request: String::new(),
+                remember: None,
+                question: QuestionInfo {
+                    project: Some(crate::broker::project::Project {
+                        key: "/synthetic/acme-billing/.git".into(),
+                        label: "acme-billing".into(),
+                        root: "/synthetic/acme-billing".into(),
+                    }),
+                    ..QuestionInfo::default()
+                },
+            },
+            left: Duration::from_secs(271),
+        };
+        let text = window_text(&waiting, 1);
+        assert!(text.contains("Codex · acme-billing"), "{text}");
+        assert!(text.contains("4:31 left"), "{text}");
+        for absent in ["What the agent says you asked", "1 of 1", "on this"] {
+            assert!(!text.contains(absent), "{absent}: {text}");
+        }
+        waiting.run.user_request = "Show the last payouts.".into();
+        waiting.run.agent_request = "Show every payout.".into();
+        waiting.run.purpose = "Report the payouts.".into();
+        let text = window_text(&waiting, 2);
+        assert!(
+            text.contains("\"Show the last payouts.\" (from the agent)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("The agent sent a different request: \"Show every payout.\""),
+            "{text}"
+        );
+        assert!(text.contains("Report the payouts."), "{text}");
+        assert!(text.contains("1 of 2"), "{text}");
     }
 }

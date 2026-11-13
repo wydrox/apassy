@@ -171,7 +171,7 @@ Settings > Bouncer says the state once. The "Bouncer brain" row shows **Ready** 
 after successful inference readiness (a server of this Mac, one started outside Apassy,
 or your own server) and another state otherwise. Without a model server, the row
 "Bouncer" shows **Brain not ready**. **Today** shows model allowances, owner questions,
-and failures ("Today: {n} allowed · {n} asked you · {n} failed"; allowed counts the
+and failures (the row "Today" with the value "{n} allowed · {n} asked you · {n} failed"; allowed counts the
 uses that the bouncer brain allowed without asking you) for the owner's local calendar day from the existing decision log. Both day boundaries use the system timezone, including daylight saving changes. Failed includes model
 or readiness failure and unanswered/invalidated questions; it can overlap asked. The
 hover text of the line says so, and VoiceOver reads it as its description. "Why it asked" · "Show" (only when a question was
@@ -229,7 +229,7 @@ Tests for step 4a: `learning_replaces_only_the_model_step` and `calibration_chan
 
 Each decision has one reason kind (`src/broker/route_diagnostics.rs`, `ReasonKind`): the first hard rule that asked, else the bouncer brain step (`LowTaskMatch`, `ModelUnsure`, `ModelUnavailable`, `ModelTimeout`). Three places show it:
 
-- Decisions: a past decision of this Mac has "Why Apassy asked you" (or "Why it ran"): the reason of the question, the task and its source (prompt hook or agent), the rule flags, and the bouncer brain answers.
+- Decisions: a past decision of this Mac has "Why" (one sentence of its reason, the stored note on hover) and "Next time" (one-line rows: save the project answer the question offered, remove a remembered answer or command, always ask or never for the agent, turn off "Always ask me", or open the credential or Settings; ADR 0046). The task and its source, the phrase of an injection flag, the rule flags, the bouncer brain answers and the command of its use are behind "Details". Its History row shows the outcome, then the short reason.
 - `apassy decisions log`: the questions of the last 7 days by reason, with what to change, and the last decisions. It reads `~/Library/Logs/Apassy/bouncer-decisions.log` and needs no session ([learning](learning.md), section 1a).
 - Settings > Bouncer: the counts since Apassy started.
 

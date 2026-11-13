@@ -1392,6 +1392,7 @@ fn ask_first(
         remember: None,
         question: QuestionInfo {
             reason: Default::default(),
+            flags: Vec::new(),
             id: 0,
             item_ids: Vec::new(),
             project: caller.project.clone(),

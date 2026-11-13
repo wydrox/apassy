@@ -16,6 +16,7 @@ use super::bouncer::{
 };
 use super::kit;
 use crate::broker::approvals::PendingRun;
+use crate::broker::reasons;
 use crate::desktop::DesktopApp;
 use crate::desktop::remote_feeds::{self, RemoteFeedState, RemoteMac};
 use crate::questions::feed::{Feed, FeedAgent};
@@ -149,6 +150,11 @@ pub(super) fn load(
     data.production = production_uses(&local.rows, since, &this_name);
     data.more_events = local.more;
     for row in &local.rows {
+        let kind = reasons::kind_of(&row.why, &row.decided_by, &row.flags);
+        let short = reasons::words(kind, &row.flags, &row.why.code).short;
+        if !short.is_empty() {
+            data.reasons.insert(row.decision_log_id, short.to_owned());
+        }
         data.events.push(LogEvent {
             source: LogSource::Decision(row.decision_log_id),
             at: row.at,

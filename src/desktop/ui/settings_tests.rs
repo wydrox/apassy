@@ -199,7 +199,11 @@ fn cases() -> [(
         ),
         (
             SettingsSection::Bouncer,
-            &["Bouncer brain", "Calibration and learning"],
+            &[
+                "Bouncer brain",
+                "Calibration and learning",
+                "0 allowed · 0 asked you · 0 failed",
+            ],
             &[
                 "Back up now…",
                 "Asked you",
@@ -2297,8 +2301,18 @@ fn today_row_says_what_failed_counts() {
         });
     }
     let (texts, nodes) = drawn;
+    // A label and its value, as the rows beside it; VoiceOver reads them as one phrase.
+    let value = "41 allowed · 3 asked you · 1 failed";
     let today = "Today: 41 allowed · 3 asked you · 1 failed";
-    assert!(texts.iter().any(|(text, _)| text == today), "{texts:?}");
+    let at = |painted: &str| {
+        texts
+            .iter()
+            .find(|(text, _)| text == painted)
+            .map(|(_, rect)| *rect)
+            .unwrap_or_else(|| panic!("{painted} is not painted: {texts:?}"))
+    };
+    assert!(at("Today").left() < at(value).left(), "{texts:?}");
+    assert!(!texts.iter().any(|(text, _)| text == today), "{texts:?}");
     assert!(
         nodes.iter().any(|(name, said)| {
             name == today && said.as_deref() == Some(super::TODAY_FAILED_HELP)

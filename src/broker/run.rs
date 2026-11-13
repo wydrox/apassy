@@ -114,9 +114,9 @@ use crate::vault::usage::{
     CUT_MARK, InteractionKind, MAX_COMMAND_SUMMARY_BYTES, NewItemUse, UseDecidedBy, UseOutcome,
 };
 use crate::vault::{
-    ActivityDecision, AgentSummary, DecisionEntry, DecisionMeta, Declaration, DeclarationSource,
-    DeclarationSources, EnvBinding, EnvDelivery, NewActivity, OwnerLabel, RealOutcome, RequestKind,
-    Vault, VaultErrorKind,
+    ActivityDecision, AgentSummary, DecisionEntry, DecisionMeta, DecisionWhy, Declaration,
+    DeclarationSource, DeclarationSources, EnvBinding, EnvDelivery, NewActivity, OwnerLabel,
+    RealOutcome, RequestKind, Vault, VaultErrorKind,
 };
 
 #[cfg(test)]
@@ -553,6 +553,86 @@ fn host_matches(host: &str, known: &str) -> bool {
             .is_some_and(|domain| host.ends_with(&format!(".{domain}")))
 }
 
+/// Where the injection flag of a run found its phrase, as a closed word of the decision
+/// (ADR 0046): `SOURCE:NUMBER`, the first match in the order of the confirmed host
+/// prompt (or the agent's task text), the agent's purpose, and the command. Empty
+/// without the flag. The text itself is never stored.
+fn injection_source(
+    analysis: &Analysis,
+    user_request: &str,
+    request_source: &str,
+    request: &RunRequest<'_>,
+) -> String {
+    if !analysis
+        .flags
+        .iter()
+        .any(|flag| flag == shell_risk::INJECTION_FLAG)
+    {
+        return String::new();
+    }
+    let task = if learning::resolved_source(user_request, request_source)
+        == crate::vault::RequestSource::Host
+    {
+        "prompt"
+    } else {
+        "task"
+    };
+    std::iter::once((task, user_request))
+        .chain(std::iter::once(("purpose", request.purpose)))
+        .chain(request.command.iter().map(|arg| ("command", arg.as_str())))
+        .find_map(|(source, text)| {
+            shell_risk::injection_match(text).map(|(index, _)| format!("{source}:{index}"))
+        })
+        .unwrap_or_default()
+}
+
+/// Each host of `hosts` is a known host of `item_id` now, as a run counts them: the
+/// hosts of its provider, the host rules of its placeholder, and its host field. A
+/// code-only run gets a plain value binding, so its placeholder rules do not count
+/// (`code_only`). History saves an answer only for known hosts (ADR 0046). A read error
+/// counts as unknown.
+pub(super) fn hosts_known_now(
+    vault: &Vault,
+    item_id: u64,
+    hosts: &[String],
+    code_only: bool,
+) -> bool {
+    let Ok(provider) = vault.declaration_provider(item_id) else {
+        return false;
+    };
+    let mut known: Vec<String> = provider
+        .as_deref()
+        .map(|provider| {
+            providers::known_hosts(provider)
+                .iter()
+                .filter_map(|host| normal_host(host))
+                .collect()
+        })
+        .unwrap_or_default();
+    match vault.process_binding(item_id) {
+        Ok(Some(binding)) => {
+            if let EnvDelivery::Placeholder(rules) = &binding.delivery
+                && !code_only
+            {
+                known.extend(
+                    rules
+                        .iter()
+                        .filter_map(|rule| HostRule::parse(rule).ok())
+                        .filter_map(|rule| normal_host(rule.host())),
+                );
+            }
+        }
+        Ok(None) => {}
+        Err(_) => return false,
+    }
+    match vault.item_host_field(item_id) {
+        Ok(field) => known.extend(field.as_deref().and_then(normal_host)),
+        Err(_) => return false,
+    }
+    let hosts: Vec<String> = hosts.iter().filter_map(|host| normal_host(host)).collect();
+    hosts_within(&hosts, known.iter())
+}
+
 /// Each host of `hosts` is in `allowed`.
 fn hosts_within<'a>(hosts: &[String], allowed: impl Iterator<Item = &'a String> + Clone) -> bool {
     hosts
@@ -570,7 +650,7 @@ fn hard_rules(
     let mut why = Vec::new();
     if !run.analysis.flags.is_empty() {
         why.push((
-            format!("Rule flags: {}.", run.analysis.flags.join(", ")),
+            super::reasons::flags_sentence(&run.analysis.flags),
             if run
                 .analysis
                 .flags
@@ -815,6 +895,59 @@ fn production_and_read_only(checked: &Checked, index: usize) -> (bool, bool) {
     (production, read_only)
 }
 
+/// The first condition of a remembered answer that the run does not meet, in the order
+/// of the checks, as a closed word (ADR 0046); `None` when an answer can be remembered.
+/// "Always ask me" of an item asks every agent, so nothing can be remembered for it.
+/// "Always ask for this agent" asks this agent only: an answer covers the others.
+fn remember_blocker<F: FnMut() -> Result<(), String>>(
+    checked: &Checked,
+    run: &RunFacts<'_>,
+    certain: Option<ActionKind>,
+    ready: &mut Readiness<F>,
+) -> Option<&'static str> {
+    let sure = certain == Some(run.action)
+        || checked
+            .facts
+            .iter()
+            .all(|facts| !facts.production && !facts.unconfirmed);
+    if checked.project.is_none() {
+        Some("project")
+    } else if !run.has_user_request {
+        Some("task")
+    } else if !checked.declarations.iter().all(Option::is_some) {
+        Some("undeclared")
+    } else if !run.analysis.flags.is_empty() {
+        Some("flags")
+    } else if foreign_db_host(checked, run).is_some() {
+        Some("dbhost")
+    } else if !checked.facts.iter().all(|facts| !facts.always_ask) {
+        Some("always_ask")
+    } else if !sure {
+        Some("uncertain")
+    } else if ready.get().is_err() {
+        Some("brain")
+    } else {
+        None
+    }
+}
+
+/// The `noremember` word of a question (ADR 0046): empty when it offered a remembered
+/// answer or another sentence says why not (`every_time`); else the first condition it
+/// did not meet. Every condition can hold while nothing is offered: a production
+/// credential, where the production rule asks in any case (`valid_answers`), behind an
+/// earlier hard rule such as a one-time code.
+fn noremember_word(
+    offered: &str,
+    every_time: Option<&str>,
+    blocker: Option<&'static str>,
+) -> &'static str {
+    if !offered.is_empty() || every_time.is_some() {
+        ""
+    } else {
+        blocker.unwrap_or("production")
+    }
+}
+
 /// The answers that a question can take now (ADR 0025 §3): a remembered answer only
 /// when it can take effect for a later run of the same kind.
 fn valid_answers<F: FnMut() -> Result<(), String>>(
@@ -830,21 +963,7 @@ fn valid_answers<F: FnMut() -> Result<(), String>>(
         AnswerKind::AlwaysAskForAgent,
         AnswerKind::Disconnect,
     ];
-    let sure = certain == Some(run.action)
-        || checked
-            .facts
-            .iter()
-            .all(|facts| !facts.production && !facts.unconfirmed);
-    // "Always ask me" of an item asks every agent, so nothing can be remembered for it.
-    // "Always ask for this agent" asks this agent only: an answer covers the others.
-    let can_remember = checked.project.is_some()
-        && run.has_user_request
-        && checked.declarations.iter().all(Option::is_some)
-        && run.analysis.flags.is_empty()
-        && foreign_db_host(checked, run).is_none()
-        && checked.facts.iter().all(|facts| !facts.always_ask)
-        && sure
-        && ready.get().is_ok();
+    let can_remember = remember_blocker(checked, run, certain, ready).is_none();
     // The production rule asks whatever the owner answered before, so a new allowance
     // would change nothing: the owner ticks "Remember" and the same question comes back.
     let production_asks = (0..checked.facts.len()).any(|index| {
@@ -1073,7 +1192,9 @@ fn run_inner(
                             .collect(),
                         route: format!("{:?}", RouteKind::Refused),
                         reason: format!("{:?}", ReasonKind::AccessCheck),
-                        headline: ReasonKind::AccessCheck.headline().to_owned(),
+                        headline: super::reasons::words(ReasonKind::AccessCheck, &[], code)
+                            .line
+                            .to_owned(),
                         why: vault
                             .command_mask(&items)
                             .map(|mask| mask.summary(&reason, decision_log::MAX_TEXT))
@@ -1097,7 +1218,12 @@ fn run_inner(
                         purpose: request.purpose,
                         reason: &reason,
                     }
-                    .entry(),
+                    .entry()
+                    .with_why(&DecisionWhy {
+                        reason: format!("{:?}", ReasonKind::AccessCheck),
+                        code: code.to_owned(),
+                        ..DecisionWhy::default()
+                    }),
                     &decision_meta(browser_fill.is_some(), None),
                 );
                 return WireResponse::failure(code, reason);
@@ -1409,7 +1535,11 @@ fn run_inner(
             .note
         }
     };
-    let log_note = format!("{} {risk_note}", resolved.log_note());
+    // The texts that end with this note add their own full stop.
+    let log_note = format!("{} {risk_note}", resolved.log_note())
+        .trim_end()
+        .trim_end_matches('.')
+        .to_owned();
     let risk_note = if request.codes.is_empty() {
         risk_note
     } else {
@@ -1439,7 +1569,9 @@ fn run_inner(
         action: action.as_str().to_owned(),
         route: format!("{route_kind:?}"),
         reason: format!("{reason_kind:?}"),
-        headline: reason_kind.headline().to_owned(),
+        headline: super::reasons::words(reason_kind, &analysis.flags, "")
+            .line
+            .to_owned(),
         why: if route == Route::Pattern {
             "Remembered pattern allowed.".to_owned()
         } else {
@@ -1491,6 +1623,51 @@ fn run_inner(
     } else {
         (Vec::new(), None)
     };
+    // The closed words of the decision (ADR 0046): its reason kind, the remembered answer
+    // that the question offers, the one-time codes of a run with one credential, and
+    // where the injection flag found its phrase.
+    let mut why_words = DecisionWhy {
+        reason: format!("{reason_kind:?}"),
+        code: String::new(),
+        offered: valid
+            .iter()
+            .find_map(|answer| match answer {
+                AnswerKind::InProject(action) => Some(format!("in_project:{}", action.as_str())),
+                _ => None,
+            })
+            .or_else(|| {
+                valid.iter().find_map(|answer| match answer {
+                    AnswerKind::Production(action) => {
+                        Some(format!("production:{}", action.as_str()))
+                    }
+                    _ => None,
+                })
+            })
+            .unwrap_or_default(),
+        codes: if items.len() == 1 && !request.codes.is_empty() {
+            if request.items.is_empty() {
+                "only"
+            } else {
+                "with_value"
+            }
+        } else {
+            ""
+        }
+        .to_owned(),
+        inject: injection_source(&analysis, user_request, &resolved.source, request),
+        noremember: String::new(),
+    };
+    // Why the question offers no remembered answer, when no other sentence says so.
+    if needs_approval && cloud.is_none() {
+        let blocker = remember_blocker(&checked, &run_facts, certain, &mut ready);
+        noremember_word(
+            &why_words.offered,
+            super::reasons::every_time(reason_kind, &analysis.flags),
+            blocker,
+        )
+        .clone_into(&mut why_words.noremember);
+    }
+    debug_line.offered.clone_from(&why_words.offered);
     let question_items: Vec<QuestionItem> = items
         .iter()
         .zip(&checked.facts)
@@ -1535,7 +1712,7 @@ fn run_inner(
             Route::Pattern => Outcome::Automatic { by_pattern: true },
             _ => Outcome::Automatic { by_pattern: false },
         };
-        let entry = logged.entry(outcome, &risk_note);
+        let entry = logged.entry(outcome, &risk_note).with_why(&why_words);
         let meta = decision_meta(browser_fill.is_some(), None);
         decision_id = record_decision_locked(ctx, &checked, &entry, &meta, pattern.as_ref());
         "allowed".clone_into(&mut debug_line.outcome);
@@ -1621,6 +1798,7 @@ fn run_inner(
                 },
                 items: question_items,
                 valid_answers: valid,
+                flags: analysis.flags.clone(),
             },
         };
         // The answer time of the decision log (schema 27) starts with the question.
@@ -1735,7 +1913,9 @@ fn run_inner(
         }
         // Every owner answer goes to the decision log. A denial blocks the pattern. The
         // vault keeps the answer time for an owner answer only (not a timeout).
-        let mut entry = logged.entry(Outcome::Owner(outcome), &risk_note);
+        let mut entry = logged
+            .entry(Outcome::Owner(outcome), &risk_note)
+            .with_why(&why_words);
         entry.at = learning::now();
         let meta = decision_meta(browser_fill.is_some(), Some(millis(asked_at)));
         decision_id = record_decision_locked(ctx, &checked, &entry, &meta, pattern.as_ref());
@@ -1792,7 +1972,8 @@ fn run_inner(
             )),
         };
         if let Some((code, reason, use_outcome, by)) = refusal {
-            let reason = format!("{reason} {log_note}.");
+            // The agent reads this text.
+            let reason = super::reasons::for_agent(&format!("{reason} {log_note}."));
             if own_entry {
                 let mut guard = lock(&ctx.vault);
                 if let Some(vault) = guard

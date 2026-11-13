@@ -481,7 +481,7 @@ fn an_active_pattern_never_overrides_the_earlier_steps() {
     teach(&fx, &items, &declared, "", &leak);
     let card = expect_prompt(&fx, || run(&fx, &leak));
     assert!(
-        card.risk.contains("Rule flags: secret_output"),
+        card.risk.contains("The command could print the secret."),
         "{}",
         card.risk
     );

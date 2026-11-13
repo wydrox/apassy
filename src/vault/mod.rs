@@ -120,7 +120,7 @@ pub use history::{
 };
 pub use learning::{
     BouncerCounts, CALIBRATION_CEILING, CALIBRATION_FLOOR, CalibrationRecord, CandidateAgreement,
-    DayRate, DecidedBy, DecisionEntry, DecisionMeta, DecisionRecord, LoggedDecision,
+    DayRate, DecidedBy, DecisionEntry, DecisionMeta, DecisionRecord, DecisionWhy, LoggedDecision,
     MAX_BLOCKED_PATTERNS, MAX_DECISION_ROWS, MAX_KEPT_DENIALS, MAX_PATTERNS,
     PATTERN_APPROVALS_NEEDED, PATTERN_IDLE_DAYS, PatternKey, PatternRecord, PatternState,
     RequestKind, RequestSource,

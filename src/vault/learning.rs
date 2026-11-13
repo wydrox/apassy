@@ -303,7 +303,105 @@ pub struct DecisionEntry {
 /// keeps it, so the schema of the decision log does not change.
 const POLICY_MODEL: &str = "; model ";
 
+/// Closed words about a decision, kept in `policy` the same way as the model version
+/// (ADR 0046): `; why ForeignProject; offered in_project:change`. No word holds request
+/// text.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DecisionWhy {
+    /// The reason kind as `ReasonKind` prints with `{:?}`: `ForeignProject`.
+    pub reason: String,
+    /// The wire code of a refusal by a check: `not_granted`.
+    pub code: String,
+    /// The remembered answer that the question offered: `in_project:change` or
+    /// `production:read`. Empty: none.
+    pub offered: String,
+    /// One-time codes of a run with one credential: `with_value` or `only`.
+    pub codes: String,
+    /// Where the injection flag found its phrase, and which entry of the list:
+    /// `prompt:1000` (`prompt`, `task`, `purpose`, or `command`). Never the text itself.
+    pub inject: String,
+    /// The first condition that kept the question from offering a remembered answer:
+    /// `uncertain`, `brain`, `dbhost`, and so on; `production` when each condition held
+    /// and the production rule asks anyway. Empty: it offered one, or another sentence
+    /// says why not.
+    pub noremember: String,
+}
+
+/// The parts of [`DecisionWhy`] in `policy`, in this order.
+const WHY_PARTS: [&str; 6] = ["why", "code", "offered", "codes", "inject", "noremember"];
+
+/// A word of [`DecisionWhy`]: 1 to 48 bytes of `[A-Za-z0-9_:]`.
+fn why_word(word: &str) -> bool {
+    (1..=48).contains(&word.len())
+        && word
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b':')
+}
+
+impl DecisionWhy {
+    /// The words of a stored `policy`. A part that is not a closed word is skipped.
+    pub fn of_policy(policy: &str) -> Self {
+        let mut why = Self::default();
+        for part in policy.split("; ") {
+            let Some((name, word)) = part.split_once(' ') else {
+                continue;
+            };
+            if !why_word(word) {
+                continue;
+            }
+            let slot = match name {
+                "why" => &mut why.reason,
+                "code" => &mut why.code,
+                "offered" => &mut why.offered,
+                "codes" => &mut why.codes,
+                "inject" => &mut why.inject,
+                "noremember" => &mut why.noremember,
+                _ => continue,
+            };
+            if slot.is_empty() {
+                *slot = word.to_owned();
+            }
+        }
+        why
+    }
+
+    /// The words as `policy` parts, each with its leading `; `.
+    fn policy_text(&self) -> String {
+        let words = [
+            &self.reason,
+            &self.code,
+            &self.offered,
+            &self.codes,
+            &self.inject,
+            &self.noremember,
+        ];
+        WHY_PARTS
+            .iter()
+            .zip(words)
+            .filter(|(_, word)| why_word(word))
+            .map(|(name, word)| format!("; {name} {word}"))
+            .collect()
+    }
+}
+
 impl DecisionEntry {
+    /// Add the closed words of [`DecisionWhy`] to `policy`, before the model version
+    /// when it is there. A word outside the closed form is not stored.
+    #[must_use]
+    pub fn with_why(mut self, why: &DecisionWhy) -> Self {
+        let text = why.policy_text();
+        match self.policy.rfind(POLICY_MODEL) {
+            Some(at) => self.policy.insert_str(at, &text),
+            None => self.policy.push_str(&text),
+        }
+        self
+    }
+
+    /// The closed words of `policy`. Empty for a decision of an older version.
+    pub fn why(&self) -> DecisionWhy {
+        DecisionWhy::of_policy(&self.policy)
+    }
+
     /// Add the version of the model that answered to `policy`. A missing or invalid
     /// version (see [`super::valid_model_version`]) adds nothing.
     #[must_use]
@@ -1653,6 +1751,101 @@ mod tests {
             .collect();
         assert_eq!(lines[0]["model_version"], "apassy-base-v1+1a2b3c4d");
         assert!(lines[1].get("model_version").is_none(), "{}", lines[1]);
+    }
+
+    /// The why words go before the model version, so it still reads (ADR 0046).
+    #[test]
+    fn the_policy_keeps_the_why_words_before_the_model_version() {
+        let (_dir, mut vault) = temp_vault();
+        let words = DecisionWhy {
+            reason: "ForeignProject".to_owned(),
+            code: String::new(),
+            offered: "in_project:change".to_owned(),
+            codes: "with_value".to_owned(),
+            inject: String::new(),
+            noremember: String::new(),
+        };
+        let mut answered = entry(1, DecidedBy::NoAnswer, LoggedDecision::Deny);
+        answered.policy = "apassy-bouncer-v9; task_match 0.75".to_owned();
+        let answered = answered
+            .with_model_version(Some("apassy-base-v1+1a2b3c4d"))
+            .with_why(&words);
+        assert_eq!(
+            answered.policy,
+            "apassy-bouncer-v9; task_match 0.75; why ForeignProject; offered in_project:change; codes with_value; model apassy-base-v1+1a2b3c4d"
+        );
+        assert_eq!(answered.model_version(), Some("apassy-base-v1+1a2b3c4d"));
+        assert_eq!(answered.why(), words);
+        let mut refused = entry(2, DecidedBy::Rule, LoggedDecision::Deny);
+        refused.policy = "apassy-bouncer-v9; task_match 0.75".to_owned();
+        let refused = refused.with_why(&DecisionWhy {
+            reason: "AccessCheck".to_owned(),
+            code: "not_granted".to_owned(),
+            ..DecisionWhy::default()
+        });
+        assert_eq!(
+            refused.policy,
+            "apassy-bouncer-v9; task_match 0.75; why AccessCheck; code not_granted"
+        );
+        assert_eq!(refused.model_version(), None);
+        for decision in [&answered, &refused] {
+            vault.record_decision(decision).expect("record");
+        }
+        let log = vault.decision_log().expect("log");
+        assert_eq!(log[0].entry.why(), words);
+        assert_eq!(
+            log[0].entry.model_version(),
+            Some("apassy-base-v1+1a2b3c4d")
+        );
+        assert_eq!(log[1].entry.why().code, "not_granted");
+        assert_eq!(
+            entry(3, DecidedBy::Model, LoggedDecision::Allow).why(),
+            DecisionWhy::default(),
+            "an older row has no words"
+        );
+    }
+
+    #[test]
+    fn a_word_outside_the_closed_form_is_not_stored() {
+        let mut plain = entry(1, DecidedBy::Model, LoggedDecision::Allow);
+        plain.policy = "apassy-bouncer-v9".to_owned();
+        let stored = plain.clone().with_why(&DecisionWhy {
+            reason: "Foreign Project".to_owned(),
+            code: "not\"granted".to_owned(),
+            offered: "in_project:change; model x".to_owned(),
+            codes: "x".repeat(49),
+            inject: "prompt: 3".to_owned(),
+            noremember: "brain\n".to_owned(),
+        });
+        assert_eq!(stored.policy, plain.policy, "no word is stored");
+        assert_eq!(stored.why(), DecisionWhy::default());
+        let mixed = plain.with_why(&DecisionWhy {
+            reason: "ModelAllowed".to_owned(),
+            code: "a b".to_owned(),
+            ..DecisionWhy::default()
+        });
+        assert_eq!(mixed.policy, "apassy-bouncer-v9; why ModelAllowed");
+        let flagged = DecisionWhy {
+            reason: "HookFlags".to_owned(),
+            inject: "prompt:1000".to_owned(),
+            noremember: "uncertain".to_owned(),
+            ..DecisionWhy::default()
+        };
+        let mut entry = entry(2, DecidedBy::NoAnswer, LoggedDecision::Deny);
+        entry.policy = "apassy-bouncer-v9".to_owned();
+        let entry = entry.with_why(&flagged);
+        assert_eq!(
+            entry.policy,
+            "apassy-bouncer-v9; why HookFlags; inject prompt:1000; noremember uncertain"
+        );
+        assert_eq!(entry.why(), flagged);
+        assert_eq!(
+            DecisionWhy::of_policy("x; why Model\"Allowed; offered in_project:read"),
+            DecisionWhy {
+                offered: "in_project:read".to_owned(),
+                ..DecisionWhy::default()
+            }
+        );
     }
 
     #[test]

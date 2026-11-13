@@ -121,6 +121,11 @@ it does not claim that a command succeeded. Retries count as separate requests.
 Legacy remote cards retain their existing broker explanation as the headline;
 the relay envelope and authentication contract do not change.
 
+2026-11-13 (ADR 0046): the card's headline is the sentence of its reason, and of the
+first rule flag for a flagged run; the why text names each flag in plain words. A past
+decision in History says the same sentence under "Why", and "Next time" offers what can
+change. The order of the hard rules and the remembered-answer conditions do not change.
+
 
 ## Owner task and floating questions — 2026-11-02
 
@@ -162,6 +167,8 @@ default risk and reversibility, so labeling every unknown item downgraded a bund
 production credential. A run with two or more unknown items offers Allow and labels
 nothing. Known environments offer Allow, Dismiss, and Dismiss with
 comment, with remembering only as a secondary checkbox, off by default.
+2026-11-13: on the Mac, Dismiss sends the comment when the field holds one; the bar
+has no second dismiss button. The answers on the wire do not change.
 
 Amended 2026-11-06 (owner: fix the repeated questions): "A run with two or more
 unknown items offers Allow and labels nothing" asked again at each run, for ever.
@@ -186,9 +193,11 @@ owner check. Its optional single-line plain-text comment is limited to 500
 characters and is returned only as refusal data, never as owner approval.
 
 A small always-on-top, inactive-on-creation Apassy viewport shows the oldest
-waiting question, its agent and local host, credentials and environment badges,
-reason, task provenance, purpose, truncated command with hover text, countdown,
-and the same answer controls. It shows 1 of N and disappears on settlement or
-expiry. Unsupported embedded viewports route to Decisions in the main window.
+waiting question, its agent and project with the time left, the reason and why it
+asks, credentials and environment badges, the request with its provenance and the
+warning when the agent sent a different request (only when there is a request), the
+purpose (only when there is one), truncated command with hover text, and the same
+answer controls. It shows 1 of N when several wait, and disappears on settlement or
+expiry (amended 2026-11-13). Unsupported embedded viewports route to Decisions in the main window.
 Native focus, monitor positioning and fallback behavior require device QA;
 unit tests establish queue selection only, not operating-system behavior.

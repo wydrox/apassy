@@ -466,6 +466,7 @@ fn contract_run(id: u64, ids: [u64; 2], valid_answers: Vec<AnswerKind>) -> Pendi
         remember: None,
         question: QuestionInfo {
             reason: Default::default(),
+            flags: Vec::new(),
             id,
             item_ids: ids.to_vec(),
             project: Some(Project {

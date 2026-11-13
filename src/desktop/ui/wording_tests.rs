@@ -153,6 +153,18 @@ fn owner_requests(item: u64) -> Vec<(&'static str, OwnerRequest)> {
         ),
         ("show values", OwnerRequest::Reveal { item_id: item }),
         (
+            "remember an answer",
+            OwnerRequest::RememberAnswer {
+                decision_id: 1,
+                item_id: item,
+                name: "Synthetic key".to_owned(),
+                project: "apassy".to_owned(),
+                project_key: "/home/owner/apassy/.git".to_owned(),
+                action: crate::broker::action_kind::ActionKind::Change,
+                codes: true,
+            },
+        ),
+        (
             "copy a field",
             OwnerRequest::CopyField {
                 item_id: item,

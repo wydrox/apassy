@@ -45,33 +45,68 @@ pub enum ReasonKind {
     RememberedPattern,
 }
 impl ReasonKind {
+    /// Every kind, in declaration order.
+    pub const ALL: [Self; 24] = [
+        Self::Other,
+        Self::MissingTask,
+        Self::LowTaskMatch,
+        Self::ModelUnavailable,
+        Self::ModelTimeout,
+        Self::HookFlags,
+        Self::HookUnverified,
+        Self::HookAmbiguous,
+        Self::NotProject,
+        Self::AlwaysAsk,
+        Self::Production,
+        Self::ForeignHost,
+        Self::ForeignProject,
+        Self::MissingDeclaration,
+        Self::UnfitAnswer,
+        Self::OneTimeCode,
+        Self::ModelUnsure,
+        Self::AccessCheck,
+        Self::Connector,
+        Self::BrowserFill,
+        Self::CloudAgent,
+        Self::ModelAllowed,
+        Self::RememberedAnswer,
+        Self::RememberedPattern,
+    ];
+
+    /// The kind of its `{:?}` name, for example `ForeignProject` (ADR 0046).
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|kind| format!("{kind:?}") == name)
+    }
+
     pub fn headline(self) -> &'static str {
         match self {
             Self::MissingTask => "The agent didn't say what you asked it to do.",
             Self::LowTaskMatch => "The bouncer brain wasn't sure this fits your task.",
             Self::ModelUnavailable => "The bouncer brain is not running.",
             Self::ModelTimeout => "The bouncer brain didn't answer in time.",
-            Self::HookUnverified => "The agent task could not be verified in the host transcript.",
-            Self::HookAmbiguous => "More than one agent session could be the source of this task.",
-            Self::HookFlags => "The command or task context needs your review.",
+            Self::HookUnverified => "Apassy could not confirm your prompt.",
+            Self::HookAmbiguous => "Apassy could not tell which agent session asked.",
+            Self::HookFlags => "A safety rule flagged this run.",
             Self::NotProject => "This folder isn't a project.",
             Self::AlwaysAsk => "This credential is marked Always ask.",
             Self::Production => "Production credential.",
-            Self::ForeignHost => "This host isn't declared for this credential.",
+            Self::ForeignHost => "The command goes to a host this credential doesn't know.",
             Self::ForeignProject => "This credential belongs to another project.",
-            Self::MissingDeclaration => "This credential has no declaration.",
-            Self::UnfitAnswer => "Your earlier answer doesn't cover this run.",
+            Self::MissingDeclaration => "This credential has no environment set.",
+            Self::UnfitAnswer => "Your rule doesn't cover this run.",
             Self::OneTimeCode => "This run needs a one-time code.",
             Self::ModelUnsure => "The bouncer brain wasn't sure this run is safe.",
-            Self::AccessCheck => "This request didn't pass the access checks.",
+            Self::AccessCheck => "Apassy refused this request.",
             Self::Connector => "This connector operation needs your approval.",
             Self::BrowserFill => "The agent wants to fill a credential in your browser.",
             Self::CloudAgent => {
                 "A cloud agent wants to use a credential. Its request is not verified."
             }
-            Self::ModelAllowed => "The bouncer gate allowed this run.",
-            Self::RememberedAnswer => "Your earlier answer covers this run.",
-            Self::RememberedPattern => "An approved pattern covers this run.",
+            Self::ModelAllowed => "The bouncer brain judged this run safe.",
+            Self::RememberedAnswer => "Your rule covers this run.",
+            Self::RememberedPattern => "You approved this command before.",
             Self::Other => "This request needs your approval.",
         }
     }
@@ -281,5 +316,21 @@ mod tests {
             counts.top_reasons(),
             vec![(ReasonKind::ModelUnavailable, 2)]
         );
+    }
+
+    #[test]
+    fn reason_kinds_parse_from_their_debug_names() {
+        for kind in ReasonKind::ALL {
+            assert_eq!(ReasonKind::parse(&format!("{kind:?}")), Some(kind));
+        }
+        let mut names: Vec<String> = ReasonKind::ALL
+            .iter()
+            .map(|kind| format!("{kind:?}"))
+            .collect();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), ReasonKind::ALL.len(), "each kind once");
+        assert_eq!(ReasonKind::parse(""), None);
+        assert_eq!(ReasonKind::parse("foreignproject"), None);
     }
 }

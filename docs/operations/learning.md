@@ -26,7 +26,7 @@ The broker stores one entry for each decision in the encrypted vault (schema 7, 
 | The owner approves or denies | `owner` | `allow` or `deny` | yes |
 | The owner does not answer in time, or a lock ends the wait | `no_answer` | `deny` | yes |
 
-An entry has: the time, the agent, the project directory, the working directory relative to the project (`cwd_rel`), the item IDs, the user request and its source (`agent`, `host`, or `none`), the command, the purpose, the owner instruction, the environment variable names, the declaration of each item, the rule flags, "known safe", the model facts, the generalized pattern, "a grant in ask mode", the decision, who made it, "approve and remember", the policy (bouncer contract and `task_match` level, and `; model <version>` when the model answered with a version), and the decision note.
+An entry has: the time, the agent, the project directory, the working directory relative to the project (`cwd_rel`), the item IDs, the user request and its source (`agent`, `host`, or `none`), the command, the purpose, the owner instruction, the environment variable names, the declaration of each item, the rule flags, "known safe", the model facts, the generalized pattern, "a grant in ask mode", the decision, who made it, "approve and remember", the policy (bouncer contract and `task_match` level, the closed words of ADR 0046 — `; why <kind>`, `; code <code>`, `; offered <answer>`, `; codes <word>`, `; inject <source>:<number>`, `; noremember <word>` — and `; model <version>` when the model answered with a version), and the decision note.
 
 No secret value:
 
@@ -202,7 +202,7 @@ Tests: `learning_view_shows_the_ask_rate_decisions_patterns_and_candidate_slot`,
 | `model_version` | string, optional | The version of the model that answered, for example `apassy-base-v1+1a2b3c4d` or `laya-rl-agent`. Only when the model answered with a version. Added on 2026-10-07; older lines and readers without it stay valid |
 | `project_dir` | string, optional | The project root of the run (the working directory when it is not in a project). The fine-tune shortens it to `.`, and the home folder to `~`, in the command of a training state, as the broker does in the state that it sends to the bouncer brain. Added on 2026-11-03; older lines and readers without it stay valid |
 
-The decision log keeps the version at the end of its `policy` text (`...; model apassy-base-v1+1a2b3c4d`), so the vault schema does not change. Since 0.5.0 the app does not show the policy text; the export gives the version in `model_version`.
+The decision log keeps the version at the end of its `policy` text (`...; model apassy-base-v1+1a2b3c4d`), so the vault schema does not change. The closed words of ADR 0046 come before it (`apassy-bouncer-v9; task_match 0.75; why ForeignProject; offered in_project:change; model …`); a word holds only `[A-Za-z0-9_:]`, never request text. The learning sheet of the app shows the policy text as stored, with these words; the export gives the version in `model_version`.
 
 The owner labels are the lines with `decided_by` = `owner` and `asked` = true. A line of a remembered answer (section 3a) has `decided_by` = `answer` and `asked` = false: the owner did not see that run, so the fine-tune and its gate skip it (`broker::finetune`). An export of an older Apassy has no `asked` field. [The fine-tune study](fine-tune.md), section 5, names some fields differently: `relative_dir` is `cwd_rel`, `owner_decision` is `decision` of an owner line, and `source` is `remembered`.
 

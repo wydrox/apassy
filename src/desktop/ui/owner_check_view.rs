@@ -23,23 +23,29 @@ pub(super) fn browser_question(app: &mut DesktopApp, ui: &mut egui::Ui) {
     if !matches!(dialog.request, OwnerRequest::BrowserDebugging { .. }) {
         return;
     }
-    ui.strong("Browser debugging permission");
-    ui.label(dialog.request.describe());
+    ui.label(kit::text("Browser debugging permission", Font::Headline).color(kit::palette().label));
+    kit::paragraph(
+        ui,
+        dialog.request.describe(),
+        Font::Body,
+        kit::palette().label,
+    );
     let running = dialog.running.is_some() || app.owner.check_probe.is_some();
     let message = dialog.message.clone();
     let mut allow = false;
     let mut dismiss = false;
     ui.horizontal(|ui| {
         allow = ui
-            .add_enabled(!running, egui::Button::new("Allow"))
+            .add_enabled_ui(!running, |ui| kit::button(ui, "Allow", Style::Prominent))
+            .inner
             .clicked();
-        dismiss = ui.button("Dismiss").clicked();
+        dismiss = kit::button(ui, "Dismiss", Style::Bordered).clicked();
     });
     if running {
-        ui.label("Complete the owner check in Apassy.");
+        kit::tone_note(ui, "Complete the owner check in Apassy.", Tone::Neutral);
     }
     if let Some(message) = message {
-        ui.label(message);
+        kit::tone_note(ui, message, Tone::Warning);
     }
     if dismiss {
         app.close_owner_check(Some(ui.ctx()));

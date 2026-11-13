@@ -237,3 +237,83 @@ fn the_cards_say_what_the_mockup_says() {
     let answers = [CardAnswer::Deny, CardAnswer::Allow];
     assert_eq!(answers.len(), 2);
 }
+
+/// The words that one frame of `draw` paints, in paint order.
+fn painted(draw: impl FnMut(&mut Ui)) -> String {
+    fn collect(shape: &egui::Shape, out: &mut String) {
+        match shape {
+            egui::Shape::Text(text) => {
+                out.push_str(text.galley.text());
+                out.push('\n');
+            }
+            egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| collect(shape, out)),
+            _ => {}
+        }
+    }
+    let ctx = egui::Context::default();
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(360.0, 200.0),
+        )),
+        ..Default::default()
+    };
+    let mut draw = draw;
+    let mut output = ctx.run_ui(input, |ui| draw(ui));
+    output.textures_delta.clear();
+    let mut text = String::new();
+    for clipped in &output.shapes {
+        collect(&clipped.shape, &mut text);
+    }
+    output.drop_without_applying_deltas();
+    text
+}
+
+/// ADR 0046: a decision of this Mac reads its outcome, then its short reason; the Mac
+/// name stays in the detail and in the accessible name.
+#[test]
+fn a_history_row_shows_the_outcome_then_the_reason() {
+    let mut data = frame_5();
+    data.reasons
+        .insert(3, "Another project's credential".to_owned());
+    let view = HistoryView::of(&data, &ActivityScope::default(), &State::default(), NOW, 0);
+    let row = view.groups[0]
+        .1
+        .iter()
+        .find(|row| row.title == "Claude Code · Stripe live")
+        .expect("the row")
+        .clone();
+    assert_eq!(row.reason, "Another project's credential");
+    let text = painted(|ui| {
+        history_row(ui, &row, false);
+    });
+    let outcome = text.find("Allowed by you").expect("outcome");
+    let reason = text.find("Another project's credential").expect("reason");
+    assert!(outcome < reason, "{text}");
+    assert!(!text.contains("Mac mini (office)"), "{text}");
+    // A row of this Mac without a stored reason keeps its environment line.
+    let without = view.groups[0]
+        .1
+        .iter()
+        .find(|row| row.title == "Grok Bot · GitHub token")
+        .expect("the row");
+    assert!(without.reason.is_empty());
+}
+
+#[test]
+fn a_row_of_another_mac_keeps_its_environment_line() {
+    let mut data = frame_5();
+    // A feed row never reads a reason, also when a decision of this Mac has its number.
+    data.reasons.insert(1, "Judged safe".to_owned());
+    let view = HistoryView::of(&data, &ActivityScope::default(), &State::default(), NOW, 0);
+    let row = view.groups[0].1[0].clone();
+    assert_eq!(row.title, "Claude Code · Shop database");
+    assert!(row.reason.is_empty());
+    let text = painted(|ui| {
+        history_row(ui, &row, false);
+    });
+    let outcome = text.find(&row.outcome).expect("outcome");
+    let env = text.find("Mac mini (studio)").expect("environment");
+    assert!(outcome < env, "{text}");
+    assert!(!text.contains("Judged safe"), "{text}");
+}

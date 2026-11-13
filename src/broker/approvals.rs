@@ -129,6 +129,9 @@ pub struct QuestionInfo {
     /// The answers that can take effect now. The card offers only these, and the queue
     /// refuses a remembered answer that is not here.
     pub valid_answers: Vec<AnswerKind>,
+    /// The rule flags of the run, for the title of the card (ADR 0046). Not in the
+    /// digest that an iPhone signs, and not on the relay card.
+    pub flags: Vec<String>,
 }
 
 impl QuestionInfo {
@@ -162,6 +165,7 @@ impl Default for QuestionInfo {
             why: String::new(),
             items: Vec::new(),
             valid_answers: vec![AnswerKind::Once],
+            flags: Vec::new(),
         }
     }
 }
@@ -609,6 +613,7 @@ fn template_of(run: &PendingRun) -> PendingRun {
     template.remember = None;
     template.question.why.clear();
     template.question.reason = Default::default();
+    template.question.flags.clear();
     template
 }
 
@@ -2541,6 +2546,43 @@ mod tests {
                     approvals: 1,
                     needed: 3,
                 });
+                queue.wait_for_question(run, 7, [1; 32], [0; 32], Duration::from_secs(5), || true)
+            })
+        };
+        assert_eq!(
+            first.join().expect("join"),
+            Err(QuestionRefusal::Superseded)
+        );
+        assert_eq!(queue.pending().len(), 1);
+        assert!(queue.deny(id));
+        let settled = joined.join().expect("join").expect("an answer");
+        assert!(settled.attached);
+        assert_eq!(settled.outcome, ApprovalOutcome::Denied);
+    }
+
+    /// The same request with other rule flags (a prompt hook that now confirms the
+    /// task, for example) joins its question: the flags only word the title (ADR 0046).
+    #[test]
+    fn the_same_request_with_other_flags_joins_the_waiting_question() {
+        let queue = Arc::new(ApprovalQueue::new());
+        let first = {
+            let queue = Arc::clone(&queue);
+            std::thread::spawn(move || {
+                let mut run = run();
+                run.question.flags = vec!["injection_phrase".to_owned()];
+                queue.wait_for_question(run, 7, [1; 32], [0; 32], Duration::from_secs(5), || true)
+            })
+        };
+        let id = wait_until_pending(&queue);
+        assert_eq!(
+            queue.pending()[0].question.flags,
+            vec!["injection_phrase".to_owned()]
+        );
+        let joined = {
+            let queue = Arc::clone(&queue);
+            std::thread::spawn(move || {
+                let mut run = run();
+                run.question.flags = vec!["hook_unverified".to_owned()];
                 queue.wait_for_question(run, 7, [1; 32], [0; 32], Duration::from_secs(5), || true)
             })
         };

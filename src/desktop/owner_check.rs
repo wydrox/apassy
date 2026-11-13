@@ -722,6 +722,19 @@ pub enum OwnerRequest {
         item_id: u64,
         name: String,
     },
+    /// Save the project answer that a past question offered (ADR 0046): "Allow ACTION
+    /// in PROJECT" for the credential, for every agent. It gives authority: its own owner
+    /// action, never covered by the owner window, and the session checks the offer again
+    /// under the proof.
+    RememberAnswer {
+        decision_id: u64,
+        item_id: u64,
+        name: String,
+        project: String,
+        project_key: String,
+        action: ActionKind,
+        codes: bool,
+    },
     /// Remove an exception of an agent for an item (ADR 0025 §3f). It gives authority
     /// back.
     RemoveAgentException {
@@ -1473,6 +1486,22 @@ impl OwnerRequest {
             | Self::AlwaysAskOff { item_id, .. } => {
                 OwnerAction::ChangeItemRules { item_id: *item_id }
             }
+            Self::RememberAnswer {
+                decision_id,
+                item_id,
+                project,
+                project_key,
+                action,
+                codes,
+                ..
+            } => OwnerAction::RememberAnswer {
+                decision_id: *decision_id,
+                item_id: *item_id,
+                project_key: project_key.clone(),
+                project_label: project.clone(),
+                action: *action,
+                codes: *codes,
+            },
             Self::RemoveAgentException {
                 agent_id,
                 item_id,
@@ -1970,6 +1999,19 @@ impl OwnerRequest {
             ),
             Self::AlwaysAskOff { name, .. } => format!(
                 "Turn off \"Always ask me\" for \"{name}\". The bouncer then decides each use."
+            ),
+            Self::RememberAnswer {
+                name,
+                project,
+                action,
+                codes,
+                ..
+            } => format!(
+                "Allow {} in \"{}\" with \"{}\"{} for every agent, without asking, from the next matching use. Safety rules still ask.",
+                action_words(*action),
+                page_text(project),
+                page_text(name),
+                if *codes { " and its one-time codes" } else { "" }
             ),
             Self::RemoveAgentException {
                 agent_name, kind, ..
@@ -3404,6 +3446,15 @@ impl DesktopApp {
                     )),
                     Some(Err(message)) => self.set_err(message),
                     None => self.set_err("The vault is locked."),
+                }
+            }
+            request @ OwnerRequest::RememberAnswer { .. } => {
+                match session.remember_from_decision(&request.action(), proof) {
+                    Ok(_) => self.set_ok(
+                        "Saved. Safety rules can still ask.",
+                    ),
+                    Err(err) if err.code == "already_exists" => self.set_ok("Already saved."),
+                    Err(err) => self.set_err(err.message),
                 }
             }
             OwnerRequest::RemoveAgentException {

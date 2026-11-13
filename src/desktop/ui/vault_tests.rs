@@ -1739,6 +1739,172 @@ fn always_ask_turns_on_at_once_and_off_after_the_owner_check() {
     assert!(!always_ask(&app));
 }
 
+/// ADR 0046: the project answer that a past question offered is saved from History
+/// only after the owner check for that credential, and only as the question offered it.
+#[test]
+fn remembering_from_history_needs_the_owner_check_for_that_item() {
+    use crate::broker::action_kind::ActionKind;
+    use crate::desktop::owner_check::OwnerRequest;
+    use crate::vault::answers::AnswerScope;
+    use crate::vault::usage::{NewItemUse, UseDecidedBy, UseOutcome};
+    use crate::vault::{
+        DecidedBy, DecisionEntry, DecisionWhy, Declaration, Environment, LoggedDecision,
+        RequestSource, Reversibility, RiskLevel, Scope,
+    };
+    const KEY: &str = "/synthetic/apassy/.git";
+
+    let dir = TempDir::new().expect("temp dir");
+    let mut app = app_in(&dir);
+    create(&mut app, "Personal", PASS_A);
+    let id = add_item(&mut app, "Devbox key");
+    let other = add_item(&mut app, "Other key");
+    let decision = app
+        .owner_ui
+        .session
+        .with_vault(|vault| {
+            vault
+                .save_declaration(
+                    id,
+                    &Declaration {
+                        project: "apassy".to_owned(),
+                        environment: Environment::Staging,
+                        risk: RiskLevel::Medium,
+                        scope: Scope::ReadWrite,
+                        reversibility: Reversibility::Reversible,
+                    },
+                    Some("sentry"),
+                    None,
+                )
+                .expect("declaration");
+            let (agent, _) = vault.register_agent("Claude Code").expect("agent");
+            let entry = DecisionEntry {
+                at: crate::broker::learning::now(),
+                agent_id: agent.id,
+                agent_name: "Claude Code".to_owned(),
+                project_dir: "/synthetic/apassy".to_owned(),
+                cwd_rel: ".".to_owned(),
+                items: vec![id],
+                user_request: "Start the devbox.".to_owned(),
+                user_request_source: RequestSource::Host,
+                command: vec!["devbox".to_owned(), "up".to_owned()],
+                purpose: "Start the devbox.".to_owned(),
+                env_names: Vec::new(),
+                declarations: Vec::new(),
+                rule_flags: Vec::new(),
+                known_safe: false,
+                model_facts: Vec::new(),
+                pattern: String::new(),
+                grant_asks: false,
+                asked: true,
+                decision: LoggedDecision::Deny,
+                decided_by: DecidedBy::NoAnswer,
+                remembered: false,
+                policy: "apassy-bouncer-v9".to_owned(),
+                note: String::new(),
+                instruction: String::new(),
+            }
+            .with_why(&DecisionWhy {
+                reason: "ForeignProject".to_owned(),
+                offered: "in_project:change".to_owned(),
+                ..DecisionWhy::default()
+            });
+            let decision = vault.record_decision(&entry).expect("decision");
+            vault
+                .record_item_use(&NewItemUse {
+                    item_id: id,
+                    agent_id: Some(agent.id),
+                    agent_name: "Claude Code".to_owned(),
+                    project_key: KEY.to_owned(),
+                    project_label: "apassy".to_owned(),
+                    action: ActionKind::Change,
+                    command_summary: "run devbox up".to_owned(),
+                    hosts: vec!["sentry.io".to_owned()],
+                    outcome: UseOutcome::TimedOut,
+                    decided_by: UseDecidedBy::Owner,
+                    answered_on: String::new(),
+                    decision_log_id: Some(decision),
+                })
+                .expect("use");
+            decision
+        })
+        .expect("open");
+    let request = OwnerRequest::RememberAnswer {
+        decision_id: decision,
+        item_id: id,
+        name: "Devbox key".to_owned(),
+        project: "apassy".to_owned(),
+        project_key: KEY.to_owned(),
+        action: ActionKind::Change,
+        codes: false,
+    };
+    let answer = |app: &DesktopApp| {
+        app.owner_ui
+            .session
+            .with_vault(|vault| vault.answer_for(id, KEY, ActionKind::Change, AnswerScope::Project))
+            .expect("open")
+            .expect("read")
+    };
+    // A wrong passphrase saves nothing.
+    app.prepare_owner(request.clone(), None, false);
+    assert!(
+        app.confirm_owner_now(OwnerCheck::passphrase(PASS_B))
+            .is_err()
+    );
+    assert!(answer(&app).is_none(), "a wrong passphrase saves nothing");
+    // A proof of another action is refused: the rules of the credential, or the same
+    // answer for another credential.
+    let for_other = OwnerAction::RememberAnswer {
+        decision_id: decision,
+        item_id: other,
+        project_key: KEY.to_owned(),
+        project_label: "apassy".to_owned(),
+        action: ActionKind::Change,
+        codes: false,
+    };
+    for action in [
+        OwnerAction::ChangeItemRules { item_id: id },
+        for_other.clone(),
+    ] {
+        app.prepare_owner(request.clone(), None, false);
+        let foreign = app
+            .owner_gate()
+            .authorize(action, OwnerCheck::passphrase(PASS_A))
+            .expect("owner check");
+        app.finish_owner_check_with(foreign);
+        assert!(
+            answer(&app).is_none(),
+            "a proof of another action saves nothing"
+        );
+    }
+    // A proof for another credential does not save the decision of this one.
+    let proof = app
+        .owner_gate()
+        .authorize(for_other.clone(), OwnerCheck::passphrase(PASS_A))
+        .expect("owner check");
+    assert!(
+        app.owner_ui
+            .session
+            .remember_from_decision(&for_other, proof)
+            .is_err()
+    );
+    assert!(answer(&app).is_none());
+    // The check for this credential saves the answer that the question offered.
+    let request_again = request.clone();
+    app.prepare_owner(request, None, false);
+    app.confirm_owner_now(OwnerCheck::passphrase(PASS_A))
+        .expect("owner check");
+    let saved = answer(&app).expect("the answer is saved");
+    assert_eq!(saved.answered_on, concat!("this ", crate::computer!()));
+    assert_eq!(saved.hosts, vec!["sentry.io".to_owned()]);
+    assert_eq!(app.status_text, "Saved. Safety rules can still ask.");
+    // Opened again, the decision says that the answer is there; nothing changes.
+    app.prepare_owner(request_again, None, false);
+    app.confirm_owner_now(OwnerCheck::passphrase(PASS_A))
+        .expect("owner check");
+    assert_eq!(app.status_text, "Already saved.");
+    assert_eq!(answer(&app), Some(saved));
+}
+
 /// "Is this a development key?" shows while only a default found the environment.
 /// "Production" is stricter: no check. "Development" waits for the owner check. Each
 /// answer counts as the owner's (the source "owner"), and the question goes away. A

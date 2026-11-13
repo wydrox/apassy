@@ -260,7 +260,18 @@ fn an_agent_decoy_does_not_vouch_for_the_host_of_an_owner_item() {
     );
     let run = asks(&fx, &[decoy, owner_db], TO_EVIL);
     let why = &run.question.why;
-    assert!(why.contains("db_host_from_command"), "{why}");
+    assert!(
+        run.question
+            .flags
+            .iter()
+            .any(|flag| flag == "db_host_from_command"),
+        "{:?}",
+        run.question.flags
+    );
+    assert!(
+        why.contains(common::flag_line("db_host_from_command")),
+        "{why}"
+    );
     assert!(why.contains("evil.host"), "{why}");
     assert!(why.contains("Synthetic app database"), "{why}");
     assert_eq!(model_calls(&fx), 0);

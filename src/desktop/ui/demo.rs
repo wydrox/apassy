@@ -2492,7 +2492,7 @@ pub(super) fn decisions_detail(app: &mut DesktopApp, ui: &mut egui::Ui) {
         Some(key) => {
             let event = cards::find(&app.ui.bouncer.data, &app.ui.activity_scope, key).cloned();
             columns::detail_body(ui, ("demo-past", key), |ui| match &event {
-                Some(event) => cards::history_detail(ui, event, None, now),
+                Some(event) => cards::history_detail(ui, event, now, false, |_| {}, |_| {}),
                 None => demo_week(app, ui),
             });
             None
