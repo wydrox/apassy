@@ -1158,15 +1158,15 @@ pub(super) fn draw_fresh_token(app: &mut DesktopApp, ctx: &egui::Context) {
         .copied();
     let other = host == ConnectHost::Other;
     kit::sheet(ctx, "fresh-token", 480.0, |ui| {
-        kit::sheet_title(
-            ui,
-            &title,
-            Some(if other {
-                "Use this token in the host. Apassy shows it one time."
-            } else {
-                "Apassy saves the settings of the host. There is nothing else to set."
-            }),
-        );
+        // Once the settings are saved, the two steps below say what is left.
+        let lead = if other {
+            Some("Use this token in the host. Apassy shows it one time.")
+        } else if saved.is_some() {
+            None
+        } else {
+            Some("Apassy saves the settings of the host. There is nothing else to set.")
+        };
+        kit::sheet_title(ui, &title, lead);
         kit::sheet_body(ui, |ui| {
             if rotated {
                 kit::note(
@@ -1188,10 +1188,6 @@ pub(super) fn draw_fresh_token(app: &mut DesktopApp, ctx: &egui::Context) {
             if saved.is_some() {
                 kit::tone_note(ui, "Connection settings saved.", Tone::Good);
                 agent_onboarding::after_setup_notes(ui, host);
-                kit::note(
-                    ui,
-                    "Saved settings do not prove a connection. Check it in the host.",
-                );
             } else {
                 let setup = super::agent_setup::Host::from_index(app.ui.setup_host);
                 ui.add_enabled_ui(!busy, |ui| {
@@ -1269,7 +1265,7 @@ pub(super) fn draw_fresh_token(app: &mut DesktopApp, ctx: &egui::Context) {
         app.ui.agent_onboarding.shown = None;
         app.place = Place::Agents;
         app.set_ok(if saved.is_some() || other {
-            "The agent is connected. The bouncer decides each use; a question shows in Decisions."
+            "Done. The bouncer decides each use; a question shows in Decisions."
         } else {
             "The token is hidden. Apassy cannot show it again."
         });

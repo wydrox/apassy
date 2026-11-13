@@ -150,6 +150,10 @@ fn a_pasted_key_goes_to_the_selected_folder_with_its_variable_and_declaration() 
         );
     }
     assert!(!window.text.contains("Add 1"), "{}", window.text);
+    // One way to the login form, on the title row; "Fill in by hand…" for the rest.
+    assert!(window.text.contains("Add Login…"), "{}", window.text);
+    assert!(!window.text.contains("Other…"), "{}", window.text);
+    assert!(!window.text.contains("Paste\n"), "{}", window.text);
     assert!(!window.text.contains(&key), "the paste is masked");
     assert!(
         !window.text.contains("EXAMPLE0"),
@@ -378,7 +382,7 @@ fn paste_destination_survives_manual_login_and_reveals_the_actual_result() {
     let mut window = Window::new();
     open_with(&mut app, &mut window, "");
     Choices::set_folder(&window.ctx, Some(b.uuid.clone()));
-    window.click(&mut app, "Login");
+    window.click(&mut app, "Add Login…");
     assert_eq!(app.ui.sheet, Some(Sheet::AddItem { kind_chosen: true }));
     assert_eq!(app.add_form.kind, CredentialKind::Login);
     assert_eq!(app.ui.create_folder.as_deref(), Some(b.uuid.as_str()));
@@ -421,7 +425,7 @@ fn deleted_create_destination_retains_manual_draft_and_does_not_redirect() {
     let mut window = Window::new();
     open_with(&mut app, &mut window, "");
     Choices::set_folder(&window.ctx, Some(b.uuid.clone()));
-    window.click(&mut app, "Login");
+    window.click(&mut app, "Add Login…");
     assert_eq!(app.ui.create_folder.as_deref(), Some(b.uuid.as_str()));
     app.owner_ui
         .session

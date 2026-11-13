@@ -306,18 +306,18 @@ function listVault(){
   const groups={};for(const i of its)(groups[i.folder]=groups[i.folder]||[]).push(i);
   const keys=Object.keys(groups).sort();
   const title=f===null?'All credentials':fpath(f).split(' › ').pop();
-  return `<div class="tb"><div class="ttl"><b>${esc(title)}</b><small>${its.length} items</small></div><button class="ib" data-a="paste" title="New credential">${I.plus}</button></div>
+  return `<div class="tb"><div class="ttl"><b>${esc(title)}</b><small>${its.length===1?'1 credential':its.length+' credentials'}</small></div><button class="ib" data-a="paste" title="New credential">${I.plus}</button></div>
   <div class="searchf">${I.search}Search</div>
-  <div class="rows">${keys.map(k=>`${keys.length>1?`<div class="gh">${esc(fpath(k))}</div>`:''}${groups[k].map(i=>credRow(i,S.sel.vault===i.id)).join('')}`).join('')||'<div class="empty" style="padding:40px 0">No items</div>'}</div>`;
+  <div class="rows">${keys.map(k=>`${keys.length>1?`<div class="gh">${esc(fpath(k))}</div>`:''}${groups[k].map(i=>credRow(i,S.sel.vault===i.id)).join('')}`).join('')||'<div class="empty" style="padding:40px 0">No credentials</div>'}</div>`;
 }
 function listShared(){
   const v=S.shares.find(x=>x.id===S.shared);
   const mine=S.items.filter(i=>i.shared.includes(v.id)),theirs=S.others.filter(o=>o.vault===v.id);
-  return `<div class="tb"><div class="ttl"><b>${esc(v.name)}</b><small>${v.members.length} people · ${mine.length+theirs.length} items</small></div><button class="ib" data-a="members" title="People">${I.people}</button><button class="ib" data-a="addshare" title="Add">${I.plus}</button></div>
+  return `<div class="tb"><div class="ttl"><b>${esc(v.name)}</b><small>${v.members.length} people · ${mine.length+theirs.length===1?'1 credential':(mine.length+theirs.length)+' credentials'}</small></div><button class="ib" data-a="members" title="People">${I.people}</button><button class="ib" data-a="addshare" title="Add">${I.plus}</button></div>
   <div class="searchf">${I.search}Search</div>
   <div class="rows">${mine.length?`<div class="gh">From you<span>${mine.length}</span></div>${mine.map(i=>credRow(i,S.sel.vault===i.id)).join('')}`:''}
   ${theirs.length?`<div class="gh">From others<span>${theirs.length}</span></div>${theirs.map(i=>credRow(i,S.sel.vault===i.id)).join('')}`:''}
-  ${!mine.length&&!theirs.length?'<div class="empty" style="padding:40px 0">No items yet</div>':''}</div>`;
+  ${!mine.length&&!theirs.length?'<div class="empty" style="padding:40px 0">No credentials yet</div>':''}</div>`;
 }
 function decRow(d,sel){
   if(d.t==='ask'){const it=item(d.item);return `<div class="r${sel?' on':''}" data-a="dsel" data-id="${d.id}">${ava(d.agent)}
@@ -340,7 +340,7 @@ function listAgents(){
 function frow(k,v){return `<div class="fr"><div class="k">${k}</div><div class="v">${v}</div></div>`}
 function detailCred(){
   const it=item(S.sel.vault);
-  if(!it)return `<div class="tb"></div><div class="empty">${I.key}<b>No item selected</b></div>`;
+  if(!it)return `<div class="tb"></div><div class="empty">${I.key}<b>No credential selected</b></div>`;
   if(it.from){const v=S.shares.find(x=>x.id===it.vault);return `<div class="tb"></div><div class="dscroll"><div class="dpad">
     <div class="hdr">${tile(it.pv,'l')}<div><h1>${esc(it.name)}</h1><div class="s">${esc(it.kind)} · shared by ${esc(it.from)}</div></div></div>
     <div class="grp">${frow('Shared vault',esc(v.name))}${frow('Owner',esc(it.from))}${frow('You can','Use it with your agents')}</div>
@@ -470,7 +470,7 @@ const EX={key:'sk-ant-api03-FAKE0000000000000000',env:'# .env\nRESEND_API_KEY=re
 let DET=[];
 function pasteSheet(){
   const opts=['',...allF().map(f=>f.id)].map(id=>`<option value="${id}" ${id===(S.folder||'')?'selected':''}>${esc(fpath(id||null))}</option>`).join('');
-  sheet(`<h2>New Credential</h2><p class="lead">Paste a key, a .env file, a database URL, or an otpauth:// link.</p>
+  sheet(`<div style="display:flex;align-items:center;justify-content:space-between;gap:8px"><h2 style="margin:0">New Credential</h2><button class="btn" data-a="addlogin">Add Login…</button></div><p class="lead">Paste a key, a .env file, a database URL, or an otpauth:// link.</p>
     <textarea class="field mono" rows="4" id="pbox" placeholder="⌘V"></textarea>
     <div class="ex">Examples:<button data-a="ex" data-v="key">API key</button><button data-a="ex" data-v="env">.env file</button><button data-a="ex" data-v="url">Database URL</button></div>
     <div id="det" style="margin-top:12px"></div>
@@ -527,6 +527,7 @@ document.addEventListener('click',e=>{
     case 'imenu':S.menu=S.menu==='item'?null:'item';return render();
     case 'dmenu':S.menu=S.menu==='dec'?null:'dec';return render();
     case 'paste':return pasteSheet();
+    case 'addlogin':closeSheet();return hud('Opens the login form');
     case 'ex':$('#pbox').value=EX[el.dataset.v];return upd();
     case 'close':return closeSheet();
     case 'savepaste':{const f=$('#pf').value;const ch=DET.map((d,i)=>({...d,name:document.querySelector(`.dname[data-i="${i}"]`).value,on:(document.querySelector(`.dchk[data-i="${i}"]`)||{checked:true}).checked})).filter(d=>d.on);if(!ch.length)return;let last;for(const d of ch){last=S.next++;S.items.push({id:last,name:d.name,pv:d.pv,kind:d.kind,env:d.env,host:d.host,envt:d.envt,folder:f,shared:[],user:d.user})}closeSheet();S.view='vault';S.folder=f||null;S.sel.vault=last;render();return hud(ch.length>1?`Added ${ch.length} credentials`:`Added ${ch[0].name}`)}

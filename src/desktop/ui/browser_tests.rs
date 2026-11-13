@@ -797,6 +797,149 @@ fn settings_show_the_browser_extension_and_the_last_request() {
     assert!(app.browser.last_seen.is_some(), "a request counts as seen");
 }
 
+/// One frame of the window: the painted texts (joined, and each with its centre) and
+/// the AccessKit names of the controls.
+#[cfg(not(target_os = "linux"))]
+type Frame = (String, Vec<(String, egui::Pos2)>, Vec<String>);
+
+#[cfg(not(target_os = "linux"))]
+fn tools_frame(ctx: &egui::Context, app: &mut DesktopApp, events: Vec<egui::Event>) -> Frame {
+    fn placed(shape: &egui::Shape, out: &mut Vec<(String, egui::Pos2)>) {
+        match shape {
+            egui::Shape::Text(text) => out.push((
+                text.galley.text().to_owned(),
+                text.pos + text.galley.size() / 2.0,
+            )),
+            egui::Shape::Vec(nested) => nested.iter().for_each(|inner| placed(inner, out)),
+            _ => {}
+        }
+    }
+    let output = ctx.run_ui(super::owner_tests::input(0.0, events), |ui| {
+        super::draw(app, ui)
+    });
+    let mut text = String::new();
+    let mut texts = Vec::new();
+    for clipped in &output.shapes {
+        super::owner_tests::collect(&clipped.shape, &mut text);
+        placed(&clipped.shape, &mut texts);
+    }
+    let names = output
+        .platform_output
+        .accesskit_update
+        .iter()
+        .flat_map(|update| update.nodes.iter())
+        .filter_map(|(_, node)| node.label().map(str::to_owned))
+        .collect();
+    output.drop_without_applying_deltas();
+    (text, texts, names)
+}
+
+/// Settings › Tools after three frames.
+#[cfg(not(target_os = "linux"))]
+fn tools_settled(ctx: &egui::Context, app: &mut DesktopApp) -> Frame {
+    super::open_settings(app, super::SettingsSection::Tools);
+    let mut last = tools_frame(ctx, app, Vec::new());
+    for _ in 0..2 {
+        last = tools_frame(ctx, app, Vec::new());
+    }
+    last
+}
+
+/// The Browser Debugging group (macOS) is drawn only with a row. No instance draws no
+/// label. An instance to trust draws its row with "Trust…", which VoiceOver names, and
+/// which starts the owner check for browser debugging. A trusted instance draws "Remove",
+/// spoken with the instance. A protected setting that cannot be read draws the warning.
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn the_debugging_group_is_drawn_only_with_a_row() {
+    use crate::browser::trust::InstanceIdentity;
+
+    let dir = TempDir::new().unwrap();
+    let (mut app, _) = unlocked_app_with_item(&dir);
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    app.browser.unsafe_instance = None;
+    app.browser.trusted_instances = Some(Ok(Vec::new()));
+    let (text, _, _) = tools_settled(&ctx, &mut app);
+    assert!(text.contains("Browser extension"), "{text}");
+    for gone in ["Browser Debugging", "Trust…", "remote debugging"] {
+        assert!(!text.contains(gone), "{gone}: {text}");
+    }
+
+    let identity = InstanceIdentity {
+        bundle_id: "net.imput.helium".into(),
+        team_id: "S4Q33XPHB4".into(),
+        user_data_root: "/tmp/synthetic-browser".into(),
+        debugging: "9333".into(),
+        unsafe_switches: vec!["remote-debugging-port".into()],
+    };
+    assert!(identity.valid());
+
+    // A trusted instance: "Remove", spoken with the instance.
+    app.browser.trusted_instances = Some(Ok(vec![identity.clone()]));
+    let (text, _, names) = tools_settled(&ctx, &mut app);
+    assert!(text.contains("Browser Debugging"), "{text}");
+    assert!(text.contains("Remove\n"), "{text}");
+    let remove = format!("Remove trust of {}", identity.description());
+    assert!(names.contains(&remove), "{remove}: {names:?}");
+    assert!(!text.contains("Trust…"), "{text}");
+
+    // The protected setting cannot be read: the warning, and no instance row.
+    app.browser.trusted_instances = Some(Err("synthetic read error".to_owned()));
+    let (text, _, _) = tools_settled(&ctx, &mut app);
+    assert!(text.contains("Browser Debugging"), "{text}");
+    assert!(
+        text.contains("Protected device setting unavailable. Agent fills are refused."),
+        "{text}"
+    );
+    assert!(!text.contains("synthetic read error"), "{text}");
+
+    // An instance to trust: its row with "Trust…", above the extension group.
+    app.browser.trusted_instances = Some(Ok(Vec::new()));
+    app.browser.unsafe_instance = Some(identity.clone());
+    let (text, texts, names) = tools_settled(&ctx, &mut app);
+    let debugging = text.find("Browser Debugging").expect("the group label");
+    let extension = text.find("Browser extension").expect("the extension group");
+    assert!(debugging < extension, "{text}");
+    assert!(text.contains("remote debugging on port 9333"), "{text}");
+    assert!(
+        names
+            .iter()
+            .any(|name| name == "Trust this browser instance"),
+        "{names:?}"
+    );
+
+    // "Trust…" starts the owner check for browser debugging of this instance.
+    assert!(app.owner.check.is_none());
+    let at = texts
+        .iter()
+        .rev()
+        .find(|(text, _)| text == "Trust…")
+        .map(|(_, at)| *at)
+        .expect("Trust…");
+    let button = |pressed| egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    tools_frame(&ctx, &mut app, vec![egui::Event::PointerMoved(at)]);
+    tools_frame(&ctx, &mut app, vec![button(true)]);
+    tools_frame(&ctx, &mut app, vec![button(false)]);
+    let request = app.owner.check.as_ref().map(|check| &check.request);
+    assert!(
+        matches!(
+            request,
+            Some(OwnerRequest::BrowserDebugging {
+                identity: asked,
+                scope: None,
+                ..
+            }) if *asked == identity
+        ),
+        "{request:?}"
+    );
+}
+
 fn update_login(
     app: &mut DesktopApp,
     ctx: &egui::Context,

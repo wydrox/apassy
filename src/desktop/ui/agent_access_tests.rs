@@ -1,5 +1,5 @@
 //! Tests of the "Agent Access" part of the credential page: the status line under its
-//! title, the line under "Always ask me", and what an environment that is not set
+//! title, "Always ask me" without a second line, and what an environment that is not set
 //! means. Synthetic data only. The credentials are made in a temporary vault.
 
 use eframe::egui::{self, Pos2, RawInput, Rect, Vec2};
@@ -367,10 +367,10 @@ fn the_status_shows_while_agent_access_is_closed() {
     assert!(!window.text.contains(PASSWORD), "a value is visible");
 }
 
-/// "Always ask me" has a line under its label in both states, the same as the status,
-/// and VoiceOver reads it as the description of the switch.
+/// The rule shows once, in the status line under "Agent Access", in both states of
+/// "Always ask me". VoiceOver reads it as the description of the switch.
 #[test]
-fn always_ask_me_has_a_line_under_it_in_both_states() {
+fn always_ask_me_says_its_rule_once() {
     let dir = TempDir::new().expect("temp dir");
     let mut app = unlocked_app(&dir);
     let mut window = Window::new();
@@ -381,8 +381,8 @@ fn always_ask_me_has_a_line_under_it_in_both_states() {
     assert!(window.has("Always ask me"), "{}", window.text);
     assert_eq!(
         window.count(BOUNCER),
-        2,
-        "the status and the line under the switch: {}",
+        1,
+        "only the status, no line under the switch: {}",
         window.text
     );
     assert_eq!(
@@ -394,7 +394,7 @@ fn always_ask_me_has_a_line_under_it_in_both_states() {
 
     set_always_ask(&mut app, id, true);
     window.idle(&mut app);
-    assert_eq!(window.count(ALWAYS), 2, "{}", window.text);
+    assert_eq!(window.count(ALWAYS), 1, "{}", window.text);
     assert!(!window.has(BOUNCER), "{}", window.text);
     assert_eq!(
         window.description("Always ask me"),

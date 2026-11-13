@@ -612,7 +612,14 @@ fn editing_a_login_with_only_a_passkey_keeps_the_passkey() {
     // A password is optional here, and the form says so.
     assert!(window.has("Optional"), "{}", window.text);
     assert!(!window.has("Unchanged"), "{}", window.text);
-    assert!(window.text.contains("A password is optional"));
+    // The note stays whole: saving keeps the passkey.
+    assert!(
+        window.text.contains(
+            "This login signs in with a passkey. A password is optional. Apassy keeps the passkey when you save."
+        ),
+        "{}",
+        window.text
+    );
     app.edit_form.name = "Renamed passkey".to_owned();
     app.edit_form.notes = "a note".to_owned();
     window.key(&mut app, Key::S, Modifiers::COMMAND);

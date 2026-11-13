@@ -38,7 +38,7 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
     columns::list_toolbar(
         ui,
         &title,
-        &columns::count_label(count, "item", "items"),
+        &columns::count_label(count, "credential", "credentials"),
         |ui| {
             if !locked {
                 add = kit::plain_icon_button(ui, Icon::Plus, "New credential").clicked();

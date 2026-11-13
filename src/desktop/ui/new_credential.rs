@@ -227,13 +227,17 @@ pub(super) fn sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
         // sheet is white: paint the gray inside its edge, under the content.
         let backdrop = ui.painter().add(egui::Shape::Noop);
         ui.spacing_mut().item_spacing.y = 0.0;
-        ui.label(kit::text("New Credential", Font::Body).variation(b"wght", 700.0));
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            login = push_button(ui, "Login").clicked();
-            ui.label(kit::text("Paste", Font::Body).color(kit::palette().label));
-            by_hand = push_button(ui, "Other…").clicked();
-        });
+        // The title, and on its right the one way to a login form. "Fill in by hand…"
+        // under the field leads to the other kinds.
+        egui::Sides::new().show(
+            ui,
+            |ui| {
+                ui.label(kit::text("New Credential", Font::Body).variation(b"wght", 700.0));
+            },
+            |ui| {
+                login = push_button(ui, "Add Login…").clicked();
+            },
+        );
         ui.add_space(3.0);
         kit::paragraph(
             ui,
