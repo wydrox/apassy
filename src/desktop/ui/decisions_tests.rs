@@ -2655,7 +2655,7 @@ fn unconfirmed_question_headlines_show_blocking_reason_before_classification() {
     flagged.flags = vec!["injection_phrase".to_owned()];
     assert_eq!(
         decisions::question_headline(&flagged),
-        "The request text tells the bouncer what to decide."
+        "The request text mentions the bouncer or an approval."
     );
     for (reason, headline) in [
         (
@@ -2834,6 +2834,9 @@ fn a_past_decision_opens_its_why_while_a_question_waits() {
         "what waits first"
     );
     assert!(text.contains("Codex · Guarded key"), "History: {text}");
+    // The short reason of the row comes from the decision row through the load of the
+    // Bouncer data (ADR 0046).
+    assert!(text.contains("Judged safe"), "History: {text}");
 
     let text = screen.click(&mut app, "Codex · Guarded key");
     assert_eq!(decisions::selected_key(&app), None, "{text}");
@@ -2948,24 +2951,65 @@ fn dismiss_sends_a_typed_comment() {
     let (text, _) = frames(&mut app, WIDE, 3);
     assert!(text.lines().any(|line| line.trim() == "Dismiss"), "{text}");
     assert!(!text.contains("Dismiss with comment"), "{text}");
-    assert!(queue.deny(pending.id));
-    waiter.join().unwrap().unwrap();
+    assert!(queue.pending().iter().any(|run| run.id == pending.id));
+    // Type a comment into the painted field and press the painted Dismiss.
+    let screen = Screen {
+        ctx: egui::Context::default(),
+        size: WIDE,
+    };
+    screen.click(&mut app, "Comment");
+    screen.frame(&mut app, vec![egui::Event::Text("Not now".to_owned())]);
+    screen.click(&mut app, "Dismiss");
+    let settled = waiter.join().unwrap().unwrap();
+    assert_eq!(settled.outcome, ApprovalOutcome::Denied);
+    assert_eq!(settled.refusal_comment.as_deref(), Some("Not now"));
 }
 
 /// C3: "Why you are asked" says only what the title does not. With a real reason, the
 /// title is its sentence and the why text shows under the group; with the reason
-/// `Other`, the why text is the title and the group is not drawn.
+/// `Other`, the why text is the title and the group is not drawn. A flagged run drops
+/// the title sentence from its why text, and a production question does not repeat
+/// that it asks every time.
 #[test]
 fn the_why_group_shows_only_what_the_title_does_not_say() {
     use crate::broker::route_diagnostics::ReasonKind;
-    let why = "\"Live key\" is a production credential with write or admin scope: you approve each run in \"acme-billing\": reading.";
-    for (reason, group) in [(ReasonKind::Production, true), (ReasonKind::Other, false)] {
+    let production = "\"Live key\" is a production credential with write or admin scope: you approve each run in \"acme-billing\": reading.";
+    let flags = vec!["injection_phrase".to_owned(), "secret_output".to_owned()];
+    let flagged = crate::broker::reasons::flags_sentence(&flags);
+    for (reason, why, flags, group, shown) in [
+        (
+            ReasonKind::Production,
+            production.to_owned(),
+            Vec::new(),
+            true,
+            vec![production],
+        ),
+        (
+            ReasonKind::Other,
+            production.to_owned(),
+            Vec::new(),
+            false,
+            vec![],
+        ),
+        (
+            ReasonKind::HookFlags,
+            flagged.clone(),
+            flags.clone(),
+            true,
+            vec![
+                "The request text mentions the bouncer or an approval.",
+                "A command like this asks every time.",
+            ],
+        ),
+    ] {
         let dir = TempDir::new().unwrap();
         let (mut app, item_id) = unlocked_app_with_item(&dir);
         let queue = queue_of(&mut app, &dir);
         let mut info = question(vec![item(item_id, "Live key")], &[]);
         info.reason = reason;
-        info.why = why.to_owned();
+        info.why = why.clone();
+        info.flags = flags;
+        let title = decisions::question_headline(&info).to_owned();
         let (waiter, pending) = ask(&app, &queue, 1, run("Codex", info));
         app.place = Place::Decisions;
         let (text, _) = frames(&mut app, WIDE, 3);
@@ -2974,15 +3018,90 @@ fn the_why_group_shows_only_what_the_title_does_not_say() {
             group,
             "{reason:?}: {text}"
         );
-        assert_eq!(text.matches(why).count(), 1, "{reason:?}: {text}");
-        if group {
-            assert!(text.contains("Production credential."), "{text}");
-            assert!(
-                text.contains("This production credential asks every time."),
-                "{text}"
-            );
+        assert_eq!(
+            text.matches(title.as_str()).count(),
+            1,
+            "{reason:?}: {text}"
+        );
+        for expected in shown {
+            assert_eq!(text.matches(expected).count(), 1, "{expected}: {text}");
         }
+        assert!(
+            !text.contains("This production credential asks every time."),
+            "{reason:?}: {text}"
+        );
         assert!(queue.deny(pending.id));
         waiter.join().unwrap().unwrap();
     }
+}
+
+/// ADR 0046: a painted button of "Next time" acts, and the detail shows the new state at
+/// once: "Always Ask" for the agent, then its row with "Remove…".
+#[test]
+fn a_next_time_button_acts_and_the_detail_follows() {
+    use crate::broker::bouncer::Thresholds;
+    use crate::vault::{DecidedBy, DecisionEntry, LoggedDecision, RequestSource};
+
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, item_id) = unlocked_app_with_item(&dir);
+    let agent = app
+        .owner_ui
+        .session
+        .with_vault(|vault| {
+            let agent = vault.register_agent("Claude Code").expect("agent").0.id;
+            vault.set_agent_sees_all(agent, true).expect("see all");
+            vault
+                .record_decision(&DecisionEntry {
+                    at: super::kit::now() - 600,
+                    agent_id: agent,
+                    agent_name: "Claude Code".to_owned(),
+                    project_dir: "/synthetic/acme-billing".to_owned(),
+                    cwd_rel: ".".to_owned(),
+                    items: vec![item_id],
+                    user_request: "Check the October payout.".to_owned(),
+                    user_request_source: RequestSource::Host,
+                    command: vec!["./report.sh".to_owned()],
+                    purpose: "Report.".to_owned(),
+                    env_names: Vec::new(),
+                    declarations: vec![None],
+                    rule_flags: Vec::new(),
+                    known_safe: false,
+                    model_facts: Vec::new(),
+                    pattern: String::new(),
+                    grant_asks: false,
+                    asked: false,
+                    decision: LoggedDecision::Allow,
+                    decided_by: DecidedBy::Model,
+                    remembered: false,
+                    policy: Thresholds::default().policy_label(),
+                    note: String::new(),
+                    instruction: String::new(),
+                })
+                .expect("decision");
+            agent
+        })
+        .expect("vault");
+    app.place = Place::Decisions;
+    let screen = Screen {
+        ctx: egui::Context::default(),
+        size: WIDE,
+    };
+    screen.frame(&mut app, Vec::new());
+    let text = screen.click(&mut app, "Claude Code · Guarded key");
+    assert!(text.contains("Next uses by Claude Code"), "{text}");
+    let text = screen.click(&mut app, "Always Ask");
+    assert_eq!(
+        app.status_text,
+        "Each use of Guarded key by Claude Code now asks you."
+    );
+    assert!(text.contains("Always asks for Claude Code"), "{text}");
+    assert!(text.contains("Remove…"), "{text}");
+    assert!(!text.contains("Next uses by Claude Code"), "{text}");
+    let view = app
+        .owner_ui
+        .session
+        .with_vault(|vault| vault.agent_view(agent))
+        .expect("open")
+        .expect("view");
+    assert!(view.always_ask.contains(&item_id));
 }

@@ -101,8 +101,6 @@ const SHORT_PROJECT: usize = 28;
 const SHOWN_PATH: usize = 80;
 /// The salt of the paste field of a request.
 pub(super) const REQUEST_FIELD: &str = "decision-request";
-/// The state of "Details" of a past decision, closed by default (ADR 0046).
-const PAST_DETAILS: &str = "past-decision-details";
 /// The note when the paste of a request has no credential.
 const NOTHING_FOUND: &str = "Apassy found no credential in the text. Paste the secret, a KEY=value line, or a URL with a password.";
 
@@ -193,6 +191,8 @@ pub(crate) struct State {
     sending: Sending,
     /// An immutable offer snapshot with only the owner's classification edits.
     evaluation: Option<EvaluationDraft>,
+    /// The past decision whose "Details" are open, by its key (ADR 0046).
+    past_details: Option<u64>,
     /// The detail of the past decision that shows, read once per key (ADR 0046).
     past_detail: Option<(
         super::decisions_past::CacheKey,
@@ -906,6 +906,8 @@ fn choose_past(state: &mut State, id: u64) {
     state.selected = None;
     state.disconnect = None;
     state.past = Some(id);
+    // "Details" of a past decision opens per selection, closed by default.
+    state.past_details = None;
 }
 
 /// Type into the paste field of the selected request.
@@ -1463,7 +1465,7 @@ pub(super) fn detail_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[
             }
             _ => None,
         };
-        let mut details_open = app.ui.is_expanded(PAST_DETAILS);
+        let mut details_open = app.ui.decisions.past_details == Some(event.key());
         let mut pressed = None;
         let mut week = false;
         columns::detail_toolbar(ui, |ui| {
@@ -1493,9 +1495,7 @@ pub(super) fn detail_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[
                 },
             );
         });
-        if details_open != app.ui.is_expanded(PAST_DETAILS) {
-            app.ui.set_expanded(PAST_DETAILS, details_open);
-        }
+        app.ui.decisions.past_details = details_open.then_some(event.key());
         if let Some(act) = pressed {
             let ctx = ui.ctx().clone();
             super::decisions_past::act(app, &ctx, act);
@@ -2162,20 +2162,34 @@ pub(super) fn question_headline(question: &QuestionInfo) -> &str {
 }
 
 /// How long a question like this keeps asking, when no answer can change it (ADR 0046).
-/// Only the owner's window says it: it is not part of the why text.
+/// Only the owner's window says it: it is not part of the why text. A production
+/// credential, a folder outside a project, and a run without a task already say it in
+/// their why text, so the question does not repeat it (History does).
 pub(super) fn asks_every_time(question: &QuestionInfo) -> Option<&'static str> {
+    use crate::broker::route_diagnostics::ReasonKind;
+    if question.flags.is_empty()
+        && matches!(
+            question.reason,
+            ReasonKind::Production | ReasonKind::NotProject | ReasonKind::MissingTask
+        )
+    {
+        return None;
+    }
     crate::broker::reasons::every_time(question.reason, &question.flags)
 }
 
-/// The why text of a question when it says more than the title: the card's why, else
-/// the risk note. `None` when it is empty or the same as the title.
+/// The why text of a question without what the title says: the card's why, else the
+/// risk note, without the title sentence at its start (the first flag of a flagged run).
+/// `None` when nothing is left.
 pub(super) fn why_beyond_title(run: &PendingRun) -> Option<&str> {
     let why = if run.question.why.is_empty() {
         run.risk.as_str()
     } else {
         run.question.why.as_str()
     };
-    (!why.is_empty() && why != question_headline(&run.question)).then_some(why)
+    let title = question_headline(&run.question);
+    let rest = why.strip_prefix(title).unwrap_or(why).trim();
+    (!rest.is_empty()).then_some(rest)
 }
 
 fn draw_question(
@@ -3599,15 +3613,23 @@ fn prompt_body(
         Font::Headline,
         kit::palette().label,
     );
-    if let Some(why) = why_beyond_title(run) {
-        kit::paragraph(ui, why, Font::Callout, kit::palette().secondary);
-    }
-    if let Some(every) = asks_every_time(&run.question) {
-        kit::paragraph(ui, every, Font::Callout, kit::palette().secondary);
-    }
+    // The window is 440 by 320 points and does not grow: the scroll area takes what the
+    // answer bar leaves, with the bar's height of the last frame.
+    let bar_id = egui::Id::new(("prompt-bar-height", run.id));
+    let bar = ui
+        .ctx()
+        .data(|d| d.get_temp::<f32>(bar_id))
+        .unwrap_or(PROMPT_BAR_HEIGHT);
+    let room = (ui.available_height() - bar - ui.spacing().item_spacing.y).max(40.0);
     egui::ScrollArea::vertical()
-        .max_height(145.0)
+        .max_height(room)
         .show(ui, |ui| {
+            if let Some(why) = why_beyond_title(run) {
+                kit::paragraph(ui, why, Font::Callout, kit::palette().secondary);
+            }
+            if let Some(every) = asks_every_time(&run.question) {
+                kit::paragraph(ui, every, Font::Callout, kit::palette().secondary);
+            }
             for item in &run.question.items {
                 let environment = if item.unconfirmed {
                     "Unknown".to_owned()
@@ -3663,8 +3685,15 @@ fn prompt_body(
             ui.add(Label::new(kit::text(&command, Font::Mono)).truncate())
                 .on_hover_text(command);
         });
+    let top = ui.cursor().top();
     action_bar(ui, run, answer);
+    let height = ui.cursor().top() - top;
+    ui.ctx().data_mut(|d| d.insert_temp(bar_id, height));
 }
+
+/// The height that the answer bar of the floating window takes before it was drawn
+/// once: two rows of buttons and a note.
+const PROMPT_BAR_HEIGHT: f32 = 110.0;
 
 #[cfg(test)]
 mod prompt_tests {
@@ -3728,6 +3757,93 @@ mod prompt_tests {
         }
         output.drop_without_applying_deltas();
         text
+    }
+
+    /// The painted texts with their rectangles, after three frames of the window's
+    /// content at 440 by 320 points (the bar's height settles after the first).
+    fn window_at_size(waiting: &Waiting, count: usize) -> Vec<(String, egui::Rect)> {
+        fn collect(shape: &egui::Shape, out: &mut Vec<(String, egui::Rect)>) {
+            match shape {
+                egui::Shape::Text(text) => out.push((
+                    text.galley.text().to_owned(),
+                    egui::Rect::from_min_size(text.pos, text.galley.size()),
+                )),
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| collect(shape, out)),
+                _ => {}
+            }
+        }
+        let app = DesktopApp::new();
+        let ctx = egui::Context::default();
+        let mut placed = Vec::new();
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(440.0, 320.0),
+                )),
+                ..Default::default()
+            };
+            let mut answer = None;
+            let mut output = ctx.run_ui(input, |ui| {
+                prompt_body(&app, ui, waiting, count, &mut answer);
+            });
+            output.textures_delta.clear();
+            placed.clear();
+            for clipped in &output.shapes {
+                collect(&clipped.shape, &mut placed);
+            }
+            output.drop_without_applying_deltas();
+        }
+        placed
+    }
+
+    /// The window is 440 by 320 points and does not grow: with a long request, a
+    /// two-line why and the note of two unknown credentials, every answer button is
+    /// still inside it.
+    #[test]
+    fn the_question_window_keeps_its_answers_inside_its_size() {
+        let unknown = |item_id, name: &str| crate::broker::approvals::QuestionItem {
+            item_id,
+            name: name.to_owned(),
+            unconfirmed: true,
+            ..Default::default()
+        };
+        let waiting = Waiting {
+            run: PendingRun {
+                id: 7,
+                agent: "Codex".into(),
+                command: vec!["sh".into(), "-c".into(), "make deploy ".repeat(12)],
+                cwd: "/synthetic/acme-billing".into(),
+                env_names: vec![],
+                purpose: "Deploy the billing service to the staging cluster.".into(),
+                risk: String::new(),
+                user_request: "Deploy the billing service to staging and check that the payout jobs still run after the migration of last week. ".repeat(3),
+                request_source: "from the agent".into(),
+                agent_request: String::new(),
+                remember: None,
+                question: QuestionInfo {
+                    project: Some(crate::broker::project::Project {
+                        key: "/synthetic/acme-billing/.git".into(),
+                        label: "acme-billing".into(),
+                        root: "/synthetic/acme-billing".into(),
+                    }),
+                    why: "Synthetic billing key is declared for the project platform, not for acme-billing, and Synthetic queue key has no environment set yet.".into(),
+                    items: vec![unknown(1, "Synthetic billing key"), unknown(2, "Synthetic queue key")],
+                    valid_answers: vec![AnswerKind::Once, AnswerKind::CorrectEnvironment],
+                    ..QuestionInfo::default()
+                },
+            },
+            left: Duration::from_secs(200),
+        };
+        let placed = window_at_size(&waiting, 3);
+        let window = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(440.0, 320.0));
+        for label in ["Allow as dev", "Allow as prod", "Allow once", "Dismiss"] {
+            let (_, rect) = placed
+                .iter()
+                .find(|(text, _)| text == label)
+                .unwrap_or_else(|| panic!("{label} is not painted: {placed:?}"));
+            assert!(window.contains_rect(*rect), "{label} at {rect:?}");
+        }
     }
 
     #[test]
