@@ -61,7 +61,9 @@ The why text of a flagged run is the sentence of each flag, in a fixed order. Ho
 such a run keeps asking ("A command like this asks every time.") is for the owner's
 window only: the desktop draws it on the question card, in the floating question
 window, and in "Next time". It is not part of the stored why, the refusal text that an
-agent receives, the relay card, or the log file. The question does not repeat what its
+agent receives, the relay card, or the log file. In the refusal text that an agent
+receives, the sentence of the injection flag is "A safety rule flagged the request
+text."; the owner's window keeps the full sentence. The question does not repeat what its
 title says: the why text drops the title sentence, and a production question, a folder
 outside a project, or a run without a task, whose why text says that it asks, gets no
 every-time line.
