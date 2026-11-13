@@ -193,9 +193,11 @@ owner check. Its optional single-line plain-text comment is limited to 500
 characters and is returned only as refusal data, never as owner approval.
 
 A small always-on-top, inactive-on-creation Apassy viewport shows the oldest
-waiting question, its agent and local host, credentials and environment badges,
-reason, task provenance, purpose, truncated command with hover text, countdown,
-and the same answer controls. It shows 1 of N and disappears on settlement or
-expiry. Unsupported embedded viewports route to Decisions in the main window.
+waiting question, its agent and project with the time left, the reason and why it
+asks, credentials and environment badges, the request with its provenance and the
+warning when the agent sent a different request (only when there is a request), the
+purpose (only when there is one), truncated command with hover text, and the same
+answer controls. It shows 1 of N when several wait, and disappears on settlement or
+expiry (amended 2026-11-13). Unsupported embedded viewports route to Decisions in the main window.
 Native focus, monitor positioning and fallback behavior require device QA;
 unit tests establish queue selection only, not operating-system behavior.

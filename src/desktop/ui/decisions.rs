@@ -3550,62 +3550,120 @@ pub(super) fn floating_prompt(app: &mut DesktopApp, ctx: &egui::Context, pending
                 return;
             }
             ui.ctx().request_repaint_after(Duration::from_secs(1));
-            ui.label(kit::medium(
-                format!(
-                    concat!("{} · on this ", crate::computer!(), " · 1 of {count}"),
-                    run.agent,
-                    count = count
-                ),
-                Font::Body,
-            ));
-            ui.strong(question_headline(&run.question));
-            egui::ScrollArea::vertical()
-                .max_height(145.0)
-                .show(ui, |ui| {
-                    if let Some(why) = why_beyond_title(run) {
-                        kit::paragraph(ui, why, Font::Callout, kit::palette().secondary);
-                    }
-                    if let Some(every) = asks_every_time(&run.question) {
-                        kit::paragraph(ui, every, Font::Callout, kit::palette().secondary);
-                    }
-                    for item in &run.question.items {
-                        let environment = if item.unconfirmed {
-                            "Unknown".to_owned()
-                        } else {
-                            app.owner_ui
-                                .session
-                                .declaration(item.item_id)
-                                .ok()
-                                .flatten()
-                                .map(|d| environment_label(d.environment).to_owned())
-                                .unwrap_or_else(|| {
-                                    if item.production {
-                                        "Production".to_owned()
-                                    } else {
-                                        "Unknown".to_owned()
-                                    }
-                                })
-                        };
-                        ui.horizontal(|ui| {
-                            ui.label(&item.name);
-                            kit::cap(ui, &environment, item.production);
-                        });
-                    }
-                    ui.label("What the agent says you asked");
-                    ui.label(&run.user_request);
-                    ui.small(&run.request_source);
-                    ui.label(&run.purpose);
-                    let command = shell_words(&run.command);
-                    ui.add(Label::new(kit::text(&command, Font::Mono)).truncate())
-                        .on_hover_text(command);
-                });
-            ui.label(timer_text(clock(first.left), Font::Body).color(kit::palette().countdown));
-            action_bar(ui, run, &mut answer);
+            prompt_body(app, ui, first, count, &mut answer);
         },
     );
     if let Some(answer) = answer {
         apply(app, ctx, run, answer);
     }
+}
+
+/// The floating question window's content: the agent and the project with the time
+/// left, the title and why it asks, the credentials, the request lines that have text,
+/// the command, and the answer bar. `count`: how many questions wait.
+fn prompt_body(
+    app: &DesktopApp,
+    ui: &mut egui::Ui,
+    first: &Waiting,
+    count: usize,
+    answer: &mut Option<Answer>,
+) {
+    let run = &first.run;
+    egui::Sides::new().shrink_left().show(
+        ui,
+        |ui| {
+            ui.add(
+                Label::new(kit::medium(
+                    format!("{} · {}", run.agent, project_text(run)),
+                    Font::Body,
+                ))
+                .truncate(),
+            );
+        },
+        |ui| {
+            ui.label(
+                timer_text(format!("{} left", clock(first.left)), Font::Body)
+                    .color(kit::palette().countdown),
+            );
+            if count > 1 {
+                ui.label(
+                    kit::text(format!("1 of {count} \u{b7}"), Font::Callout)
+                        .color(kit::palette().secondary),
+                );
+            }
+        },
+    );
+    kit::paragraph(
+        ui,
+        question_headline(&run.question),
+        Font::Headline,
+        kit::palette().label,
+    );
+    if let Some(why) = why_beyond_title(run) {
+        kit::paragraph(ui, why, Font::Callout, kit::palette().secondary);
+    }
+    if let Some(every) = asks_every_time(&run.question) {
+        kit::paragraph(ui, every, Font::Callout, kit::palette().secondary);
+    }
+    egui::ScrollArea::vertical()
+        .max_height(145.0)
+        .show(ui, |ui| {
+            for item in &run.question.items {
+                let environment = if item.unconfirmed {
+                    "Unknown".to_owned()
+                } else {
+                    app.owner_ui
+                        .session
+                        .declaration(item.item_id)
+                        .ok()
+                        .flatten()
+                        .map(|d| environment_label(d.environment).to_owned())
+                        .unwrap_or_else(|| {
+                            if item.production {
+                                "Production".to_owned()
+                            } else {
+                                "Unknown".to_owned()
+                            }
+                        })
+                };
+                ui.horizontal(|ui| {
+                    ui.label(&item.name);
+                    kit::cap(ui, &environment, item.production);
+                });
+            }
+            // The request lines of the Decisions detail; the source in brackets says
+            // where the request came from.
+            if !run.user_request.is_empty() {
+                let source = if run.request_source.is_empty() {
+                    "from the agent"
+                } else {
+                    run.request_source.as_str()
+                };
+                kit::paragraph(
+                    ui,
+                    format!("\"{}\" ({source})", run.user_request),
+                    Font::Body,
+                    kit::palette().label,
+                );
+                if !run.agent_request.is_empty() {
+                    kit::tone_note(
+                        ui,
+                        format!(
+                            "The agent sent a different request: \"{}\"",
+                            run.agent_request
+                        ),
+                        Tone::Warning,
+                    );
+                }
+            }
+            if !run.purpose.is_empty() {
+                kit::paragraph(ui, &run.purpose, Font::Callout, kit::palette().secondary);
+            }
+            let command = shell_words(&run.command);
+            ui.add(Label::new(kit::text(&command, Font::Mono)).truncate())
+                .on_hover_text(command);
+        });
+    action_bar(ui, run, answer);
 }
 
 #[cfg(test)]
@@ -3636,5 +3694,87 @@ mod prompt_tests {
         assert_eq!((first.run.id, count), (2, 2));
         queue.retain(|w| w.run.id != 2);
         assert_eq!(prompt_queue(&queue).unwrap().0.run.id, 3);
+    }
+
+    /// The words of one frame of the window's content.
+    fn window_text(waiting: &Waiting, count: usize) -> String {
+        fn collect(shape: &egui::Shape, out: &mut String) {
+            match shape {
+                egui::Shape::Text(text) => {
+                    out.push_str(text.galley.text());
+                    out.push('\n');
+                }
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| collect(shape, out)),
+                _ => {}
+            }
+        }
+        let app = DesktopApp::new();
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(440.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        let mut answer = None;
+        let mut output = ctx.run_ui(input, |ui| {
+            prompt_body(&app, ui, waiting, count, &mut answer);
+        });
+        output.textures_delta.clear();
+        let mut text = String::new();
+        for clipped in &output.shapes {
+            collect(&clipped.shape, &mut text);
+        }
+        output.drop_without_applying_deltas();
+        text
+    }
+
+    #[test]
+    fn the_question_window_draws_no_empty_request_lines() {
+        let mut waiting = Waiting {
+            run: PendingRun {
+                id: 1,
+                agent: "Codex".into(),
+                command: vec!["true".into()],
+                cwd: "/synthetic/acme-billing".into(),
+                env_names: vec![],
+                purpose: String::new(),
+                risk: String::new(),
+                user_request: String::new(),
+                request_source: String::new(),
+                agent_request: String::new(),
+                remember: None,
+                question: QuestionInfo {
+                    project: Some(crate::broker::project::Project {
+                        key: "/synthetic/acme-billing/.git".into(),
+                        label: "acme-billing".into(),
+                        root: "/synthetic/acme-billing".into(),
+                    }),
+                    ..QuestionInfo::default()
+                },
+            },
+            left: Duration::from_secs(271),
+        };
+        let text = window_text(&waiting, 1);
+        assert!(text.contains("Codex · acme-billing"), "{text}");
+        assert!(text.contains("4:31 left"), "{text}");
+        for absent in ["What the agent says you asked", "1 of 1", "on this"] {
+            assert!(!text.contains(absent), "{absent}: {text}");
+        }
+        waiting.run.user_request = "Show the last payouts.".into();
+        waiting.run.agent_request = "Show every payout.".into();
+        waiting.run.purpose = "Report the payouts.".into();
+        let text = window_text(&waiting, 2);
+        assert!(
+            text.contains("\"Show the last payouts.\" (from the agent)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("The agent sent a different request: \"Show every payout.\""),
+            "{text}"
+        );
+        assert!(text.contains("Report the payouts."), "{text}");
+        assert!(text.contains("1 of 2"), "{text}");
     }
 }
