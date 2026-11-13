@@ -406,7 +406,7 @@ function detailDecision(){
       <div class="gl">Why you are asked</div>
       <div class="grp"><div class="fr"><div class="v l">${esc(d.why)}</div></div></div>
     </div></div>
-    <div class="abar"><button class="btn des" data-a="decide" data-c="deny">Deny</button><div class="cap2">Allow is remembered for all agents in ${esc(d.project)}. Also on your iPhone.</div><button class="btn" data-a="decide" data-c="once">Allow Once</button><button class="btn pri" data-a="decide" data-c="allow">${esc(allow)}</button></div>`;
+    <div class="abar"><button class="btn pri" data-a="decide" data-c="once">Allow</button><button class="btn des" data-a="decide" data-c="deny">Dismiss</button><input class="field" style="width:170px" placeholder="Comment" title="Sent to the agent with Dismiss. Optional." aria-label="Comment for the agent, sent with Dismiss"><label class="cap2" title="${esc(allow)}"><input type="checkbox"> Remember for this project</label></div>`;
   }
   if(d.t==='req'){const a=AG[d.agent];return `<div class="tb"></div><div class="dscroll"><div class="dpad">
       <div class="hdr">${ava(d.agent,'l')}<div><h1>${esc(a.name)} asks for a ${esc(d.name)}</h1><div class="s">${esc(d.project)}</div></div></div>

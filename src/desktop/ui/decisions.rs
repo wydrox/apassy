@@ -316,6 +316,15 @@ pub(super) enum Primary {
     Correct,
 }
 
+/// The answer of Dismiss: with the comment of the field when it holds one.
+pub(super) fn dismiss_answer(comment: &str) -> Answer {
+    if comment.trim().is_empty() {
+        Answer::Deny
+    } else {
+        Answer::DenyWithComment(comment.to_owned())
+    }
+}
+
 /// An answer of the owner on the card.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Answer {
@@ -2051,22 +2060,25 @@ fn action_bar(ui: &mut egui::Ui, run: &PendingRun, answer: &mut Option<Answer>) 
                 });
             }
         }
-        if bar_button(ui, "Dismiss", Bar::Deny).clicked() {
-            *answer = Some(Answer::Deny);
-        }
+        // One Dismiss: it sends the comment of the field when the field holds one.
         let key = egui::Id::new(("refusal-comment", run.id));
         let mut comment = ui
             .ctx()
             .data_mut(|d| d.get_temp::<String>(key).unwrap_or_default());
-        ui.add(
-            TextEdit::singleline(&mut comment)
-                .char_limit(500)
-                .desired_width(170.0)
-                .hint_text("Comment"),
-        );
-        if bar_button(ui, "Dismiss with comment", Bar::Plain).clicked() {
-            *answer = Some(Answer::DenyWithComment(comment.clone()));
+        if bar_button(ui, "Dismiss", Bar::Deny).clicked() {
+            *answer = Some(dismiss_answer(&comment));
         }
+        let field = ui
+            .add(
+                TextEdit::singleline(&mut comment)
+                    .char_limit(500)
+                    .desired_width(170.0)
+                    .hint_text("Comment"),
+            )
+            .on_hover_text("Sent to the agent with Dismiss. Optional.");
+        ui.ctx().accesskit_node_builder(field.id, |node| {
+            node.set_label("Comment for the agent, sent with Dismiss");
+        });
         ui.ctx().data_mut(|d| d.insert_temp(key, comment));
     });
     if let Some(item) = unknown.filter(|_| others > 0) {

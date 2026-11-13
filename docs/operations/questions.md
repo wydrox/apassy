@@ -55,7 +55,8 @@ items. The answer names no item: the Mac labels only that one unconfirmed item.
 
 When no item, or two or more items, have `unconfirmed: true`, offer **Allow**
 (`approve`), **Dismiss** (`deny`), and **Dismiss with comment**
-(`deny_with_comment`). With two or more unknown items an answer without an item
+(`deny_with_comment`). The Mac bar has one **Dismiss** beside a comment field: it
+sends `deny_with_comment` when the field holds text, else `deny`. With two or more unknown items an answer without an item
 could label a production credential that the owner did not look at, so the run
 asks as any other and labels nothing; the owner labels each item on the Mac. An item's `production: true` with `unconfirmed: false`
 means confirmed production; both flags false mean known non-production.

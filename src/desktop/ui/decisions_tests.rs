@@ -596,7 +596,8 @@ fn the_list_has_waiting_questions_in_order_and_no_empty_sections() {
 
 /// The card says who wants what: the credential with its production cap, the action, the
 /// project, the hosts, the command, and why the owner is asked. The bar offers Allow,
-/// Dismiss, Dismiss with comment, and an optional project checkbox. No value shows.
+/// Dismiss with an optional comment field, and an optional project checkbox. No value
+/// shows.
 #[test]
 fn the_detail_shows_the_facts_the_command_and_why() {
     let dir = TempDir::new().expect("temp dir");
@@ -632,13 +633,16 @@ fn the_detail_shows_the_facts_the_command_and_why() {
         "This is a production key, and there is no production rule for reading in acme-billing yet.",
         "Dismiss",
         "Allow",
-        "Dismiss with comment",
         "Remember for this project",
         "What the agent says you asked",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
     assert!(text.contains("Show the last payouts."), "{text}");
+    assert!(
+        !text.contains("Dismiss with comment"),
+        "one Dismiss: {text}"
+    );
     assert!(
         text.find(decisions::question_headline(&pending.question)) < text.find("Credential"),
         "the reason headline precedes the credential facts: {text}"
@@ -881,14 +885,10 @@ fn a_correction_toward_development_needs_the_owner_check() {
     );
     app.place = Place::Decisions;
     let (text, _) = frames(&mut app, DEFAULT, 3);
-    for expected in [
-        "Allow as dev",
-        "Allow as prod",
-        "Dismiss",
-        "Dismiss with comment",
-    ] {
+    for expected in ["Allow as dev", "Allow as prod", "Dismiss"] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
+    assert!(!text.contains("Dismiss with comment"), "{text}");
     let environment = |app: &DesktopApp| {
         app.owner_ui
             .session
@@ -2702,12 +2702,7 @@ fn unconfirmed_question_headlines_show_blocking_reason_before_classification() {
                 < text.find("Synthetic sandbox: environment unknown").unwrap(),
             "{text}"
         );
-        for label in [
-            "Dismiss",
-            "Dismiss with comment",
-            "Allow as prod",
-            "Allow as dev",
-        ] {
+        for label in ["Dismiss", "Allow as prod", "Allow as dev"] {
             assert!(text.contains(label), "{text}");
         }
         assert!(queue.deny(pending.id));
@@ -2925,6 +2920,33 @@ fn two_unknown_credentials_label_the_first_one() {
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
+    assert!(queue.deny(pending.id));
+    waiter.join().unwrap().unwrap();
+}
+
+/// One Dismiss: it sends the comment of the field when the field holds one.
+#[test]
+fn dismiss_sends_a_typed_comment() {
+    use super::decisions::{Answer, dismiss_answer};
+    assert_eq!(dismiss_answer(""), Answer::Deny);
+    assert_eq!(dismiss_answer("  "), Answer::Deny);
+    assert_eq!(
+        dismiss_answer("No"),
+        Answer::DenyWithComment("No".to_owned())
+    );
+    let dir = TempDir::new().unwrap();
+    let (mut app, item_id) = unlocked_app_with_item(&dir);
+    let queue = queue_of(&mut app, &dir);
+    let (waiter, pending) = ask(
+        &app,
+        &queue,
+        1,
+        run("Codex", question(vec![item(item_id, "Guarded key")], &[])),
+    );
+    app.place = Place::Decisions;
+    let (text, _) = frames(&mut app, WIDE, 3);
+    assert!(text.lines().any(|line| line.trim() == "Dismiss"), "{text}");
+    assert!(!text.contains("Dismiss with comment"), "{text}");
     assert!(queue.deny(pending.id));
     waiter.join().unwrap().unwrap();
 }

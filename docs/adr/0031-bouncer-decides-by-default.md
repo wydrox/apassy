@@ -167,6 +167,8 @@ default risk and reversibility, so labeling every unknown item downgraded a bund
 production credential. A run with two or more unknown items offers Allow and labels
 nothing. Known environments offer Allow, Dismiss, and Dismiss with
 comment, with remembering only as a secondary checkbox, off by default.
+2026-11-13: on the Mac, Dismiss sends the comment when the field holds one; the bar
+has no second dismiss button. The answers on the wire do not change.
 
 Amended 2026-11-06 (owner: fix the repeated questions): "A run with two or more
 unknown items offers Allow and labels nothing" asked again at each run, for ever.

@@ -571,7 +571,8 @@ fn allow_once_needs_the_owner_check() {
     let text = app_frame(&ctx, &mut app);
     assert!(text.contains("UI agent wants to use DEMO_KEY"), "{text}");
     assert!(text.lines().any(|line| line.trim() == "Allow"), "{text}");
-    assert!(text.contains("Dismiss with comment"), "{text}");
+    assert!(text.lines().any(|line| line.trim() == "Dismiss"), "{text}");
+    assert!(!text.contains("Dismiss with comment"), "{text}");
     assert!(!text.contains("Allow Once"), "{text}");
     assert!(text.contains("A notification is not an approval"), "{text}");
     assert_eq!(approvals.pending(), vec![run.clone()]);
