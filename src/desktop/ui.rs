@@ -53,6 +53,9 @@ mod decisions_activity;
 mod decisions_activity_tests;
 /// History, the connect card, and the cloud run card of Decisions (both builds).
 mod decisions_bouncer;
+/// The detail of a past decision of this computer: "Why", "Next time", "Details".
+#[cfg(feature = "vault")]
+mod decisions_past;
 #[cfg(all(test, feature = "vault"))]
 mod decisions_tests;
 #[cfg(not(feature = "vault"))]

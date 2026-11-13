@@ -514,13 +514,15 @@ fn history_row(ui: &mut Ui, row: &HistoryRow, selected: bool) -> egui::Response 
     response
 }
 
-/// The facts of one run of the history, read-only. `why`: the reason of a decision of
-/// this Mac, from its decision log entry.
+/// The facts of one run of the history, read-only. `top` draws between the header and
+/// "Decision" ("Why" and "Next time" of a decision of this computer), `bottom` after the
+/// facts ("Details"); the vault build fills them, the demo passes nothing.
 pub(crate) fn history_detail(
     ui: &mut Ui,
     event: &LogEvent,
-    why: Option<&[(String, String)]>,
     now: u64,
+    top: impl FnOnce(&mut Ui),
+    bottom: impl FnOnce(&mut Ui),
 ) {
     let offset = bouncer::local_offset(now);
     let agent = event.agent.clone().unwrap_or_else(|| "An agent".to_owned());
@@ -555,6 +557,7 @@ pub(crate) fn history_detail(
         });
     });
     ui.add_space(22.0);
+    top(ui);
     kit::section(ui, Some("Decision"), None, |s| {
         s.labeled("Environment", event.env_name.as_str());
         s.labeled("Agent", agent.as_str());
@@ -577,22 +580,6 @@ pub(crate) fn history_detail(
             ),
         );
     });
-    if let Some(why) = why.filter(|why| !why.is_empty()) {
-        kit::section(ui, Some("Why"), None, |s| {
-            for (label, value) in why {
-                if label.is_empty() {
-                    s.row(|ui| {
-                        ui.add(
-                            Label::new(kit::text(value, Font::Body).color(kit::palette().label))
-                                .wrap(),
-                        );
-                    });
-                } else {
-                    s.labeled(label, value.as_str());
-                }
-            }
-        });
-    }
     if !event.command.is_empty() {
         kit::section(ui, Some("Command"), None, |s| {
             s.row(|ui| {
@@ -603,6 +590,7 @@ pub(crate) fn history_detail(
             });
         });
     }
+    bottom(ui);
     if matches!(event.source, LogSource::Feed(_)) {
         kit::note(ui, format!("Change on {}.", event.env_name));
     }

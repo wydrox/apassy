@@ -2842,18 +2842,30 @@ fn a_past_decision_opens_its_why_while_a_question_waits() {
     let text = screen.click(&mut app, "Codex · Guarded key");
     assert_eq!(decisions::selected_key(&app), None, "{text}");
     assert!(decisions::selected_past(&app).is_some(), "{text}");
+    // ADR 0046: one sentence under "Why"; the facts wait behind "Details".
     for expected in [
         "Why",
+        "The bouncer brain judged this run safe.",
+        "Details",
+        &decisions::waiting_label(1),
+    ] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+    let facts = [
         "The command fits the task.",
         "Asked you",
         "From the prompt hook: \u{201c}Check the October payout.\u{201d}",
         "Rule flags",
         "fits the task 69%",
-        &decisions::waiting_label(1),
-    ] {
-        assert!(text.contains(expected), "{expected}: {text}");
+    ];
+    for hidden in facts {
+        assert!(!text.contains(hidden), "{hidden}: {text}");
     }
     assert!(!text.contains("Why you are asked"), "{text}");
+    let text = screen.click(&mut app, "Details");
+    for expected in facts {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
 
     // A new question does not take the place of the chosen decision.
     let (second_waiter, second) = ask(
@@ -2865,7 +2877,10 @@ fn a_past_decision_opens_its_why_while_a_question_waits() {
     let (text, _) = screen.frame(&mut app, Vec::new());
     let (text2, _) = screen.frame(&mut app, Vec::new());
     assert!(decisions::selected_past(&app).is_some(), "{text}");
-    assert!(text2.contains("The command fits the task."), "{text2}");
+    assert!(
+        text2.contains("The bouncer brain judged this run safe."),
+        "{text2}"
+    );
     assert!(text2.contains(&decisions::waiting_label(2)), "{text2}");
 
     // The way back: what waits comes first again.

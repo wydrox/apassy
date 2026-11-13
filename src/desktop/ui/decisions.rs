@@ -101,6 +101,8 @@ const SHORT_PROJECT: usize = 28;
 const SHOWN_PATH: usize = 80;
 /// The salt of the paste field of a request.
 pub(super) const REQUEST_FIELD: &str = "decision-request";
+/// The state of "Details" of a past decision, closed by default (ADR 0046).
+const PAST_DETAILS: &str = "past-decision-details";
 /// The note when the paste of a request has no credential.
 const NOTHING_FOUND: &str = "Apassy found no credential in the text. Paste the secret, a KEY=value line, or a URL with a password.";
 
@@ -191,6 +193,11 @@ pub(crate) struct State {
     sending: Sending,
     /// An immutable offer snapshot with only the owner's classification edits.
     evaluation: Option<EvaluationDraft>,
+    /// The detail of the past decision that shows, read once per key (ADR 0046).
+    past_detail: Option<(
+        super::decisions_past::CacheKey,
+        Option<super::decisions_past::Past>,
+    )>,
 }
 
 impl State {
@@ -1424,17 +1431,31 @@ pub(super) fn detail_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[
         .filter(|_| !app.ui.decisions.routed)
         .and_then(|key| cards::find(&app.ui.bouncer.data, &app.ui.activity_scope, key).cloned());
     if let Some(event) = past {
-        // The decision log entry of a decision of this Mac says why it went as it did.
-        let why = match event.source {
-            super::bouncer::LogSource::Decision(id) => app
-                .owner_ui
-                .session
-                .decision_record(id)
-                .ok()
-                .flatten()
-                .map(|record| why_rows(&super::decisions_activity::PastWhy::of(&record.entry))),
+        // A decision of this Mac says why it went as it did, and what can change next
+        // time. The vault is read once per key, not each frame.
+        let detail = match &event.source {
+            super::bouncer::LogSource::Decision(id) => {
+                let key = super::decisions_past::cache_key(app, event.key(), unix_now());
+                let fresh = app
+                    .ui
+                    .decisions
+                    .past_detail
+                    .as_ref()
+                    .is_some_and(|(cached, _)| *cached == key);
+                if !fresh {
+                    let read = super::decisions_past::read(app, *id);
+                    app.ui.decisions.past_detail = Some((key, read));
+                }
+                app.ui
+                    .decisions
+                    .past_detail
+                    .as_ref()
+                    .and_then(|(_, detail)| detail.clone())
+            }
             _ => None,
         };
+        let mut details_open = app.ui.is_expanded(PAST_DETAILS);
+        let mut pressed = None;
         let mut week = false;
         columns::detail_toolbar(ui, |ui| {
             // With something waiting, the way back goes to it; else to the week.
@@ -1447,8 +1468,29 @@ pub(super) fn detail_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[
         });
         columns::detail_body(ui, ("past-decision", event.key()), |ui| {
             super::shell::banners(app, ui, pending);
-            cards::history_detail(ui, &event, why.as_deref(), unix_now());
+            cards::history_detail(
+                ui,
+                &event,
+                unix_now(),
+                |ui| {
+                    if let Some(detail) = &detail {
+                        pressed = super::decisions_past::draw_top(ui, detail);
+                    }
+                },
+                |ui| {
+                    if let Some(detail) = &detail {
+                        super::decisions_past::draw_details(ui, detail, &mut details_open);
+                    }
+                },
+            );
         });
+        if details_open != app.ui.is_expanded(PAST_DETAILS) {
+            app.ui.set_expanded(PAST_DETAILS, details_open);
+        }
+        if let Some(act) = pressed {
+            let ctx = ui.ctx().clone();
+            super::decisions_past::act(app, &ctx, act);
+        }
         if week {
             app.ui.decisions.past = None;
         }
@@ -1549,27 +1591,6 @@ fn question_detail(
         apply(app, ui.ctx(), &current.run, answer);
     }
     disconnect_sheet(app, ui.ctx());
-}
-
-/// The lines of "Why" of a past decision of this Mac.
-fn why_rows(why: &super::decisions_activity::PastWhy) -> Vec<(String, String)> {
-    let mut rows = Vec::new();
-    if !why.note.is_empty() {
-        rows.push((String::new(), why.note.clone()));
-    }
-    rows.push((
-        "Asked you".to_owned(),
-        if why.asked { "Yes" } else { "No" }.to_owned(),
-    ));
-    rows.push(("Task".to_owned(), why.task.clone()));
-    if !why.flags.is_empty() {
-        rows.push(("Rule flags".to_owned(), why.flags.join(", ")));
-    }
-    let brain = why.brain_line();
-    if !brain.is_empty() {
-        rows.push(("Bouncer brain".to_owned(), brain));
-    }
-    rows
 }
 
 /// The card of a connect request (frame 5): Deny needs nothing; Allow opens the owner
