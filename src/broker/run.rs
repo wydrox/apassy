@@ -587,9 +587,16 @@ fn injection_source(
 }
 
 /// Each host of `hosts` is a known host of `item_id` now, as a run counts them: the
-/// hosts of its provider, the host rules of its placeholder, and its host field. History
-/// saves an answer only for known hosts (ADR 0046). A read error counts as unknown.
-pub(super) fn hosts_known_now(vault: &Vault, item_id: u64, hosts: &[String]) -> bool {
+/// hosts of its provider, the host rules of its placeholder, and its host field. A
+/// code-only run gets a plain value binding, so its placeholder rules do not count
+/// (`code_only`). History saves an answer only for known hosts (ADR 0046). A read error
+/// counts as unknown.
+pub(super) fn hosts_known_now(
+    vault: &Vault,
+    item_id: u64,
+    hosts: &[String],
+    code_only: bool,
+) -> bool {
     let Ok(provider) = vault.declaration_provider(item_id) else {
         return false;
     };
@@ -604,7 +611,9 @@ pub(super) fn hosts_known_now(vault: &Vault, item_id: u64, hosts: &[String]) -> 
         .unwrap_or_default();
     match vault.process_binding(item_id) {
         Ok(Some(binding)) => {
-            if let EnvDelivery::Placeholder(rules) = &binding.delivery {
+            if let EnvDelivery::Placeholder(rules) = &binding.delivery
+                && !code_only
+            {
                 known.extend(
                     rules
                         .iter()
@@ -1632,13 +1641,16 @@ fn run_inner(
         noremember: String::new(),
     };
     // Why the question offers no remembered answer, when no other sentence says so.
+    // Every condition can hold while nothing is offered: a production credential, where
+    // the production rule asks in any case (`valid_answers`).
     if needs_approval
         && cloud.is_none()
         && why_words.offered.is_empty()
         && super::reasons::every_time(reason_kind, &analysis.flags).is_none()
-        && let Some(blocker) = remember_blocker(&checked, &run_facts, certain, &mut ready)
     {
-        blocker.clone_into(&mut why_words.noremember);
+        remember_blocker(&checked, &run_facts, certain, &mut ready)
+            .unwrap_or("production")
+            .clone_into(&mut why_words.noremember);
     }
     debug_line.offered.clone_from(&why_words.offered);
     let question_items: Vec<QuestionItem> = items

@@ -1894,10 +1894,7 @@ fn remembering_from_history_needs_the_owner_check_for_that_item() {
     let saved = answer(&app).expect("the answer is saved");
     assert_eq!(saved.answered_on, concat!("this ", crate::computer!()));
     assert_eq!(saved.hosts, vec!["sentry.io".to_owned()]);
-    assert_eq!(
-        app.status_text,
-        "Saved. Runs like this start without asking unless a safety rule flags them."
-    );
+    assert_eq!(app.status_text, "Saved. Safety rules can still ask.");
     // Opened again, the decision says that the answer is there; nothing changes.
     app.prepare_owner(request_again, None, false);
     app.confirm_owner_now(OwnerCheck::passphrase(PASS_A))

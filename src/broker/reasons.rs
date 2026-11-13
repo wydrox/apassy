@@ -129,8 +129,8 @@ const OTHER_FLAG: Words = words_of("Flagged command", "A safety rule flagged thi
 
 /// The injection flag reads last: another flag of the same run says more.
 const INJECTION: Words = words_of(
-    "Text talks to the bouncer",
-    "The request text tells the bouncer what to decide.",
+    "Text mentions the bouncer",
+    "The request text mentions the bouncer or an approval.",
 );
 
 /// Refusals by a check, by their wire code.
@@ -298,7 +298,7 @@ pub fn every_time(reason: ReasonKind, flags: &[String]) -> Option<&'static str> 
         ReasonKind::MissingTask => Some("Apassy asks until the agent sends your task."),
         ReasonKind::NotProject => Some("Apassy remembers nothing outside a project folder."),
         ReasonKind::Production => Some("This production credential asks every time."),
-        ReasonKind::CloudAgent => Some("A remote agent asks every time."),
+        ReasonKind::CloudAgent => Some("A cloud agent asks every time."),
         _ => None,
     }
 }
@@ -401,7 +401,7 @@ mod tests {
         assert_eq!(words.short, "Could print the secret");
         assert_eq!(
             super::words(ReasonKind::HookFlags, &flags(&["injection_phrase"]), "").line,
-            "The request text tells the bouncer what to decide."
+            "The request text mentions the bouncer or an approval."
         );
         assert_eq!(
             super::words(
@@ -432,11 +432,11 @@ mod tests {
     fn the_flags_sentence_names_each_flag_and_how_long_it_asks() {
         assert_eq!(
             flags_sentence(&flags(&["injection_phrase", "secret_output"])),
-            "The command could print the secret. The request text tells the bouncer what to decide."
+            "The command could print the secret. The request text mentions the bouncer or an approval."
         );
         assert_eq!(
             flags_sentence(&flags(&["injection_phrase"])),
-            "The request text tells the bouncer what to decide."
+            "The request text mentions the bouncer or an approval."
         );
         assert_eq!(
             flags_sentence(&flags(&["hook_unverified"])),

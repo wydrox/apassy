@@ -95,7 +95,7 @@ impl ReasonKind {
             Self::ForeignHost => "The command goes to a host this credential doesn't know.",
             Self::ForeignProject => "This credential belongs to another project.",
             Self::MissingDeclaration => "This credential has no environment set.",
-            Self::UnfitAnswer => "Your earlier answer doesn't cover this run.",
+            Self::UnfitAnswer => "Your rule doesn't cover this run.",
             Self::OneTimeCode => "This run needs a one-time code.",
             Self::ModelUnsure => "The bouncer brain wasn't sure this run is safe.",
             Self::AccessCheck => "Apassy refused this request.",
@@ -105,7 +105,7 @@ impl ReasonKind {
                 "A cloud agent wants to use a credential. Its request is not verified."
             }
             Self::ModelAllowed => "The bouncer brain judged this run safe.",
-            Self::RememberedAnswer => "Your earlier answer covers this run.",
+            Self::RememberedAnswer => "Your rule covers this run.",
             Self::RememberedPattern => "You approved this command before.",
             Self::Other => "This request needs your approval.",
         }

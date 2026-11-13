@@ -321,8 +321,9 @@ pub struct DecisionWhy {
     /// `prompt:1000` (`prompt`, `task`, `purpose`, or `command`). Never the text itself.
     pub inject: String,
     /// The first condition that kept the question from offering a remembered answer:
-    /// `uncertain`, `brain`, `dbhost`, and so on. Empty: it offered one, or another
-    /// sentence says why not.
+    /// `uncertain`, `brain`, `dbhost`, and so on; `production` when each condition held
+    /// and the production rule asks anyway. Empty: it offered one, or another sentence
+    /// says why not.
     pub noremember: String,
 }
 

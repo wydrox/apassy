@@ -2007,9 +2007,10 @@ impl OwnerRequest {
                 codes,
                 ..
             } => format!(
-                "Allow {} in \"{}\" with \"{name}\"{} for every agent, without asking, from the next matching use. Safety rules still ask.",
+                "Allow {} in \"{}\" with \"{}\"{} for every agent, without asking, from the next matching use. Safety rules still ask.",
                 action_words(*action),
                 page_text(project),
+                page_text(name),
                 if *codes { " and its one-time codes" } else { "" }
             ),
             Self::RemoveAgentException {
@@ -3450,7 +3451,7 @@ impl DesktopApp {
             request @ OwnerRequest::RememberAnswer { .. } => {
                 match session.remember_from_decision(&request.action(), proof) {
                     Ok(_) => self.set_ok(
-                        "Saved. Runs like this start without asking unless a safety rule flags them.",
+                        "Saved. Safety rules can still ask.",
                     ),
                     Err(err) if err.code == "already_exists" => self.set_ok("Already saved."),
                     Err(err) => self.set_err(err.message),

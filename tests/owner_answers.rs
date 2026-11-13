@@ -939,7 +939,14 @@ fn a_question_without_an_offer_stores_why_nothing_is_remembered() {
         "{:?}",
         run.question.valid_answers
     );
-    assert_eq!(last_decision(&fx).why().noremember, "undeclared");
+    // A credential without a declaration is production by default: each condition of a
+    // remembered answer holds, and the production rule asks anyway.
+    assert_eq!(last_decision(&fx).why().noremember, "production");
+    // "Always ask me" keeps every answer from being remembered: the first condition.
+    let careful = fixture(Some(declaration(Environment::Staging, RiskLevel::Medium)));
+    with_vault(&careful, |v| v.set_always_ask(careful.item_id, true)).expect("always ask");
+    asks(&careful, &careful.project, &sentry_call());
+    assert_eq!(last_decision(&careful).why().noremember, "always_ask");
     // A question that offered the answer keeps no such word.
     let declared = fixture(Some(declaration(Environment::Staging, RiskLevel::Medium)));
     asks(&declared, &declared.project, &sentry_call());
