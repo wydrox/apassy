@@ -1357,7 +1357,7 @@ mod tests {
             ),
             (
                 Place::Shared("drawn-shared".to_owned()),
-                ["Drawn team", "No items yet"],
+                ["Drawn team", "No credentials yet"],
             ),
             (Place::Overview, ["Overview", "No runs yet"]),
             // A new vault: no decisions yet, no "All clear" (frame 9c).
@@ -2220,6 +2220,9 @@ mod tests {
         ] {
             assert!(text.contains(expected), "missing {expected}: {text}");
         }
+        // One title for the history, and no footer under its lists.
+        assert_eq!(text.matches("History").count(), 1, "{text}");
+        assert!(!text.contains("newest first"), "{text}");
         // The rare actions are in the "⋯" menu of the toolbar, not on the page (ADR
         // 0026 §1).
         for gone in ["Add custom detail", "More actions", "Archive credential…"] {
@@ -2248,6 +2251,39 @@ mod tests {
             "a stored hidden value stays: {text}"
         );
         assert!(!text.contains(HIDDEN), "{text}");
+    }
+
+    /// The edit sheet says what a blank field does with its placeholder, not with a
+    /// footer under each group.
+    #[cfg(feature = "vault")]
+    #[test]
+    fn the_edit_form_has_no_footers() {
+        use crate::desktop::model::DetailDraft;
+
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let (mut app, item_id) = app_with_item(&dir);
+        let details = app.owner_ui.session.details(item_id).expect("details");
+        app.edit_form = details.to_draft();
+        app.edit_form.details.push(DetailDraft::default());
+        app.ui.sheet = Some(Sheet::EditItem);
+        let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
+        for expected in [
+            "Secret",
+            "Unchanged",
+            "Agent Settings (Optional)",
+            "Custom details",
+        ] {
+            assert!(text.contains(expected), "missing {expected}: {text}");
+        }
+        for gone in [
+            "Leave a field blank",
+            "leave the value blank",
+            "Where it is used",
+            "Apassy suggests safe agent settings",
+        ] {
+            assert!(!text.contains(gone), "{gone} is painted: {text}");
+        }
+        assert_masked(&text);
     }
 
     /// The archive sheet archives at once. The page then offers the way back, which

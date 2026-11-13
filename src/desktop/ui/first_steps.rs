@@ -58,21 +58,14 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) -> bool {
             kit::paint_icon_in(ui, Icon::Key, 34.0, kit::palette().tertiary);
             ui.add_space(10.0);
             ui.label(kit::text("No credentials yet", Font::Title3).color(kit::palette().label));
-            ui.add_space(2.0);
-            ui.label(
-                kit::text(
-                    "Add a login or import your existing credentials.",
-                    Font::Callout,
-                )
-                .color(kit::palette().secondary),
-            );
             ui.add_space(16.0);
         });
     }
     let header = progress.credential.then_some("First steps");
+    // The first open step below is the one prominent button.
     let mut primary = None;
     ui.horizontal_wrapped(|ui| {
-        if kit::small_button(ui, "Add Login…", Style::Prominent).clicked() {
+        if kit::small_button(ui, "Add Login…", Style::Bordered).clicked() {
             primary = Some(Go::Login);
         }
         if kit::small_button(ui, "Import…", Style::Bordered).clicked() {
@@ -95,7 +88,7 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) -> bool {
             (
                 progress.agent,
                 "Connect an agent (optional)",
-                "Claude Code, Codex, or another host. You confirm once.",
+                "Claude Code, Codex, or another host.",
                 "Connect…",
                 Go::Connect,
             ),
@@ -197,8 +190,11 @@ mod tests {
         assert!(text.contains("Paste…"), "{text}");
         assert!(text.contains("Connect an agent"), "{text}");
         assert!(text.contains("Connect…"), "{text}");
-        // The old panel and its steps are gone.
+        assert!(text.contains("Add Login…"), "{text}");
+        // The old panel and its steps are gone, and so is the line under the title.
         for old in [
+            "Add a login or import",
+            "You confirm once",
             "Get started",
             "Register",
             "Activity",

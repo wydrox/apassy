@@ -250,7 +250,7 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
     columns::list_toolbar(
         ui,
         &title,
-        &columns::count_label(active, "item", "items"),
+        &columns::count_label(active, "credential", "credentials"),
         |ui| {
             add = kit::plain_icon_button(
                 ui,
@@ -290,7 +290,7 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
     if vault_empty {
         // No search field without credentials. ⌘F must not focus it later by surprise.
         app.ui.focus_search = false;
-        columns::list_note(ui, "No items");
+        columns::list_note(ui, "No credentials");
         return;
     }
     let active_here: Vec<u64> = in_place
@@ -649,9 +649,9 @@ mod list_tests;
 /// The list of a shared vault: "From you" and "From others" (ADR 0026 §6). Shared vaults
 /// come later, so the list has no item yet.
 fn shared_list(app: &mut DesktopApp, ui: &mut egui::Ui, title: &str) {
-    columns::list_toolbar(ui, title, "0 items", |_| {});
+    columns::list_toolbar(ui, title, "0 credentials", |_| {});
     app.ui.focus_search = false;
-    columns::list_note(ui, "No items yet.");
+    columns::list_note(ui, "No credentials yet.");
 }
 
 /// The search field. ⌘F puts the focus in it. The list has no filter or order menus,
@@ -1190,7 +1190,7 @@ fn overview(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &super::shell::Pen
             columns::nothing_selected(
                 ui,
                 Icon::People,
-                "No items yet",
+                "No credentials yet",
                 "Use Share on a credential to add it to this shared vault.",
             );
             return;
@@ -2417,7 +2417,8 @@ fn agent_settings_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &Owner
         _ if by_owner => about.push("Declaration: set by you.".to_owned()),
         _ => about.push("Declaration: set automatically.".to_owned()),
     }
-    // The second line of "Always ask me": what it does when on, else what decides now.
+    // What "Always ask me" does when on, else what decides now. The status line under
+    // "Agent Access" shows it, so the switch carries it only as its description.
     let ask_note = if always_ask {
         ALWAYS_ASK_NOTE
     } else {
@@ -2427,7 +2428,7 @@ fn agent_settings_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &Owner
     let hosts_note = known.is_empty().then_some(NO_HOST_NOTE);
     let mut toggle_access = false;
     rows::group(ui, |s| {
-        noted_row(s, "Always ask me", Some(ask_note), |ui| {
+        noted_row(s, "Always ask me", None, |ui| {
             let response = kit::toggle(ui, &mut ask, "Always ask me");
             ui.ctx()
                 .accesskit_node_builder(response.id, |node| node.set_description(ask_note));
@@ -3893,15 +3894,18 @@ fn item_form(
         }
     });
     if editing {
+        // The placeholder "Unchanged" says that a blank field keeps the stored value.
         let (footer, placeholder) = if passkey_only {
             (
-                "This login signs in with a passkey. A password is optional. Apassy keeps the passkey when you save.",
+                Some(
+                    "This login signs in with a passkey. A password is optional. Apassy keeps the passkey when you save.",
+                ),
                 "Optional",
             )
         } else {
-            ("Leave a field blank to keep the stored value.", "Unchanged")
+            (None, "Unchanged")
         };
-        kit::section(ui, Some("Secret"), Some(footer), |s| {
+        kit::section(ui, Some("Secret"), footer, |s| {
             secret_rows(s, salt, kind, secrets, placeholder);
             otp::form_row(s, salt, form, secrets);
         });
@@ -3909,28 +3913,26 @@ fn item_form(
     let agent_key = format!("{salt}-agent-fields");
     let mut agent_open =
         state.is_expanded(&agent_key) || !form.service.is_empty() || !form.project.is_empty();
-    if kit::disclosure(ui, &mut agent_open, "Agent Settings (Optional)").changed() {
+    if kit::disclosure(ui, &mut agent_open, "Agent Settings (Optional)")
+        .on_hover_text("Apassy suggests safe agent settings from the service and the project.")
+        .changed()
+    {
         state.set_expanded(&agent_key, agent_open);
     }
     if agent_open {
-        kit::section(
-            ui,
-            Some("Where it is used"),
-            Some("Apassy suggests safe agent settings from the service and the project."),
-            |s| {
-                s.field("Service", |ui| {
-                    kit::text_input(
-                        ui,
-                        &mut form.service,
-                        &format!("{salt}-service"),
-                        "stripe, github, supabase…",
-                    )
-                });
-                s.field("Project", |ui| {
-                    kit::text_input(ui, &mut form.project, &format!("{salt}-project"), "shop")
-                });
-            },
-        );
+        kit::section(ui, None, None, |s| {
+            s.field("Service", |ui| {
+                kit::text_input(
+                    ui,
+                    &mut form.service,
+                    &format!("{salt}-service"),
+                    "stripe, github, supabase…",
+                )
+            });
+            s.field("Project", |ui| {
+                kit::text_input(ui, &mut form.project, &format!("{salt}-project"), "shop")
+            });
+        });
     }
     detail_rows(ui, form, secrets, salt);
     let key = format!("{salt}-notes");
@@ -3958,145 +3960,134 @@ fn detail_rows(ui: &mut egui::Ui, form: &mut ItemDraft, secrets: &mut SecretForm
     // The login form edits its one-time password in the secret rows.
     let dedicated = otp::dedicated_slot(form);
     if form.details.len() > usize::from(dedicated.is_some()) {
-        kit::section(
-            ui,
-            Some("Custom details"),
-            Some(
-                "A hidden detail is masked, and showing it needs your passphrase. For a hidden detail that is stored, leave the value blank to keep it.",
-            ),
-            |s| {
+        // The "Hidden" switch and the placeholder "Unchanged" say what a hidden detail
+        // does, so the group has no footer.
+        kit::section(ui, Some("Custom details"), None, |s| {
+            s.row(|ui| {
+                ui.horizontal(|ui| {
+                    let caption = |text: &str| {
+                        kit::text(text, Font::Footnote).color(kit::palette().secondary)
+                    };
+                    ui.allocate_ui(Vec2::new(150.0, 14.0), |ui| {
+                        ui.set_min_width(150.0);
+                        ui.label(caption("Name"));
+                    });
+                    let width = (ui.available_width() - 92.0).max(120.0);
+                    ui.allocate_ui(Vec2::new(width, 14.0), |ui| {
+                        ui.set_min_width(width);
+                        ui.label(caption("Value"));
+                    });
+                    ui.label(caption("Hidden"));
+                });
+            });
+            for (index, detail) in form.details.iter_mut().enumerate() {
+                if dedicated == Some(index) {
+                    continue;
+                }
+                // VoiceOver names each field of the row, as the captions above do.
+                let row_name = if detail.label.trim().is_empty() {
+                    format!("detail {}", index + 1)
+                } else {
+                    format!("\"{}\"", detail.label.trim())
+                };
+                let name_label = |ctx: &egui::Context, id: egui::Id, text: String| {
+                    ctx.accesskit_node_builder(id, |node| node.set_label(text));
+                };
                 s.row(|ui| {
                     ui.horizontal(|ui| {
-                        let caption = |text: &str| {
-                            kit::text(text, Font::Footnote).color(kit::palette().secondary)
-                        };
-                        ui.allocate_ui(Vec2::new(150.0, 14.0), |ui| {
-                            ui.set_min_width(150.0);
-                            ui.label(caption("Name"));
+                        let name_field = ui.allocate_ui(Vec2::new(150.0, 26.0), |ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut detail.label)
+                                    .id_salt(format!("{salt}-detail-label-{index}"))
+                                    .hint_text(
+                                        kit::text("Name", Font::Body)
+                                            .color(kit::palette().tertiary),
+                                    )
+                                    .char_limit(crate::desktop::owner_store::MAX_DETAIL_LABEL_BYTES)
+                                    .margin(kit::FIELD_MARGIN)
+                                    .desired_width(f32::INFINITY),
+                            )
                         });
+                        name_label(ui.ctx(), name_field.inner.id, format!("Name of {row_name}"));
+                        // A label like "OTP" makes the detail hidden before its value is drawn.
+                        let mut protected = otp::hide_setup_key(
+                            ui.ctx(),
+                            salt,
+                            index,
+                            detail,
+                            &mut secrets.details[index],
+                        );
                         let width = (ui.available_width() - 92.0).max(120.0);
-                        ui.allocate_ui(Vec2::new(width, 14.0), |ui| {
-                            ui.set_min_width(width);
-                            ui.label(caption("Value"));
+                        let value_field = ui.allocate_ui(Vec2::new(width, 26.0), |ui| {
+                            if detail.hidden {
+                                let placeholder = if detail.stored.is_some() {
+                                    "Unchanged"
+                                } else {
+                                    "Value"
+                                };
+                                secure_input(
+                                    ui,
+                                    &format!("{salt}-detail-{index}"),
+                                    &mut secrets.details[index],
+                                    SECRET_VALUE_CAPACITY,
+                                    placeholder,
+                                )
+                            } else {
+                                kit::text_input(
+                                    ui,
+                                    &mut detail.value,
+                                    &format!("{salt}-detail-value-{index}"),
+                                    "Value",
+                                )
+                            }
                         });
-                        ui.label(caption("Hidden"));
+                        name_label(
+                            ui.ctx(),
+                            value_field.inner.id,
+                            format!("Value of {row_name}"),
+                        );
+                        // A pasted otpauth link hides the detail. The frame is drawn
+                        // again, so the link is never painted.
+                        protected |= otp::hide_setup_key(
+                            ui.ctx(),
+                            salt,
+                            index,
+                            detail,
+                            &mut secrets.details[index],
+                        );
+                        if protected {
+                            ui.ctx().request_discard("A setup key is hidden");
+                            ui.ctx().request_repaint();
+                        }
+                        let mut hidden = detail.hidden;
+                        let locked = otp::is_locked_hidden(detail);
+                        let switch = ui
+                            .add_enabled_ui(!locked, |ui| {
+                                kit::toggle(ui, &mut hidden, &format!("Hidden: {row_name}"))
+                                    .on_hover_text(if locked {
+                                        "A one-time password is always hidden"
+                                    } else {
+                                        "Hidden: masked, and showing it needs your passphrase"
+                                    })
+                            })
+                            .inner;
+                        if switch.changed() && !locked {
+                            set_hidden(detail, &mut secrets.details[index], hidden);
+                        }
+                        if kit::icon_button(
+                            ui,
+                            Icon::Xmark,
+                            &format!("Remove {row_name}"),
+                            Size::Small,
+                        )
+                        .clicked()
+                        {
+                            remove = Some(index);
+                        }
                     });
                 });
-                for (index, detail) in form.details.iter_mut().enumerate() {
-                    if dedicated == Some(index) {
-                        continue;
-                    }
-                    // VoiceOver names each field of the row, as the captions above do.
-                    let row_name = if detail.label.trim().is_empty() {
-                        format!("detail {}", index + 1)
-                    } else {
-                        format!("\"{}\"", detail.label.trim())
-                    };
-                    let name_label = |ctx: &egui::Context, id: egui::Id, text: String| {
-                        ctx.accesskit_node_builder(id, |node| node.set_label(text));
-                    };
-                    s.row(|ui| {
-                        ui.horizontal(|ui| {
-                            let name_field = ui.allocate_ui(Vec2::new(150.0, 26.0), |ui| {
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut detail.label)
-                                        .id_salt(format!("{salt}-detail-label-{index}"))
-                                        .hint_text(
-                                            kit::text("Name", Font::Body)
-                                                .color(kit::palette().tertiary),
-                                        )
-                                        .char_limit(
-                                            crate::desktop::owner_store::MAX_DETAIL_LABEL_BYTES,
-                                        )
-                                        .margin(kit::FIELD_MARGIN)
-                                        .desired_width(f32::INFINITY),
-                                )
-                            });
-                            name_label(
-                                ui.ctx(),
-                                name_field.inner.id,
-                                format!("Name of {row_name}"),
-                            );
-                            // A label like "OTP" makes the detail hidden before its value is drawn.
-                            let mut protected = otp::hide_setup_key(
-                                ui.ctx(),
-                                salt,
-                                index,
-                                detail,
-                                &mut secrets.details[index],
-                            );
-                            let width = (ui.available_width() - 92.0).max(120.0);
-                            let value_field = ui.allocate_ui(Vec2::new(width, 26.0), |ui| {
-                                if detail.hidden {
-                                    let placeholder = if detail.stored.is_some() {
-                                        "Unchanged"
-                                    } else {
-                                        "Value"
-                                    };
-                                    secure_input(
-                                        ui,
-                                        &format!("{salt}-detail-{index}"),
-                                        &mut secrets.details[index],
-                                        SECRET_VALUE_CAPACITY,
-                                        placeholder,
-                                    )
-                                } else {
-                                    kit::text_input(
-                                        ui,
-                                        &mut detail.value,
-                                        &format!("{salt}-detail-value-{index}"),
-                                        "Value",
-                                    )
-                                }
-                            });
-                            name_label(
-                                ui.ctx(),
-                                value_field.inner.id,
-                                format!("Value of {row_name}"),
-                            );
-                            // A pasted otpauth link hides the detail. The frame is drawn
-                            // again, so the link is never painted.
-                            protected |= otp::hide_setup_key(
-                                ui.ctx(),
-                                salt,
-                                index,
-                                detail,
-                                &mut secrets.details[index],
-                            );
-                            if protected {
-                                ui.ctx().request_discard("A setup key is hidden");
-                                ui.ctx().request_repaint();
-                            }
-                            let mut hidden = detail.hidden;
-                            let locked = otp::is_locked_hidden(detail);
-                            let switch = ui
-                                .add_enabled_ui(!locked, |ui| {
-                                    kit::toggle(ui, &mut hidden, &format!("Hidden: {row_name}"))
-                                        .on_hover_text(if locked {
-                                            "A one-time password is always hidden"
-                                        } else {
-                                            "Hidden: masked, and showing it needs your passphrase"
-                                        })
-                                })
-                                .inner;
-                            if switch.changed() && !locked {
-                                set_hidden(detail, &mut secrets.details[index], hidden);
-                            }
-                            if kit::icon_button(
-                                ui,
-                                Icon::Xmark,
-                                &format!("Remove {row_name}"),
-                                Size::Small,
-                            )
-                            .clicked()
-                            {
-                                remove = Some(index);
-                            }
-                        });
-                    });
-                }
-            },
-        );
+            }
+        });
     }
     if let Some(index) = remove {
         form.details.remove(index);
