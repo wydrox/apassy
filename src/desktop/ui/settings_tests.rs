@@ -2249,7 +2249,7 @@ fn the_bouncer_state_shows_once() {
 fn panel_frame(
     ctx: &egui::Context,
     events: Vec<Event>,
-    add: impl FnOnce(&mut egui::Ui),
+    mut add: impl FnMut(&mut egui::Ui),
 ) -> (Vec<(String, Rect)>, Spoken) {
     let input = RawInput {
         screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(720.0, 800.0))),
@@ -2257,7 +2257,7 @@ fn panel_frame(
         ..Default::default()
     };
     let output = ctx.run_ui(input, |ui| {
-        egui::CentralPanel::default().show(ui, add);
+        egui::CentralPanel::default().show(ui, &mut add);
     });
     let nodes = output
         .platform_output
