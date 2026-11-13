@@ -147,3 +147,29 @@ pub fn make_source(
         .expect("source");
     (vault, row)
 }
+
+/// The rule flags of the newest decision in the vault's decision log (ADR 0046): which
+/// rule fired, now that the why text names it in plain words.
+#[cfg(feature = "vault")]
+pub fn last_rule_flags(vault: &apassy::broker::SharedVault) -> Vec<String> {
+    let guard = vault.lock().expect("vault mutex");
+    guard
+        .as_ref()
+        .expect("open vault")
+        .decision_log()
+        .expect("decision log")
+        .pop()
+        .map(|record| record.entry.rule_flags)
+        .unwrap_or_default()
+}
+
+/// The sentence that the why text of a question gives for one rule flag (ADR 0046).
+#[cfg(feature = "vault")]
+pub fn flag_line(flag: &str) -> &'static str {
+    apassy::broker::reasons::words(
+        apassy::broker::route_diagnostics::ReasonKind::HookFlags,
+        &[flag.to_owned()],
+        "",
+    )
+    .line
+}

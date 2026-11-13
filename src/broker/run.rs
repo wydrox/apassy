@@ -553,6 +553,39 @@ fn host_matches(host: &str, known: &str) -> bool {
             .is_some_and(|domain| host.ends_with(&format!(".{domain}")))
 }
 
+/// Where the injection flag of a run found its phrase, as a closed word of the decision
+/// (ADR 0046): `SOURCE:NUMBER`, the first match in the order of the confirmed host
+/// prompt (or the agent's task text), the agent's purpose, and the command. Empty
+/// without the flag. The text itself is never stored.
+fn injection_source(
+    analysis: &Analysis,
+    user_request: &str,
+    request_source: &str,
+    request: &RunRequest<'_>,
+) -> String {
+    if !analysis
+        .flags
+        .iter()
+        .any(|flag| flag == shell_risk::INJECTION_FLAG)
+    {
+        return String::new();
+    }
+    let task = if learning::resolved_source(user_request, request_source)
+        == crate::vault::RequestSource::Host
+    {
+        "prompt"
+    } else {
+        "task"
+    };
+    std::iter::once((task, user_request))
+        .chain(std::iter::once(("purpose", request.purpose)))
+        .chain(request.command.iter().map(|arg| ("command", arg.as_str())))
+        .find_map(|(source, text)| {
+            shell_risk::injection_match(text).map(|(index, _)| format!("{source}:{index}"))
+        })
+        .unwrap_or_default()
+}
+
 /// Each host of `hosts` is in `allowed`.
 fn hosts_within<'a>(hosts: &[String], allowed: impl Iterator<Item = &'a String> + Clone) -> bool {
     hosts
@@ -613,7 +646,7 @@ fn hard_rules(
                     .is_some_and(Declaration::is_production))
                 || !known.answer.get(index).copied().unwrap_or(false))
         {
-            why.push((format!("\"{}\" gives a one-time code. Apassy asks unless you remember the answer for this project.", facts.name), ReasonKind::OneTimeCode));
+            why.push((format!("\"{}\" includes a one-time code: only an explicit owner project answer covering codes can skip this question.", facts.name), ReasonKind::OneTimeCode));
         }
         let (production, read_only) = production_and_read_only(checked, index);
         if production && read_only && run.remote_brain {
@@ -815,6 +848,42 @@ fn production_and_read_only(checked: &Checked, index: usize) -> (bool, bool) {
     (production, read_only)
 }
 
+/// The first condition of a remembered answer that the run does not meet, in the order
+/// of the checks, as a closed word (ADR 0046); `None` when an answer can be remembered.
+/// "Always ask me" of an item asks every agent, so nothing can be remembered for it.
+/// "Always ask for this agent" asks this agent only: an answer covers the others.
+fn remember_blocker<F: FnMut() -> Result<(), String>>(
+    checked: &Checked,
+    run: &RunFacts<'_>,
+    certain: Option<ActionKind>,
+    ready: &mut Readiness<F>,
+) -> Option<&'static str> {
+    let sure = certain == Some(run.action)
+        || checked
+            .facts
+            .iter()
+            .all(|facts| !facts.production && !facts.unconfirmed);
+    if checked.project.is_none() {
+        Some("project")
+    } else if !run.has_user_request {
+        Some("task")
+    } else if !checked.declarations.iter().all(Option::is_some) {
+        Some("undeclared")
+    } else if !run.analysis.flags.is_empty() {
+        Some("flags")
+    } else if foreign_db_host(checked, run).is_some() {
+        Some("dbhost")
+    } else if !checked.facts.iter().all(|facts| !facts.always_ask) {
+        Some("always_ask")
+    } else if !sure {
+        Some("uncertain")
+    } else if ready.get().is_err() {
+        Some("brain")
+    } else {
+        None
+    }
+}
+
 /// The answers that a question can take now (ADR 0025 §3): a remembered answer only
 /// when it can take effect for a later run of the same kind.
 fn valid_answers<F: FnMut() -> Result<(), String>>(
@@ -830,21 +899,7 @@ fn valid_answers<F: FnMut() -> Result<(), String>>(
         AnswerKind::AlwaysAskForAgent,
         AnswerKind::Disconnect,
     ];
-    let sure = certain == Some(run.action)
-        || checked
-            .facts
-            .iter()
-            .all(|facts| !facts.production && !facts.unconfirmed);
-    // "Always ask me" of an item asks every agent, so nothing can be remembered for it.
-    // "Always ask for this agent" asks this agent only: an answer covers the others.
-    let can_remember = checked.project.is_some()
-        && run.has_user_request
-        && checked.declarations.iter().all(Option::is_some)
-        && run.analysis.flags.is_empty()
-        && foreign_db_host(checked, run).is_none()
-        && checked.facts.iter().all(|facts| !facts.always_ask)
-        && sure
-        && ready.get().is_ok();
+    let can_remember = remember_blocker(checked, run, certain, ready).is_none();
     // The production rule asks whatever the owner answered before, so a new allowance
     // would change nothing: the owner ticks "Remember" and the same question comes back.
     let production_asks = (0..checked.facts.len()).any(|index| {
@@ -1416,7 +1471,11 @@ fn run_inner(
             .note
         }
     };
-    let log_note = format!("{} {risk_note}", resolved.log_note());
+    // The texts that end with this note add their own full stop.
+    let log_note = format!("{} {risk_note}", resolved.log_note())
+        .trim_end()
+        .trim_end_matches('.')
+        .to_owned();
     let risk_note = if request.codes.is_empty() {
         risk_note
     } else {
@@ -1501,8 +1560,9 @@ fn run_inner(
         (Vec::new(), None)
     };
     // The closed words of the decision (ADR 0046): its reason kind, the remembered answer
-    // that the question offers, and the one-time codes of a run with one credential.
-    let why_words = DecisionWhy {
+    // that the question offers, the one-time codes of a run with one credential, and
+    // where the injection flag found its phrase.
+    let mut why_words = DecisionWhy {
         reason: format!("{reason_kind:?}"),
         code: String::new(),
         offered: valid
@@ -1530,7 +1590,18 @@ fn run_inner(
             ""
         }
         .to_owned(),
+        inject: injection_source(&analysis, user_request, &resolved.source, request),
+        noremember: String::new(),
     };
+    // Why the question offers no remembered answer, when no other sentence says so.
+    if needs_approval
+        && cloud.is_none()
+        && why_words.offered.is_empty()
+        && super::reasons::every_time(reason_kind, &analysis.flags).is_none()
+        && let Some(blocker) = remember_blocker(&checked, &run_facts, certain, &mut ready)
+    {
+        blocker.clone_into(&mut why_words.noremember);
+    }
     debug_line.offered.clone_from(&why_words.offered);
     let question_items: Vec<QuestionItem> = items
         .iter()

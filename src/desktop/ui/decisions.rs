@@ -2128,6 +2128,12 @@ pub(super) fn question_headline(question: &QuestionInfo) -> &str {
     }
 }
 
+/// How long a question like this keeps asking, when no answer can change it (ADR 0046).
+/// Only the owner's window says it: it is not part of the why text.
+pub(super) fn asks_every_time(question: &QuestionInfo) -> Option<&'static str> {
+    crate::broker::reasons::every_time(question.reason, &question.flags)
+}
+
 /// The why text of a question when it says more than the title: the card's why, else
 /// the risk note. `None` when it is empty or the same as the title.
 pub(super) fn why_beyond_title(run: &PendingRun) -> Option<&str> {
@@ -2289,6 +2295,9 @@ fn draw_question(
     group_label(ui, "Why you are asked");
     kit::section(ui, None, None, |s| {
         s.row(|ui| kit::paragraph(ui, why, Font::Body, kit::palette().label));
+        if let Some(every) = asks_every_time(question) {
+            s.row(|ui| kit::paragraph(ui, every, Font::Body, kit::palette().secondary));
+        }
     });
     // The quiet line at the foot of a detail of the mockup (`.meta-foot`).
     ui.add_space(2.0);
@@ -3531,6 +3540,9 @@ pub(super) fn floating_prompt(app: &mut DesktopApp, ctx: &egui::Context, pending
                 .show(ui, |ui| {
                     if let Some(why) = why_beyond_title(run) {
                         kit::paragraph(ui, why, Font::Callout, kit::palette().secondary);
+                    }
+                    if let Some(every) = asks_every_time(&run.question) {
+                        kit::paragraph(ui, every, Font::Callout, kit::palette().secondary);
                     }
                     for item in &run.question.items {
                         let environment = if item.unconfirmed {

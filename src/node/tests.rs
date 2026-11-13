@@ -1014,7 +1014,21 @@ fn a_denial_denies_with_the_reason_and_the_injection_flag_is_on_the_card() {
     let question = fx.question();
     assert_eq!(question.question.reason, ReasonKind::CloudAgent);
     assert!(
-        question.risk.contains("injection_phrase"),
+        question
+            .question
+            .flags
+            .iter()
+            .any(|flag| flag == "injection_phrase"),
+        "{:?}",
+        question.question.flags
+    );
+    let line =
+        crate::broker::reasons::words(ReasonKind::HookFlags, &["injection_phrase".to_owned()], "")
+            .line;
+    assert!(question.risk.contains(line), "{}", question.risk);
+    assert!(
+        crate::broker::reasons::every_time(ReasonKind::CloudAgent, &question.question.flags)
+            .is_none_or(|every| !question.risk.contains(every)),
         "{}",
         question.risk
     );

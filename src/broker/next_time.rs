@@ -297,6 +297,7 @@ mod tests {
             code: String::new(),
             offered: asked.offered.to_owned(),
             codes: asked.codes.to_owned(),
+            ..DecisionWhy::default()
         });
         let id = fx.vault.record_decision(&entry).unwrap();
         for item in asked.items {

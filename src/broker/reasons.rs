@@ -150,7 +150,7 @@ const CODES: [(&str, Words); 10] = [
         "review_required",
         words_of(
             "Waits for your review",
-            "Its settings wait for your review.",
+            "This credential waits for your review.",
         ),
     ),
     (
@@ -205,7 +205,7 @@ const CODES: [(&str, Words); 10] = [
 fn short_of(reason: ReasonKind) -> &'static str {
     match reason {
         ReasonKind::ModelAllowed => "Judged safe",
-        ReasonKind::RememberedAnswer => "Your rule",
+        ReasonKind::RememberedAnswer => "Covered by your rule",
         ReasonKind::RememberedPattern => "Approved before",
         ReasonKind::MissingTask => "No task from the agent",
         ReasonKind::LowTaskMatch => "May not fit your task",
@@ -264,17 +264,15 @@ pub fn words(reason: ReasonKind, flags: &[String], code: &str) -> Words {
     }
 }
 
-/// The question's why text for a flagged run: the sentence of each flag in order, then
-/// how long a run like it asks.
+/// The question's why text for a flagged run: the sentence of each flag in order. How
+/// long a run like it asks ([`every_time`]) is for the owner's window only: the desktop
+/// draws it, and it is never part of the stored why, the refusal text, or the card.
 pub fn flags_sentence(flags: &[String]) -> String {
-    let mut out: Vec<&str> = ordered_flags(flags)
+    ordered_flags(flags)
         .into_iter()
         .map(|words| words.line)
-        .collect();
-    if let Some(every) = every_time(ReasonKind::HookFlags, flags) {
-        out.push(every);
-    }
-    out.join(" ")
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The sentence for a decision that no answer of the owner can change; `None` when an
@@ -299,7 +297,7 @@ pub fn every_time(reason: ReasonKind, flags: &[String]) -> Option<&'static str> 
     match reason {
         ReasonKind::MissingTask => Some("Apassy asks until the agent sends your task."),
         ReasonKind::NotProject => Some("Apassy remembers nothing outside a project folder."),
-        ReasonKind::Production => Some("Production with write access asks every time."),
+        ReasonKind::Production => Some("This production credential asks every time."),
         ReasonKind::CloudAgent => Some("A remote agent asks every time."),
         _ => None,
     }
@@ -434,20 +432,39 @@ mod tests {
     fn the_flags_sentence_names_each_flag_and_how_long_it_asks() {
         assert_eq!(
             flags_sentence(&flags(&["injection_phrase", "secret_output"])),
-            "The command could print the secret. The request text tells the bouncer what to decide. A command like this asks every time."
+            "The command could print the secret. The request text tells the bouncer what to decide."
         );
         assert_eq!(
             flags_sentence(&flags(&["injection_phrase"])),
-            "The request text tells the bouncer what to decide. Apassy asks while the text says this."
+            "The request text tells the bouncer what to decide."
         );
         assert_eq!(
             flags_sentence(&flags(&["hook_unverified"])),
-            "Apassy could not confirm your prompt. Apassy asks until it can confirm your prompt."
+            "Apassy could not confirm your prompt."
         );
         assert_eq!(
             flags_sentence(&flags(&["a_new_one", "another_new_one"])),
-            "A safety rule flagged this run. A command like this asks every time."
+            "A safety rule flagged this run."
         );
+        // How long a run asks is a sentence of its own, for the owner's window.
+        assert_eq!(
+            every_time(
+                ReasonKind::HookFlags,
+                &flags(&["injection_phrase", "secret_output"])
+            ),
+            Some("A command like this asks every time.")
+        );
+        assert_eq!(
+            every_time(ReasonKind::HookFlags, &flags(&["injection_phrase"])),
+            Some("Apassy asks while the text says this.")
+        );
+        assert_eq!(
+            every_time(ReasonKind::HookUnverified, &flags(&["hook_unverified"])),
+            Some("Apassy asks until it can confirm your prompt.")
+        );
+        for flag in every_flag() {
+            assert!(every_time(ReasonKind::Other, &flags(&[flag.as_str()])).is_some());
+        }
         for flag in every_flag() {
             assert!(
                 !flags_sentence(&flags(&[flag.as_str()])).contains('_'),

@@ -317,10 +317,17 @@ pub struct DecisionWhy {
     pub offered: String,
     /// One-time codes of a run with one credential: `with_value` or `only`.
     pub codes: String,
+    /// Where the injection flag found its phrase, and which entry of the list:
+    /// `prompt:1000` (`prompt`, `task`, `purpose`, or `command`). Never the text itself.
+    pub inject: String,
+    /// The first condition that kept the question from offering a remembered answer:
+    /// `uncertain`, `brain`, `dbhost`, and so on. Empty: it offered one, or another
+    /// sentence says why not.
+    pub noremember: String,
 }
 
 /// The parts of [`DecisionWhy`] in `policy`, in this order.
-const WHY_PARTS: [&str; 4] = ["why", "code", "offered", "codes"];
+const WHY_PARTS: [&str; 6] = ["why", "code", "offered", "codes", "inject", "noremember"];
 
 /// A word of [`DecisionWhy`]: 1 to 48 bytes of `[A-Za-z0-9_:]`.
 fn why_word(word: &str) -> bool {
@@ -346,6 +353,8 @@ impl DecisionWhy {
                 "code" => &mut why.code,
                 "offered" => &mut why.offered,
                 "codes" => &mut why.codes,
+                "inject" => &mut why.inject,
+                "noremember" => &mut why.noremember,
                 _ => continue,
             };
             if slot.is_empty() {
@@ -357,7 +366,14 @@ impl DecisionWhy {
 
     /// The words as `policy` parts, each with its leading `; `.
     fn policy_text(&self) -> String {
-        let words = [&self.reason, &self.code, &self.offered, &self.codes];
+        let words = [
+            &self.reason,
+            &self.code,
+            &self.offered,
+            &self.codes,
+            &self.inject,
+            &self.noremember,
+        ];
         WHY_PARTS
             .iter()
             .zip(words)
@@ -1745,6 +1761,8 @@ mod tests {
             code: String::new(),
             offered: "in_project:change".to_owned(),
             codes: "with_value".to_owned(),
+            inject: String::new(),
+            noremember: String::new(),
         };
         let mut answered = entry(1, DecidedBy::NoAnswer, LoggedDecision::Deny);
         answered.policy = "apassy-bouncer-v9; task_match 0.75".to_owned();
@@ -1795,6 +1813,8 @@ mod tests {
             code: "not\"granted".to_owned(),
             offered: "in_project:change; model x".to_owned(),
             codes: "x".repeat(49),
+            inject: "prompt: 3".to_owned(),
+            noremember: "brain\n".to_owned(),
         });
         assert_eq!(stored.policy, plain.policy, "no word is stored");
         assert_eq!(stored.why(), DecisionWhy::default());
@@ -1804,6 +1824,20 @@ mod tests {
             ..DecisionWhy::default()
         });
         assert_eq!(mixed.policy, "apassy-bouncer-v9; why ModelAllowed");
+        let flagged = DecisionWhy {
+            reason: "HookFlags".to_owned(),
+            inject: "prompt:1000".to_owned(),
+            noremember: "uncertain".to_owned(),
+            ..DecisionWhy::default()
+        };
+        let mut entry = entry(2, DecidedBy::NoAnswer, LoggedDecision::Deny);
+        entry.policy = "apassy-bouncer-v9".to_owned();
+        let entry = entry.with_why(&flagged);
+        assert_eq!(
+            entry.policy,
+            "apassy-bouncer-v9; why HookFlags; inject prompt:1000; noremember uncertain"
+        );
+        assert_eq!(entry.why(), flagged);
         assert_eq!(
             DecisionWhy::of_policy("x; why Model\"Allowed; offered in_project:read"),
             DecisionWhy {

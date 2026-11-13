@@ -391,7 +391,17 @@ fn a_false_hook_request_waits_for_the_owner() {
     );
     assert_eq!(code(&response), "approval_timeout");
     let reason = last_reason(&fx);
-    assert!(reason.contains("hook_unverified"), "{reason}");
+    assert!(
+        common::last_rule_flags(&fx.vault)
+            .iter()
+            .any(|flag| flag == "hook_unverified"),
+        "{:?}",
+        common::last_rule_flags(&fx.vault)
+    );
+    assert!(
+        reason.contains(common::flag_line("hook_unverified")),
+        "{reason}"
+    );
     assert!(
         reason.contains("NOT verified: the prompt is not the newest user message"),
         "{reason}"
@@ -404,7 +414,18 @@ fn a_false_hook_request_waits_for_the_owner() {
     );
     let response = run(&fx, Some(SESSION), "", &["echo", "ok"]);
     assert_eq!(code(&response), "approval_timeout");
-    assert!(last_reason(&fx).contains("hook_unverified"));
+    assert!(
+        common::last_rule_flags(&fx.vault)
+            .iter()
+            .any(|flag| flag == "hook_unverified"),
+        "{:?}",
+        common::last_rule_flags(&fx.vault)
+    );
+    assert!(
+        last_reason(&fx).contains(common::flag_line("hook_unverified")),
+        "{}",
+        last_reason(&fx)
+    );
 
     // A transcript that the agent wrote outside the host directories is not trusted.
     let fake = fx.dir.path().join(format!("{SESSION}.jsonl"));
@@ -528,7 +549,17 @@ fn a_command_that_names_the_hook_channel_waits_for_the_owner() {
         let response = run(&fx, Some(SESSION), PROMPT, &command);
         assert_eq!(code(&response), "approval_timeout", "{command:?}");
         let reason = last_reason(&fx);
-        assert!(reason.contains("hook_channel"), "{reason}");
+        assert!(
+            common::last_rule_flags(&fx.vault)
+                .iter()
+                .any(|flag| flag == "hook_channel"),
+            "{command:?}: {:?}",
+            common::last_rule_flags(&fx.vault)
+        );
+        assert!(
+            reason.contains(common::flag_line("hook_channel")),
+            "{reason}"
+        );
     }
     assert!(fx.bodies.lock().expect("bodies").is_empty());
 }

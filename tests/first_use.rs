@@ -322,8 +322,16 @@ fn model_field_spoofing_in_each_agent_text_field_asks_before_inference() {
         );
         assert_eq!(code(&response), "approval_timeout", "{field}");
         assert!(
-            response.error.unwrap().message.contains("injection_phrase"),
-            "{field}"
+            common::last_rule_flags(&fx.vault)
+                .iter()
+                .any(|flag| flag == "injection_phrase"),
+            "{field}: {:?}",
+            common::last_rule_flags(&fx.vault)
+        );
+        let message = response.error.unwrap().message;
+        assert!(
+            message.contains(common::flag_line("injection_phrase")),
+            "{field}: {message}"
         );
         assert_eq!(model_calls(&fx), 0, "{field}");
     }
