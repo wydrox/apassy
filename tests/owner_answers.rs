@@ -939,9 +939,23 @@ fn a_question_without_an_offer_stores_why_nothing_is_remembered() {
         "{:?}",
         run.question.valid_answers
     );
-    // A credential without a declaration is production by default: each condition of a
-    // remembered answer holds, and the production rule asks anyway.
-    assert_eq!(last_decision(&fx).why().noremember, "production");
+    // The run of a credential without a declaration has another sentence that says why
+    // nothing is remembered, so it stores no word.
+    let undeclared = last_decision(&fx);
+    let kind = apassy::broker::route_diagnostics::ReasonKind::parse(&undeclared.why().reason)
+        .expect("a reason kind");
+    assert!(
+        apassy::broker::reasons::every_time(kind, &undeclared.rule_flags).is_some()
+            || !undeclared.why().offered.is_empty(),
+        "{kind:?} {:?}: {}",
+        undeclared.rule_flags,
+        undeclared.policy
+    );
+    assert!(
+        undeclared.why().noremember.is_empty(),
+        "{}",
+        undeclared.policy
+    );
     // "Always ask me" keeps every answer from being remembered: the first condition.
     let careful = fixture(Some(declaration(Environment::Staging, RiskLevel::Medium)));
     with_vault(&careful, |v| v.set_always_ask(careful.item_id, true)).expect("always ask");

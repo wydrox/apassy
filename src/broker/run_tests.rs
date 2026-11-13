@@ -1004,3 +1004,109 @@ fn a_timed_out_question_saved_later_covers_the_next_run() {
     super::super::next_time::save(&mut vault, &later, ANSWERED_ON_MAC).unwrap();
     assert_eq!(route_of(&vault), Route::Answer);
 }
+
+/// ADR 0046: the word of a question that offered nothing. A confirmed production
+/// credential with write scope meets every condition of a remembered answer, and the
+/// card offers none, because the production rule asks in any case: the word says
+/// `production`.
+#[test]
+fn a_production_question_that_offers_nothing_stores_the_production_word() {
+    assert_eq!(noremember_word("in_project:change", None, None), "");
+    assert_eq!(
+        noremember_word(
+            "",
+            Some("A command like this asks every time."),
+            Some("flags")
+        ),
+        ""
+    );
+    assert_eq!(noremember_word("", None, Some("brain")), "brain");
+    assert_eq!(noremember_word("", None, None), "production");
+
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().join("project");
+    std::fs::create_dir_all(cwd.join(".git")).unwrap();
+    let mut vault = Vault::create(&dir.path().join("vault.db"), "synthetic-word-pass").unwrap();
+    vault.unlock("synthetic-word-pass").unwrap();
+    let item = vault
+        .add(ItemDraft {
+            title: "Synthetic live key".into(),
+            kind: CredentialKind::ApiKey,
+            notes: String::new(),
+            tags: vec![],
+            fields: vec![Field {
+                name: "token".into(),
+                value: SecretValue::new("FAKE-word-only".into()),
+                secret: true,
+            }],
+        })
+        .unwrap();
+    vault
+        .set_env_binding(item.id, "SYNTH_LIVE_KEY", "token")
+        .unwrap();
+    // Production from the owner: confirmed, with admin scope.
+    vault
+        .save_declaration(
+            item.id,
+            &Declaration {
+                project: "project".to_owned(),
+                environment: Environment::Production,
+                risk: RiskLevel::High,
+                scope: Scope::Admin,
+                reversibility: Reversibility::Irreversible,
+            },
+            None,
+            None,
+        )
+        .unwrap();
+    vault
+        .set_declaration_sources(item.id, &DeclarationSources::default())
+        .unwrap();
+    let (agent, _) = vault.register_agent("Synthetic developer").unwrap();
+    vault.set_agent_sees_all(agent.id, true).unwrap();
+    let items = [item.id];
+    let command = vec!["node".to_owned(), "script.js".into()];
+    let request = RunRequest {
+        access_request_id: None,
+        codes: Default::default(),
+        items: &items,
+        command: &command,
+        cwd: cwd.to_str().unwrap(),
+        purpose: "Change the live settings.",
+        path: Some("/usr/bin:/bin"),
+        user_request: Some("Change the live settings."),
+        host_session: None,
+    };
+    let checked = check(&vault, &agent, &request).unwrap();
+    assert!(checked.facts[0].production && !checked.facts[0].unconfirmed);
+    let analysis = Analysis::default();
+    let facts = RunFacts {
+        analysis: &analysis,
+        has_user_request: true,
+        pattern: false,
+        action: ActionKind::Change,
+        hosts: &[],
+        remote_brain: false,
+    };
+    let mut ready = Readiness::new(|| Ok(()));
+    let certain = Some(ActionKind::Change);
+    assert_eq!(
+        remember_blocker(&checked, &facts, certain, &mut ready),
+        None
+    );
+    let valid = valid_answers(&checked, &facts, certain, true, &mut ready);
+    assert!(
+        !valid
+            .iter()
+            .any(|answer| matches!(answer, AnswerKind::InProject(_) | AnswerKind::Production(_))),
+        "{valid:?}"
+    );
+    assert_eq!(
+        noremember_word(
+            "",
+            None,
+            remember_blocker(&checked, &facts, certain, &mut ready)
+        ),
+        "production"
+    );
+}

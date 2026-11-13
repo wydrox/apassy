@@ -931,6 +931,23 @@ fn remember_blocker<F: FnMut() -> Result<(), String>>(
     }
 }
 
+/// The `noremember` word of a question (ADR 0046): empty when it offered a remembered
+/// answer or another sentence says why not (`every_time`); else the first condition it
+/// did not meet. Every condition can hold while nothing is offered: a production
+/// credential, where the production rule asks in any case (`valid_answers`), behind an
+/// earlier hard rule such as a one-time code.
+fn noremember_word(
+    offered: &str,
+    every_time: Option<&str>,
+    blocker: Option<&'static str>,
+) -> &'static str {
+    if !offered.is_empty() || every_time.is_some() {
+        ""
+    } else {
+        blocker.unwrap_or("production")
+    }
+}
+
 /// The answers that a question can take now (ADR 0025 §3): a remembered answer only
 /// when it can take effect for a later run of the same kind.
 fn valid_answers<F: FnMut() -> Result<(), String>>(
@@ -1641,16 +1658,14 @@ fn run_inner(
         noremember: String::new(),
     };
     // Why the question offers no remembered answer, when no other sentence says so.
-    // Every condition can hold while nothing is offered: a production credential, where
-    // the production rule asks in any case (`valid_answers`).
-    if needs_approval
-        && cloud.is_none()
-        && why_words.offered.is_empty()
-        && super::reasons::every_time(reason_kind, &analysis.flags).is_none()
-    {
-        remember_blocker(&checked, &run_facts, certain, &mut ready)
-            .unwrap_or("production")
-            .clone_into(&mut why_words.noremember);
+    if needs_approval && cloud.is_none() {
+        let blocker = remember_blocker(&checked, &run_facts, certain, &mut ready);
+        noremember_word(
+            &why_words.offered,
+            super::reasons::every_time(reason_kind, &analysis.flags),
+            blocker,
+        )
+        .clone_into(&mut why_words.noremember);
     }
     debug_line.offered.clone_from(&why_words.offered);
     let question_items: Vec<QuestionItem> = items

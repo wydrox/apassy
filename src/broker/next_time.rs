@@ -624,8 +624,16 @@ mod tests {
                 None,
             )
             .unwrap();
+        // Only the environment's source makes it unconfirmed: the default value, as the
+        // run and the Mac card read it (the all-owner default is confirmed).
         fx.vault
-            .set_declaration_sources(fx.item, &crate::vault::DeclarationSources::default())
+            .set_declaration_sources(
+                fx.item,
+                &crate::vault::DeclarationSources {
+                    environment: DeclarationSource::Default,
+                    ..crate::vault::DeclarationSources::default()
+                },
+            )
             .unwrap();
         assert!(environment_unconfirmed(&fx.vault, fx.item));
         assert_eq!(
