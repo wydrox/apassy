@@ -2116,15 +2116,27 @@ fn item_tile(app: &DesktopApp, item_id: u64, name: &str) -> kit::Tile {
     super::credential_tile(kind, provider.as_deref().unwrap_or(&service), name)
 }
 
-/// Broker-owned enum takes precedence over credential classification and agent prose.
+/// Broker-owned enum takes precedence over credential classification and agent prose:
+/// the one sentence of the reason, and of the first rule flag of a flagged run (ADR 0046).
 pub(super) fn question_headline(question: &QuestionInfo) -> &str {
     if question.reason == crate::broker::route_diagnostics::ReasonKind::Other
         && !question.why.is_empty()
     {
         &question.why
     } else {
-        question.reason.headline()
+        crate::broker::reasons::words(question.reason, &question.flags, "").line
     }
+}
+
+/// The why text of a question when it says more than the title: the card's why, else
+/// the risk note. `None` when it is empty or the same as the title.
+pub(super) fn why_beyond_title(run: &PendingRun) -> Option<&str> {
+    let why = if run.question.why.is_empty() {
+        run.risk.as_str()
+    } else {
+        run.question.why.as_str()
+    };
+    (!why.is_empty() && why != question_headline(&run.question)).then_some(why)
 }
 pub(super) fn classification_line(question: &QuestionInfo) -> Option<String> {
     question
@@ -3517,6 +3529,9 @@ pub(super) fn floating_prompt(app: &mut DesktopApp, ctx: &egui::Context, pending
             egui::ScrollArea::vertical()
                 .max_height(145.0)
                 .show(ui, |ui| {
+                    if let Some(why) = why_beyond_title(run) {
+                        kit::paragraph(ui, why, Font::Callout, kit::palette().secondary);
+                    }
                     for item in &run.question.items {
                         let environment = if item.unconfirmed {
                             "Unknown".to_owned()

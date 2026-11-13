@@ -24,8 +24,8 @@ use apassy::contracts::CredentialKind;
 use apassy::vault::answers::AnswerScope;
 use apassy::vault::usage::{NewItemUse, UseDecidedBy, UseOutcome};
 use apassy::vault::{
-    Declaration, DeclarationSource, DeclarationSources, Environment, Field, ItemDraft,
-    Reversibility, RiskLevel, Scope, SecretValue, Vault,
+    DecidedBy, DecisionEntry, Declaration, DeclarationSource, DeclarationSources, Environment,
+    Field, ItemDraft, Reversibility, RiskLevel, Scope, SecretValue, Vault,
 };
 use tempfile::TempDir;
 
@@ -783,7 +783,17 @@ fn secret_output_always_asks() {
     assert!(fx.broker.approvals().deny(run.id));
     assert_eq!(code(&handle.join().expect("thread")), "approval_denied");
     assert!(
-        run.question.why.contains("secret_output"),
+        run.question
+            .flags
+            .iter()
+            .any(|flag| flag == "secret_output"),
+        "{:?}",
+        run.question.flags
+    );
+    assert!(
+        run.question
+            .why
+            .contains("The command could print the secret."),
         "{}",
         run.question.why
     );
@@ -797,11 +807,81 @@ fn secret_output_always_asks() {
     );
     let env_leak = "jq -n env | base64".to_owned();
     let run = asks(&fx, &fx.project, &env_leak);
+    assert!(!run.question.flags.is_empty(), "{:?}", run.question.flags);
     assert!(
-        run.question.why.contains("Rule flags"),
+        run.question
+            .why
+            .ends_with("A command like this asks every time."),
         "{}",
         run.question.why
     );
+}
+
+/// The newest decision of the vault's decision log.
+fn last_decision(fx: &Fixture) -> DecisionEntry {
+    with_vault(fx, |v| v.decision_log())
+        .expect("decision log")
+        .pop()
+        .expect("a decision")
+        .entry
+}
+
+/// ADR 0046: each decision keeps its reason kind, the remembered answer that its
+/// question offered, and the code of a refusal, as closed words of its policy.
+#[test]
+fn each_decision_stores_its_reason_and_its_offer() {
+    let fx = fixture(Some(declaration(Environment::Staging, RiskLevel::Medium)));
+    // Asked, and the question offers the project answer.
+    let run = asks(&fx, &fx.project, &sentry_call());
+    assert!(
+        run.question
+            .valid_answers
+            .contains(&AnswerKind::InProject(ActionKind::Change)),
+        "{:?}",
+        run.question.valid_answers
+    );
+    let asked = last_decision(&fx);
+    assert_eq!(asked.why().reason, format!("{:?}", run.question.reason));
+    assert_eq!(asked.why().offered, "in_project:change");
+    assert!(asked.why().code.is_empty() && asked.why().codes.is_empty());
+    // A flagged run offers no remembered answer, so the word stays empty.
+    let leak = format!("echo ${ENV_NAME} | base64");
+    let run = asks(&fx, &fx.project, &leak);
+    let flagged = last_decision(&fx);
+    assert!(
+        flagged
+            .rule_flags
+            .iter()
+            .any(|flag| flag == "secret_output"),
+        "{:?}",
+        flagged.rule_flags
+    );
+    assert_eq!(run.question.flags, flagged.rule_flags);
+    assert_eq!(flagged.why().reason, "HookFlags");
+    assert!(flagged.why().offered.is_empty(), "{}", flagged.policy);
+    // Allowed without a question: the remembered answer names its own kind.
+    assert!(answer_with(&fx, &fx.project, &sentry_call(), in_project).ok);
+    assert_eq!(
+        decided_by(&run_in(&fx, &fx.project, &sentry_call())),
+        "Remembered answer"
+    );
+    let allowed = last_decision(&fx);
+    assert_eq!(allowed.decided_by, DecidedBy::Answer);
+    assert_eq!(allowed.why().reason, "RememberedAnswer");
+    assert!(allowed.why().offered.is_empty());
+    // A check refusal keeps its code: the agent may not use the credential.
+    let narrow = fixture_with(
+        Some(declaration(Environment::Staging, RiskLevel::Medium)),
+        false,
+        Duration::from_secs(10),
+    );
+    let response = run_in(&narrow, &narrow.project, &sentry_call());
+    let refused_code = code(&response).to_owned();
+    let refused = last_decision(&narrow);
+    assert_eq!(refused.decided_by, DecidedBy::Rule);
+    assert_eq!(refused.why().reason, "AccessCheck");
+    assert_eq!(refused.why().code, refused_code);
+    assert!(refused.policy.contains("; code "), "{}", refused.policy);
 }
 
 /// A-2: `psql` to a host that is not the host of the database item asks, also with a
@@ -1365,6 +1445,31 @@ fn mfa_old_password_answers_and_model_allow_never_cover_codes_but_explicit_proje
     let run = waiting(&fx);
     fx.broker.approvals().deny(run.id);
     assert_eq!(code(&handle.join().unwrap()), "approval_denied");
+}
+
+/// ADR 0046: a run of one credential with its one-time code keeps whether it also used
+/// the stored value, so a later answer can include the codes.
+#[test]
+fn a_code_run_with_one_credential_stores_its_codes_word() {
+    let fx = mfa_fixture();
+    for (normal, word) in [(true, "with_value"), (false, "only")] {
+        let handle = mfa_later(&fx, mfa_action(&fx, normal, &["true"], &fx.project));
+        let run = waiting(&fx);
+        assert!(fx.broker.approvals().deny(run.id));
+        assert_eq!(code(&handle.join().unwrap()), "approval_denied");
+        let entry = last_decision(&fx);
+        assert_eq!(entry.why().codes, word, "{}", entry.policy);
+        assert!(
+            entry.why().offered.starts_with("in_project:"),
+            "{}",
+            entry.policy
+        );
+    }
+    let handle = mfa_later(&fx, mfa_password_action(&fx));
+    let run = waiting(&fx);
+    assert!(fx.broker.approvals().deny(run.id));
+    assert_eq!(code(&handle.join().unwrap()), "approval_denied");
+    assert!(last_decision(&fx).why().codes.is_empty());
 }
 
 #[test]

@@ -214,6 +214,7 @@ fn question(items: Vec<QuestionItem>, extra: &[AnswerKind]) -> QuestionInfo {
     valid_answers.extend_from_slice(extra);
     QuestionInfo {
         reason: Default::default(),
+        flags: Vec::new(),
         id: 0,
         item_ids: items.iter().map(|item| item.item_id).collect(),
         project: Some(project("acme-billing")),
@@ -2640,6 +2641,19 @@ fn durable_and_evaluation_answers_reuse_global_window_only_while_valid() {
 #[test]
 fn unconfirmed_question_headlines_show_blocking_reason_before_classification() {
     use crate::broker::route_diagnostics::ReasonKind;
+    // A flagged run is titled by its first rule flag (ADR 0046).
+    let mut flagged = question(vec![item(1, "Synthetic sandbox")], &[]);
+    flagged.reason = ReasonKind::HookFlags;
+    flagged.flags = vec!["injection_phrase".to_owned(), "secret_output".to_owned()];
+    assert_eq!(
+        decisions::question_headline(&flagged),
+        "The command could print the secret."
+    );
+    flagged.flags = vec!["injection_phrase".to_owned()];
+    assert_eq!(
+        decisions::question_headline(&flagged),
+        "The request text tells the bouncer what to decide."
+    );
     for (reason, headline) in [
         (
             ReasonKind::MissingTask,

@@ -114,9 +114,9 @@ use crate::vault::usage::{
     CUT_MARK, InteractionKind, MAX_COMMAND_SUMMARY_BYTES, NewItemUse, UseDecidedBy, UseOutcome,
 };
 use crate::vault::{
-    ActivityDecision, AgentSummary, DecisionEntry, DecisionMeta, Declaration, DeclarationSource,
-    DeclarationSources, EnvBinding, EnvDelivery, NewActivity, OwnerLabel, RealOutcome, RequestKind,
-    Vault, VaultErrorKind,
+    ActivityDecision, AgentSummary, DecisionEntry, DecisionMeta, DecisionWhy, Declaration,
+    DeclarationSource, DeclarationSources, EnvBinding, EnvDelivery, NewActivity, OwnerLabel,
+    RealOutcome, RequestKind, Vault, VaultErrorKind,
 };
 
 #[cfg(test)]
@@ -570,7 +570,7 @@ fn hard_rules(
     let mut why = Vec::new();
     if !run.analysis.flags.is_empty() {
         why.push((
-            format!("Rule flags: {}.", run.analysis.flags.join(", ")),
+            super::reasons::flags_sentence(&run.analysis.flags),
             if run
                 .analysis
                 .flags
@@ -613,7 +613,7 @@ fn hard_rules(
                     .is_some_and(Declaration::is_production))
                 || !known.answer.get(index).copied().unwrap_or(false))
         {
-            why.push((format!("\"{}\" includes a one-time code: only an explicit owner project answer covering codes can skip this question.", facts.name), ReasonKind::OneTimeCode));
+            why.push((format!("\"{}\" gives a one-time code. Apassy asks unless you remember the answer for this project.", facts.name), ReasonKind::OneTimeCode));
         }
         let (production, read_only) = production_and_read_only(checked, index);
         if production && read_only && run.remote_brain {
@@ -1073,7 +1073,9 @@ fn run_inner(
                             .collect(),
                         route: format!("{:?}", RouteKind::Refused),
                         reason: format!("{:?}", ReasonKind::AccessCheck),
-                        headline: ReasonKind::AccessCheck.headline().to_owned(),
+                        headline: super::reasons::words(ReasonKind::AccessCheck, &[], code)
+                            .line
+                            .to_owned(),
                         why: vault
                             .command_mask(&items)
                             .map(|mask| mask.summary(&reason, decision_log::MAX_TEXT))
@@ -1097,7 +1099,12 @@ fn run_inner(
                         purpose: request.purpose,
                         reason: &reason,
                     }
-                    .entry(),
+                    .entry()
+                    .with_why(&DecisionWhy {
+                        reason: format!("{:?}", ReasonKind::AccessCheck),
+                        code: code.to_owned(),
+                        ..DecisionWhy::default()
+                    }),
                     &decision_meta(browser_fill.is_some(), None),
                 );
                 return WireResponse::failure(code, reason);
@@ -1439,7 +1446,9 @@ fn run_inner(
         action: action.as_str().to_owned(),
         route: format!("{route_kind:?}"),
         reason: format!("{reason_kind:?}"),
-        headline: reason_kind.headline().to_owned(),
+        headline: super::reasons::words(reason_kind, &analysis.flags, "")
+            .line
+            .to_owned(),
         why: if route == Route::Pattern {
             "Remembered pattern allowed.".to_owned()
         } else {
@@ -1491,6 +1500,38 @@ fn run_inner(
     } else {
         (Vec::new(), None)
     };
+    // The closed words of the decision (ADR 0046): its reason kind, the remembered answer
+    // that the question offers, and the one-time codes of a run with one credential.
+    let why_words = DecisionWhy {
+        reason: format!("{reason_kind:?}"),
+        code: String::new(),
+        offered: valid
+            .iter()
+            .find_map(|answer| match answer {
+                AnswerKind::InProject(action) => Some(format!("in_project:{}", action.as_str())),
+                _ => None,
+            })
+            .or_else(|| {
+                valid.iter().find_map(|answer| match answer {
+                    AnswerKind::Production(action) => {
+                        Some(format!("production:{}", action.as_str()))
+                    }
+                    _ => None,
+                })
+            })
+            .unwrap_or_default(),
+        codes: if items.len() == 1 && !request.codes.is_empty() {
+            if request.items.is_empty() {
+                "only"
+            } else {
+                "with_value"
+            }
+        } else {
+            ""
+        }
+        .to_owned(),
+    };
+    debug_line.offered.clone_from(&why_words.offered);
     let question_items: Vec<QuestionItem> = items
         .iter()
         .zip(&checked.facts)
@@ -1535,7 +1576,7 @@ fn run_inner(
             Route::Pattern => Outcome::Automatic { by_pattern: true },
             _ => Outcome::Automatic { by_pattern: false },
         };
-        let entry = logged.entry(outcome, &risk_note);
+        let entry = logged.entry(outcome, &risk_note).with_why(&why_words);
         let meta = decision_meta(browser_fill.is_some(), None);
         decision_id = record_decision_locked(ctx, &checked, &entry, &meta, pattern.as_ref());
         "allowed".clone_into(&mut debug_line.outcome);
@@ -1621,6 +1662,7 @@ fn run_inner(
                 },
                 items: question_items,
                 valid_answers: valid,
+                flags: analysis.flags.clone(),
             },
         };
         // The answer time of the decision log (schema 27) starts with the question.
@@ -1735,7 +1777,9 @@ fn run_inner(
         }
         // Every owner answer goes to the decision log. A denial blocks the pattern. The
         // vault keeps the answer time for an owner answer only (not a timeout).
-        let mut entry = logged.entry(Outcome::Owner(outcome), &risk_note);
+        let mut entry = logged
+            .entry(Outcome::Owner(outcome), &risk_note)
+            .with_why(&why_words);
         entry.at = learning::now();
         let meta = decision_meta(browser_fill.is_some(), Some(millis(asked_at)));
         decision_id = record_decision_locked(ctx, &checked, &entry, &meta, pattern.as_ref());

@@ -461,6 +461,7 @@ mod tests {
     fn question() -> QuestionInfo {
         QuestionInfo {
             reason: Default::default(),
+            flags: Vec::new(),
             id: 123_456_789_012_345,
             item_ids: vec![7, 9],
             project: Some(Project {
