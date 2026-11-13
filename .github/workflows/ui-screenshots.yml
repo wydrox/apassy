@@ -2,13 +2,18 @@ name: UI screenshots
 
 # Linux screenshots of the desktop app for a list of git refs. For each line
 # "LABEL SHA" of .github/ui-screenshots-refs.txt, one job checks out SHA, builds the
-# demo binary and the tour example, runs that ref's scripts/screenshots-linux.sh under
-# Xvfb (both parts), and uploads the PNGs as the artifact LABEL (LABEL-logs holds the
-# logs). Runs on a push to this branch only; nothing is published or deployed.
+# tour example (and the demo binary), and makes up to three parts under Xvfb:
+#   demo    that ref's scripts/screenshots-linux.sh, demo part (Connect/Devices frames)
+#   scenes  that ref's scripts/screenshots-linux.sh, vault scenes (one run per scene)
+#   walk    the main walk of examples/screenshots.rs (seed + run, as scripts/screenshots.sh
+#           on macOS), driven by .github/ui-screenshots-walk.sh of this branch: walk-*.png
+# The PNGs go to the artifact LABEL, the logs to LABEL-logs. A line "@parts walk" (or
+# "@parts demo scenes walk", ...) in the refs file chooses the parts; without it, all.
+# Runs on a push to this branch only; nothing is published or deployed.
 #
 # Render other refs (in a checkout of this branch, after git fetch origin; 1 to 4 pairs
 # of LABEL and full SHA, one run of this branch at a time):
-#   printf '%s %s\n' before "$(git rev-parse origin/main)" after "$(git rev-parse origin/BRANCH)" > .github/ui-screenshots-refs.txt
+#   printf '%s\n' '@parts walk' "before $(git rev-parse origin/main)" "after $(git rev-parse origin/BRANCH)" > .github/ui-screenshots-refs.txt
 #   git commit -qam "Screenshots of other refs" && git push origin HEAD:verify/ui-screenshots
 # Then: gh run list --branch verify/ui-screenshots -L 1, gh run download RUN_ID -n LABEL -D DIR.
 on:
@@ -28,6 +33,9 @@ jobs:
     timeout-minutes: 5
     outputs:
       matrix: ${{ steps.read.outputs.matrix }}
+      demo: ${{ steps.read.outputs.demo }}
+      scenes: ${{ steps.read.outputs.scenes }}
+      walk: ${{ steps.read.outputs.walk }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -39,11 +47,18 @@ jobs:
           python3 -I - .github/ui-screenshots-refs.txt <<'PY' >>"$GITHUB_OUTPUT"
           import json, re, sys
           rows, seen = [], set()
+          known = ["demo", "scenes", "walk"]
+          wanted = set(known)
           for line in open(sys.argv[1], encoding="utf-8"):
               line = line.strip()
               if not line or line.startswith("#"):
                   continue
               parts = line.split()
+              if parts[0] == "@parts":
+                  wanted = set(parts[1:])
+                  if not wanted or not wanted <= set(known):
+                      sys.exit(f"want '@parts' with some of {known}, got: {line!r}")
+                  continue
               if len(parts) != 2:
                   sys.exit(f"want 'LABEL SHA', got: {line!r}")
               label, ref = parts
@@ -58,6 +73,8 @@ jobs:
           if not 1 <= len(rows) <= 4:
               sys.exit(f"want 1 to 4 refs, got {len(rows)}")
           print("matrix=" + json.dumps({"include": rows}))
+          for part in known:
+              print(f"{part}={'true' if part in wanted else 'false'}")
           PY
           cat "$GITHUB_OUTPUT"
 
@@ -72,11 +89,18 @@ jobs:
     env:
       LABEL: ${{ matrix.label }}
       WANTED_REF: ${{ matrix.ref }}
+      PART_DEMO: ${{ needs.refs.outputs.demo }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ matrix.ref }}
           persist-credentials: false
+      # The walk driver of this branch, beside the checked-out ref.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: _ui-tools
+          persist-credentials: false
+          sparse-checkout: .github
       - name: Record the commit
         run: |
           sha="$(git rev-parse HEAD)"
@@ -111,7 +135,8 @@ jobs:
           cache-bin: false
           save-if: false
       # The builds of scripts/ui-review/on-devbox.sh: the tour example with --all-features,
-      # the demo binary with --features desktop, both in the debug profile.
+      # the demo binary with --features desktop (only for the demo part), both in the
+      # debug profile.
       - name: Build the tour example and the demo binary
         id: build
         env:
@@ -121,17 +146,20 @@ jobs:
           cargo build --locked --all-features --example screenshots
           tour=$((SECONDS - start))
           cp target/debug/examples/screenshots "$RUNNER_TEMP/bin/screenshots"
-          start=$SECONDS
-          cargo build --locked --features desktop --bin apassy
-          demo=$((SECONDS - start))
-          cp target/debug/apassy "$RUNNER_TEMP/bin/apassy-demo"
+          demo=skipped
+          if [ "$PART_DEMO" = true ]; then
+            start=$SECONDS
+            cargo build --locked --features desktop --bin apassy
+            demo=$((SECONDS - start))
+            cp target/debug/apassy "$RUNNER_TEMP/bin/apassy-demo"
+          fi
           df -h / | tee -a "$RUNNER_TEMP/logs/build.txt"
           printf 'build: tour %ss, demo %ss\n' "$tour" "$demo" | tee -a "$RUNNER_TEMP/logs/build.txt"
           printf 'build: tour example %ss, demo binary %ss\n\n' "$tour" "$demo" >>"$GITHUB_STEP_SUMMARY"
       # As in the devbox container: no session bus, no runtime directory of a desktop
       # session, no Wayland display.
       - name: Screenshots, demo part
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && needs.refs.outputs.demo == 'true' }}
         env:
           APASSY_DEMO_BIN: ${{ runner.temp }}/bin/apassy-demo
           APASSY_TOUR_PART: demo
@@ -143,7 +171,7 @@ jobs:
       # fails, so each scene runs on its own and a failed scene does not hide the later
       # ones. The step fails at the end when a scene failed (logs/failed-scenes.txt).
       - name: Screenshots, vault part
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && needs.refs.outputs.scenes == 'true' }}
         env:
           APASSY_TOUR_BIN: ${{ runner.temp }}/bin/screenshots
           APASSY_TOUR_PART: vault
@@ -165,6 +193,21 @@ jobs:
             printf 'failed vault scenes:%s\n\n' "$failed" >>"$GITHUB_STEP_SUMMARY"
             exit 1
           fi
+      # The main walk of the tour (seed + run), also when an earlier part failed. Each
+      # SHOT is captured from the X server as walk-NAME.png; a run with no output for
+      # 60 s stops there and keeps its images (logs/walk-status.txt says where).
+      - name: Screenshots, main walk
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && needs.refs.outputs.walk == 'true' }}
+        env:
+          APASSY_TOUR_BIN: ${{ runner.temp }}/bin/screenshots
+          WALK_SHOT_TIMEOUT: "60"
+        run: |
+          set -o pipefail
+          status=0
+          bash _ui-tools/.github/ui-screenshots-walk.sh "$RUNNER_TEMP/shots" "$RUNNER_TEMP/logs" 2>&1 \
+            | tee "$RUNNER_TEMP/logs/walk.log" || status=$?
+          { echo '```'; cat "$RUNNER_TEMP/logs/walk-status.txt" 2>/dev/null || true; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
+          exit "$status"
       - name: Count the screenshots
         if: always()
         run: |
