@@ -320,6 +320,10 @@ pub(crate) struct UiState {
     /// The step of the start screens.
     #[cfg(feature = "vault")]
     pub(crate) start: start::Step,
+    /// The folders that Settings › Tools › Agent host health inspects. `None`: the
+    /// folders of the environment (`HostDirs::from_env`).
+    #[cfg(feature = "vault")]
+    pub(crate) host_dirs: Option<agent_onboarding::HostDirs>,
     /// The owner collapsed the sidebar to its icons in a wide window (⌃⌘S or the
     /// sidebar button). `ui.json` keeps it across restarts.
     pub(crate) sidebar_hidden: bool,
@@ -1266,14 +1270,14 @@ mod tests {
             "the passphrase is typed two times: {text}"
         );
         assert!(
-            text.contains("Apassy cannot recover a lost passphrase"),
+            text.contains("Apassy cannot recover a lost passphrase. The data is then gone."),
             "{text}"
         );
 
         // Restore keeps its lead; the placeholders say the rest, so no footer explains
         // the empty file field.
         app.ui.start = start::Step::Restore;
-        let (text, _) = draw_frames(&mut app, DEFAULT_SIZE, 3);
+        let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
         assert!(
             text.contains("each credential waits for your review"),
             "{text}"
@@ -1281,6 +1285,15 @@ mod tests {
         assert!(text.contains("Passphrase of the backup"), "{text}");
         assert!(!text.contains("Leave the file empty"), "{text}");
         assert!(!text.contains("The passphrase is the one of"), "{text}");
+        // macOS: the restored file starts without Touch ID unlock, and the form says so.
+        if cfg!(target_os = "linux") {
+            assert!(!text.contains("Touch ID"), "{text}");
+        } else {
+            assert!(
+                text.contains("Touch ID unlock stays off for the restored file."),
+                "{text}"
+            );
+        }
     }
 
     /// The two create fields must match. Both fields are empty after the try.

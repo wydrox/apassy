@@ -2052,60 +2052,95 @@ fn a_watch_row_names_its_kind() {
     );
 }
 
-/// Settings › Tools › Agent host health: one line per host with its state, and the
-/// facts of the check as the hover text and the description of the line, with no
-/// "Details" disclosure.
-#[test]
-fn host_rows_describe_their_facts() {
-    use super::super::agent_onboarding::host_health;
-    use super::super::agent_setup::Host;
+/// The name and the description of each AccessKit node of a frame.
+type Spoken = Vec<(String, Option<String>)>;
 
-    let dir = TempDir::new().expect("temp dir");
-    let (mut app, _) = unlocked_app_with_item(&dir);
-    super::super::open_settings(&mut app, SettingsSection::Tools);
+/// Three frames of the whole window at [`TALL`] with AccessKit on. Returns the painted
+/// texts of the last one, and the name and the description of each node (a label's
+/// text is its AccessKit value, a button's its label).
+fn painted_and_spoken(app: &mut DesktopApp) -> (Vec<(String, Rect)>, Spoken) {
     let ctx = egui::Context::default();
     ctx.enable_accesskit();
-    let mut found = Vec::new();
     let mut texts = Vec::new();
+    let mut nodes = Vec::new();
     for _ in 0..3 {
         let input = RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, TALL)),
             ..Default::default()
         };
-        let output = ctx.run_ui(input, |ui| super::super::draw(&mut app, ui));
-        found = output
+        let output = ctx.run_ui(input, |ui| super::super::draw(app, ui));
+        nodes = output
             .platform_output
             .accesskit_update
             .iter()
             .flat_map(|update| update.nodes.iter())
-            // A label's text is its AccessKit value, a button's its label.
             .filter_map(|(_, node)| {
                 let name = node.label().or_else(|| node.value())?;
-                Some((name.to_owned(), node.description()?.to_owned()))
+                Some((name.to_owned(), node.description().map(str::to_owned)))
             })
-            .collect::<Vec<_>>();
+            .collect();
         texts.clear();
         for clipped in &output.shapes {
             texts_of(&clipped.shape, clipped.clip_rect, &mut texts);
         }
         output.drop_without_applying_deltas();
     }
-    let home = std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_default();
-    for host in [Host::Claude, Host::Codex] {
-        let health = host_health(&home, host);
+    (texts, nodes)
+}
+
+/// Settings › Tools › Agent host health, with the folders of a test home: one line per
+/// host with its state; the facts of the check are the hover text and the description of
+/// the line, with no "Details" disclosure; the button names the host for VoiceOver.
+#[test]
+fn host_rows_describe_their_facts() {
+    use super::super::agent_onboarding::{HostDirs, host_health};
+    use super::super::agent_setup::Host;
+
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, _) = unlocked_app_with_item(&dir);
+    // Claude Code was set up once, and its MCP entry is gone: "Needs repair". Codex
+    // was never set up: "Not connected".
+    let home = dir.path().join("home");
+    let apassy = home.join(".config/apassy");
+    std::fs::create_dir_all(&apassy).expect("dir");
+    std::fs::write(
+        apassy.join("connection-claude.json"),
+        "{\"version\":\"0.5.20\"}",
+    )
+    .expect("write");
+    let dirs = HostDirs {
+        home: home.clone(),
+        claude_config: Some(home.join("claude-config")),
+        codex_home: Some(home.join("codex-home")),
+    };
+    app.ui.host_dirs = Some(dirs.clone());
+    super::super::open_settings(&mut app, SettingsSection::Tools);
+    let (texts, nodes) = painted_and_spoken(&mut app);
+
+    let claude = host_health(&dirs, Host::Claude);
+    assert_eq!(claude.status, "Needs repair: connection missing");
+    assert_eq!(claude.action, Some("Repair…"));
+    let codex = host_health(&dirs, Host::Codex);
+    assert_eq!(codex.status, "Not connected");
+    for (host, health, spoken) in [
+        (Host::Claude, &claude, "Repair Claude Code…"),
+        (Host::Codex, &codex, "Connect Codex…"),
+    ] {
         let line = format!("{}: {}", host.name(), health.status);
         assert!(
             texts.iter().any(|(text, _)| *text == line),
             "{line}: {texts:?}"
         );
         assert!(
-            found
-                .iter()
-                .any(|(name, said)| *name == line && *said == health.details),
-            "{line}: {} in {found:?}",
+            nodes.iter().any(|(name, said)| {
+                *name == line && said.as_deref() == Some(health.details.as_str())
+            }),
+            "{line}: {} in {nodes:?}",
             health.details
+        );
+        assert!(
+            nodes.iter().any(|(name, _)| name == spoken),
+            "{spoken}: {nodes:?}"
         );
     }
     assert!(
@@ -2187,8 +2222,9 @@ fn bouncer_brain_says_ready_only_after_inference_readiness() {
 }
 
 /// Settings › Bouncer says the state of the brain once: without a model server the
-/// "Bouncer" row says "Brain not ready" (with one, the "Bouncer brain" row says it). The
-/// counters since Apassy started stay behind "Show".
+/// "Bouncer" row says "Brain not ready" (with one, the "Bouncer brain" row alone says it:
+/// `settings_show_start_now_and_the_first_start_download` in `vault_tests.rs`). The
+/// "Today" line is [`today_row_says_what_failed_counts`].
 #[test]
 fn the_bouncer_state_shows_once() {
     let dir = TempDir::new().expect("temp dir");
@@ -2205,6 +2241,185 @@ fn the_bouncer_state_shows_once() {
     ] {
         assert!(!text.contains(gone), "{gone}: {text}");
     }
+}
+
+/// One frame of `add` in a panel of 720 × 800 points. Returns the painted texts, and
+/// the name and the description of each AccessKit node (a label's text is its value, a
+/// button's its label). The context must have AccessKit on.
+fn panel_frame(
+    ctx: &egui::Context,
+    events: Vec<Event>,
+    add: impl FnOnce(&mut egui::Ui),
+) -> (Vec<(String, Rect)>, Spoken) {
+    let input = RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(720.0, 800.0))),
+        events,
+        ..Default::default()
+    };
+    let output = ctx.run_ui(input, |ui| {
+        egui::CentralPanel::default().show(ui, add);
+    });
+    let nodes = output
+        .platform_output
+        .accesskit_update
+        .iter()
+        .flat_map(|update| update.nodes.iter())
+        .filter_map(|(_, node)| {
+            let name = node.label().or_else(|| node.value())?;
+            Some((name.to_owned(), node.description().map(str::to_owned)))
+        })
+        .collect();
+    let mut texts = Vec::new();
+    for clipped in &output.shapes {
+        texts_of(&clipped.shape, clipped.clip_rect, &mut texts);
+    }
+    output.drop_without_applying_deltas();
+    (texts, nodes)
+}
+
+/// "Today" says what the bouncer allowed, what asked you, and what failed; what
+/// "failed" counts is the hover text and the description of that painted line.
+#[test]
+fn today_row_says_what_failed_counts() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let counts = crate::vault::BouncerCounts {
+        by_model: 41,
+        asked: 3,
+        failed: 1,
+    };
+    let mut drawn = (Vec::new(), Vec::new());
+    for _ in 0..3 {
+        drawn = panel_frame(&ctx, Vec::new(), |ui| {
+            super::rows::group(ui, Some("Bouncer brain"), |g| {
+                super::today_row(g, Some(counts));
+            });
+        });
+    }
+    let (texts, nodes) = drawn;
+    let today = "Today: 41 allowed · 3 asked you · 1 failed";
+    assert!(texts.iter().any(|(text, _)| text == today), "{texts:?}");
+    assert!(
+        nodes.iter().any(|(name, said)| {
+            name == today && said.as_deref() == Some(super::TODAY_FAILED_HELP)
+        }),
+        "{nodes:?}"
+    );
+    assert!(
+        !texts.iter().any(|(text, _)| text.starts_with("Failed:")),
+        "the explanation is not painted at rest: {texts:?}"
+    );
+
+    let (texts, _) = panel_frame(&ctx, Vec::new(), |ui| {
+        super::rows::group(ui, Some("Bouncer brain"), |g| super::today_row(g, None));
+    });
+    assert!(
+        texts
+            .iter()
+            .any(|(text, _)| text == "Today's bouncer counts are unavailable."),
+        "{texts:?}"
+    );
+}
+
+/// One frame of the "Why it asked" rows of Settings › Bouncer for `counters`, in their
+/// group.
+fn reasons_frame(
+    ctx: &egui::Context,
+    counters: &crate::broker::route_diagnostics::Counters,
+    events: Vec<Event>,
+) -> (Vec<(String, Rect)>, Vec<String>) {
+    let (texts, nodes) = panel_frame(ctx, events, |ui| {
+        let more = super::shows_more(ui, super::REASONS_KEY);
+        super::rows::group(ui, Some("Bouncer brain"), |g| {
+            super::reason_rows(g, counters, more);
+        });
+    });
+    (texts, nodes.into_iter().map(|(name, _)| name).collect())
+}
+
+/// "Why it asked" shows only when a question was asked since Apassy started. Closed, it
+/// is one row with "Show"; "Show" opens the counts since then and the reasons.
+#[test]
+fn why_it_asked_opens_the_counts_since_apassy_started() {
+    use crate::broker::route_diagnostics::{
+        Counters, LatencyBucket, ReasonKind, RouteEvent, RouteKind, TaskMatchBucket, VerdictKind,
+    };
+
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let settle = |counters: &Counters| {
+        let mut last = (Vec::new(), Vec::new());
+        for _ in 0..3 {
+            last = reasons_frame(&ctx, counters, Vec::new());
+        }
+        last
+    };
+    let has = |texts: &[(String, Rect)], needle: &str| texts.iter().any(|(text, _)| text == needle);
+
+    // Nothing was asked: no row.
+    let (texts, _) = settle(&Counters::default());
+    assert!(!has(&texts, "Why it asked"), "{texts:?}");
+
+    let asked = RouteEvent {
+        route: RouteKind::Owner,
+        reason: ReasonKind::ModelUnavailable,
+        inference_attempted: false,
+        verdict: VerdictKind::Asked,
+        latency: LatencyBucket::UnderSecond,
+        task_match: TaskMatchBucket::NotScored,
+    };
+    let counters = Counters {
+        outcomes: [(asked, 2)].into_iter().collect(),
+    };
+    let headline = ReasonKind::ModelUnavailable.headline();
+    let (texts, names) = settle(&counters);
+    assert!(has(&texts, "Why it asked"), "{texts:?}");
+    assert!(has(&texts, "Show"), "{texts:?}");
+    assert!(
+        !texts
+            .iter()
+            .any(|(text, _)| text.contains("Since Apassy started")),
+        "{texts:?}"
+    );
+    assert!(!has(&texts, headline), "{texts:?}");
+    assert!(
+        names
+            .iter()
+            .any(|name| name == "Show why the bouncer asked"),
+        "{names:?}"
+    );
+
+    // Click "Show".
+    let at = texts
+        .iter()
+        .find(|(text, _)| text == "Show")
+        .map(|(_, rect)| rect.center())
+        .expect("Show");
+    let button = |pressed| Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Modifiers::NONE,
+    };
+    reasons_frame(&ctx, &counters, vec![Event::PointerMoved(at)]);
+    reasons_frame(&ctx, &counters, vec![button(true)]);
+    reasons_frame(&ctx, &counters, vec![button(false)]);
+    let (texts, names) = settle(&counters);
+    assert!(has(&texts, &counters.summary()), "{texts:?}");
+    assert!(
+        counters.summary().starts_with("Since Apassy started"),
+        "{}",
+        counters.summary()
+    );
+    assert!(has(&texts, headline), "{texts:?}");
+    assert!(has(&texts, "2"), "{texts:?}");
+    assert!(has(&texts, "Hide"), "{texts:?}");
+    assert!(
+        names
+            .iter()
+            .any(|name| name == "Hide why the bouncer asked"),
+        "{names:?}"
+    );
 }
 
 #[test]

@@ -585,8 +585,60 @@ fn shortcuts_section(ui: &mut egui::Ui) {
     });
 }
 
-/// The hover text of the "Today" row of Settings › Bouncer: what "failed" counts.
+/// The hover text and the description of the "Today" row of Settings › Bouncer: what
+/// "failed" counts.
 const TODAY_FAILED_HELP: &str = "Failed: bouncer brain or readiness errors, or questions left unanswered. These can also count as asked.";
+
+/// "Today" in Settings › Bouncer: what the bouncer allowed, what asked you, and what
+/// failed today. What "failed" counts is the hover text and the description of the
+/// painted line itself. `None`: the counts cannot be read.
+fn today_row(g: &mut rows::Group<'_>, counts: Option<crate::vault::BouncerCounts>) {
+    match counts {
+        Some(counts) => {
+            let today = rows::label_text(&format!(
+                "Today: {} allowed · {} asked you · {} failed",
+                counts.by_model, counts.asked, counts.failed
+            ));
+            g.row(|ui| {
+                rows::text_buttons_detailed(ui, today, Some(TODAY_FAILED_HELP), &[]);
+            });
+        }
+        None => g.tone_row(
+            "Today's bouncer counts are unavailable.",
+            Tone::Warning.text(),
+        ),
+    }
+}
+
+/// The key of "Why it asked" in [`shows_more`].
+const REASONS_KEY: &str = "bouncer-reasons";
+
+/// "Why it asked" · "Show" in Settings › Bouncer, only when a question was asked since
+/// Apassy started; open, the counts since then and the most common reasons. `more` is
+/// [`shows_more`] of [`REASONS_KEY`].
+fn reason_rows(
+    g: &mut rows::Group<'_>,
+    routes: &crate::broker::route_diagnostics::Counters,
+    (id, open): (egui::Id, bool),
+) {
+    let reasons = routes.top_reasons();
+    if reasons.is_empty() {
+        return;
+    }
+    g.line("Why it asked", None, |ui| {
+        show_more_button(ui, id, open, "why the bouncer asked");
+    });
+    if open {
+        g.note_row(routes.summary());
+        for (reason, count) in reasons {
+            g.line(
+                reason.headline(),
+                Some(kit::text(count.to_string(), Font::Body)),
+                |_| {},
+            );
+        }
+    }
+}
 
 /// UTC bounds of the owner's calendar day. Resolve both boundaries in the system
 /// timezone: subtracting today's offset or adding 24 hours fails on DST days.
@@ -628,9 +680,8 @@ fn broker_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let mut action = None;
     let mut runs_on = None;
     let routes = crate::broker::route_diagnostics::snapshot();
-    let reasons = routes.top_reasons();
     // Why the bouncer asked since Apassy started: a look back, behind "Show".
-    let (reasons_id, reasons_open) = shows_more(ui, "bouncer-reasons");
+    let reasons_more = shows_more(ui, REASONS_KEY);
     rows::group(ui, Some("Bouncer brain"), |g| {
         // Who runs the bouncer brain (ADR 0035, plan 0035 J1), above its state.
         runs_on = crate::desktop::brain_hosting_ui::runs_on_rows(app, g);
@@ -648,21 +699,7 @@ fn broker_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 |_| {},
             );
         }
-        if !reasons.is_empty() {
-            g.line("Why it asked", None, |ui| {
-                show_more_button(ui, reasons_id, reasons_open, "why the bouncer asked");
-            });
-            if reasons_open {
-                g.note_row(routes.summary());
-                for &(reason, count) in &reasons {
-                    g.line(
-                        reason.headline(),
-                        Some(kit::text(count.to_string(), Font::Body)),
-                        |_| {},
-                    );
-                }
-            }
-        }
+        reason_rows(g, &routes, reasons_more);
         let shared = app.owner_ui.session.shared_vault();
         let guard = shared
             .lock()
@@ -670,30 +707,7 @@ fn broker_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
         if let Some(vault) = guard.as_ref().filter(|vault| !vault.is_locked()) {
             let counts = local_day_bounds(crate::broker::learning::now())
                 .and_then(|(start, end)| vault.bouncer_counts(start, end).ok());
-            match counts {
-                Some(counts) => {
-                    let value = format!(
-                        "{} decided · {} asked you · {} failed",
-                        counts.by_model, counts.asked, counts.failed
-                    );
-                    g.row(|ui| {
-                        ui.scope(|ui| {
-                            rows::one_line(
-                                ui,
-                                rows::label_text("Today").into(),
-                                Some(kit::text(value, Font::Body)),
-                                |_| {},
-                            );
-                        })
-                        .response
-                        .on_hover_text(TODAY_FAILED_HELP);
-                    });
-                }
-                None => g.tone_row(
-                    "Today's bouncer counts are unavailable.",
-                    Tone::Warning.text(),
-                ),
-            }
+            today_row(g, counts);
         }
     });
     if let Some(choice) = runs_on {
@@ -1288,15 +1302,17 @@ fn command_line_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
             "A first request and hook trust still need verification.",
         ],
     );
+    let dirs = app
+        .ui
+        .host_dirs
+        .clone()
+        .unwrap_or_else(super::agent_onboarding::HostDirs::from_env);
     rows::group_box(ui, |g| {
-        let home = std::env::var_os("HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_default();
         for host in [
             super::agent_setup::Host::Claude,
             super::agent_setup::Host::Codex,
         ] {
-            let health = super::agent_onboarding::host_health(&home, host);
+            let health = super::agent_onboarding::host_health(&dirs, host);
             // The button names the host for VoiceOver: "Repair Claude Code…".
             let spoken = health
                 .action

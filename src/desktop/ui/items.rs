@@ -2483,6 +2483,14 @@ fn agent_settings_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &Owner
 /// The line of "Always ask me" while it is on, and its hover text.
 const ALWAYS_ASK_NOTE: &str = "Each use by an agent waits for you.";
 
+/// The hover text and the description of "Agent Settings (Optional)" in the forms.
+const AGENT_SETTINGS_HINT: &str =
+    "Apassy suggests safe agent settings from the service and the project.";
+
+/// The note of the edit form of a login that signs in with a passkey: saving keeps the
+/// passkey.
+const PASSKEY_ONLY_NOTE: &str = "This login signs in with a passkey. A password is optional. Apassy keeps the passkey when you save.";
+
 /// The line of "Hosts and risk" without a known host. A destination host of a run must
 /// be a known host of the item, unless a fitting answer of the owner names it (`route`
 /// in `crate::broker::run`).
@@ -3896,12 +3904,7 @@ fn item_form(
     if editing {
         // The placeholder "Unchanged" says that a blank field keeps the stored value.
         let (footer, placeholder) = if passkey_only {
-            (
-                Some(
-                    "This login signs in with a passkey. A password is optional. Apassy keeps the passkey when you save.",
-                ),
-                "Optional",
-            )
+            (Some(PASSKEY_ONLY_NOTE), "Optional")
         } else {
             (None, "Unchanged")
         };
@@ -3913,10 +3916,12 @@ fn item_form(
     let agent_key = format!("{salt}-agent-fields");
     let mut agent_open =
         state.is_expanded(&agent_key) || !form.service.is_empty() || !form.project.is_empty();
-    if kit::disclosure(ui, &mut agent_open, "Agent Settings (Optional)")
-        .on_hover_text("Apassy suggests safe agent settings from the service and the project.")
-        .changed()
-    {
+    // What the two fields do is the hover text and the description of the disclosure.
+    let agent_toggle = kit::disclosure(ui, &mut agent_open, "Agent Settings (Optional)");
+    ui.ctx().accesskit_node_builder(agent_toggle.id, |node| {
+        node.set_description(AGENT_SETTINGS_HINT);
+    });
+    if agent_toggle.on_hover_text(AGENT_SETTINGS_HINT).changed() {
         state.set_expanded(&agent_key, agent_open);
     }
     if agent_open {
