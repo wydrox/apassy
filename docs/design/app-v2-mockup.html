@@ -254,7 +254,7 @@ const S={
   exc:{cx:[5],ci:[3,5]},askAlways:{t3:[3]},
   decided:7,auto:128,next:200,
   decs:[
-    {id:'d1',t:'ask',agent:'cc',item:3,project:'acme-billing',action:'Read',cmd:'stripe payouts list --limit 10',host:'api.stripe.com',why:'This is a production key, and there is no production rule for reading in acme-billing yet.',secs:292},
+    {id:'d1',t:'ask',agent:'cc',item:3,project:'acme-billing',action:'Read',cmd:'stripe payouts list --limit 10',host:'api.stripe.com',why:'Production credential. "Stripe live" is a production credential, and nothing is remembered for reading in acme-billing yet.',secs:292},
     {id:'d2',t:'ask',agent:'cx',item:8,project:'newsletter',action:'Change',cmd:'node scripts/summarize.mjs drafts/',host:'api.openai.com',why:'First use of this key in newsletter, and you have not confirmed whether it is a development key.',secs:241},
     {id:'d3',t:'ask',agent:'cc',member:'Ola',item:3,project:'acme-billing',action:'Deploy',cmd:'stripe prices create --product prod_N1 --unit-amount 4900',host:'api.stripe.com',why:'A production deploy with a key shared in Acme team. It needs an owner or a manager of the team.',secs:188},
     {id:'d4',t:'req',agent:'cx',name:'Resend API key',project:'newsletter',purpose:'Send the test email of the newsletter',where:'resend.com/api-keys'},

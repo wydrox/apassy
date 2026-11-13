@@ -121,6 +121,11 @@ it does not claim that a command succeeded. Retries count as separate requests.
 Legacy remote cards retain their existing broker explanation as the headline;
 the relay envelope and authentication contract do not change.
 
+2026-11-13 (ADR 0046): the card's headline is the sentence of its reason, and of the
+first rule flag for a flagged run; the why text names each flag in plain words. A past
+decision in History says the same sentence under "Why", and "Next time" offers what can
+change. The order of the hard rules and the remembered-answer conditions do not change.
+
 
 ## Owner task and floating questions — 2026-11-02
 

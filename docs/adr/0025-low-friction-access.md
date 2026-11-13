@@ -88,6 +88,7 @@ The owner decided on 2026-10-12 that the owner can allow production ("mogę zezw
 - The allowance needs an owner check. It is valid only for the item, the project and the kind of action. A command of another kind still waits.
 - Only an answer of the owner makes an allowance. The bouncer, a remembered pattern and the usage log cannot.
 - The item screen lists the allowances. The owner removes one with one click; the removal needs no owner check.
+- 2026-11-13: a project answer that a question offered can also be saved later from Decisions › History, with its own owner check (ADR 0046).
 
 ### 3c. Who an answer covers
 
@@ -122,6 +123,7 @@ The owner accepted on 2026-10-12 ("pasuje"). The owner did not like levels of tr
 - **The agent screen shows, it does not configure.** It lists what the agent used lately and its exceptions. The owner removes an exception with one click. "Disconnect" is the only other action.
 - **An optional sentence about the agent**, for example "CI agent for client X, only the Stripe test key". The bouncer reads it as context. It is a hint, not a hard limit.
 - Making an exception stricter needs no owner check. Removing one needs an owner check.
+- 2026-11-13: an exception can also come from a past decision in Decisions › History ("Always Ask", "Never"; ADR 0046).
 
 **Upgrade.** The settings of ADR 0012 become exceptions, so nothing gets looser without the owner:
 
