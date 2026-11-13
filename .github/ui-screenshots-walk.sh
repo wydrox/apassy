@@ -47,7 +47,8 @@ trap cleanup EXIT
 
 DISPLAY_NUM=90
 while [ -e "/tmp/.X11-unix/X$DISPLAY_NUM" ]; do DISPLAY_NUM=$((DISPLAY_NUM + 1)); done
-Xvfb ":$DISPLAY_NUM" -screen 0 "${W}x${H}x24" -nolisten tcp >"$WORK/xvfb.log" 2>&1 &
+# The screen is wider than the window: other windows of the app wait right of it.
+Xvfb ":$DISPLAY_NUM" -screen 0 "$((W + 600))x${H}x24" -nolisten tcp >"$WORK/xvfb.log" 2>&1 &
 XVFB_PID=$!
 export DISPLAY=":$DISPLAY_NUM"
 for _ in $(seq 50); do xdotool getdisplaygeometry >/dev/null 2>&1 && break; sleep 0.1; done
@@ -59,31 +60,51 @@ TOTAL=0
 FAILED=0
 : >"$STATUS"
 
-# The window of $APP_PID, moved to 0,0 and given the keyboard focus (no window manager).
+# The main window of $APP_PID: its largest visible window (the walk also opens a small
+# question window, which a capture of the main window on macOS leaves out). The main
+# window goes to 0,0, each other window of the app to the right of it, outside the
+# part of the screen that is captured. Sets WID, WW and WH. No window manager: the
+# script gives the keyboard focus to the main window once.
 WID=""
-find_window() {
-  WID=""
+WW=$W
+WH=$H
+FOCUSED=""
+layout_windows() {
+  local ids id geo ww wh best="" area=0
   for _ in $(seq 100); do
-    WID="$(xdotool search --onlyvisible --pid "$APP_PID" 2>/dev/null | tail -1 || true)"
-    [ -n "$WID" ] && break
+    ids="$(xdotool search --onlyvisible --pid "$APP_PID" 2>/dev/null || true)"
+    best=""
+    area=0
+    for id in $ids; do
+      geo="$(xdotool getwindowgeometry --shell "$id" 2>/dev/null)" || continue
+      ww="$(sed -n 's/^WIDTH=//p' <<<"$geo")"
+      wh="$(sed -n 's/^HEIGHT=//p' <<<"$geo")"
+      if [ $((ww * wh)) -gt "$area" ]; then
+        best="$id" area=$((ww * wh)) WW="$ww" WH="$wh"
+      fi
+    done
+    # The main window is at least half the size of the walk's window.
+    [ -n "$best" ] && [ "$area" -ge $((W * H / 2)) ] && break
     sleep 0.1
   done
-  [ -n "$WID" ] || return 1
+  [ -n "$best" ] || return 1
+  WID="$best"
   xdotool windowmove "$WID" 0 0 2>/dev/null || true
-  xdotool windowfocus "$WID" 2>/dev/null || true
+  for id in $ids; do
+    [ "$id" = "$WID" ] || xdotool windowmove "$id" $((W + 20)) 0 2>/dev/null || true
+  done
+  if [ -z "$FOCUSED" ]; then
+    xdotool windowfocus "$WID" 2>/dev/null || true
+    FOCUSED=1
+  fi
+  [ "$WW" -le "$W" ] 2>/dev/null || WW=$W
+  [ "$WH" -le "$H" ] 2>/dev/null || WH=$H
 }
 
-# The window as a PNG: the root window, cut to the size of the window (the walk makes
-# the window narrower for two views).
+# The main window as a PNG: the root window, cut to the main window (the walk makes it
+# narrower for two views).
 capture() {
-  local file="$1" geo ww=$W wh=$H
-  if [ -n "$WID" ] && geo="$(xdotool getwindowgeometry --shell "$WID" 2>/dev/null)"; then
-    ww="$(sed -n 's/^WIDTH=//p' <<<"$geo")"
-    wh="$(sed -n 's/^HEIGHT=//p' <<<"$geo")"
-    [ "$ww" -le "$W" ] 2>/dev/null || ww=$W
-    [ "$wh" -le "$H" ] 2>/dev/null || wh=$H
-  fi
-  import -window root -crop "${ww}x${wh}+0+0" +repage "$file"
+  import -window root -crop "${WW}x${WH}+0+0" +repage "$1"
 }
 
 # One run. $1: the run name; $2: seed or seed-empty; the rest: environment settings.
@@ -110,6 +131,7 @@ walk_run() {
   exec 3<"$WORK/events"
   local line name last="(none)" count=0 rc=0 why=""
   WID=""
+  FOCUSED=""
   : >"$LOGS/walk-$run-stdout.log"
   while true; do
     if IFS= read -r -t "$TIMEOUT" line <&3; then
@@ -117,7 +139,7 @@ walk_run() {
       case "$line" in
         "SHOT "*)
           name="${line#SHOT }"
-          [ -n "$WID" ] || find_window || { why="no window for SHOT $name"; break; }
+          layout_windows || { why="no window for SHOT $name"; break; }
           sleep 0.5
           capture "$OUT/walk-$name.png"
           echo "captured walk-$name.png"
