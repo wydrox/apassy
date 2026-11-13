@@ -1,0 +1,177 @@
+name: UI screenshots
+
+# Linux screenshots of the desktop app for a list of git refs. For each line
+# "LABEL SHA" of .github/ui-screenshots-refs.txt, one job checks out SHA, builds the
+# demo binary and the tour example, runs that ref's scripts/screenshots-linux.sh under
+# Xvfb (both parts), and uploads the PNGs as the artifact LABEL (LABEL-logs holds the
+# logs). Runs on a push to this branch only; nothing is published or deployed.
+#
+# Render other refs (in a checkout of this branch, after git fetch origin; 1 to 4 pairs
+# of LABEL and full SHA, one run of this branch at a time):
+#   printf '%s %s\n' before "$(git rev-parse origin/main)" after "$(git rev-parse origin/BRANCH)" > .github/ui-screenshots-refs.txt
+#   git commit -qam "Screenshots of other refs" && git push origin HEAD:verify/ui-screenshots
+# Then: gh run list --branch verify/ui-screenshots -L 1, gh run download RUN_ID -n LABEL -D DIR.
+on:
+  push:
+    branches: [verify/ui-screenshots]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ui-screenshots-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  refs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.read.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github
+      - name: Read the list of refs
+        id: read
+        run: |
+          python3 -I - .github/ui-screenshots-refs.txt <<'PY' >>"$GITHUB_OUTPUT"
+          import json, re, sys
+          rows, seen = [], set()
+          for line in open(sys.argv[1], encoding="utf-8"):
+              line = line.strip()
+              if not line or line.startswith("#"):
+                  continue
+              parts = line.split()
+              if len(parts) != 2:
+                  sys.exit(f"want 'LABEL SHA', got: {line!r}")
+              label, ref = parts
+              if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", label):
+                  sys.exit(f"bad label: {label!r}")
+              if not re.fullmatch(r"[0-9a-f]{40}|[A-Za-z0-9][A-Za-z0-9._/-]{0,199}", ref):
+                  sys.exit(f"bad ref: {ref!r}")
+              if label in seen:
+                  sys.exit(f"label twice: {label!r}")
+              seen.add(label)
+              rows.append({"label": label, "ref": ref})
+          if not 1 <= len(rows) <= 4:
+              sys.exit(f"want 1 to 4 refs, got {len(rows)}")
+          print("matrix=" + json.dumps({"include": rows}))
+          PY
+          cat "$GITHUB_OUTPUT"
+
+  shots:
+    needs: refs
+    name: shots (${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.refs.outputs.matrix) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      LABEL: ${{ matrix.label }}
+      WANTED_REF: ${{ matrix.ref }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ matrix.ref }}
+          persist-credentials: false
+      - name: Record the commit
+        run: |
+          sha="$(git rev-parse HEAD)"
+          echo "$LABEL: $WANTED_REF -> $sha"
+          printf '### %s\n\ncommit %s\n\n' "$LABEL" "$sha" >>"$GITHUB_STEP_SUMMARY"
+          mkdir -p "$RUNNER_TEMP/shots" "$RUNNER_TEMP/logs" "$RUNNER_TEMP/bin"
+          printf '%s %s\n' "$LABEL" "$sha" >"$RUNNER_TEMP/logs/commit.txt"
+      # The devbox container runs with the hostname linux-desktop; the app can show it.
+      - name: Set the hostname
+        run: |
+          echo "127.0.1.1 linux-desktop" | sudo tee -a /etc/hosts >/dev/null
+          sudo hostname linux-desktop
+          hostname
+      # Build packages of ci.yml (linux-vault), runtime packages of scripts/ui-review/Dockerfile
+      # (without Chromium and Python, which only the mockup renderer uses).
+      - name: Install build and runtime packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            pkg-config libssl-dev libxkbcommon-dev libwayland-dev libx11-dev libegl1-mesa-dev libgl1-mesa-dev \
+            xvfb x11-utils xdotool imagemagick libgl1-mesa-dri libgl1 libegl1 libglx-mesa0 \
+            libxkbcommon-x11-0 libxkbcommon0 libxcursor1 libxrandr2 libxi6 libx11-xcb1 libwayland-client0 \
+            dbus dbus-x11 gnome-keyring libsecret-tools fonts-dejavu-core fonts-liberation2 procps
+      - name: Install Rust 1.97.0
+        run: rustup toolchain install 1.97.0 --profile minimal
+      # Restore only: the dependencies of the Linux test group of ci.yml (debug profile,
+      # --all-features, the features of the tour build). Nothing is saved.
+      - name: Restore Rust dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: dev-tests-4-0-tests
+          cache-bin: false
+          save-if: false
+      # The builds of scripts/ui-review/on-devbox.sh: the tour example with --all-features,
+      # the demo binary with --features desktop, both in the debug profile.
+      - name: Build the tour example and the demo binary
+        id: build
+        env:
+          CARGO_INCREMENTAL: "0"
+        run: |
+          start=$SECONDS
+          cargo build --locked --all-features --example screenshots
+          tour=$((SECONDS - start))
+          cp target/debug/examples/screenshots "$RUNNER_TEMP/bin/screenshots"
+          start=$SECONDS
+          cargo build --locked --features desktop --bin apassy
+          demo=$((SECONDS - start))
+          cp target/debug/apassy "$RUNNER_TEMP/bin/apassy-demo"
+          df -h / | tee -a "$RUNNER_TEMP/logs/build.txt"
+          printf 'build: tour %ss, demo %ss\n' "$tour" "$demo" | tee -a "$RUNNER_TEMP/logs/build.txt"
+          printf 'build: tour example %ss, demo binary %ss\n\n' "$tour" "$demo" >>"$GITHUB_STEP_SUMMARY"
+      # As in the devbox container: no session bus, no runtime directory of a desktop
+      # session, no Wayland display.
+      - name: Screenshots, demo part
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        env:
+          APASSY_DEMO_BIN: ${{ runner.temp }}/bin/apassy-demo
+          APASSY_TOUR_PART: demo
+        run: |
+          set -o pipefail
+          env -u XDG_RUNTIME_DIR -u WAYLAND_DISPLAY -u DBUS_SESSION_BUS_ADDRESS \
+            bash scripts/screenshots-linux.sh "$RUNNER_TEMP/shots" 2>&1 | tee "$RUNNER_TEMP/logs/demo.log"
+      - name: Screenshots, vault part
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        env:
+          APASSY_TOUR_BIN: ${{ runner.temp }}/bin/screenshots
+          APASSY_TOUR_PART: vault
+          APASSY_TOUR_LOG: ${{ runner.temp }}/logs/app
+        run: |
+          set -o pipefail
+          env -u XDG_RUNTIME_DIR -u WAYLAND_DISPLAY -u DBUS_SESSION_BUS_ADDRESS \
+            bash scripts/screenshots-linux.sh "$RUNNER_TEMP/shots" 2>&1 | tee "$RUNNER_TEMP/logs/vault.log"
+      - name: Count the screenshots
+        if: always()
+        run: |
+          n="$(find "$RUNNER_TEMP/shots" -maxdepth 1 -name '*.png' | wc -l)"
+          echo "$n PNG files"
+          printf '%s PNG files\n\n' "$n" >>"$GITHUB_STEP_SUMMARY"
+          if [ -f "$RUNNER_TEMP/shots/missing.txt" ]; then
+            cp "$RUNNER_TEMP/shots/missing.txt" "$RUNNER_TEMP/logs/missing.txt"
+            { echo '```'; cat "$RUNNER_TEMP/shots/missing.txt"; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload the screenshots
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ matrix.label }}
+          path: ${{ runner.temp }}/shots/*.png
+          retention-days: 7
+          if-no-files-found: warn
+      - name: Upload the logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ matrix.label }}-logs
+          path: ${{ runner.temp }}/logs/
+          retention-days: 7
+          if-no-files-found: warn
