@@ -567,7 +567,7 @@ fn standing_row(
             NextButton {
                 label: "Never",
                 spoken: format!("Never give {item} to {agent}"),
-                style: Style::Destructive,
+                style: Style::DestructiveBordered,
                 act: except(ExceptionKind::Never),
             },
         ],
@@ -592,9 +592,12 @@ pub(crate) fn draw_top(ui: &mut Ui, past: &Past) -> Option<Act> {
     let mut pressed = None;
     kit::section(ui, Some("Next time"), None, |s| {
         for row in &past.next {
+            // The helper puts its first button at the trailing edge: the buttons of a row
+            // go in from the last, so they read left to right as listed.
             let buttons: Vec<(&str, &str, Style)> = row
                 .buttons
                 .iter()
+                .rev()
                 .map(|button| (button.label, button.spoken.as_str(), button.style))
                 .collect();
             let index = s.row(|ui| {
@@ -606,21 +609,27 @@ pub(crate) fn draw_top(ui: &mut Ui, past: &Past) -> Option<Act> {
                 )
             });
             if let Some(index) = index {
-                pressed = row.buttons.get(index).map(|button| button.act.clone());
+                pressed = row
+                    .buttons
+                    .iter()
+                    .rev()
+                    .nth(index)
+                    .map(|button| button.act.clone());
             }
         }
     });
     pressed
 }
 
-/// Draw "Details", closed until the owner opens it: the facts of the decision and the
-/// command of its use.
-pub(crate) fn draw_details(ui: &mut Ui, past: &Past, open: &mut bool) {
+/// Draw "Details", closed until the owner opens it: the "Decision" table (`facts`), the
+/// facts of the decision, and the command of its use.
+pub(crate) fn draw_details(ui: &mut Ui, past: &Past, open: &mut bool, facts: impl FnOnce(&mut Ui)) {
     ui.add_space(4.0);
     kit::disclosure(ui, open, "Details");
     if !*open {
         return;
     }
+    facts(ui);
     kit::section(ui, None, None, |s| {
         for (label, value) in &past.details {
             if label.is_empty() {

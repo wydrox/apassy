@@ -171,7 +171,7 @@ Settings > Bouncer says the state once. The "Bouncer brain" row shows **Ready** 
 after successful inference readiness (a server of this Mac, one started outside Apassy,
 or your own server) and another state otherwise. Without a model server, the row
 "Bouncer" shows **Brain not ready**. **Today** shows model allowances, owner questions,
-and failures ("Today: {n} allowed · {n} asked you · {n} failed"; allowed counts the
+and failures (the row "Today" with the value "{n} allowed · {n} asked you · {n} failed"; allowed counts the
 uses that the bouncer brain allowed without asking you) for the owner's local calendar day from the existing decision log. Both day boundaries use the system timezone, including daylight saving changes. Failed includes model
 or readiness failure and unanswered/invalidated questions; it can overlap asked. The
 hover text of the line says so, and VoiceOver reads it as its description. "Why it asked" · "Show" (only when a question was

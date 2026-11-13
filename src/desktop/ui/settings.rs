@@ -589,18 +589,27 @@ fn shortcuts_section(ui: &mut egui::Ui) {
 /// "failed" counts.
 const TODAY_FAILED_HELP: &str = "Failed: bouncer brain or readiness errors, or questions left unanswered. These can also count as asked.";
 
-/// "Today" in Settings › Bouncer: what the bouncer allowed, what asked you, and what
-/// failed today. What "failed" counts is the hover text and the description of the
-/// painted line itself. `None`: the counts cannot be read.
+/// "Today" in Settings › Bouncer, label and value as the rows beside it: what the
+/// bouncer allowed, what asked you, and what failed today. What "failed" counts is the
+/// hover text and the description of the value, which VoiceOver reads as one phrase
+/// with its label. `None`: the counts cannot be read.
 fn today_row(g: &mut rows::Group<'_>, counts: Option<crate::vault::BouncerCounts>) {
     match counts {
         Some(counts) => {
-            let today = rows::label_text(&format!(
-                "Today: {} allowed · {} asked you · {} failed",
+            let value = format!(
+                "{} allowed · {} asked you · {} failed",
                 counts.by_model, counts.asked, counts.failed
-            ));
+            );
+            let spoken = format!("Today: {value}");
             g.row(|ui| {
-                rows::text_buttons_detailed(ui, today, Some(TODAY_FAILED_HELP), &[]);
+                rows::one_line(ui, rows::label_text("Today").into(), None, |ui| {
+                    let painted = ui.add(egui::Label::new(rows::value(value.as_str())).truncate());
+                    ui.ctx().accesskit_node_builder(painted.id, |node| {
+                        node.set_label(spoken.as_str());
+                        node.set_description(TODAY_FAILED_HELP);
+                    });
+                    painted.on_hover_text(TODAY_FAILED_HELP);
+                });
             });
         }
         None => g.tone_row(

@@ -2783,32 +2783,49 @@ fn a_past_decision_opens_its_why_while_a_question_waits() {
     app.owner_ui
         .session
         .with_vault(|vault| {
-            vault.record_decision(&DecisionEntry {
-                at: super::kit::now() - 600,
-                agent_id: 1,
-                agent_name: "Codex".to_owned(),
-                project_dir: "/synthetic/acme-billing".to_owned(),
-                cwd_rel: ".".to_owned(),
-                items: vec![item_id],
-                user_request: "Check the October payout.".to_owned(),
-                user_request_source: RequestSource::Host,
-                command: vec!["./report.sh".to_owned()],
-                purpose: "Report.".to_owned(),
-                env_names: vec!["GUARDED_KEY".to_owned()],
-                declarations: vec![None],
-                rule_flags: vec!["writes".to_owned()],
-                known_safe: false,
-                model_facts: vec![("task_match".to_owned(), 0.69)],
-                pattern: String::new(),
-                grant_asks: false,
-                asked: false,
-                decision: LoggedDecision::Allow,
-                decided_by: DecidedBy::Model,
-                remembered: false,
-                policy: Thresholds::default().policy_label(),
-                note: "The command fits the task.".to_owned(),
-                instruction: String::new(),
-            })
+            vault
+                .record_decision(&DecisionEntry {
+                    at: super::kit::now() - 600,
+                    agent_id: 1,
+                    agent_name: "Codex".to_owned(),
+                    project_dir: "/synthetic/acme-billing".to_owned(),
+                    cwd_rel: ".".to_owned(),
+                    items: vec![item_id],
+                    user_request: "Check the October payout.".to_owned(),
+                    user_request_source: RequestSource::Host,
+                    command: vec!["./report.sh".to_owned()],
+                    purpose: "Report.".to_owned(),
+                    env_names: vec!["GUARDED_KEY".to_owned()],
+                    declarations: vec![None],
+                    rule_flags: vec!["writes".to_owned()],
+                    known_safe: false,
+                    model_facts: vec![("task_match".to_owned(), 0.69)],
+                    pattern: String::new(),
+                    grant_asks: false,
+                    asked: false,
+                    decision: LoggedDecision::Allow,
+                    decided_by: DecidedBy::Model,
+                    remembered: false,
+                    policy: Thresholds::default().policy_label(),
+                    note: "The command fits the task.".to_owned(),
+                    instruction: String::new(),
+                })
+                .and_then(|decision| {
+                    vault.record_item_use(&crate::vault::usage::NewItemUse {
+                        item_id,
+                        agent_id: None,
+                        agent_name: "Codex".to_owned(),
+                        project_key: "/synthetic/acme-billing/.git".to_owned(),
+                        project_label: "acme-billing".to_owned(),
+                        action: ActionKind::Read,
+                        command_summary: "run ./report.sh".to_owned(),
+                        hosts: Vec::new(),
+                        outcome: crate::vault::usage::UseOutcome::Allowed,
+                        decided_by: crate::vault::usage::UseDecidedBy::Bouncer,
+                        answered_on: String::new(),
+                        decision_log_id: Some(decision),
+                    })
+                })
         })
         .expect("vault")
         .expect("decision");
@@ -2861,9 +2878,22 @@ fn a_past_decision_opens_its_why_while_a_question_waits() {
         assert!(!text.contains(hidden), "{hidden}: {text}");
     }
     assert!(!text.contains("left to answer"), "{text}");
+    // The header names the outcome and the project; the "Decision" table waits behind
+    // "Details" for a decision of this Mac.
+    assert!(
+        text.lines()
+            .any(|line| line.starts_with("Allowed by bouncer · acme-billing · ")),
+        "{text}"
+    );
+    for label in ["Environment", "Outcome"] {
+        assert!(!text.lines().any(|line| line == label), "{label}: {text}");
+    }
     let text = screen.click(&mut app, "Details");
     for expected in facts {
         assert!(text.contains(expected), "{expected}: {text}");
+    }
+    for label in ["Environment", "Outcome"] {
+        assert!(text.lines().any(|line| line == label), "{label}: {text}");
     }
 
     // A new question does not take the place of the chosen decision.
@@ -3089,6 +3119,16 @@ fn a_next_time_button_acts_and_the_detail_follows() {
     screen.frame(&mut app, Vec::new());
     let text = screen.click(&mut app, "Claude Code · Guarded key");
     assert!(text.contains("Next uses by Claude Code"), "{text}");
+    // The two buttons read left to right: "Always Ask", then "Never".
+    let (_, placed) = screen.frame(&mut app, Vec::new());
+    let x = |label: &str| {
+        placed
+            .iter()
+            .find(|(text, _)| text == label)
+            .map(|(_, pos)| pos.x)
+            .unwrap_or_else(|| panic!("{label} is not painted"))
+    };
+    assert!(x("Always Ask") < x("Never"), "{placed:?}");
     let text = screen.click(&mut app, "Always Ask");
     assert_eq!(
         app.status_text,

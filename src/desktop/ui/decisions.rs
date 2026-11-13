@@ -1524,10 +1524,13 @@ pub(super) fn detail_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[
         });
         columns::detail_body(ui, ("past-decision", event.key()), |ui| {
             super::shell::banners(app, ui, pending);
+            // A decision of this Mac keeps its "Decision" table inside "Details".
+            let now = unix_now();
             cards::history_detail(
                 ui,
                 &event,
-                unix_now(),
+                now,
+                detail.is_some(),
                 |ui| {
                     if let Some(detail) = &detail {
                         pressed = super::decisions_past::draw_top(ui, detail);
@@ -1535,7 +1538,9 @@ pub(super) fn detail_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[
                 },
                 |ui| {
                     if let Some(detail) = &detail {
-                        super::decisions_past::draw_details(ui, detail, &mut details_open);
+                        super::decisions_past::draw_details(ui, detail, &mut details_open, |ui| {
+                            cards::decision_facts(ui, &event, now);
+                        });
                     }
                 },
             );

@@ -514,13 +514,16 @@ fn history_row(ui: &mut Ui, row: &HistoryRow, selected: bool) -> egui::Response 
     response
 }
 
-/// The facts of one run of the history, read-only. `top` draws between the header and
-/// "Decision" ("Why" and "Next time" of a decision of this computer), `bottom` after the
-/// facts ("Details"); the vault build fills them, the demo passes nothing.
+/// The facts of one run of the history, read-only. `top` draws under the header ("Why"
+/// and "Next time" of a decision of this computer), `bottom` after it ("Details"); the
+/// vault build fills them, the demo passes nothing. With `facts_in_details` the
+/// "Decision" table is not drawn at rest: `bottom` draws it inside "Details"
+/// ([`decision_facts`]).
 pub(crate) fn history_detail(
     ui: &mut Ui,
     event: &LogEvent,
     now: u64,
+    facts_in_details: bool,
     top: impl FnOnce(&mut Ui),
     bottom: impl FnOnce(&mut Ui),
 ) {
@@ -543,21 +546,45 @@ pub(crate) fn history_detail(
                 )
                 .wrap(),
             );
-            ui.label(
-                kit::text(
-                    format!(
-                        "{} · {}",
-                        event.outcome.text(),
-                        bouncer::ago(event.at, now, offset)
-                    ),
-                    Font::Callout,
-                )
-                .color(kit::palette().secondary),
-            );
+            let when = bouncer::ago(event.at, now, offset);
+            let line = if event.project.is_empty() {
+                format!("{} · {when}", event.outcome.text())
+            } else {
+                format!("{} · {} · {when}", event.outcome.text(), event.project)
+            };
+            ui.label(kit::text(line, Font::Callout).color(kit::palette().secondary));
         });
     });
     ui.add_space(22.0);
     top(ui);
+    if !facts_in_details {
+        decision_facts(ui, event, now);
+    }
+    if !event.command.is_empty() {
+        kit::section(ui, Some("Command"), None, |s| {
+            s.row(|ui| {
+                ui.add(
+                    Label::new(kit::text(&event.command, Font::Mono).color(kit::palette().label))
+                        .wrap(),
+                );
+            });
+        });
+    }
+    bottom(ui);
+    if matches!(event.source, LogSource::Feed(_)) {
+        kit::note(ui, format!("Change on {}.", event.env_name));
+    }
+}
+
+/// The "Decision" table of a run of the history: where, who, what, the project, the
+/// outcome, and the time.
+pub(crate) fn decision_facts(ui: &mut Ui, event: &LogEvent, now: u64) {
+    let offset = bouncer::local_offset(now);
+    let agent = event.agent.clone().unwrap_or_else(|| "An agent".to_owned());
+    let credential = event
+        .credential
+        .clone()
+        .unwrap_or_else(|| "A credential".to_owned());
     kit::section(ui, Some("Decision"), None, |s| {
         s.labeled("Environment", event.env_name.as_str());
         s.labeled("Agent", agent.as_str());
@@ -580,20 +607,6 @@ pub(crate) fn history_detail(
             ),
         );
     });
-    if !event.command.is_empty() {
-        kit::section(ui, Some("Command"), None, |s| {
-            s.row(|ui| {
-                ui.add(
-                    Label::new(kit::text(&event.command, Font::Mono).color(kit::palette().label))
-                        .wrap(),
-                );
-            });
-        });
-    }
-    bottom(ui);
-    if matches!(event.source, LogSource::Feed(_)) {
-        kit::note(ui, format!("Change on {}.", event.env_name));
-    }
 }
 
 // ---- The cards. ----

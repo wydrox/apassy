@@ -220,7 +220,7 @@ fn a_past_decision_shows_one_reason_and_details_on_demand() {
     );
     let closed = painted(|ui| {
         draw_top(ui, &detail);
-        draw_details(ui, &detail, &mut false);
+        draw_details(ui, &detail, &mut false, |_| {});
     });
     for expected in ["Why", detail.reason.as_str(), "Next time", "Details"] {
         assert!(closed.contains(expected), "{expected}: {closed}");
@@ -228,7 +228,7 @@ fn a_past_decision_shows_one_reason_and_details_on_demand() {
     for hidden in ["Asked you", "is declared for the project", "run sentry-cli"] {
         assert!(!closed.contains(hidden), "{hidden}: {closed}");
     }
-    let open = painted(|ui| draw_details(ui, &detail, &mut true));
+    let open = painted(|ui| draw_details(ui, &detail, &mut true, |_| {}));
     for expected in [
         "Asked you",
         "is declared for the project",
@@ -305,7 +305,7 @@ fn always_ask_and_never_act_at_once_and_remove_asks_for_the_check() {
             "Never give Guarded key to Claude Code"
         ]
     );
-    assert_eq!(standing.buttons[1].style, Style::Destructive);
+    assert_eq!(standing.buttons[1].style, Style::DestructiveBordered);
     press(&mut fx, &standing.buttons[0].act);
     assert!(fx.app.owner.check.is_none(), "stricter: no check");
     assert_eq!(
@@ -915,7 +915,14 @@ fn codes_old_rows_and_why_nothing_is_remembered_read_in_plain_words() {
                 None,
                 None,
             )?;
-            vault.set_declaration_sources(item, &crate::vault::DeclarationSources::default())
+            // Production only by default: the environment's source is the default value.
+            vault.set_declaration_sources(
+                item,
+                &crate::vault::DeclarationSources {
+                    environment: crate::vault::DeclarationSource::Default,
+                    ..crate::vault::DeclarationSources::default()
+                },
+            )
         })
         .expect("open")
         .expect("unset");
