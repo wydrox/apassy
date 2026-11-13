@@ -39,9 +39,9 @@ It adds one extra field to each response. The broker must drop that field.
 For Claude Code or Codex, use the guided setup ([ADR 0024](../adr/0024-access-at-first-use.md), changed by [ADR 0025](../adr/0025-low-friction-access.md)):
 
 1. In Agents, click "+" ("Connect an Agent"). Select Claude Code, Codex, or T3 Code. T3 Code uses the settings of Claude Code.
-2. Click "Connect Claude Code" (or "Connect Codex", "Connect T3 Code"). One owner check gives the new token. Apassy saves the host settings and shows "Connection settings saved." There is nothing else to set: the agent sees the names of your credentials without values, and the bouncer decides each use (section 8d).
-3. Start the host from the project folder: `MCP_TOOL_TIMEOUT=660000 apassy-sandbox -- claude --settings '{"sandbox":{"enabled":false}}'` or `apassy-sandbox -- codex -c sandbox_mode=danger-full-access`. The desktop handoff uses these macOS sandbox launch commands. Configuration saved does not prove that an existing host is sandboxed or connected.
-4. In Codex, use `/hooks` to trust the hook. Use `/mcp` to check the connection.
+2. Click "Connect Claude Code" (or "Connect Codex", "Connect T3 Code"). One owner check gives the new token. Apassy saves the host settings and shows "Connection settings saved." with two steps under it. There is nothing else to set: the agent sees the names of your credentials without values, and the bouncer decides each use (section 8d).
+3. Step 1 of the sheet: start the host from the project folder: `MCP_TOOL_TIMEOUT=660000 apassy-sandbox -- claude --settings '{"sandbox":{"enabled":false}}'` or `apassy-sandbox -- codex -c sandbox_mode=danger-full-access`. The desktop handoff uses these macOS sandbox launch commands; the hover of the command says why the tool time-out is 660 seconds. Saved settings do not prove that an existing host is sandboxed or connected.
+4. Step 2 of the sheet: in Codex, run `/hooks` and trust the Apassy hook. Then run `/mcp` in Claude Code or Codex and check that Apassy is connected. The PATH lines for the owner commands are in Settings › Tools, not in this sheet.
 5. Ask the agent for a task that needs a credential. When the bouncer cannot allow the run, Apassy shows a question in Decisions (section 8d).
 
 A process grant and an evaluation scope are not needed for a run. The bouncer

@@ -341,7 +341,8 @@ fn launch_command_at(host: Host, launcher: &std::path::Path) -> String {
     }
 }
 
-/// What the owner does after the settings are saved.
+/// What the owner does after the settings are saved: start the host, then check the
+/// connection in it. The PATH help for the owner commands is in Settings › Tools.
 pub(super) fn after_setup_notes(ui: &mut egui::Ui, host: ConnectHost) {
     let Some(setup) = host.setup() else {
         return;
@@ -354,38 +355,22 @@ pub(super) fn after_setup_notes(ui: &mut egui::Ui, host: ConnectHost) {
     }
     kit::note(
         ui,
-        format!(
-            concat!(
-                "Configuration saved. Start {} ",
-                crate::agent_sandbox!(),
-                " Keep Apassy open and the vault unlocked. Connection and first use still need verification."
-            ),
-            setup.name()
-        ),
+        format!(concat!("1. Start {} ", crate::agent_sandbox!()), setup.name()),
     );
-    kit::note(
-        ui,
-        if setup == Host::Codex {
-            "Use /hooks to trust the Apassy hook, and /mcp to check the connection. A question waits up to 5 minutes for you; the setup gives Codex a tool time-out of 660 seconds."
-        } else {
-            "Use /mcp to check the connection. A question waits up to 5 minutes for you, so start Claude Code with a tool time-out of at least 660 seconds:"
-        },
-    );
-    kit::code_block(ui, &launch_command(setup), 2);
-    kit::note(
-        ui,
-        "For owner CLI commands, install the links in Settings > Tools. In this terminal, add them to PATH:",
-    );
-    kit::code_block(ui, "export PATH=\"$HOME/.local/bin:$PATH\"", 1);
-    kit::note(
-        ui,
-        "For future zsh terminals, run the following once (use ~/.bashrc for Bash):",
-    );
-    kit::code_block(
-        ui,
-        "printf '%s\\n' 'export PATH=\"$HOME/.local/bin:$PATH\"' >> \"$HOME/.zshrc\"",
-        2,
-    );
+    let (timeout, check) = if setup == Host::Codex {
+        (
+            "The setup gave Codex a tool time-out of 660 seconds.",
+            "2. In Codex, run /hooks and trust the Apassy hook. Then run /mcp and check that Apassy is connected.",
+        )
+    } else {
+        (
+            "The time-out of 660 seconds covers the 5 minutes that a question waits for you.",
+            "2. In Claude Code, run /mcp and check that Apassy is connected.",
+        )
+    };
+    kit::code_block(ui, &launch_command(setup), 2).on_hover_text(timeout);
+    kit::note(ui, check);
+    kit::note(ui, "Keep Apassy open and the vault unlocked.");
 }
 
 #[cfg(test)]
@@ -500,6 +485,45 @@ mod tests {
             .expect("registered");
         assert!(app.owner_ui.session.agent_sees_all(ci.id).unwrap());
         assert_eq!(token_shown(&mut app).0, ConnectHost::Other);
+    }
+
+    /// Once the settings are saved, the sheet says what is left in two steps: start the
+    /// host, then check the connection in it. The PATH help is in Settings › Tools.
+    #[test]
+    fn the_saved_sheet_has_two_steps() {
+        use super::super::owner_tests::app_frame;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut app, _) = unlocked_app_with_item(&dir);
+        connect(&mut app, None, ConnectHost::Claude, "");
+        app.confirm_owner_now(OwnerCheck::passphrase(PASS)).unwrap();
+        assert!(app.owner_ui.fresh_token.is_some());
+        let ctx = egui::Context::default();
+        let before = app_frame(&ctx, &mut app);
+        assert!(
+            before.contains("There is nothing else to set"),
+            "the lead before the save: {before}"
+        );
+        // The settings are saved: a test never writes host settings.
+        app.ui.agent_setup.result = Some(Ok(Host::Claude));
+        let text = app_frame(&ctx, &mut app);
+        for expected in [
+            "Connection settings saved.",
+            "1. Start Claude Code",
+            "2. In Claude Code, run /mcp and check that Apassy is connected.",
+            "Keep Apassy open and the vault unlocked.",
+            "Done",
+        ] {
+            assert!(text.contains(expected), "missing {expected}: {text}");
+        }
+        for gone in [
+            "PATH",
+            "do not prove",
+            "Configuration saved",
+            "There is nothing else to set",
+        ] {
+            assert!(!text.contains(gone), "{gone} is painted: {text}");
+        }
     }
 }
 
