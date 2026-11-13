@@ -24,7 +24,7 @@ struct Fixture {
 
 fn fixture() -> Fixture {
     let dir = TempDir::new().expect("temp dir");
-    let (mut app, item) = unlocked_app_with_item(&dir);
+    let (app, item) = unlocked_app_with_item(&dir);
     let agent = app
         .owner_ui
         .session

@@ -44,7 +44,7 @@ pub(crate) fn cache_key(app: &DesktopApp, event_key: u64, now: u64) -> CacheKey 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Act {
     /// Open the owner check for this request: "Allow…", "Remove…", "Turn Off…".
-    Ask(OwnerRequest),
+    Ask(Box<OwnerRequest>),
     /// Remove a remembered answer. Stricter: no owner check.
     RemoveAnswer {
         id: u64,
@@ -295,7 +295,7 @@ fn offer_row(vault: &Vault, decision_id: u64, item_id: u64, why: &DecisionWhy) -
                 action: answer.action,
                 codes: answer.codes.is_some(),
             };
-            let mut row = NextRow::with(text.clone(), "Allow…", text, Act::Ask(request));
+            let mut row = NextRow::with(text.clone(), "Allow…", text, Act::Ask(Box::new(request)));
             row.detail = Some(detail);
             Some(row)
         }
@@ -363,10 +363,10 @@ fn next_rows(
                     "\u{201c}Always ask me\u{201d} is on.",
                     "Turn Off…",
                     "Turn off Always ask me".to_owned(),
-                    Act::Ask(OwnerRequest::AlwaysAskOff {
+                    Act::Ask(Box::new(OwnerRequest::AlwaysAskOff {
                         item_id,
                         name: item.clone(),
-                    }),
+                    })),
                 )
             } else {
                 NextRow::open_credential("\u{201c}Always ask me\u{201d} is on.", item_id)
@@ -454,12 +454,12 @@ fn standing_row(
                 text,
                 "Remove…",
                 format!("Remove {words} for {agent}"),
-                Act::Ask(OwnerRequest::RemoveAgentException {
+                Act::Ask(Box::new(OwnerRequest::RemoveAgentException {
                     agent_id,
                     agent_name: agent.to_owned(),
                     item_id,
                     kind,
-                }),
+                })),
             )
         } else {
             NextRow::open_credential(format!("{text}."), item_id)
@@ -570,7 +570,7 @@ pub(crate) fn draw_details(ui: &mut Ui, past: &Past, open: &mut bool) {
 /// Do what a button of "Next time" says.
 pub(crate) fn act(app: &mut DesktopApp, ctx: &egui::Context, act: Act) {
     match act {
-        Act::Ask(request) => app.ask_owner(request, Some(ctx)),
+        Act::Ask(request) => app.ask_owner(*request, Some(ctx)),
         Act::RemoveAnswer { id, title } => {
             // Stricter: the bouncer asks again. No owner check (ADR 0025 §3b).
             match app
