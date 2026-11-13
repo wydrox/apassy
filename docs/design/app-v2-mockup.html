@@ -254,9 +254,9 @@ const S={
   exc:{cx:[5],ci:[3,5]},askAlways:{t3:[3]},
   decided:7,auto:128,next:200,
   decs:[
-    {id:'d1',t:'ask',agent:'cc',item:3,project:'acme-billing',action:'Read',cmd:'stripe payouts list --limit 10',host:'api.stripe.com',why:'Production credential. "Stripe live" is a production credential, and nothing is remembered for reading in acme-billing yet.',secs:292},
-    {id:'d2',t:'ask',agent:'cx',item:8,project:'newsletter',action:'Change',cmd:'node scripts/summarize.mjs drafts/',host:'api.openai.com',why:'First use of this key in newsletter, and you have not confirmed whether it is a development key.',secs:241},
-    {id:'d3',t:'ask',agent:'cc',member:'Ola',item:3,project:'acme-billing',action:'Deploy',cmd:'stripe prices create --product prod_N1 --unit-amount 4900',host:'api.stripe.com',why:'A production deploy with a key shared in Acme team. It needs an owner or a manager of the team.',secs:188},
+    {id:'d1',t:'ask',agent:'cc',item:3,project:'acme-billing',action:'Read',cmd:'stripe payouts list --limit 10',host:'api.stripe.com',title:'Production credential.',why:'"Stripe live" is a production credential with write or admin scope: you approve each run in "acme-billing": reading.',secs:292},
+    {id:'d2',t:'ask',agent:'cx',item:8,project:'newsletter',action:'Change',cmd:'node scripts/summarize.mjs drafts/',host:'api.openai.com',title:'The bouncer brain wasn\'t sure this fits your task.',why:'Below the needed certainty: task_match 62% (needs 80%).',secs:241},
+    {id:'d3',t:'ask',agent:'cc',member:'Ola',item:3,project:'acme-billing',action:'Deploy',cmd:'stripe prices create --product prod_N1 --unit-amount 4900',host:'api.stripe.com',title:'Production credential.',why:'"Stripe live" is a production credential with write or admin scope: you approve each run in "acme-billing": deploys.',secs:188},
     {id:'d4',t:'req',agent:'cx',name:'Resend API key',project:'newsletter',purpose:'Send the test email of the newsletter',where:'resend.com/api-keys'},
     {id:'d5',t:'fix',item:8,q:'Is OpenAI API a development key?',facts:[['Uses this week','14'],['Projects','newsletter, apassy, scratch'],['Sends to','only api.openai.com'],['Key type','project key']]},
   ],
@@ -393,7 +393,8 @@ function detailDecision(){
     const allow=prod?`Allow ${d.action} in ${d.project}`:`Allow in ${d.project}`;
     return `<div class="tb"><span style="position:relative"><button class="tbtn" data-a="dmenu">${I.more}</button>${S.menu==='dec'?`<div class="menu" style="right:0;top:32px"><button data-a="decide" data-c="never">Never for ${esc(a.name)}</button><button data-a="decide" data-c="askall">Always Ask for ${esc(a.name)}</button><hr><button data-a="decide" data-c="disc">Disconnect ${esc(a.name)}…</button></div>`:''}</span></div>
     <div class="dscroll"><div class="dpad">
-      <div class="hdr">${ava(d.agent,'l')}<div><h1>${esc(d.member?d.member+'’s '+a.name:a.name)} wants to use ${esc(it.name)}</h1><div class="s">${esc(d.project)} · <span class="tm" data-timer2="${d.id}">${fmt(d.secs)}</span> left to answer</div></div></div>
+      <div class="hdr">${ava(d.agent,'l')}<div><h1>${esc(d.title)}</h1><div class="s">${esc(d.project)} · <span class="tm" data-timer2="${d.id}">${fmt(d.secs)}</span> left to answer</div></div></div>
+      <p class="s" style="margin:0 4px 12px;color:var(--secondary)">${esc(d.member?d.member+'’s '+a.name:a.name)} wants to use ${esc(it.name)}</p>
       <div class="grp">
         <div class="fr"><div class="k">Credential</div><div class="v" style="display:flex;justify-content:flex-end;align-items:center;gap:8px;color:var(--label)">${tile(it.pv,'s')}${esc(it.name)}${prod?'<span class="cap red">Production</span>':''}</div></div>
         ${frow('Action',d.action)}

@@ -23,7 +23,9 @@ decision says one line at rest, and the facts come on demand.
 ### 1. Rules
 
 1. One sentence per decision, from a closed table (`broker::reasons`). The same
-   sentence is the title of the question and the "Why" of its History entry. A short
+   sentence is the title of the question and the "Why" of its History entry, except
+   for a browser fill, whose question has its own title, and an injection flag, whose
+   History line names the stored phrase ("Your prompt mentions “bouncer”."). A short
    form (at most 30 characters) is the reason on the History row.
 2. The broker records the reason as closed words. The app never parses prose.
 3. A button of "Next time" does only what the owner can already do elsewhere, plus one
@@ -59,7 +61,10 @@ The why text of a flagged run is the sentence of each flag, in a fixed order. Ho
 such a run keeps asking ("A command like this asks every time.") is for the owner's
 window only: the desktop draws it on the question card, in the floating question
 window, and in "Next time". It is not part of the stored why, the refusal text that an
-agent receives, the relay card, or the log file.
+agent receives, the relay card, or the log file. The question does not repeat what its
+title says: the why text drops the title sentence, and a production question, a folder
+outside a project, or a run without a task, whose why text says that it asks, gets no
+every-time line.
 
 ### 4. The actions of "Next time"
 
@@ -67,7 +72,7 @@ agent receives, the relay card, or the log file.
 |---|---|---|
 | Save the project answer the question offered | **Allow…** | yes: its own action (§5) |
 | Remove the remembered answer | **Remove** | no |
-| Forget the remembered command (active patterns of the agent, project folder, folder, credentials, and command) | **Forget** | no |
+| Forget the remembered command (the active patterns of the agent, the project key of the use, the folder in it, the credentials, and the command; read again at the click, so a pattern blocked since stays) | **Forget** | no |
 | Always ask for the agent | **Always Ask** | no |
 | Never for the agent | **Never** | no |
 | Remove the exception | **Remove…** | yes |
@@ -92,10 +97,16 @@ of these hold:
 5. A use of the decision names the credential, a project, and the same action.
 6. The credential exists now, is not archived, needs no review, has "Always ask me"
    off, and has a declaration that is not production.
-7. Every host of the use is a known host of the credential now. History never adds a
-   host.
+7. Every host of the use is a known host of the credential now, as the run counts
+   them (a code-only run without the host rules of the placeholder). History never
+   adds a host.
 8. No answer exists for the credential, the project, and the action. One that fits is
    reported as saved already; one that does not fit is never changed from History.
+
+When one of these does not hold, the row says why: "Environment not set" or "Always
+ask me" with their button, that the production credential asks every time, or to tick
+"Remember for this project" on the next question. No **Allow…** shows while the agent
+has an "Always ask" exception for the credential: that exception asks in any case.
 
 The save needs its own owner action, `OwnerAction::RememberAnswer`, which names the
 decision, the credential, the project, the action, and the codes. The "How often to
