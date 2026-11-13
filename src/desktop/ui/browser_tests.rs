@@ -881,10 +881,7 @@ fn the_debugging_group_is_drawn_only_with_a_row() {
     assert!(text.contains("Browser Debugging"), "{text}");
     assert!(text.contains("Remove\n"), "{text}");
     let remove = format!("Remove trust of {}", identity.description());
-    assert!(
-        names.iter().any(|name| *name == remove),
-        "{remove}: {names:?}"
-    );
+    assert!(names.contains(&remove), "{remove}: {names:?}");
     assert!(!text.contains("Trust…"), "{text}");
 
     // The protected setting cannot be read: the warning, and no instance row.
