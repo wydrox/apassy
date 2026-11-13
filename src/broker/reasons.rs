@@ -231,17 +231,6 @@ fn short_of(reason: ReasonKind) -> &'static str {
     }
 }
 
-/// The words of a rule flag; [`OTHER_FLAG`] for a name that no table has.
-fn flag_words(flag: &str) -> Words {
-    if flag == INJECTION_FLAG {
-        return INJECTION;
-    }
-    FLAGS
-        .iter()
-        .find(|(name, _)| *name == flag)
-        .map_or(OTHER_FLAG, |(_, words)| *words)
-}
-
 /// The flags of a run in the order of the tables: known flags first, then one entry
 /// for every unknown name, then the injection flag.
 fn ordered_flags(flags: &[String]) -> Vec<Words> {

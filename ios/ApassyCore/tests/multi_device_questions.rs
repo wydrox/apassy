@@ -102,6 +102,7 @@ fn run(ids: [u64; 2]) -> PendingRun {
         remember: None,
         question: QuestionInfo {
             reason: Default::default(),
+            flags: Vec::new(),
             id: 0,
             item_ids: ids.to_vec(),
             project: Some(Project {
