@@ -954,6 +954,7 @@ impl DesktopApp {
     /// The screenshot tour: show the newest past decision of this computer about
     /// `credential` in Decisions, with its "Details" open when `details`. False when
     /// History has none.
+    #[doc(hidden)]
     pub fn tour_past(&mut self, credential: &str, details: bool) -> bool {
         let Some(key) = self
             .ui
@@ -975,6 +976,7 @@ impl DesktopApp {
 
     /// The screenshot tour: select the question of `agent` that waits. False when none
     /// waits.
+    #[doc(hidden)]
     pub fn tour_question(&mut self, agent: &str) -> bool {
         let Some(run) = queue(self)
             .and_then(|(queue, _)| queue.pending().into_iter().find(|run| run.agent == agent))
@@ -988,6 +990,7 @@ impl DesktopApp {
 
     /// The screenshot tour: draw the floating question window inside the main window
     /// (with embedded viewports), so the tour can capture it.
+    #[doc(hidden)]
     pub fn tour_question_window(&mut self, on: bool) {
         self.ui.decisions.tour_window = on;
     }

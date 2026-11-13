@@ -329,8 +329,13 @@ fn model_field_spoofing_in_each_agent_text_field_asks_before_inference() {
             common::last_rule_flags(&fx.vault)
         );
         let message = response.error.unwrap().message;
+        // The agent reads the neutral sentence, never the words that the rule reacts to.
         assert!(
-            message.contains(common::flag_line("injection_phrase")),
+            message.contains(apassy::broker::reasons::INJECTION_FOR_AGENT),
+            "{field}: {message}"
+        );
+        assert!(
+            !message.contains(common::flag_line("injection_phrase")),
             "{field}: {message}"
         );
         assert_eq!(model_calls(&fx), 0, "{field}");

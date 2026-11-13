@@ -1972,7 +1972,8 @@ fn run_inner(
             )),
         };
         if let Some((code, reason, use_outcome, by)) = refusal {
-            let reason = format!("{reason} {log_note}.");
+            // The agent reads this text.
+            let reason = super::reasons::for_agent(&format!("{reason} {log_note}."));
             if own_entry {
                 let mut guard = lock(&ctx.vault);
                 if let Some(vault) = guard

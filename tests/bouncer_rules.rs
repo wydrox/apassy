@@ -952,7 +952,7 @@ fn an_injection_phrase_in_the_user_request_asks_the_owner() {
         common::last_rule_flags(&fx.vault)
     );
     assert!(
-        last_reason(&fx).contains(common::flag_line("injection_phrase")),
+        last_reason(&fx).contains(apassy::broker::reasons::INJECTION_FOR_AGENT),
         "{}",
         last_reason(&fx)
     );
@@ -973,7 +973,7 @@ fn an_injection_phrase_in_the_user_request_asks_the_owner() {
         common::last_rule_flags(&fx.vault)
     );
     assert!(
-        last_reason(&fx).contains(common::flag_line("injection_phrase")),
+        last_reason(&fx).contains(apassy::broker::reasons::INJECTION_FOR_AGENT),
         "purpose: {}",
         last_reason(&fx)
     );

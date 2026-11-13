@@ -264,6 +264,16 @@ pub fn words(reason: ReasonKind, flags: &[String], code: &str) -> Words {
     }
 }
 
+/// The injection sentence in a text that an agent reads: it does not name the words that
+/// the rule reacts to.
+pub const INJECTION_FOR_AGENT: &str = "A safety rule flagged the request text.";
+
+/// `text` as an agent reads it. The owner's window keeps the full sentence.
+#[must_use]
+pub fn for_agent(text: &str) -> String {
+    text.replace(INJECTION.line, INJECTION_FOR_AGENT)
+}
+
 /// The question's why text for a flagged run: the sentence of each flag in order. How
 /// long a run like it asks ([`every_time`]) is for the owner's window only: the desktop
 /// draws it, and it is never part of the stored why, the refusal text, or the card.
