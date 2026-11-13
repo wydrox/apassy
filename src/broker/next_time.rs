@@ -2,27 +2,35 @@
 //! offered, saved later from Decisions › History.
 //!
 //! Only the broker writes answers (`vault::answers`). This module keeps that: the app
-//! calls [`save`] only after the owner check `OwnerAction::ChangeItemRules` for the
-//! item, and it calls [`later_answer`] again under the proof. The saved answer is the
-//! one the card offered: "Allow ACTION in PROJECT" for one credential, for every agent
-//! in the project (ADR 0025 §3c). Every hard rule still runs before it at each use.
+//! calls [`save`] only after the owner check `OwnerAction::RememberAnswer`, which the
+//! "How often to ask" window never covers and no phone can give, and it calls
+//! [`later_answer`] again under the proof. The saved answer is the one the card offered:
+//! "Allow ACTION in PROJECT" for one credential, for every agent in the project (ADR
+//! 0025 §3c). Every hard rule still runs before it at each use.
 //!
 //! [`later_answer`] offers an answer only when all of these hold:
 //!
-//! 1. The decision asked the owner, and the owner allowed it or did not answer. An
-//!    owner denial offers nothing.
+//! 1. The decision was a run that asked the owner, and the owner allowed it or did not
+//!    answer. An owner denial, a refusal, and a browser fill offer nothing.
 //! 2. Its question offered a project answer (`offered in_project:ACTION`). A
 //!    production allowance is not saved from here.
-//! 3. It used one credential and had no rule flag.
-//! 4. A use of the decision names the credential, a project, and the same action.
-//! 5. The credential exists now, is not archived, needs no review, has "Always ask me"
-//!    off, and has a declaration that is not production.
-//! 6. No answer covers the use already.
+//! 3. It used one credential, had no rule flag, and its one-time codes are recorded
+//!    as they were used.
+//! 4. Its agent is still connected, and the vault was not restored after it.
+//! 5. A use of the decision names the credential, a project, and the same action.
+//! 6. The credential exists now, is not archived, needs no review, has "Always ask me"
+//!    off, and has a confirmed declaration that is not production.
+//! 7. Every host of the use is a known host of the credential now: History never adds
+//!    a host.
+//! 8. No answer exists for the credential, the project, and the action. One that fits
+//!    is reported; one that does not fit is never changed from here.
 
 use super::action_kind::ActionKind;
-use crate::vault::answers::{AnswerScope, OwnerAnswer, ProjectRef, normal_host};
-use crate::vault::usage::ItemUse;
-use crate::vault::{DecidedBy, DecisionEntry, LoggedDecision, Vault, VaultResult};
+use crate::vault::answers::{AnswerScope, OwnerAnswer, ProjectRef};
+use crate::vault::{
+    DecidedBy, DecisionEntry, ItemEventKind, LoggedDecision, MAX_ITEM_EVENTS, RequestKind, Vault,
+    VaultResult,
+};
 
 /// The project answer that a past question offered, as [`save`] stores it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,7 +41,7 @@ pub struct LaterAnswer {
     pub item_name: String,
     pub project: ProjectRef,
     pub action: ActionKind,
-    /// The destination hosts of the use.
+    /// The destination hosts of the use, all known hosts of the credential.
     pub hosts: Vec<String>,
     /// `Some` when the run used the one-time codes of the credential: `true` when it
     /// also used the stored value.
@@ -47,7 +55,7 @@ pub enum NotOffered {
     NoOffer,
     /// An answer covers the run already: its ID.
     Covered(u64),
-    /// The credential or the use is not as the question showed it.
+    /// The credential, the use, or an answer is not as the question showed it.
     Changed,
 }
 
@@ -61,7 +69,38 @@ fn asked_without_denial(entry: &DecisionEntry) -> bool {
         }
 }
 
-/// The credential can take a project answer now (condition 5). A read error counts as
+/// The agent of the decision is still connected, and no restore of the vault came after
+/// the decision (condition 4).
+fn still_current(vault: &Vault, entry: &DecisionEntry, item_id: u64) -> bool {
+    let connected = vault.list_agents().is_ok_and(|agents| {
+        agents
+            .iter()
+            .any(|agent| agent.id == entry.agent_id && !agent.revoked)
+    });
+    let restored_after = match vault.item_events(item_id, MAX_ITEM_EVENTS) {
+        Ok(events) => events
+            .iter()
+            .any(|event| event.kind == ItemEventKind::Restored && event.at >= entry.at),
+        Err(_) => true,
+    };
+    connected && !restored_after
+}
+
+/// The one-time codes of the decision's run, from its closed word and its variables
+/// (condition 3): `Ok(None)` without codes, `Ok(Some(with_value))` with them.
+fn codes_of(entry: &DecisionEntry, item_id: u64) -> Result<Option<bool>, NotOffered> {
+    let code_name = crate::vault::mfa::code_env_name(item_id);
+    let had_code = entry.env_names.iter().any(|name| *name == code_name);
+    match entry.why().codes.as_str() {
+        "with_value" => Ok(Some(true)),
+        // A code-only run had no other variable of the credential.
+        "only" if entry.env_names.iter().all(|name| *name == code_name) => Ok(Some(false)),
+        "" if !had_code => Ok(None),
+        _ => Err(NotOffered::NoOffer),
+    }
+}
+
+/// The credential can take a project answer now (condition 6). A read error counts as
 /// a change.
 fn still_answerable(vault: &Vault, item_id: u64) -> Result<String, NotOffered> {
     let changed = |_| NotOffered::Changed;
@@ -72,24 +111,20 @@ fn still_answerable(vault: &Vault, item_id: u64) -> Result<String, NotOffered> {
     {
         return Err(NotOffered::Changed);
     }
+    // A missing declaration, or production from any source (also only by default, the
+    // environment the Mac card cannot remember), is not saved from here.
     match vault.declaration(item_id).map_err(changed)? {
         Some(declaration) if !declaration.is_production() => Ok(details.summary.title),
         _ => Err(NotOffered::Changed),
     }
 }
 
-/// `answer` already covers `use_row` with these codes, as the broker checks a later run.
-fn covers(answer: &OwnerAnswer, use_row: &ItemUse, codes: Option<bool>) -> bool {
-    let values = match codes {
-        None => answer.includes_values,
-        Some(with_value) => answer.includes_codes && (!with_value || answer.includes_values),
-    };
-    values
-        && use_row
-            .hosts
-            .iter()
-            .filter_map(|host| normal_host(host))
-            .all(|host| answer.hosts.contains(&host))
+/// `answer` fits a use with these codes, as the broker checks a later run: it includes
+/// the stored value when the use had it, and the codes when the use had them. The hosts
+/// of the use are known hosts of the credential (condition 7), which every answer covers.
+fn fits(answer: &OwnerAnswer, codes: Option<bool>) -> bool {
+    let value = codes != Some(false);
+    (!value || answer.includes_values) && (codes.is_none() || answer.includes_codes)
 }
 
 /// The project answer that decision `decision_id` offered and that can still be saved.
@@ -98,11 +133,16 @@ pub fn later_answer(vault: &Vault, decision_id: u64) -> Result<LaterAnswer, NotO
         Ok(Some(record)) => record.entry,
         _ => return Err(NotOffered::NoOffer),
     };
-    if !asked_without_denial(&entry) {
+    let request = vault
+        .decision_meta(decision_id)
+        .ok()
+        .flatten()
+        .map(|meta| meta.request);
+    if request != Some(RequestKind::Run) || !asked_without_denial(&entry) {
         return Err(NotOffered::NoOffer);
     }
-    let why = entry.why();
-    let Some(action) = why
+    let Some(action) = entry
+        .why()
         .offered
         .strip_prefix("in_project:")
         .and_then(ActionKind::parse)
@@ -112,9 +152,10 @@ pub fn later_answer(vault: &Vault, decision_id: u64) -> Result<LaterAnswer, NotO
     let &[item_id] = entry.items.as_slice() else {
         return Err(NotOffered::NoOffer);
     };
-    if !entry.rule_flags.is_empty() {
+    if !entry.rule_flags.is_empty() || !still_current(vault, &entry, item_id) {
         return Err(NotOffered::NoOffer);
     }
+    let codes = codes_of(&entry, item_id)?;
     let uses = vault
         .uses_of_decision(decision_id)
         .map_err(|_| NotOffered::Changed)?;
@@ -129,16 +170,13 @@ pub fn later_answer(vault: &Vault, decision_id: u64) -> Result<LaterAnswer, NotO
         return Err(NotOffered::Changed);
     }
     let item_name = still_answerable(vault, item_id)?;
-    let codes = match why.codes.as_str() {
-        "with_value" => Some(true),
-        "only" => Some(false),
-        _ => None,
-    };
-    if let Ok(Some(answer)) =
-        vault.answer_for(item_id, &use_row.project_key, action, AnswerScope::Project)
-        && covers(&answer, &use_row, codes)
-    {
-        return Err(NotOffered::Covered(answer.id));
+    if !super::run::hosts_known_now(vault, item_id, &use_row.hosts) {
+        return Err(NotOffered::Changed);
+    }
+    match vault.answer_for(item_id, &use_row.project_key, action, AnswerScope::Project) {
+        Ok(None) => {}
+        Ok(Some(answer)) if fits(&answer, codes) => return Err(NotOffered::Covered(answer.id)),
+        _ => return Err(NotOffered::Changed),
     }
     Ok(LaterAnswer {
         decision_id,
@@ -155,7 +193,8 @@ pub fn later_answer(vault: &Vault, decision_id: u64) -> Result<LaterAnswer, NotO
 }
 
 /// Save `answer` as the project answer that its question offered. The caller passed
-/// the owner check for the item and called [`later_answer`] again under it.
+/// the owner check for it and called [`later_answer`] again under it, so no answer for
+/// the credential, the project, and the action exists.
 pub(crate) fn save(vault: &mut Vault, answer: &LaterAnswer, answered_on: &str) -> VaultResult<u64> {
     match answer.codes {
         None => vault.remember_answer(
@@ -184,17 +223,19 @@ mod tests {
     use crate::contracts::CredentialKind;
     use crate::vault::usage::{NewItemUse, UseDecidedBy, UseOutcome};
     use crate::vault::{
-        DecisionWhy, Declaration, Environment, Field, ItemDraft, RequestSource, Reversibility,
-        RiskLevel, Scope, SecretValue,
+        DecisionMeta, DecisionWhy, Declaration, Environment, Field, ItemDraft, RequestSource,
+        Reversibility, RiskLevel, Scope, SecretValue,
     };
 
     const PASS: &str = "synthetic-next-time-pass";
     const KEY: &str = "/synthetic/apassy/.git";
+    const HOST: &str = "sentry.io";
 
     struct Fixture {
         _dir: tempfile::TempDir,
         vault: Vault,
         item: u64,
+        agent: u64,
     }
 
     fn declaration(environment: Environment) -> Declaration {
@@ -207,6 +248,7 @@ mod tests {
         }
     }
 
+    /// A credential of the Sentry provider, so `sentry.io` is one of its known hosts.
     fn add_item(vault: &mut Vault, title: &str) -> u64 {
         let item = vault
             .add(ItemDraft {
@@ -223,7 +265,12 @@ mod tests {
             .unwrap()
             .id;
         vault
-            .save_declaration(item, &declaration(Environment::Staging), None, None)
+            .save_declaration(
+                item,
+                &declaration(Environment::Staging),
+                Some("sentry"),
+                None,
+            )
             .unwrap();
         item
     }
@@ -232,11 +279,13 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let mut vault = Vault::create(&dir.path().join("next.db"), PASS).unwrap();
         vault.unlock(PASS).unwrap();
-        let item = add_item(&mut vault, "Synthetic devbox key");
+        let item = add_item(&mut vault, "Synthetic Sentry key");
+        let (agent, _) = vault.register_agent("Claude Code").unwrap();
         Fixture {
             _dir: dir,
             vault,
             item,
+            agent: agent.id,
         }
     }
 
@@ -248,7 +297,10 @@ mod tests {
         offered: &'a str,
         codes: &'a str,
         flags: &'a [&'a str],
+        env_names: Vec<String>,
         action: ActionKind,
+        hosts: &'a [&'a str],
+        request: RequestKind,
     }
 
     impl Default for Asked<'_> {
@@ -260,24 +312,27 @@ mod tests {
                 offered: "in_project:change",
                 codes: "",
                 flags: &[],
+                env_names: vec!["SYNTH_SENTRY_KEY".to_owned()],
                 action: ActionKind::Change,
+                hosts: &[HOST],
+                request: RequestKind::Run,
             }
         }
     }
 
     fn record(fx: &mut Fixture, asked: Asked<'_>) -> u64 {
         let entry = DecisionEntry {
-            at: 1_793_707_200,
-            agent_id: 1,
+            at: crate::broker::learning::now(),
+            agent_id: fx.agent,
             agent_name: "Claude Code".to_owned(),
             project_dir: "/synthetic/apassy".to_owned(),
             cwd_rel: ".".to_owned(),
             items: asked.items.to_vec(),
-            user_request: "Start the devbox.".to_owned(),
+            user_request: "Check the Sentry project.".to_owned(),
             user_request_source: RequestSource::Host,
-            command: vec!["devbox".to_owned(), "up".to_owned()],
-            purpose: "Start the devbox.".to_owned(),
-            env_names: Vec::new(),
+            command: vec!["sentry-cli".to_owned(), "releases".to_owned()],
+            purpose: "Check the Sentry project.".to_owned(),
+            env_names: asked.env_names,
             declarations: Vec::new(),
             rule_flags: asked.flags.iter().map(|flag| (*flag).to_owned()).collect(),
             known_safe: false,
@@ -294,23 +349,26 @@ mod tests {
         }
         .with_why(&DecisionWhy {
             reason: "ForeignProject".to_owned(),
-            code: String::new(),
             offered: asked.offered.to_owned(),
             codes: asked.codes.to_owned(),
             ..DecisionWhy::default()
         });
-        let id = fx.vault.record_decision(&entry).unwrap();
+        let meta = DecisionMeta {
+            request: asked.request,
+            wait_ms: None,
+        };
+        let id = fx.vault.record_decision_with(&entry, &meta).unwrap();
         for item in asked.items {
             fx.vault
                 .record_item_use(&NewItemUse {
                     item_id: *item,
-                    agent_id: Some(1),
+                    agent_id: Some(fx.agent),
                     agent_name: "Claude Code".to_owned(),
                     project_key: KEY.to_owned(),
                     project_label: "apassy".to_owned(),
                     action: asked.action,
-                    command_summary: "run devbox up".to_owned(),
-                    hosts: vec!["api.hetzner.cloud".to_owned()],
+                    command_summary: "run sentry-cli releases".to_owned(),
+                    hosts: asked.hosts.iter().map(|host| (*host).to_owned()).collect(),
                     outcome: UseOutcome::TimedOut,
                     decided_by: UseDecidedBy::Owner,
                     answered_on: String::new(),
@@ -321,32 +379,38 @@ mod tests {
         id
     }
 
+    fn one(fx: &mut Fixture, asked: Asked<'_>) -> u64 {
+        let items = [fx.item];
+        record(
+            fx,
+            Asked {
+                items: &items,
+                ..asked
+            },
+        )
+    }
+
+    fn stored(fx: &Fixture) -> Option<OwnerAnswer> {
+        fx.vault
+            .answer_for(fx.item, KEY, ActionKind::Change, AnswerScope::Project)
+            .unwrap()
+    }
+
     #[test]
     fn a_timed_out_question_that_offered_an_answer_can_be_remembered_later() {
         let mut fx = fixture();
-        let items = [fx.item];
-        let id = record(
-            &mut fx,
-            Asked {
-                items: &items,
-                ..Asked::default()
-            },
-        );
+        let id = one(&mut fx, Asked::default());
         let answer = later_answer(&fx.vault, id).expect("offered");
-        assert_eq!(answer.item_name, "Synthetic devbox key");
+        assert_eq!(answer.item_name, "Synthetic Sentry key");
         assert_eq!(answer.project.key, KEY);
         assert_eq!(answer.project.label, "apassy");
         assert_eq!(answer.action, ActionKind::Change);
         assert_eq!(answer.codes, None);
         let saved = save(&mut fx.vault, &answer, "this computer").unwrap();
-        let stored = fx
-            .vault
-            .answer_for(fx.item, KEY, ActionKind::Change, AnswerScope::Project)
-            .unwrap()
-            .expect("answer");
-        assert_eq!(stored.id, saved);
-        assert!(stored.includes_values && !stored.includes_codes);
-        assert_eq!(stored.answered_on, "this computer");
+        let answer = stored(&fx).expect("answer");
+        assert_eq!(answer.id, saved);
+        assert!(answer.includes_values && !answer.includes_codes);
+        assert_eq!(answer.answered_on, "this computer");
         assert_eq!(
             later_answer(&fx.vault, id),
             Err(NotOffered::Covered(saved)),
@@ -357,69 +421,63 @@ mod tests {
     #[test]
     fn an_approved_question_remembers_its_hosts() {
         let mut fx = fixture();
-        let items = [fx.item];
-        let id = record(
+        let id = one(
             &mut fx,
             Asked {
-                items: &items,
                 decided_by: DecidedBy::Owner,
                 decision: LoggedDecision::Allow,
                 ..Asked::default()
             },
         );
         let answer = later_answer(&fx.vault, id).expect("offered");
-        assert_eq!(answer.hosts, vec!["api.hetzner.cloud".to_owned()]);
+        assert_eq!(answer.hosts, vec![HOST.to_owned()]);
         save(&mut fx.vault, &answer, "this computer").unwrap();
-        let stored = fx
-            .vault
-            .answer_for(fx.item, KEY, ActionKind::Change, AnswerScope::Project)
-            .unwrap()
-            .expect("answer");
-        assert_eq!(stored.hosts, vec!["api.hetzner.cloud".to_owned()]);
+        assert_eq!(stored(&fx).expect("answer").hosts, vec![HOST.to_owned()]);
+    }
+
+    #[test]
+    fn a_use_host_outside_the_known_hosts_is_never_saved_from_history() {
+        let mut fx = fixture();
+        let foreign = one(
+            &mut fx,
+            Asked {
+                hosts: &[HOST, "collector.example.net"],
+                ..Asked::default()
+            },
+        );
+        assert_eq!(later_answer(&fx.vault, foreign), Err(NotOffered::Changed));
+        assert!(stored(&fx).is_none());
     }
 
     #[test]
     fn a_denied_flagged_or_unoffered_decision_offers_nothing() {
         let mut fx = fixture();
-        let items = [fx.item];
-        let denied = record(
+        let denied = one(
             &mut fx,
             Asked {
-                items: &items,
                 decided_by: DecidedBy::Owner,
                 decision: LoggedDecision::Deny,
                 ..Asked::default()
             },
         );
-        let flagged = record(
+        let flagged = one(
             &mut fx,
             Asked {
-                items: &items,
                 flags: &["injection_phrase"],
                 ..Asked::default()
             },
         );
-        let unoffered = record(
+        let unoffered = one(
             &mut fx,
             Asked {
-                items: &items,
                 offered: "",
                 ..Asked::default()
             },
         );
-        let production = record(
+        let production = one(
             &mut fx,
             Asked {
-                items: &items,
                 offered: "production:read",
-                ..Asked::default()
-            },
-        );
-        let other_action = record(
-            &mut fx,
-            Asked {
-                items: &items,
-                action: ActionKind::Read,
                 ..Asked::default()
             },
         );
@@ -430,6 +488,13 @@ mod tests {
                 "{id}"
             );
         }
+        let other_action = one(
+            &mut fx,
+            Asked {
+                action: ActionKind::Read,
+                ..Asked::default()
+            },
+        );
         assert_eq!(
             later_answer(&fx.vault, other_action),
             Err(NotOffered::Changed)
@@ -446,29 +511,64 @@ mod tests {
     }
 
     #[test]
-    fn a_production_always_ask_or_archived_credential_offers_nothing() {
+    fn a_browser_fill_and_a_disconnected_agent_offer_nothing() {
         let mut fx = fixture();
-        let items = [fx.item];
-        let id = record(
+        let fill = one(
             &mut fx,
             Asked {
-                items: &items,
+                request: RequestKind::BrowserFill,
                 ..Asked::default()
             },
         );
+        assert_eq!(later_answer(&fx.vault, fill), Err(NotOffered::NoOffer));
+        // A restore revokes every agent (`prepare_restored`), so a decision before it
+        // has a disconnected agent.
+        let mut fx = fixture();
+        let run = one(&mut fx, Asked::default());
+        fx.vault.revoke_agent(fx.agent).unwrap();
+        assert_eq!(later_answer(&fx.vault, run), Err(NotOffered::NoOffer));
+    }
+
+    #[test]
+    fn a_production_always_ask_or_archived_credential_offers_nothing() {
+        let mut fx = fixture();
+        let id = one(&mut fx, Asked::default());
         assert!(later_answer(&fx.vault, id).is_ok());
-        fx.vault
-            .save_declaration(fx.item, &declaration(Environment::Production), None, None)
-            .unwrap();
+        let save_as = |fx: &mut Fixture, environment| {
+            fx.vault
+                .save_declaration(fx.item, &declaration(environment), Some("sentry"), None)
+                .unwrap();
+        };
+        save_as(&mut fx, Environment::Production);
         assert_eq!(later_answer(&fx.vault, id), Err(NotOffered::Changed));
-        fx.vault
-            .save_declaration(fx.item, &declaration(Environment::Staging), None, None)
-            .unwrap();
+        save_as(&mut fx, Environment::Staging);
         fx.vault.set_always_ask(fx.item, true).unwrap();
         assert_eq!(later_answer(&fx.vault, id), Err(NotOffered::Changed));
         fx.vault.set_always_ask(fx.item, false).unwrap();
         assert!(later_answer(&fx.vault, id).is_ok());
         fx.vault.set_archived(fx.item, true).unwrap();
+        assert_eq!(later_answer(&fx.vault, id), Err(NotOffered::Changed));
+    }
+
+    #[test]
+    fn an_unconfirmed_environment_is_not_saved_from_history() {
+        let mut fx = fixture();
+        let id = one(&mut fx, Asked::default());
+        // Production only by default: the environment the Mac card cannot remember.
+        fx.vault
+            .save_declaration(
+                fx.item,
+                &Declaration {
+                    environment: crate::vault::providers::DEFAULT_ENVIRONMENT,
+                    ..declaration(Environment::Staging)
+                },
+                Some("sentry"),
+                None,
+            )
+            .unwrap();
+        fx.vault
+            .set_declaration_sources(fx.item, &crate::vault::DeclarationSources::default())
+            .unwrap();
         assert_eq!(later_answer(&fx.vault, id), Err(NotOffered::Changed));
     }
 
@@ -489,89 +589,103 @@ mod tests {
 
     #[test]
     fn a_code_run_remembers_codes_only_when_they_were_offered() {
-        let mut fx = fixture();
-        let items = [fx.item];
+        let code_name = crate::vault::mfa::code_env_name;
         for (word, codes, values) in [
             ("with_value", Some(true), true),
             ("only", Some(false), false),
         ] {
-            for earlier in fx.vault.answers_for_item(fx.item).unwrap() {
-                fx.vault.remove_answer(earlier.id).unwrap();
-            }
-            let id = record(
+            let mut fx = fixture();
+            let env_names = if word == "only" {
+                vec![code_name(fx.item)]
+            } else {
+                vec!["SYNTH_SENTRY_KEY".to_owned(), code_name(fx.item)]
+            };
+            let id = one(
                 &mut fx,
                 Asked {
-                    items: &items,
                     codes: word,
+                    env_names,
                     ..Asked::default()
                 },
             );
             let answer = later_answer(&fx.vault, id).expect("offered");
             assert_eq!(answer.codes, codes, "{word}");
             save(&mut fx.vault, &answer, "this computer").unwrap();
-            let stored = fx
-                .vault
-                .answer_for(fx.item, KEY, ActionKind::Change, AnswerScope::Project)
-                .unwrap()
-                .expect("answer");
-            assert!(stored.includes_codes, "{word}");
-            assert_eq!(stored.includes_values, values, "{word}");
+            let answer = stored(&fx).expect("answer");
+            assert!(answer.includes_codes, "{word}");
+            assert_eq!(answer.includes_values, values, "{word}");
         }
-        // A code-only answer does not cover a run that also uses the stored value.
-        let with_value = record(
-            &mut fx,
-            Asked {
-                items: &items,
-                codes: "with_value",
-                ..Asked::default()
-            },
-        );
-        assert!(later_answer(&fx.vault, with_value).is_ok());
         // A run without codes gets an answer without codes.
-        let plain = record(
+        let mut fx = fixture();
+        let plain = one(&mut fx, Asked::default());
+        assert_eq!(later_answer(&fx.vault, plain).unwrap().codes, None);
+    }
+
+    #[test]
+    fn a_code_decision_without_its_codes_word_offers_nothing() {
+        let mut fx = fixture();
+        let code = crate::vault::mfa::code_env_name(fx.item);
+        let missing = one(
             &mut fx,
             Asked {
-                items: &items,
+                env_names: vec!["SYNTH_SENTRY_KEY".to_owned(), code.clone()],
                 ..Asked::default()
             },
         );
-        assert_eq!(later_answer(&fx.vault, plain).unwrap().codes, None);
+        assert_eq!(later_answer(&fx.vault, missing), Err(NotOffered::NoOffer));
+        // "only" with the stored value too does not agree with the variables.
+        let only = one(
+            &mut fx,
+            Asked {
+                codes: "only",
+                env_names: vec!["SYNTH_SENTRY_KEY".to_owned(), code],
+                ..Asked::default()
+            },
+        );
+        assert_eq!(later_answer(&fx.vault, only), Err(NotOffered::NoOffer));
     }
 
     #[test]
     fn an_answer_that_covers_the_run_is_reported() {
         let mut fx = fixture();
-        let items = [fx.item];
         let project = ProjectRef {
             key: KEY.to_owned(),
             label: "apassy".to_owned(),
         };
         let existing = fx
             .vault
-            .remember_answer(
-                fx.item,
-                &project,
-                ActionKind::Change,
-                "iPhone",
-                &["api.hetzner.cloud".to_owned()],
-            )
+            .remember_answer(fx.item, &project, ActionKind::Change, "iPhone", &[])
             .unwrap();
-        let id = record(
-            &mut fx,
-            Asked {
-                items: &items,
-                ..Asked::default()
-            },
-        );
+        let id = one(&mut fx, Asked::default());
         assert_eq!(
             later_answer(&fx.vault, id),
             Err(NotOffered::Covered(existing))
         );
-        // An answer without the host of the use does not cover it.
-        fx.vault.remove_answer(existing).unwrap();
+    }
+
+    #[test]
+    fn an_existing_answer_is_never_replaced_from_history() {
+        let mut fx = fixture();
+        let project = ProjectRef {
+            key: KEY.to_owned(),
+            label: "apassy".to_owned(),
+        };
+        // A code-only answer does not fit a run that used the stored value.
         fx.vault
-            .remember_answer(fx.item, &project, ActionKind::Change, "iPhone", &[])
+            .store_answer(
+                fx.item,
+                &project,
+                ActionKind::Change,
+                AnswerScope::Project,
+                "iPhone",
+                &[HOST.to_owned()],
+                true,
+                false,
+            )
             .unwrap();
-        assert!(later_answer(&fx.vault, id).is_ok());
+        let before = stored(&fx).expect("answer");
+        let id = one(&mut fx, Asked::default());
+        assert_eq!(later_answer(&fx.vault, id), Err(NotOffered::Changed));
+        assert_eq!(stored(&fx), Some(before), "the answer stays as it was");
     }
 }

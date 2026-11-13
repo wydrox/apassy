@@ -1770,13 +1770,14 @@ fn remembering_from_history_needs_the_owner_check_for_that_item() {
                         scope: Scope::ReadWrite,
                         reversibility: Reversibility::Reversible,
                     },
-                    None,
+                    Some("sentry"),
                     None,
                 )
                 .expect("declaration");
+            let (agent, _) = vault.register_agent("Claude Code").expect("agent");
             let entry = DecisionEntry {
-                at: 1_793_707_200,
-                agent_id: 1,
+                at: crate::broker::learning::now(),
+                agent_id: agent.id,
                 agent_name: "Claude Code".to_owned(),
                 project_dir: "/synthetic/apassy".to_owned(),
                 cwd_rel: ".".to_owned(),
@@ -1809,13 +1810,13 @@ fn remembering_from_history_needs_the_owner_check_for_that_item() {
             vault
                 .record_item_use(&NewItemUse {
                     item_id: id,
-                    agent_id: Some(1),
+                    agent_id: Some(agent.id),
                     agent_name: "Claude Code".to_owned(),
                     project_key: KEY.to_owned(),
                     project_label: "apassy".to_owned(),
                     action: ActionKind::Change,
                     command_summary: "run devbox up".to_owned(),
-                    hosts: vec!["api.hetzner.cloud".to_owned()],
+                    hosts: vec!["sentry.io".to_owned()],
                     outcome: UseOutcome::TimedOut,
                     decided_by: UseDecidedBy::Owner,
                     answered_on: String::new(),
@@ -1830,6 +1831,7 @@ fn remembering_from_history_needs_the_owner_check_for_that_item() {
         item_id: id,
         name: "Devbox key".to_owned(),
         project: "apassy".to_owned(),
+        project_key: KEY.to_owned(),
         action: ActionKind::Change,
         codes: false,
     };
@@ -1847,46 +1849,61 @@ fn remembering_from_history_needs_the_owner_check_for_that_item() {
             .is_err()
     );
     assert!(answer(&app).is_none(), "a wrong passphrase saves nothing");
-    // A proof for another credential is refused.
-    app.prepare_owner(request.clone(), None, false);
-    let foreign = app
-        .owner_gate()
-        .authorize(
-            OwnerAction::ChangeItemRules { item_id: other },
-            OwnerCheck::passphrase(PASS_A),
-        )
-        .expect("owner check");
-    app.finish_owner_check_with(foreign);
-    assert!(
-        answer(&app).is_none(),
-        "a proof for another item saves nothing"
-    );
-    // The proof of another credential does not save the decision of this one.
+    // A proof of another action is refused: the rules of the credential, or the same
+    // answer for another credential.
+    let for_other = OwnerAction::RememberAnswer {
+        decision_id: decision,
+        item_id: other,
+        project_key: KEY.to_owned(),
+        project_label: "apassy".to_owned(),
+        action: ActionKind::Change,
+        codes: false,
+    };
+    for action in [
+        OwnerAction::ChangeItemRules { item_id: id },
+        for_other.clone(),
+    ] {
+        app.prepare_owner(request.clone(), None, false);
+        let foreign = app
+            .owner_gate()
+            .authorize(action, OwnerCheck::passphrase(PASS_A))
+            .expect("owner check");
+        app.finish_owner_check_with(foreign);
+        assert!(
+            answer(&app).is_none(),
+            "a proof of another action saves nothing"
+        );
+    }
+    // A proof for another credential does not save the decision of this one.
     let proof = app
         .owner_gate()
-        .authorize(
-            OwnerAction::ChangeItemRules { item_id: other },
-            OwnerCheck::passphrase(PASS_A),
-        )
+        .authorize(for_other.clone(), OwnerCheck::passphrase(PASS_A))
         .expect("owner check");
     assert!(
         app.owner_ui
             .session
-            .remember_from_decision(decision, other, proof)
+            .remember_from_decision(&for_other, proof)
             .is_err()
     );
     assert!(answer(&app).is_none());
     // The check for this credential saves the answer that the question offered.
+    let request_again = request.clone();
     app.prepare_owner(request, None, false);
     app.confirm_owner_now(OwnerCheck::passphrase(PASS_A))
         .expect("owner check");
     let saved = answer(&app).expect("the answer is saved");
     assert_eq!(saved.answered_on, concat!("this ", crate::computer!()));
-    assert_eq!(saved.hosts, vec!["api.hetzner.cloud".to_owned()]);
+    assert_eq!(saved.hosts, vec!["sentry.io".to_owned()]);
     assert_eq!(
         app.status_text,
-        "Allowed. Apassy no longer asks about changes in apassy with Devbox key. Hard checks still apply."
+        "Saved. Runs like this start without asking unless a safety rule flags them."
     );
+    // Opened again, the decision says that the answer is there; nothing changes.
+    app.prepare_owner(request_again, None, false);
+    app.confirm_owner_now(OwnerCheck::passphrase(PASS_A))
+        .expect("owner check");
+    assert_eq!(app.status_text, "Already saved.");
+    assert_eq!(answer(&app), Some(saved));
 }
 
 /// "Is this a development key?" shows while only a default found the environment.

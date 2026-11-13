@@ -723,13 +723,15 @@ pub enum OwnerRequest {
         name: String,
     },
     /// Save the project answer that a past question offered (ADR 0046): "Allow ACTION
-    /// in PROJECT" for the credential, for every agent. It gives authority, so it needs
-    /// the check for the credential, and the session checks the offer again under it.
+    /// in PROJECT" for the credential, for every agent. It gives authority: its own owner
+    /// action, never covered by the owner window, and the session checks the offer again
+    /// under the proof.
     RememberAnswer {
         decision_id: u64,
         item_id: u64,
         name: String,
         project: String,
+        project_key: String,
         action: ActionKind,
         codes: bool,
     },
@@ -1481,10 +1483,25 @@ impl OwnerRequest {
             | Self::Unarchive { item_id, .. }
             | Self::SetEnvironment { item_id, .. }
             | Self::AnswerSuggestion { item_id, .. }
-            | Self::AlwaysAskOff { item_id, .. }
-            | Self::RememberAnswer { item_id, .. } => {
+            | Self::AlwaysAskOff { item_id, .. } => {
                 OwnerAction::ChangeItemRules { item_id: *item_id }
             }
+            Self::RememberAnswer {
+                decision_id,
+                item_id,
+                project,
+                project_key,
+                action,
+                codes,
+                ..
+            } => OwnerAction::RememberAnswer {
+                decision_id: *decision_id,
+                item_id: *item_id,
+                project_key: project_key.clone(),
+                project_label: project.clone(),
+                action: *action,
+                codes: *codes,
+            },
             Self::RemoveAgentException {
                 agent_id,
                 item_id,
@@ -1990,8 +2007,9 @@ impl OwnerRequest {
                 codes,
                 ..
             } => format!(
-                "Allow {} in \"{project}\" with \"{name}\"{} for every agent, without asking, from the next matching use. Hard checks still apply.",
+                "Allow {} in \"{}\" with \"{name}\"{} for every agent, without asking, from the next matching use. Safety rules still ask.",
                 action_words(*action),
+                page_text(project),
                 if *codes { " and its one-time codes" } else { "" }
             ),
             Self::RemoveAgentException {
@@ -3429,20 +3447,15 @@ impl DesktopApp {
                     None => self.set_err("The vault is locked."),
                 }
             }
-            OwnerRequest::RememberAnswer {
-                decision_id,
-                item_id,
-                name,
-                project,
-                action,
-                ..
-            } => match session.remember_from_decision(decision_id, item_id, proof) {
-                Ok(_) => self.set_ok(format!(
-                    "Allowed. Apassy no longer asks about {} in {project} with {name}. Hard checks still apply.",
-                    action_words(action)
-                )),
-                Err(err) => self.set_err(err.message),
-            },
+            request @ OwnerRequest::RememberAnswer { .. } => {
+                match session.remember_from_decision(&request.action(), proof) {
+                    Ok(_) => self.set_ok(
+                        "Saved. Runs like this start without asking unless a safety rule flags them.",
+                    ),
+                    Err(err) if err.code == "already_exists" => self.set_ok("Already saved."),
+                    Err(err) => self.set_err(err.message),
+                }
+            }
             OwnerRequest::RemoveAgentException {
                 agent_id,
                 agent_name,

@@ -502,25 +502,46 @@ impl OwnerSession {
 }
 
 impl OwnerSession {
-    /// Save the project answer that the question of decision `decision_id` offered
-    /// (ADR 0046). It gives authority: it needs the proof for "change the rules of
-    /// `item_id`", and the offer is checked again under it. Returns the answer's ID.
+    /// Save the project answer that the question of a past decision offered (ADR 0046).
+    /// `expected` is the [`OwnerAction::RememberAnswer`] that the owner confirmed; the
+    /// proof must be for exactly it. The offer is checked again under the proof, and it
+    /// must name the same credential, project, action, and codes. Returns the answer's
+    /// ID. An answer that exists already is `already_exists`: History never changes it.
     pub fn remember_from_decision(
         &mut self,
-        decision_id: u64,
-        item_id: u64,
+        expected: &OwnerAction,
         proof: OwnerProof,
     ) -> ModelResult<u64> {
-        let mut vault = self.unlocked_for(proof, &OwnerAction::ChangeItemRules { item_id })?;
+        let OwnerAction::RememberAnswer {
+            decision_id,
+            item_id,
+            project_key,
+            action,
+            codes,
+            ..
+        } = expected
+        else {
+            return Err(fail("invalid_request", "This is not a remembered answer."));
+        };
+        let mut vault = self.unlocked_for(proof, expected)?;
         let refused = || {
             fail(
                 "conflict",
                 "This answer is no longer offered. Answer the next question.",
             )
         };
-        let answer =
-            crate::broker::next_time::later_answer(&vault, decision_id).map_err(|_| refused())?;
-        if answer.item_id != item_id {
+        let answer = match crate::broker::next_time::later_answer(&vault, *decision_id) {
+            Ok(answer) => answer,
+            Err(crate::broker::next_time::NotOffered::Covered(_)) => {
+                return Err(fail("already_exists", "Already saved."));
+            }
+            Err(_) => return Err(refused()),
+        };
+        if answer.item_id != *item_id
+            || answer.project.key != *project_key
+            || answer.action != *action
+            || answer.codes.is_some() != *codes
+        {
             return Err(refused());
         }
         crate::broker::next_time::save(&mut vault, &answer, concat!("this ", crate::computer!()))

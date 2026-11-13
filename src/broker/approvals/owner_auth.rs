@@ -292,6 +292,17 @@ pub enum OwnerAction {
         project: Project,
         action: ActionKind,
     },
+    /// Save the project answer that a past question offered (ADR 0046). The answer
+    /// covers every agent in the project. A phone cannot make it, and the owner window
+    /// never covers it.
+    RememberAnswer {
+        decision_id: u64,
+        item_id: u64,
+        project_key: String,
+        project_label: String,
+        action: ActionKind,
+        codes: bool,
+    },
     /// Remove an exception of an agent (ADR 0025 §3f). It gives authority back.
     RemoveAgentException {
         agent_id: u64,
@@ -912,6 +923,7 @@ impl OwnerAction {
             }
             Self::SetTailnetRoute { on: false } => "Stop the tailnet route",
             Self::RevokeNodeDevice { .. } => "Revoke a device",
+            Self::RememberAnswer { .. } => "Allow without asking",
             _ => "Confirm with Touch ID",
         }
     }
@@ -1031,6 +1043,17 @@ impl OwnerAction {
                 short_device_name(&project.label),
                 action_words(*action),
                 short_name(run)
+            ),
+            Self::RememberAnswer {
+                project_label,
+                action,
+                codes,
+                ..
+            } => format!(
+                "allow {}{} in \"{}\" for all agents, without asking",
+                action_words(*action),
+                if *codes { " with one-time codes" } else { "" },
+                short_device_name(project_label)
             ),
             Self::RemoveAgentException { .. } => "remove an exception of an agent".to_owned(),
             Self::RemoveOwnerAnswer { .. } => "remove a remembered answer".to_owned(),
@@ -1363,6 +1386,7 @@ impl OwnerAction {
                 | Self::EndConnectShare { .. }
                 | Self::ClaimConnectStore { .. }
                 | Self::TakeCopyWithoutHistory { .. }
+                | Self::RememberAnswer { .. }
         )
     }
 
@@ -2942,6 +2966,60 @@ mod evaluation_tests {
             departed(7, "aa", true),
         ] {
             assert_ne!(other, take);
+        }
+    }
+
+    /// ADR 0046: saving a project answer from History always shows the owner check
+    /// with its text, and no phone can give it.
+    #[test]
+    fn remembering_an_answer_always_asks_again_and_no_phone_can_make_it() {
+        let answer = |item_id: u64, key: &str, action: ActionKind, codes: bool| {
+            OwnerAction::RememberAnswer {
+                decision_id: 7,
+                item_id,
+                project_key: key.to_owned(),
+                project_label: "apassy".into(),
+                action,
+                codes,
+            }
+        };
+        let key = "/synthetic/apassy/.git";
+        let remember = |codes: bool| answer(3, key, ActionKind::Change, codes);
+        for action in [remember(false), remember(true)] {
+            assert!(action.needs_fresh_local_check(), "{action:?}");
+            #[cfg(feature = "desktop")]
+            assert!(
+                !LocalWindowSource::LocalOwner.permits(&action),
+                "{action:?}"
+            );
+            assert!(matches!(
+                remote_choice(&action, None),
+                Err(OwnerAuthError::RemoteUnsupported)
+            ));
+            let reason = action.reason();
+            assert!(reason.contains("\"apassy\""), "{reason}");
+            assert!(reason.contains("for all agents"), "{reason}");
+            assert!(reason.chars().count() <= MAX_REASON_CHARS, "{reason}");
+            assert_ne!(action.touch_id_title(), "Confirm with Touch ID");
+        }
+        assert_eq!(
+            remember(false).reason(),
+            "allow changes in \"apassy\" for all agents, without asking"
+        );
+        assert_eq!(
+            remember(true).reason(),
+            "allow changes with one-time codes in \"apassy\" for all agents, without asking"
+        );
+        // Each field is part of the action: a proof for one answer is no proof for another.
+        let base = remember(false);
+        for other in [
+            remember(true),
+            answer(4, key, ActionKind::Change, false),
+            answer(3, "/synthetic/other/.git", ActionKind::Change, false),
+            answer(3, key, ActionKind::Deploy, false),
+            OwnerAction::ChangeItemRules { item_id: 3 },
+        ] {
+            assert_ne!(other, base);
         }
     }
 

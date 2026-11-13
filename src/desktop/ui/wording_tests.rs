@@ -159,6 +159,7 @@ fn owner_requests(item: u64) -> Vec<(&'static str, OwnerRequest)> {
                 item_id: item,
                 name: "Synthetic key".to_owned(),
                 project: "apassy".to_owned(),
+                project_key: "/home/owner/apassy/.git".to_owned(),
                 action: crate::broker::action_kind::ActionKind::Change,
                 codes: true,
             },

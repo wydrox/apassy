@@ -586,6 +586,44 @@ fn injection_source(
         .unwrap_or_default()
 }
 
+/// Each host of `hosts` is a known host of `item_id` now, as a run counts them: the
+/// hosts of its provider, the host rules of its placeholder, and its host field. History
+/// saves an answer only for known hosts (ADR 0046). A read error counts as unknown.
+pub(super) fn hosts_known_now(vault: &Vault, item_id: u64, hosts: &[String]) -> bool {
+    let Ok(provider) = vault.declaration_provider(item_id) else {
+        return false;
+    };
+    let mut known: Vec<String> = provider
+        .as_deref()
+        .map(|provider| {
+            providers::known_hosts(provider)
+                .iter()
+                .filter_map(|host| normal_host(host))
+                .collect()
+        })
+        .unwrap_or_default();
+    match vault.process_binding(item_id) {
+        Ok(Some(binding)) => {
+            if let EnvDelivery::Placeholder(rules) = &binding.delivery {
+                known.extend(
+                    rules
+                        .iter()
+                        .filter_map(|rule| HostRule::parse(rule).ok())
+                        .filter_map(|rule| normal_host(rule.host())),
+                );
+            }
+        }
+        Ok(None) => {}
+        Err(_) => return false,
+    }
+    match vault.item_host_field(item_id) {
+        Ok(field) => known.extend(field.as_deref().and_then(normal_host)),
+        Err(_) => return false,
+    }
+    let hosts: Vec<String> = hosts.iter().filter_map(|host| normal_host(host)).collect();
+    hosts_within(&hosts, known.iter())
+}
+
 /// Each host of `hosts` is in `allowed`.
 fn hosts_within<'a>(hosts: &[String], allowed: impl Iterator<Item = &'a String> + Clone) -> bool {
     hosts
