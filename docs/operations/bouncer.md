@@ -167,10 +167,15 @@ The broker no longer offers evaluation setup and Decisions hides its compatibili
 panel. The authenticated `ApproveAndEvaluate` machinery is retained, without a new
 UI offer. Relay and iPhone wire contracts do not change.
 
-Settings > Bouncer shows **Brain ready** only after successful inference readiness,
-and **Brain not ready** otherwise. **Today** shows model allowances, owner
-questions, and failures for the owner's local calendar day from the existing decision log. Both day boundaries use the system timezone, including daylight saving changes. Failed includes model
-or readiness failure and unanswered/invalidated questions; it can overlap asked.
+Settings > Bouncer says the state once. The "Bouncer brain" row shows **Ready** only
+after successful inference readiness (a server of this Mac, one started outside Apassy,
+or your own server) and another state otherwise. Without a model server, the row
+"Bouncer" shows **Brain not ready**. **Today** shows model allowances, owner questions,
+and failures ("{n} decided · {n} asked you · {n} failed") for the owner's local calendar day from the existing decision log. Both day boundaries use the system timezone, including daylight saving changes. Failed includes model
+or readiness failure and unanswered/invalidated questions; it can overlap asked. The
+hover text of the row says so. "Why it asked" · "Show" (only when a question was
+asked since Apassy started) shows the counts since Apassy started and the most common
+reasons.
 A denial by the owner is not by itself a failure. Patterns and remembered answers
 are not counted as model allowances. The page refreshes every five seconds (faster
 while starting). Locked or unreadable vaults do not invent zero counts.

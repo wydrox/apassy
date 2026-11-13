@@ -199,11 +199,7 @@ fn cases() -> [(
         ),
         (
             SettingsSection::Bouncer,
-            &[
-                "Bouncer brain",
-                "Calibration and learning",
-                "decided by the bouncer gate",
-            ],
+            &["Bouncer brain", "Calibration and learning"],
             &[
                 "Back up now…",
                 "Asked you",
@@ -2056,37 +2052,158 @@ fn a_watch_row_names_its_kind() {
     );
 }
 
+/// Settings › Tools › Agent host health: one line per host with its state, and the
+/// facts of the check as the hover text and the description of the line, with no
+/// "Details" disclosure.
 #[test]
-fn bouncer_status_requires_inference_readiness_including_external_mode() {
-    use crate::broker::model_server::{Problem, ServerState};
-    assert!(super::model_ready(&ServerState::Running {
-        model: None,
-        outside: false
-    }));
-    assert!(super::model_ready(&ServerState::External {
-        up: Some(true),
-        model: None
-    }));
-    for state in [
-        ServerState::Off,
-        ServerState::Stopped,
-        ServerState::External {
-            up: None,
-            model: None,
-        },
-        ServerState::External {
-            up: Some(false),
-            model: None,
-        },
-        ServerState::Starting {
-            since: std::time::Instant::now(),
-        },
-        ServerState::Failed {
-            problem: Problem::Readiness("failed inference".into()),
-            log_tail: vec![],
-        },
+fn host_rows_describe_their_facts() {
+    use super::super::agent_onboarding::host_health;
+    use super::super::agent_setup::Host;
+
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, _) = unlocked_app_with_item(&dir);
+    super::super::open_settings(&mut app, SettingsSection::Tools);
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut found = Vec::new();
+    let mut texts = Vec::new();
+    for _ in 0..3 {
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, TALL)),
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| super::super::draw(&mut app, ui));
+        found = output
+            .platform_output
+            .accesskit_update
+            .iter()
+            .flat_map(|update| update.nodes.iter())
+            // A label's text is its AccessKit value, a button's its label.
+            .filter_map(|(_, node)| {
+                let name = node.label().or_else(|| node.value())?;
+                Some((name.to_owned(), node.description()?.to_owned()))
+            })
+            .collect::<Vec<_>>();
+        texts.clear();
+        for clipped in &output.shapes {
+            texts_of(&clipped.shape, clipped.clip_rect, &mut texts);
+        }
+        output.drop_without_applying_deltas();
+    }
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default();
+    for host in [Host::Claude, Host::Codex] {
+        let health = host_health(&home, host);
+        let line = format!("{}: {}", host.name(), health.status);
+        assert!(
+            texts.iter().any(|(text, _)| *text == line),
+            "{line}: {texts:?}"
+        );
+        assert!(
+            found
+                .iter()
+                .any(|(name, said)| *name == line && *said == health.details),
+            "{line}: {} in {found:?}",
+            health.details
+        );
+    }
+    assert!(
+        !texts.iter().any(|(text, _)| text == "Details"),
+        "{texts:?}"
+    );
+}
+
+/// "Ready" on the "Bouncer brain" row is a readiness statement: the row says it only
+/// after a successful inference warm-up, of a server of this Mac or outside Apassy,
+/// on this Mac or on the owner's server.
+#[test]
+fn bouncer_brain_says_ready_only_after_inference_readiness() {
+    use std::path::PathBuf;
+
+    use crate::broker::model_server::{
+        BouncerSettings, InstallState, Problem, ServerState, Status,
+    };
+    let status = |state: ServerState, remote: bool| Status {
+        settings: BouncerSettings::default(),
+        state,
+        preflight: Err(Problem::NoScript),
+        url: "http://127.0.0.1:1".to_owned(),
+        url_from_env: false,
+        remote,
+        log: PathBuf::from("/tmp/apassy-test/bouncer.log"),
+        laya_dir: PathBuf::from("/tmp/apassy-test/laya"),
+        script_dir: None,
+        owned: false,
+        venv_ready: false,
+        uv: None,
+        venv_args: None,
+        install: InstallState::Idle,
+        install_log: PathBuf::from("/tmp/apassy-test/install.log"),
+        launch_agents: Vec::new(),
+        weights_cached: true,
+    };
+    let words =
+        |state: ServerState, remote: bool| super::model_server_words(&status(state, remote)).0;
+    for remote in [false, true] {
+        for state in [
+            ServerState::Running {
+                model: None,
+                outside: false,
+            },
+            ServerState::Running {
+                model: None,
+                outside: true,
+            },
+            ServerState::External {
+                up: Some(true),
+                model: None,
+            },
+        ] {
+            assert_eq!(words(state.clone(), remote), "Ready", "{state:?}");
+        }
+        for state in [
+            ServerState::Off,
+            ServerState::Stopped,
+            ServerState::External {
+                up: None,
+                model: None,
+            },
+            ServerState::External {
+                up: Some(false),
+                model: None,
+            },
+            ServerState::Starting {
+                since: std::time::Instant::now(),
+            },
+            ServerState::Failed {
+                problem: Problem::Readiness("failed inference".into()),
+                log_tail: vec![],
+            },
+        ] {
+            assert_ne!(words(state.clone(), remote), "Ready", "{state:?}");
+        }
+    }
+}
+
+/// Settings › Bouncer says the state of the brain once: without a model server the
+/// "Bouncer" row says "Brain not ready" (with one, the "Bouncer brain" row says it). The
+/// counters since Apassy started stay behind "Show".
+#[test]
+fn the_bouncer_state_shows_once() {
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, _) = unlocked_app_with_item(&dir);
+    assert!(app.model_server.is_none());
+    super::super::open_settings(&mut app, SettingsSection::Bouncer);
+    let (text, _) = frames(&mut app, TALL);
+    assert_eq!(text.matches("Brain not ready").count(), 1, "{text}");
+    assert!(!text.contains("Brain ready"), "{text}");
+    for gone in [
+        "Since Apassy started",
+        "decided by the bouncer gate",
+        "Failed: bouncer brain",
     ] {
-        assert!(!super::model_ready(&state), "{state:?}");
+        assert!(!text.contains(gone), "{gone}: {text}");
     }
 }
 

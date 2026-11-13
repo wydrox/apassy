@@ -585,13 +585,8 @@ fn shortcuts_section(ui: &mut egui::Ui) {
     });
 }
 
-/// Only states established by a successful inference warm-up are ready.
-fn model_ready(state: &ServerState) -> bool {
-    matches!(
-        state,
-        ServerState::Running { .. } | ServerState::External { up: Some(true), .. }
-    )
-}
+/// The hover text of the "Today" row of Settings › Bouncer: what "failed" counts.
+const TODAY_FAILED_HELP: &str = "Failed: bouncer brain or readiness errors, or questions left unanswered. These can also count as asked.";
 
 /// UTC bounds of the owner's calendar day. Resolve both boundaries in the system
 /// timezone: subtracting today's offset or adding 24 hours fails on DST days.
@@ -632,6 +627,10 @@ fn broker_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let status = server.as_ref().map(|server| server.status());
     let mut action = None;
     let mut runs_on = None;
+    let routes = crate::broker::route_diagnostics::snapshot();
+    let reasons = routes.top_reasons();
+    // Why the bouncer asked since Apassy started: a look back, behind "Show".
+    let (reasons_id, reasons_open) = shows_more(ui, "bouncer-reasons");
     rows::group(ui, Some("Bouncer brain"), |g| {
         // Who runs the bouncer brain (ADR 0035, plan 0035 J1), above its state.
         runs_on = crate::desktop::brain_hosting_ui::runs_on_rows(app, g);
@@ -639,29 +638,30 @@ fn broker_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
             action = model_server_rows(g, status);
         }
         broker_rows(app, g);
-        let ready = status
-            .as_ref()
-            .is_some_and(|status| model_ready(&status.state));
-        g.line(
-            "Bouncer",
-            Some(kit::text(
-                if ready {
-                    "Brain ready"
-                } else {
-                    "Brain not ready"
-                },
-                Font::Body,
-            )),
-            |_| {},
-        );
-        let routes = crate::broker::route_diagnostics::snapshot();
-        g.note_row(routes.summary());
-        for (reason, count) in routes.top_reasons() {
+        // With a model server, the "Bouncer brain" row says whether the brain is ready
+        // ("Ready" only after a successful inference warm-up). Without one, this row
+        // says that it is not.
+        if status.is_none() {
             g.line(
-                reason.headline(),
-                Some(kit::text(count.to_string(), Font::Body)),
+                "Bouncer",
+                Some(kit::text("Brain not ready", Font::Body)),
                 |_| {},
             );
+        }
+        if !reasons.is_empty() {
+            g.line("Why it asked", None, |ui| {
+                show_more_button(ui, reasons_id, reasons_open, "why the bouncer asked");
+            });
+            if reasons_open {
+                g.note_row(routes.summary());
+                for &(reason, count) in &reasons {
+                    g.line(
+                        reason.headline(),
+                        Some(kit::text(count.to_string(), Font::Body)),
+                        |_| {},
+                    );
+                }
+            }
         }
         let shared = app.owner_ui.session.shared_vault();
         let guard = shared
@@ -672,18 +672,22 @@ fn broker_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 .and_then(|(start, end)| vault.bouncer_counts(start, end).ok());
             match counts {
                 Some(counts) => {
-                    g.line(
-                        "Today",
-                        Some(kit::text(
-                            format!(
-                                "{} decided by the bouncer gate · {} asked you · {} failed",
-                                counts.by_model, counts.asked, counts.failed
-                            ),
-                            Font::Body,
-                        )),
-                        |_| {},
+                    let value = format!(
+                        "{} decided · {} asked you · {} failed",
+                        counts.by_model, counts.asked, counts.failed
                     );
-                    g.note_row("Failed: bouncer brain or readiness errors, or questions left unanswered. These can also count as asked.");
+                    g.row(|ui| {
+                        ui.scope(|ui| {
+                            rows::one_line(
+                                ui,
+                                rows::label_text("Today").into(),
+                                Some(kit::text(value, Font::Body)),
+                                |_| {},
+                            );
+                        })
+                        .response
+                        .on_hover_text(TODAY_FAILED_HELP);
+                    });
                 }
                 None => g.tone_row(
                     "Today's bouncer counts are unavailable.",
@@ -1276,43 +1280,41 @@ fn command_line_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
         }
     });
     let mut repair = None;
-    rows::section(
+    rows::group_label_with_help(
         ui,
-        Some("Agent host health"),
-        Some(
-            "Configuration is inspected locally. A first request and hook trust still need verification.",
-        ),
-        |g| {
-            for host in [
-                super::agent_setup::Host::Claude,
-                super::agent_setup::Host::Codex,
-            ] {
-                let home = std::env::var_os("HOME")
-                    .map(std::path::PathBuf::from)
-                    .unwrap_or_default();
-                let health = super::agent_onboarding::host_health(&home, host);
-                g.line_note(
-                    host.name(),
-                    None,
-                    Some(kit::text(&health.status, Font::Callout).color(kit::palette().secondary)),
-                    |ui| {
-                        if let Some(action) = health.action
-                            && kit::small_button(ui, action, Style::Bordered).clicked()
-                        {
-                            repair = Some((host, action == "Repair…"));
-                        }
-                    },
-                );
-                g.row(|ui| {
-                    ui.push_id(host.id(), |ui| {
-                        ui.collapsing("Details", |ui| {
-                            kit::note(ui, &health.details);
-                        });
-                    });
-                });
-            }
-        },
+        "Agent host health",
+        &[
+            "Configuration is inspected locally.",
+            "A first request and hook trust still need verification.",
+        ],
     );
+    rows::group_box(ui, |g| {
+        let home = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_default();
+        for host in [
+            super::agent_setup::Host::Claude,
+            super::agent_setup::Host::Codex,
+        ] {
+            let health = super::agent_onboarding::host_health(&home, host);
+            // The button names the host for VoiceOver: "Repair Claude Code…".
+            let spoken = health
+                .action
+                .map(|action| format!("{} {}…", action.trim_end_matches('…'), host.name()));
+            let buttons: Vec<(&str, &str, Style)> = match (health.action, spoken.as_deref()) {
+                (Some(label), Some(spoken)) => vec![(label, spoken, Style::Bordered)],
+                _ => Vec::new(),
+            };
+            let text = rows::label_text(&format!("{}: {}", host.name(), health.status));
+            // The facts of the check are the hover text and the description of the row.
+            let pressed = g.row(|ui| {
+                rows::text_buttons_detailed(ui, text, Some(health.details.as_str()), &buttons)
+            });
+            if pressed.is_some() {
+                repair = Some((host, health.action == Some("Repair…")));
+            }
+        }
+    });
     if let Some((host, broken)) = repair {
         if broken {
             super::agent_onboarding::repair_host(app, ui.ctx(), host);

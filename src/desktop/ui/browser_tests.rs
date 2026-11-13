@@ -797,6 +797,72 @@ fn settings_show_the_browser_extension_and_the_last_request() {
     assert!(app.browser.last_seen.is_some(), "a request counts as seen");
 }
 
+/// Settings › Tools: the painted texts and the AccessKit names of the controls.
+#[cfg(not(target_os = "linux"))]
+fn tools_text_and_names(app: &mut DesktopApp) -> (String, Vec<String>) {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    super::open_settings(app, super::SettingsSection::Tools);
+    let mut text = String::new();
+    let mut names = Vec::new();
+    for _ in 0..3 {
+        let output = ctx.run_ui(super::owner_tests::input(0.0, Vec::new()), |ui| {
+            super::draw(app, ui)
+        });
+        text.clear();
+        for clipped in &output.shapes {
+            super::owner_tests::collect(&clipped.shape, &mut text);
+        }
+        names = output
+            .platform_output
+            .accesskit_update
+            .iter()
+            .flat_map(|update| update.nodes.iter())
+            .filter_map(|(_, node)| node.label().map(str::to_owned))
+            .collect();
+        output.drop_without_applying_deltas();
+    }
+    (text, names)
+}
+
+/// The Browser Debugging group (macOS) is drawn only with a row: no instance draws no
+/// label; an instance to trust draws its row with "Trust…", which VoiceOver names.
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn the_debugging_group_is_drawn_only_with_a_row() {
+    use crate::browser::trust::InstanceIdentity;
+
+    let dir = TempDir::new().unwrap();
+    let (mut app, _) = unlocked_app_with_item(&dir);
+    app.browser.unsafe_instance = None;
+    app.browser.trusted_instances = Some(Ok(Vec::new()));
+    let (text, _) = tools_text_and_names(&mut app);
+    assert!(text.contains("Browser extension"), "{text}");
+    for gone in ["Browser Debugging", "Trust…", "remote debugging"] {
+        assert!(!text.contains(gone), "{gone}: {text}");
+    }
+
+    app.browser.unsafe_instance = Some(InstanceIdentity {
+        bundle_id: "net.imput.helium".into(),
+        team_id: "S4Q33XPHB4".into(),
+        user_data_root: "/tmp/synthetic-browser".into(),
+        debugging: "9333".into(),
+        unsafe_switches: vec!["remote-debugging-port".into()],
+    });
+    let (text, names) = tools_text_and_names(&mut app);
+    let debugging = text.find("Browser Debugging").expect("the group label");
+    let extension = text.find("Browser extension").expect("the extension group");
+    assert!(debugging < extension, "{text}");
+    assert!(text.contains("Trust…"), "{text}");
+    assert!(text.contains("remote debugging on port 9333"), "{text}");
+    assert!(
+        names
+            .iter()
+            .any(|name| name == "Trust this browser instance"),
+        "{names:?}"
+    );
+}
+
 fn update_login(
     app: &mut DesktopApp,
     ctx: &egui::Context,
